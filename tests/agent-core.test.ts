@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { AgentAssistantMessage, AgentModel, AgentTool, ModelStreamContext, ModelStreamEvent } from "../src/agent/core/types.js";
+import type { AgentAssistantMessage, AgentEvent, AgentModel, AgentTool, ModelStreamContext, ModelStreamEvent } from "../src/agent/core/types.js";
 import { agentLoop } from "../src/agent/core/agentLoop.js";
 
 async function main(): Promise<void> {
@@ -7,6 +7,9 @@ async function main(): Promise<void> {
   await testModelErrorRecoveryRetriesBeforeAnyDelta();
   await testModelStreamWithoutFinishFails();
   await testNextTurnRefreshesModelAndTools();
+  await testCancellationDoesNotWaitForProviderStream();
+  await testCancellationClosesLateProviderStream();
+  await testProviderFailureDoesNotWaitForStreamCleanup();
   const calls: ModelStreamContext[] = [];
   const model: AgentModel = {
     provider: "test",
@@ -173,6 +176,153 @@ async function testAssistantDeltasAreForwardedBeforeProviderCompletes(): Promise
     yield { type: "text-delta", text: "second" };
     yield { type: "finish", reason: "stop" };
     providerFinished = true;
+  }
+}
+
+async function testCancellationDoesNotWaitForProviderStream(): Promise<void> {
+  let notifyStreamStarted!: () => void;
+  const streamStarted = new Promise<void>((resolve) => { notifyStreamStarted = resolve; });
+  let releaseProvider!: () => void;
+  const providerRelease = new Promise<void>((resolve) => { releaseProvider = resolve; });
+  let notifyProviderSettled!: () => void;
+  const providerSettled = new Promise<void>((resolve) => { notifyProviderSettled = resolve; });
+  const model: AgentModel = {
+    provider: "non-cooperative-test",
+    modelId: "non-cooperative-model",
+    async stream(): Promise<AsyncIterable<ModelStreamEvent>> {
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        notifyStreamStarted();
+        try {
+          await providerRelease;
+          yield { type: "finish", reason: "stop" };
+        } finally {
+          notifyProviderSettled();
+        }
+      })();
+    }
+  };
+  const controller = new AbortController();
+  const received: AgentEvent[] = [];
+  const running = (async (): Promise<void> => {
+    for await (const event of agentLoop([{ role: "user", content: "cancel" }], { messages: [], tools: [] }, {
+      model,
+      tools: [],
+      maxSteps: 1
+    }, controller.signal)) {
+      received.push(event);
+    }
+  })();
+
+  await streamStarted;
+  controller.abort(new Error("Current turn interrupted."));
+  await settlesWithin(running, 100);
+
+  const assistantEnd = received.find((event) => event.type === "message_end" && event.message.role === "assistant");
+  assert.equal(assistantEnd?.type === "message_end" ? assistantEnd.message.stopReason : undefined, "aborted");
+  assert.equal(received.some((event) => event.type === "turn_end"), true);
+
+  // 让被脱钩的 provider 生成器完成，确认取消路径没有遗留未收尾的测试资源。
+  releaseProvider();
+  await settlesWithin(providerSettled, 100);
+}
+
+async function testCancellationClosesLateProviderStream(): Promise<void> {
+  let notifyStreamRequested!: () => void;
+  const streamRequested = new Promise<void>((resolve) => { notifyStreamRequested = resolve; });
+  let releaseStream!: (stream: AsyncIterable<ModelStreamEvent>) => void;
+  const delayedStream = new Promise<AsyncIterable<ModelStreamEvent>>((resolve) => { releaseStream = resolve; });
+  let notifyStreamClosed!: () => void;
+  const streamClosed = new Promise<void>((resolve) => { notifyStreamClosed = resolve; });
+  let closeCalls = 0;
+  const lateStream: AsyncIterable<ModelStreamEvent> = {
+    [Symbol.asyncIterator](): AsyncIterator<ModelStreamEvent> {
+      return {
+        next: async () => await new Promise<IteratorResult<ModelStreamEvent>>(() => undefined),
+        return: () => {
+          closeCalls += 1;
+          notifyStreamClosed();
+          return Promise.resolve({ done: true, value: undefined });
+        }
+      };
+    }
+  };
+  const model: AgentModel = {
+    provider: "late-stream-test",
+    modelId: "late-stream-model",
+    async stream(): Promise<AsyncIterable<ModelStreamEvent>> {
+      notifyStreamRequested();
+      return await delayedStream;
+    }
+  };
+  const controller = new AbortController();
+  const running = (async (): Promise<void> => {
+    for await (const _event of agentLoop([{ role: "user", content: "cancel before stream" }], { messages: [], tools: [] }, {
+      model,
+      tools: [],
+      maxSteps: 1
+    }, controller.signal)) {
+      // Drain the loop.
+    }
+  })();
+
+  await streamRequested;
+  controller.abort(new Error("Current turn interrupted."));
+  await settlesWithin(running, 100);
+  releaseStream(lateStream);
+  await settlesWithin(streamClosed, 100);
+  assert.equal(closeCalls, 1, "a stream resolved after cancellation must still receive return()");
+}
+
+async function testProviderFailureDoesNotWaitForStreamCleanup(): Promise<void> {
+  let closeCalls = 0;
+  const brokenStream: AsyncIterable<ModelStreamEvent> = {
+    [Symbol.asyncIterator](): AsyncIterator<ModelStreamEvent> {
+      return {
+        next: async () => { throw new Error("provider failed"); },
+        return: () => {
+          closeCalls += 1;
+          return new Promise<IteratorResult<ModelStreamEvent>>(() => undefined);
+        }
+      };
+    }
+  };
+  const model: AgentModel = {
+    provider: "broken-stream-test",
+    modelId: "broken-stream-model",
+    async stream(): Promise<AsyncIterable<ModelStreamEvent>> {
+      return brokenStream;
+    }
+  };
+  const received: AgentEvent[] = [];
+  const running = (async (): Promise<void> => {
+    for await (const event of agentLoop([{ role: "user", content: "handle provider error" }], { messages: [], tools: [] }, {
+      model,
+      tools: [],
+      maxSteps: 1
+    })) {
+      received.push(event);
+    }
+  })();
+
+  await settlesWithin(running, 100);
+  assert.equal(closeCalls, 1, "the failed iterator should still receive a background return()");
+  assert.equal(received.some((event) => event.type === "error" && event.error === "provider failed"), true);
+  const assistantEnd = received.find((event) => event.type === "message_end" && event.message.role === "assistant");
+  assert.equal(assistantEnd?.type === "message_end" ? assistantEnd.message.stopReason : undefined, "error");
+  assert.equal(received.some((event) => event.type === "turn_end"), true);
+}
+
+async function settlesWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out after ${String(timeoutMs)}ms.`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

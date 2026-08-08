@@ -1620,17 +1620,27 @@ export class AgentSession {
    * Host 层收尾时的幂等终态入口。正常 Agent Loop 已经写过 turn_status；
    * 未捕获异常等宿主级失败则由这里补一条 canonical terminal fact。
    */
-  async ensureTerminalOutcome(runId: string, turnId: string, outcome: AgentTurnOutcome): Promise<RuntimeHighWater> {
+  async readTerminalOutcome(
+    runId: string,
+    turnId: string
+  ): Promise<Extract<SessionEvent, { type: "turn_status" }> | undefined> {
     await this.recorder.flush();
     const events = await readSessionEvents(this.recorder.filePath);
     const terminals = runtimeEventsForRun(events, runId)
       .filter((event): event is Extract<SessionEvent, { type: "turn_status" }> => event.type === "turn_status");
     if (terminals.length > 1) throw new Error(`Run ${runId} has multiple canonical terminal events.`);
-    const existing = terminals[0]?.runtime;
+    const terminal = terminals[0];
+    if (terminal?.runtime && terminal.runtime.turnId !== turnId) {
+      throw new Error(`Run ${runId} terminal event belongs to another turn.`);
+    }
+    return terminal;
+  }
+
+  async ensureTerminalOutcome(runId: string, turnId: string, outcome: AgentTurnOutcome): Promise<RuntimeHighWater> {
+    const terminal = await this.readTerminalOutcome(runId, turnId);
+    const existing = terminal?.runtime;
     if (existing) {
-      if (existing.turnId !== turnId) throw new Error(`Run ${runId} terminal event belongs to another turn.`);
-      const existingTerminal = terminals[0];
-      if (!existingTerminal || !sameTerminalOutcome(existingTerminal, outcome)) {
+      if (!sameTerminalOutcome(terminal, outcome)) {
         throw new Error(`Run ${runId} already has a conflicting terminal outcome.`);
       }
       return existing;

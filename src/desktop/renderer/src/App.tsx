@@ -710,7 +710,12 @@ export function App(): React.JSX.Element {
   }, [contextBudget, document, workspace?.models, workspace?.runtime?.info]);
   const clearToast = useCallback(() => setToast(undefined), []);
   const sessionSummary = workspace?.sessions.find((session) => session.id === selectedSessionId) ?? document?.session;
-  const activeSessionId = activeRun(workspace?.runtime)?.sessionId ?? pendingPermission(workspace?.runtime)?.sessionId;
+  const activeRunSnapshot = activeRun(workspace?.runtime);
+  const pendingPermissionSnapshot = pendingPermission(workspace?.runtime);
+  const activeSessionId = activeRunSnapshot?.sessionId ?? pendingPermissionSnapshot?.sessionId;
+  const selectedActiveRun = activeRunSnapshot?.sessionId === selectedSessionId ? activeRunSnapshot : undefined;
+  const selectedPendingPermission = pendingPermissionSnapshot?.sessionId === selectedSessionId ? pendingPermissionSnapshot : undefined;
+  const selectedRunId = selectedActiveRun?.runId ?? selectedPendingPermission?.runId;
   const selectedRunning = Boolean(activeSessionId && activeSessionId === selectedSessionId);
   const activeElsewhere = Boolean(activeSessionId && selectedSessionId && activeSessionId !== selectedSessionId);
   const composer = (
@@ -725,7 +730,11 @@ export function App(): React.JSX.Element {
       onSaveAttachment={saveAttachment}
       onSend={sendPrompt}
       onSlashCommand={runSlashCommand}
-      onStop={async () => { const projectId = projectRef.current; if (projectId) await window.biny.cancelRun(projectId); }}
+      onStop={async () => {
+        const projectId = projectRef.current;
+        if (!projectId || !selectedRunId) throw new Error("当前运行已结束或状态尚未同步，未发送取消请求。");
+        await window.biny.cancelRun(projectId, selectedRunId);
+      }}
       onSwitchModel={switchModel}
       permissionMode={workspace?.runtime?.permissionMode ?? "ask"}
       project={workspace?.project}

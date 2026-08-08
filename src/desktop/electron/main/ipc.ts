@@ -328,8 +328,8 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handle(desktopIpc.cancelRun, async (_event, projectId: unknown) => {
-    await context.agents.cancelRun(idSchema.parse(projectId));
+  handle(desktopIpc.cancelRun, async (_event, projectId: unknown, runId: unknown) => {
+    await context.agents.cancelRun(idSchema.parse(projectId), idSchema.parse(runId));
   });
 
   handle(desktopIpc.runSlashCommand, async (_event, projectId: unknown, sessionId: unknown, command: unknown) => {

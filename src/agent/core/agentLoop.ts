@@ -14,6 +14,7 @@ import type {
   AgentLoopConfig,
   AgentLoopTurnContext,
   AgentMessage,
+  ModelStreamEvent,
   AgentToolCallContent,
   AgentToolResult,
   AgentToolResultMessage
@@ -159,9 +160,19 @@ async function* streamAssistant(
         ? await config.transformContext(context.messages, signal)
         : context.messages;
       const streamModel = config.model.streamSimple?.bind(config.model) ?? config.model.stream.bind(config.model);
-      const stream = await streamModel({ ...context, messages, tools: context.tools }, { ...config.modelOptions, signal });
+      // Provider 通常会响应 AbortSignal，但第三方实现可能卡在下一次 next()。
+      // 这里同时中断“拿到流”和“读取下一段流”，避免取消被 provider 的协作程度绑住。
+      const streamPromise = streamModel({ ...context, messages, tools: context.tools }, { ...config.modelOptions, signal });
+      let stream: AsyncIterable<ModelStreamEvent>;
+      try {
+        stream = await waitForAbort(streamPromise, signal);
+      } catch (error) {
+        // Abort 可能先于 provider 返回流对象。流稍后到达时也要尽力关闭，否则底层请求会继续占用连接和额度。
+        if (signal?.aborted) closeAsyncIterableWhenReady(streamPromise);
+        throw error;
+      }
       let receivedFinish = false;
-      for await (const event of stream) {
+      for await (const event of streamWithAbort(stream, signal)) {
         signal?.throwIfAborted();
         if (event.type === "text-delta") {
           text += event.text;
@@ -344,4 +355,77 @@ function errorMessage(error: unknown): string {
 /** 保留给后续 Provider/宿主直接使用的异步事件队列工厂。 */
 export function createAgentEventQueue<T>(): AsyncEventQueue<T> {
   return new AsyncEventQueue<T>();
+}
+
+async function* streamWithAbort<T>(
+  stream: AsyncIterable<T>,
+  signal: AbortSignal | undefined
+): AsyncGenerator<T, void, void> {
+  const iterator = stream[Symbol.asyncIterator]();
+  let completed = false;
+  try {
+    while (true) {
+      const next = await waitForAbort(
+        Promise.resolve().then(() => iterator.next()),
+        signal
+      );
+      if (next.done) {
+        completed = true;
+        return;
+      }
+      yield next.value;
+    }
+  } finally {
+    // Provider 的 return() 也可能和 next() 一样不合作。无论是取消还是 provider 报错，
+    // 都不能让资源清理反过来阻塞 message_end / turn_end；关闭动作只在后台尽力执行。
+    if (!completed) closeAsyncIterator(iterator);
+  }
+}
+
+/** 流对象在取消后才到达时，仍需回收它的底层 reader。 */
+function closeAsyncIterableWhenReady<T>(streamPromise: Promise<AsyncIterable<T>>): void {
+  void streamPromise.then(closeAsyncIterable, () => undefined);
+}
+
+function closeAsyncIterable<T>(stream: AsyncIterable<T>): void {
+  try {
+    closeAsyncIterator(stream[Symbol.asyncIterator]());
+  } catch {
+    // 创建 iterator 的失败不能覆盖已确定的取消或 provider 错误。
+  }
+}
+
+function closeAsyncIterator<T>(iterator: AsyncIterator<T>): void {
+  if (!iterator.return) return;
+  try {
+    void Promise.resolve(iterator.return()).catch(() => undefined);
+  } catch {
+    // 清理失败不能覆盖模型错误或用户取消的主结果。
+  }
+}
+
+async function waitForAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return await promise;
+  signal.throwIfAborted();
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    void promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
 }

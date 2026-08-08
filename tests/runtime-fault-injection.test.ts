@@ -15,7 +15,7 @@ import type { CommandRuntime } from "../src/runtime/CommandRuntime.js";
 import { RuntimeEventAuthority } from "../src/runtime/RuntimeAuthority.js";
 import { SessionLeaseError, SessionLeaseStore } from "../src/runtime/SessionLease.js";
 import { SessionRunLedger, type FinishSessionRunOptions, type StartSessionRunOptions } from "../src/session/runLedger.js";
-import { SessionRecorder } from "../src/session/recorder.js";
+import { SessionRecorder, type SessionTurnStatusEvent } from "../src/session/recorder.js";
 import { replaySessionEvents } from "../src/session/replay.js";
 import { readSessionEvents } from "../src/session/events.js";
 import { ensureAgentDirs, resolveSessionFile } from "../src/session/store.js";
@@ -31,6 +31,7 @@ async function main(): Promise<void> {
   await testAtomicRuntimeProjectionRollback();
   await testCanonicalTerminalAuthorityProjection();
   await testTerminalCommitOrdering();
+  await testCancellationAfterCanonicalTerminalDoesNotLeaveBusySnapshot();
   await testDuplicateRunRetryDoesNotExecute();
   await testProviderFaultsBecomeTerminal();
   await testPermissionTargetChangeDoesNotExecute();
@@ -82,8 +83,6 @@ async function testSessionTerminalProjectionRecovery(): Promise<void> {
     await ensureAgentDirs(root);
     const authority = await RuntimeEventAuthority.open(root);
     authority.startRun({ runId: "terminal-recovery-run", sessionId, turnId: "terminal-recovery-turn" });
-    authority.close();
-
     const recorder = new SessionRecorder(root, sessionId);
     recorder.setRuntimeContext({ runId: "terminal-recovery-run", turnId: "terminal-recovery-turn" });
     const terminal = await recorder.recordAndFlush({
@@ -93,6 +92,11 @@ async function testSessionTerminalProjectionRecovery(): Promise<void> {
       steps: 2
     });
     await recorder.close();
+
+    const recovered = await authority.reconcileRunFromSession("terminal-recovery-run");
+    assert.equal(recovered?.terminalStatus, "completed", "targeted reconciliation must repair a live owner projection");
+    assert.equal(recovered?.terminalEventId, terminal.runtime?.eventId);
+    authority.close();
 
     const reopened = await RuntimeEventAuthority.open(root);
     const run = reopened.getRun("terminal-recovery-run");
@@ -248,6 +252,71 @@ async function testTerminalCommitOrdering(): Promise<void> {
     assert.equal(log.indexOf("ledger-finish") > log.indexOf("canonical-terminal"), true);
     assert.equal(hostEvents.indexOf("run.completed") >= 0, true);
     assert.equal(log.indexOf("host-terminal") > log.indexOf("ledger-finish"), true);
+    await runtime.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testCancellationAfterCanonicalTerminalDoesNotLeaveBusySnapshot(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "biny-runtime-fault-canonical-cancel-"));
+  try {
+    let releaseStream: (() => void) | undefined;
+    let streamReachedCanonical: (() => void) | undefined;
+    const reachedCanonical = new Promise<void>((resolve) => {
+      streamReachedCanonical = resolve;
+    });
+    const streamRelease = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    let canonical: SessionTurnStatusEvent | undefined;
+    const commandRuntime = createFakeCommandRuntime(root, async function* (_input, options) {
+      canonical = {
+        type: "turn_status",
+        status: "incomplete",
+        stopReason: "hard_step_limit",
+        steps: 3,
+        summary: "The hard step limit was reached.",
+        resumable: true,
+        runtime: {
+          eventId: "canonical-cancel-terminal",
+          eventSeq: 4,
+          runId: options.runId!,
+          turnId: options.turnId!
+        }
+      };
+      // AgentSession 已经持久化 canonical status，但 Host 还没拿到 done 时，用户点击停止。
+      yield { type: "status", status: "incomplete" };
+      streamReachedCanonical?.();
+      await streamRelease;
+    }, [], {
+      ensureTerminalOutcome: async (_runId: string, _turnId: string, outcome: AgentTurnOutcome) => {
+        if (!canonical || outcome.status !== canonical.status) {
+          throw new Error("Run already has a conflicting terminal outcome.");
+        }
+        return canonical.runtime!;
+      },
+      readTerminalOutcome: async () => canonical
+    });
+    const runtime = new InteractiveAgentRuntime(commandRuntime);
+    const hostEvents: string[] = [];
+    runtime.subscribe((update) => {
+      if (update.event) hostEvents.push(update.event.type);
+    });
+    const submitted = runtime.submitPrompt("stop after canonical status", "chat", [], {
+      runId: "canonical-cancel-run",
+      messageId: "canonical-cancel-message",
+      turnId: "canonical-cancel-turn"
+    });
+    await reachedCanonical;
+    assert.equal(runtime.cancelRun(submitted.runId), true);
+    releaseStream?.();
+
+    const outcome = await submitted.completion;
+    assert.equal(outcome.status, "incomplete", "the existing canonical terminal status must win over late cancellation");
+    assert.equal(runtime.getSnapshot().state.kind, "idle", "terminal recovery must release the interactive runtime");
+    assert.equal(hostEvents.filter((type) => type === "run.incomplete").length, 1);
+    assert.equal(hostEvents.includes("run.failed"), false);
     await runtime.close();
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -424,7 +493,8 @@ class RecordingLedger extends SessionRunLedger {
 function createFakeCommandRuntime(
   root: string,
   stream: (input: string, options: AgentRunOptions) => AsyncGenerator<AgentSessionEvent>,
-  log: string[]
+  log: string[],
+  agentOverrides: Record<string, unknown> = {}
 ): CommandRuntime {
   const info: AgentSessionInfo = {
     workspaceRoot: root,
@@ -449,7 +519,8 @@ function createFakeCommandRuntime(
       return { eventId: `terminal-${runId}`, eventSeq: 1, runId, turnId };
     },
     recordError: () => undefined,
-    close: async () => undefined
+    close: async () => undefined,
+    ...agentOverrides
   };
   return {
     workspaceRoot: root,

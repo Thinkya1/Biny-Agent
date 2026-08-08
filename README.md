@@ -103,7 +103,7 @@ API 地址、SDK、环境变量或密钥。Provider endpoint、协议和凭据�
 
 `biny sessions` 默认列出第一页；需要机器读取或继续翻页时使用 `--json`、`--limit <count>` 和返回的 `--cursor <cursor>`，`--parent <session-id>` 可只查看某个会话的直接分支。Desktop 侧栏首屏加载根会话，展开父会话时再按页加载子节点。Desktop、TUI 和 CLI 使用同一份历史；复制、编辑重发和 fork 会保留父会话关系，删除会话会同步清理正文、catalog、断点和 run ledger。
 
-Desktop、TUI 和 `biny plan` 运行同一项目时，会通过本地 Unix socket attach 到同一个独立 Runtime Host，共享实时事件、权限请求和显式恢复；没有 owner 时会按项目自动启动 Host。一端退出不会复制出第二个 AgentSession。已有 Host 时，未带临时配置覆盖的 `biny run` 也会直接 attach。
+Desktop、TUI 和 `biny plan` 运行同一项目时，会通过本地 Unix socket attach 到同一个独立 Runtime Host，共享实时事件、权限请求和显式恢复；取消请求携带目标 run ID，Host 按当前 owner 状态匹配处理：客户端快照 revision 尚未同步不会阻止同一 run 的取消，迟到的旧取消也不会作用到后续 run。取消请求尚未产生运行终态时，Desktop 的停止按钮保持可操作，允许用户重试；收到终态后才恢复普通发送按钮。Desktop 选择“中止并关闭”时会先提交精确取消并有界等待运行态收敛；完全退出时会回收本次 Desktop 启动的 Host，但不会终止 attach 到的既有 owner。没有 owner 时会按项目自动启动 Host。一端退出不会复制出第二个 AgentSession。已有 Host 时，未带临时配置覆盖的 `biny run` 也会直接 attach。
 
 普通 `biny`、`biny chat`、`biny tui` 和 Desktop 启动都不会自动打开旧的空闲 session，也不会因为旧 TurnStore checkpoint 调用模型；空闲 Host 会被重建为空白聊天，运行中的 Host 也不会被 Desktop 隐式接管。需要恢复时，必须使用 `biny resume`、`biny resume <session-id>` 或 TUI 的 `/resume`；`/app` 是 TUI → Desktop 的显式会话交接入口。Automation、Agent Graph 和显式安装的 daemon pending fire/wake 仍按各自的后台调度规则运行。
 

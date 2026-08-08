@@ -13,6 +13,7 @@
  * 模型配置的保存与连通性测试也在这里：写入前先用候选配置实际发一次请求，避免存下一份用不了的配置。
  */
 import type { AgentAttachment, InteractiveAgentRunMode } from "../../../agent/AgentSession.js";
+import type { ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { providerDefinition } from "../../../ai/provider.js";
@@ -35,7 +36,7 @@ import {
 } from "../../../runtime/InteractiveAgentRuntime.js";
 import type { CommandRuntime } from "../../../runtime/CommandRuntime.js";
 import {
-  connectOrSpawnRuntimeHost,
+  connectOrSpawnRuntimeHostWithOwnership,
   startRuntimeHost,
   RuntimeHostClient,
   type HostOperationResult,
@@ -43,7 +44,7 @@ import {
   type RuntimeHostServer
 } from "../../../runtime/RuntimeHost.js";
 import { SessionLeaseError } from "../../../runtime/SessionLease.js";
-import { isTerminalRunEvent, runtimeIsBusy, type AgentHostEvent, type AgentRuntimeUpdate } from "../../../runtime/agentEvents.js";
+import { activeRun, isTerminalRunEvent, runtimeIsBusy, type AgentHostEvent, type AgentRuntimeUpdate } from "../../../runtime/agentEvents.js";
 import { evaluateTaskRetry } from "../../../runtime/TaskRetryPolicy.js";
 import { isTaskRunTerminal } from "../../../runtime/TaskRunStore.js";
 import { withAttachmentReferences } from "../../attachmentReferences.js";
@@ -81,6 +82,7 @@ interface ManagedRuntime {
   runtime: InteractiveRuntimeHandle;
   commands?: CommandRuntime;
   host?: RuntimeHostServer;
+  spawnedHost?: ChildProcess;
   unsubscribe(): void;
 }
 
@@ -338,8 +340,15 @@ export class DesktopAgentManager {
     };
   }
 
-  async cancelRun(projectId: string): Promise<void> {
-    this.runtimes.get(projectId)?.runtime.cancelCurrentRun();
+  async cancelRun(projectId: string, runId: string): Promise<void> {
+    const runtime = this.runtimes.get(projectId)?.runtime;
+    if (!runtime) throw new Error("Project runtime is not active.");
+    if (runtime instanceof RuntimeHostClient) {
+      const result = await runtime.cancelRunRequest(runId);
+      if (!result.accepted) throw new Error(result.reason ?? "Runtime Host did not accept cancellation.");
+      return;
+    }
+    if (!runtime.cancelRun(runId)) throw new Error(`Run ${runId} is not active.`);
   }
 
   async resolvePermission(projectId: string, requestId: string, result: PermissionResult): Promise<void> {
@@ -952,15 +961,34 @@ export class DesktopAgentManager {
   }
 
   /**
+   * Desktop 显式停止/退出时，必须先让取消请求到达 remote Host 并等待快照收敛。
+   * 超时只是不再阻塞窗口关闭；本次 Desktop 自己启动的 owner 会在 closeAll 中被回收。
+   */
+  async stopAllForExit(timeoutMs = 2_500): Promise<void> {
+    await Promise.all([...this.runtimes.values()].map(async ({ runtime }) => {
+      const deadline = Date.now() + timeoutMs;
+      const run = activeRun(runtime.getSnapshot());
+      if (run && runtime instanceof RuntimeHostClient) {
+        await waitForRuntimeOperation(runtime.cancelRunRequest(run.runId), remainingTimeout(deadline));
+      } else if (run) {
+        runtime.cancelRun(run.runId);
+      } else {
+        runtime.cancelCurrentRun();
+      }
+      await waitForRuntimeIdle(runtime, remainingTimeout(deadline));
+    }));
+  }
+
+  /**
    * 退出前收尾。先置 `closing` 挡住新的创建请求，再等正在初始化的运行时结束（否则它们会
    * 在关闭之后才注册进来，成为泄漏的运行时），最后统一取消订阅并关闭。
    */
-  async closeAll(): Promise<void> {
+  async closeAll(options: { terminateOwnedHosts?: boolean } = {}): Promise<void> {
     this.closing = true;
     await Promise.allSettled(this.runtimeInitializations.values());
     const managedRuntimes = [...this.runtimes.values()];
     this.runtimes.clear();
-    await Promise.all(managedRuntimes.map(async (managed) => await this.closeManagedRuntime(managed)));
+    await Promise.all(managedRuntimes.map(async (managed) => await this.closeManagedRuntime(managed, options)));
   }
 
   private async disposeRuntime(projectId: string): Promise<void> {
@@ -980,10 +1008,14 @@ export class DesktopAgentManager {
     this.runtimes.delete(projectId);
   }
 
-  private async closeManagedRuntime(managed: ManagedRuntime): Promise<void> {
+  private async closeManagedRuntime(
+    managed: ManagedRuntime,
+    options: { terminateOwnedHosts?: boolean } = {}
+  ): Promise<void> {
     managed.unsubscribe();
     await managed.host?.close();
     await managed.runtime.close();
+    if (options.terminateOwnedHosts) await terminateOwnedHost(managed.spawnedHost);
   }
 
   /**
@@ -1032,8 +1064,9 @@ export class DesktopAgentManager {
     let commands: CommandRuntime | undefined;
     let host: RuntimeHostServer | undefined;
     let attached: RuntimeHostClient | undefined;
+    let spawnedHost: ChildProcess | undefined;
     try {
-      attached = await connectOrSpawnRuntimeHost(persistenceRoot, {
+      const connected = await connectOrSpawnRuntimeHostWithOwnership(persistenceRoot, {
         workspaceRoot: project.path,
         configDir: globalConfigDir(),
         attachmentRoot: this.projects.attachmentsRoot(project),
@@ -1043,6 +1076,8 @@ export class DesktopAgentManager {
         clientId: `desktop-${process.pid}`,
         surface: "desktop"
       });
+      attached = connected?.client;
+      spawnedHost = connected?.spawnedProcess;
     } catch {
       // 独立 Host 不是可用配置时，保留同进程 owner fallback，并让下面的真实初始化给出错误。
       attached = undefined;
@@ -1092,7 +1127,7 @@ export class DesktopAgentManager {
         // 两个入口同时启动时，只有抢到 Host lock 的一方创建 owner；另一方丢弃
         // 刚装配的本地 runtime，再接回已存在的 owner，避免第二份 AgentSession 抢写。
         await runtime.close();
-        const retry = await connectOrSpawnRuntimeHost(persistenceRoot, {
+        const retry = await connectOrSpawnRuntimeHostWithOwnership(persistenceRoot, {
           workspaceRoot: project.path,
           configDir: globalConfigDir(),
           attachmentRoot: this.projects.attachmentsRoot(project),
@@ -1102,7 +1137,8 @@ export class DesktopAgentManager {
           surface: "desktop"
         });
         if (!retry) throw error;
-        runtime = retry;
+        runtime = retry.client;
+        spawnedHost = retry.spawnedProcess;
         commands = undefined;
       }
     }
@@ -1121,7 +1157,7 @@ export class DesktopAgentManager {
       }
       this.emit(projectId, update);
     });
-    const managed: ManagedRuntime = { runtime, commands, host, unsubscribe };
+    const managed: ManagedRuntime = { runtime, commands, host, spawnedHost, unsubscribe };
     this.runtimes.set(projectId, managed);
     this.runtimeErrors.delete(projectId);
     return managed;
@@ -1260,6 +1296,52 @@ function requireLocalMemory(services: CommandRuntime) {
 function requireRemoteRuntime(runtime: InteractiveRuntimeHandle): RuntimeHostClient {
   if (!(runtime instanceof RuntimeHostClient)) throw new Error("Remote runtime client is unavailable.");
   return runtime;
+}
+
+async function waitForRuntimeIdle(runtime: InteractiveRuntimeHandle, timeoutMs: number): Promise<void> {
+  await waitForRuntimeOperation(runtime.waitForIdle(), timeoutMs);
+}
+
+async function waitForRuntimeOperation(operation: Promise<unknown>, timeoutMs: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    void operation.then(finish, finish);
+  });
+}
+
+function remainingTimeout(deadline: number): number {
+  return Math.max(1, deadline - Date.now());
+}
+
+/** 只终止当前 Desktop 本次 spawn 的精确子进程，attach 到其它 surface 的 Host 不会走这里。 */
+async function terminateOwnedHost(host: ChildProcess | undefined): Promise<void> {
+  if (!host || host.exitCode !== null || host.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      host.off("exit", finish);
+      host.off("error", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, 2_500);
+    host.once("exit", finish);
+    host.once("error", finish);
+    try {
+      if (!host.kill("SIGTERM")) finish();
+    } catch {
+      finish();
+    }
+  });
 }
 
 async function executeRemoteRuntimeMutation(runtime: RuntimeHostClient, operation: DesktopRuntimeMutation, payload: Record<string, unknown>): Promise<unknown> {

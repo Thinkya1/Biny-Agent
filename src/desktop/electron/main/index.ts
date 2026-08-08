@@ -131,13 +131,13 @@ async function startDesktopApplication(): Promise<void> {
       message: "Biny 仍有正在运行或等待权限的任务。",
       detail: "你可以让任务留在后台、停止任务并关闭窗口，或取消关闭。",
       buttons: ["保持后台运行", "中止并关闭", "取消"],
-      defaultId: 0,
+      defaultId: 1,
       cancelId: 2,
       noLink: true
     });
     if (response.response === 0) return "hide";
     if (response.response === 1) {
-      agents.cancelAll();
+      await agents.stopAllForExit();
       return "close";
     }
     return "cancel";
@@ -202,14 +202,14 @@ async function startDesktopApplication(): Promise<void> {
           preparingQuit = false;
           return;
         }
-        agents.cancelAll();
+        await agents.stopAllForExit();
       }
       terminals.disposeAll();
       await browser.dispose();
       mainWindow?.destroy();
       try {
         await Promise.race([
-          agents.closeAll(),
+          agents.closeAll({ terminateOwnedHosts: true }),
           new Promise<void>((resolve) => setTimeout(resolve, 5_000))
         ]);
       } finally {

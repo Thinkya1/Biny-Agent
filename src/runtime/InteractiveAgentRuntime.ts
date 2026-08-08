@@ -10,6 +10,7 @@ import { AgentEventBus } from "./AgentEventBus.js";
 import { createCommandRuntime, type CommandRuntime, type CommandRuntimeOptions } from "./CommandRuntime.js";
 import { resolveSessionFile, sessionIdFromFile } from "../session/store.js";
 import { SessionRunLedger, type FinishSessionRunOptions } from "../session/runLedger.js";
+import type { SessionTurnStatusEvent } from "../session/recorder.js";
 import { SessionLeaseStore, type SessionLease } from "./SessionLease.js";
 import type { RuntimeEventAuthority, RuntimeRunRecord } from "./RuntimeAuthority.js";
 import type {
@@ -279,7 +280,13 @@ export class InteractiveAgentRuntime {
     this.activeRunController = controller;
     const execution = this.executeRun(run, controller.signal);
     const completion = execution
-      .catch((error: unknown) => this.failUncaughtRun(run, error))
+      .catch(async (error: unknown) => {
+        try {
+          return await this.failUncaughtRun(run, error);
+        } catch (terminalError) {
+          return await this.recoverTerminalProjection(run, terminalError);
+        }
+      })
       .finally(() => {
         if (this.activeRun === run) {
           this.activeRun = undefined;
@@ -561,6 +568,145 @@ export class InteractiveAgentRuntime {
     return outcome;
   }
 
+  /**
+   * JSONL 已经写入终态、但 Host 的 SQLite projection 或终态事件又失败时，不能让内存
+   * 状态永久卡在 runs。优先回读 canonical fact，并把它投影/广播为同一终态；读不到时
+   * 仍发布 failed 释放前台，而不是让输入框无限禁用。
+   */
+  private async recoverTerminalProjection(run: AgentRun, terminalError: unknown): Promise<AgentRunOutcome> {
+    const readTerminalOutcome = (this.commandRuntime.agent as unknown as {
+      readTerminalOutcome?: (runId: string, turnId: string) => Promise<SessionTurnStatusEvent | undefined>;
+    }).readTerminalOutcome;
+    let terminal: SessionTurnStatusEvent | undefined;
+    try {
+      terminal = await readTerminalOutcome?.call(this.commandRuntime.agent, run.runId, run.turnId);
+    } catch {
+      // canonical 读取失败时仍必须走下面的 failed 收尾，不能把错误再抛给 completion。
+    }
+    try {
+      await this.runtimeAuthority?.reconcileRunFromSession(run.runId);
+    } catch {
+      // JSONL 已经是事实来源；SQLite 的下一次启动 reconciliation 会继续补投影。
+    }
+
+    const durationMs = Math.max(0, Date.now() - run.startedAtMs);
+    if (terminal) {
+      const outcome: AgentRunOutcome = {
+        runId: run.runId,
+        status: terminal.status,
+        stopReason: readAgentTurnStopReason(terminal.stopReason, terminal.status),
+        finishReason: terminal.finishReason,
+        steps: terminal.steps,
+        output: "",
+        durationMs,
+        error: terminal.summary,
+        resumable: terminal.resumable,
+        blockedReason: terminal.blockedReason,
+        requiredAction: terminal.requiredAction,
+        affectedTodoIds: terminal.affectedTodoIds === undefined ? undefined : [...terminal.affectedTodoIds]
+      };
+      run.status = outcome.status;
+      this.emitRecoveredTerminal(run, outcome);
+      return outcome;
+    }
+
+    const message = redactSecrets(
+      `Unable to project terminal run state: ${terminalError instanceof Error ? terminalError.message : String(terminalError)}`
+    );
+    const outcome: AgentRunOutcome = {
+      runId: run.runId,
+      status: "failed",
+      stopReason: "provider_error",
+      steps: 0,
+      output: "",
+      durationMs,
+      error: message
+    };
+    run.status = "failed";
+    this.emitRecoveredTerminal(run, outcome);
+    return outcome;
+  }
+
+  private emitRecoveredTerminal(run: AgentRun, outcome: AgentRunOutcome): void {
+    if (outcome.status === "completed") {
+      this.emit({
+        ...this.eventBase(run),
+        type: "run.completed",
+        durationMs: outcome.durationMs,
+        stopReason: outcome.stopReason,
+        finishReason: outcome.finishReason,
+        steps: outcome.steps,
+        usage: outcome.usage
+      });
+      return;
+    }
+    if (outcome.status === "incomplete") {
+      this.emit({
+        ...this.eventBase(run),
+        type: "run.incomplete",
+        durationMs: outcome.durationMs,
+        reason: redactSecrets(outcome.error ?? incompleteReason(outcome)),
+        resumable: outcome.resumable,
+        stopReason: outcome.stopReason,
+        finishReason: outcome.finishReason,
+        steps: outcome.steps,
+        usage: outcome.usage
+      });
+      return;
+    }
+    if (outcome.status === "blocked") {
+      this.emit({
+        ...this.eventBase(run),
+        type: "run.blocked",
+        durationMs: outcome.durationMs,
+        reason: normalizeBlockedReason(outcome.blockedReason),
+        summary: redactSecrets(outcome.error ?? "The current task is blocked."),
+        requiredAction: outcome.requiredAction === undefined ? undefined : redactSecrets(outcome.requiredAction),
+        affectedTodoIds: outcome.affectedTodoIds,
+        resumable: outcome.resumable,
+        stopReason: outcome.stopReason,
+        finishReason: outcome.finishReason,
+        steps: outcome.steps,
+        usage: outcome.usage
+      });
+      return;
+    }
+    if (outcome.status === "cancelled") {
+      this.emit({
+        ...this.eventBase(run),
+        type: "run.cancelled",
+        durationMs: outcome.durationMs,
+        reason: redactSecrets(outcome.error ?? "Current turn cancelled."),
+        stopReason: outcome.stopReason,
+        finishReason: outcome.finishReason,
+        steps: outcome.steps,
+        usage: outcome.usage
+      });
+      return;
+    }
+    if (outcome.status === "aborted") {
+      this.emit({
+        ...this.eventBase(run),
+        type: "run.aborted",
+        durationMs: outcome.durationMs,
+        reason: redactSecrets(outcome.error ?? "Current turn interrupted."),
+        stopReason: outcome.stopReason,
+        finishReason: outcome.finishReason,
+        steps: outcome.steps
+      });
+      return;
+    }
+    this.emit({
+      ...this.eventBase(run),
+      type: "run.failed",
+      durationMs: outcome.durationMs,
+      error: redactSecrets(outcome.error ?? "Unable to determine terminal run state."),
+      stopReason: outcome.stopReason,
+      finishReason: outcome.finishReason,
+      steps: outcome.steps
+    });
+  }
+
   private async startRunLedger(run: AgentRun): Promise<void> {
     this.runtimeAuthority?.markRunRunning(run.runId, run.startedAt);
     await this.runLedger?.start({
@@ -683,9 +829,9 @@ export class InteractiveAgentRuntime {
           turn = event.outcome;
         }
       }
-      // 非协作嵌入方可能在 AbortSignal 后仍吐出一个“完成”事件；取消优先，不能把晚到的
-      // 结果写成成功回合。
-      if (signal.aborted && turn?.status !== "cancelled") throw new Error("Current turn cancelled.");
+      // AgentSession 在输出 terminal done 前已经写入 canonical turn_status。取消若发生在
+      // 该终态之后，必须保留已提交的真实结果；只在尚未得到终态时才把本轮收敛为取消。
+      if (signal.aborted && !turn) throw new Error("Current turn cancelled.");
       if (terminalEvents !== 1 || !turn) {
         throw new Error(terminalEvents > 1
           ? "Agent stream emitted multiple terminal results."

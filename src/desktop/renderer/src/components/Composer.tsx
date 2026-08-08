@@ -231,7 +231,6 @@ export const Composer = memo(function Composer({
   };
 
   const requestStop = async (): Promise<void> => {
-    if (stopPending) return;
     setStopPending(true);
     setError(undefined);
     try {

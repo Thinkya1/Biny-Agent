@@ -499,6 +499,52 @@ export class RuntimeEventAuthority implements RuntimeEventSink {
     return this.readRun(runId);
   }
 
+  /**
+   * 把某个 run 已落盘的 JSONL 终态立即补投影到 SQLite。
+   *
+   * AgentSession 的 turn_status 是 canonical fact；Host 在取消与收尾竞争中若未能完成
+   * projection，可以调用这里恢复 authority，而不用等 owner 进程重启后做全量 backfill。
+   */
+  async reconcileRunFromSession(runId: string): Promise<RuntimeRunRecord | undefined> {
+    this.assertOpen();
+    const run = this.readRun(runId);
+    if (!run) return undefined;
+    const events = await readSessionEvents(await resolveSessionFile(this.persistenceRoot, run.sessionId));
+    validateRuntimeEventStream(events);
+    const terminals = events.filter((event): event is Extract<SessionEvent, { type: "turn_status" }> => {
+      return event.type === "turn_status" && event.runtime?.runId === runId;
+    });
+    if (terminals.length > 1) throw new Error(`Runtime run ${runId} has multiple canonical terminal events.`);
+    const terminal = terminals[0];
+    const terminalRuntime = terminal?.runtime;
+    if (!terminalRuntime) return run;
+    if (terminalRuntime.turnId !== run.turnId) {
+      throw new Error(`Runtime run ${runId} does not match its canonical terminal turn.`);
+    }
+    return this.transaction(() => {
+      this.appendEventInTransaction({
+        eventId: terminalRuntime.eventId,
+        eventSeq: terminalRuntime.eventSeq,
+        sessionId: run.sessionId,
+        invocationId: run.invocationId,
+        runId,
+        turnId: run.turnId,
+        eventType: sessionEventType(terminal),
+        payload: terminal,
+        createdAt: terminal.time ?? run.updatedAt
+      });
+      this.reconcileTerminalRunInTransaction(
+        run.sessionId,
+        terminal,
+        terminalRuntime,
+        runId,
+        run.turnId,
+        terminalRuntime.eventId
+      );
+      return this.requireRun(runId);
+    });
+  }
+
   listRuns(options: RuntimeRunListOptions = {}): RuntimeRunPage {
     this.assertOpen();
     const limit = pageSize(options.limit);

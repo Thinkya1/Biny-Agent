@@ -236,6 +236,12 @@ export interface SpawnedRuntimeHost {
   client: RuntimeHostClient;
 }
 
+/** 调用方可据此区分 attach 到已有 owner 与本次自行启动的 owner。 */
+export interface ConnectedRuntimeHost {
+  client: RuntimeHostClient;
+  spawnedProcess?: ChildProcess;
+}
+
 /** 计算本机 runtime 的发现信息；socket 本身放在用户临时目录，不写入项目目录。 */
 export function runtimeHostPaths(persistenceRoot: string): RuntimeHostPaths {
   const resolvedRoot = path.resolve(persistenceRoot);
@@ -279,20 +285,45 @@ export async function connectRuntimeHost(
   }
 }
 
-/** 先 attach，找不到 owner 时启动一个独立 Node Host 再 attach。 */
-export async function connectOrSpawnRuntimeHost(
+/**
+ * 先 attach，找不到 owner 时启动一个独立 Node Host 再 attach。
+ *
+ * 只有本次 spawn 的进程会通过 spawnedProcess 返回；attach 到其它 surface 的 owner 时，
+ * 调用方不得把它当成可随意关闭的子进程。
+ */
+export async function connectOrSpawnRuntimeHostWithOwnership(
   persistenceRoot: string,
   options: SpawnRuntimeHostOptions
-): Promise<RuntimeHostClient | undefined> {
+): Promise<ConnectedRuntimeHost | undefined> {
   const spawnOptions = toSpawnOptions(options);
   const attached = await connectRuntimeHost(persistenceRoot, {
     clientId: options.clientId,
     surface: options.surface,
     spawnOptions
   });
-  if (attached) return attached;
-  const spawned = await spawnRuntimeHost(persistenceRoot, options);
-  return spawned.client;
+  if (attached) return { client: attached };
+  try {
+    const spawned = await spawnRuntimeHost(persistenceRoot, options);
+    return { client: spawned.client, spawnedProcess: spawned.process };
+  } catch (error) {
+    // 两个 surface 同时启动时，另一个可能刚拿到 Host lock。失败后再 attach 一次，
+    // 避免把正常的 owner 竞争误报成 Desktop 初始化失败。
+    const raced = await connectRuntimeHost(persistenceRoot, {
+      clientId: options.clientId,
+      surface: options.surface,
+      spawnOptions
+    });
+    if (raced) return { client: raced };
+    throw error;
+  }
+}
+
+/** 兼容不需要 owner 进程所有权的 TUI / CLI 调用方。 */
+export async function connectOrSpawnRuntimeHost(
+  persistenceRoot: string,
+  options: SpawnRuntimeHostOptions
+): Promise<RuntimeHostClient | undefined> {
+  return (await connectOrSpawnRuntimeHostWithOwnership(persistenceRoot, options))?.client;
 }
 
 /** 启动独立 Host 进程，并等待 registration/socket 真正可用。 */
@@ -723,9 +754,8 @@ export class RuntimeHostServer {
           : { runId: submitted.runId, messageId: submitted.messageId };
       }
       case "cancel": {
-        this.assertRevision(payload);
-        const runId = optionalString(payload.runId);
-        return runId === undefined ? (this.runtime.cancelCurrentRun(), true) : this.runtime.cancelRun(runId);
+        // 取消可绕过滞后的 revision，但必须绑定具体 run，不能让迟到请求影响后续运行。
+        return this.runtime.cancelRun(requiredString(payload.runId, "runId"));
       }
       case "permission":
         this.assertRevision(payload);
@@ -733,10 +763,10 @@ export class RuntimeHostServer {
         return undefined;
       case "run.cancel":
         return await this.executeControl(async () => {
-          this.assertRevision(payload);
-          const runId = optionalString(payload.runId);
-          const accepted = runId === undefined ? (this.runtime.cancelCurrentRun(), true) : this.runtime.cancelRun(runId);
-          if (!accepted) throw new Error(`Run ${runId ?? "current"} is not active.`);
+          // 取消与运行状态更新并发到达时，不用 revision 拒绝同一 run，但不允许旧请求取消新 run。
+          const runId = requiredString(payload.runId, "runId");
+          const accepted = this.runtime.cancelRun(runId);
+          if (!accepted) throw new Error(`Run ${runId} is not active.`);
           return { runId };
         });
       case "run.permission":
@@ -1375,8 +1405,8 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     });
   }
 
-  async cancelRunRequest(runId?: string): Promise<HostOperationResult<{ runId?: string }>> {
-    return await this.request("run.cancel", { runId, expectedRevision: this.currentRevision() });
+  async cancelRunRequest(runId: string): Promise<HostOperationResult<{ runId: string }>> {
+    return await this.request("run.cancel", { runId });
   }
 
   async answerPermissionRequest(requestId: string, result: PermissionResult): Promise<HostOperationResult<{ requestId: string }>> {
@@ -1656,13 +1686,15 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   }
 
   cancelCurrentRun(): void {
-    void this.request("cancel", { expectedRevision: this.currentRevision() }).catch((error) => this.reportError(error));
+    const runId = this.activeRunId();
+    if (!runId) return;
+    void this.request("cancel", { runId }).catch((error) => this.reportError(error));
   }
 
   cancelRun(runId: string): boolean {
     const active = this.activeRunId();
     if (active !== runId) return false;
-    void this.request("cancel", { runId, expectedRevision: this.currentRevision() }).catch((error) => this.reportError(error));
+    void this.request("cancel", { runId }).catch((error) => this.reportError(error));
     return true;
   }
 

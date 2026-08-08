@@ -30,12 +30,22 @@ interface FakeRuntime extends InteractiveRuntimeHandle {
   publish(update: AgentRuntimeUpdate): void;
 }
 
+async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(predicate(), true, "Timed out waiting for Runtime Host cancellation.");
+}
+
 async function main(): Promise<void> {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "biny-runtime-host-test-"));
   const listeners = new Set<(update: AgentRuntimeUpdate) => void>();
   let currentSnapshot = snapshot;
   let switchedThinking: string | undefined;
   let interruptedStarts = 0;
+  let cancellationRequests = 0;
+  let activeRunId = "run-host-test";
   const runtime: FakeRuntime = {
     publish(update): void {
       currentSnapshot = update.snapshot;
@@ -76,8 +86,12 @@ async function main(): Promise<void> {
       return undefined;
     },
     waitForIdle: async () => undefined,
-    cancelCurrentRun: () => undefined,
-    cancelRun: () => false,
+    cancelCurrentRun: () => { cancellationRequests += 1; },
+    cancelRun: (runId) => {
+      if (runId !== activeRunId) return false;
+      cancellationRequests += 1;
+      return true;
+    },
     answerPermission: () => undefined,
     resumeSession: async () => { throw new Error("not used"); },
     runExclusiveOperation: async (_operation, execute) => await execute(new AbortController().signal),
@@ -117,6 +131,21 @@ async function main(): Promise<void> {
       resolve(update);
     });
   });
+  const runningSnapshot = {
+    ...snapshot,
+    state: {
+      kind: "runs",
+      activeRun: {
+        sessionId: "session-host-test",
+        runId: "run-host-test",
+        messageId: "message-host-test",
+        input: "hello",
+        mode: "chat",
+        status: "thinking",
+        startedAt: new Date().toISOString()
+      }
+    }
+  } as InteractiveRuntimeSnapshot;
   const update: AgentRuntimeUpdate = {
     event: {
       type: "run.started",
@@ -134,7 +163,7 @@ async function main(): Promise<void> {
       },
       skills: []
     },
-    snapshot
+    snapshot: runningSnapshot
   };
   runtime.publish(update);
   assert.equal((await updatePromise).event?.type, "run.started");
@@ -146,6 +175,21 @@ async function main(): Promise<void> {
   const switched = await client.switchModel("test-model", "max");
   assert.equal(switched.thinking, "max");
   assert.equal(switchedThinking, "max");
+
+  // 同一 run 的取消可绕过滞后的 revision；Host 改为按 runId 匹配而不是取消当前运行。
+  currentSnapshot = { ...currentSnapshot, revision: currentSnapshot.revision + 1 };
+  client.cancelCurrentRun();
+  await waitUntil(() => cancellationRequests === 1);
+  const cancellation = await client.cancelRunRequest("run-host-test");
+  assert.equal(cancellation.accepted, true, "取消不应被客户端滞后的 revision 拒绝");
+  assert.equal(cancellationRequests, 2);
+
+  // 旧客户端晚到的取消不能停止已经替换为新 run 的 Host 当前运行。
+  activeRunId = "new-run";
+  currentSnapshot = { ...currentSnapshot, revision: currentSnapshot.revision + 1 };
+  const staleCancellation = await client.cancelRunRequest("run-host-test");
+  assert.equal(staleCancellation.accepted, false, "Host must reject a cancellation for a superseded run");
+  assert.equal(cancellationRequests, 2, "a stale cancellation must not reach the newer run");
 
   const secondClient = await connectRuntimeHost(workspace, { clientId: "test-client-2", surface: "desktop" });
   assert.ok(secondClient);
