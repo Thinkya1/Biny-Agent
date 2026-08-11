@@ -11,6 +11,7 @@ import type { SidebarLayoutSnapshot } from "../../../sidebarLayout.js";
 import { MAX_SIDEBAR_WIDTH, SIDEBAR_RAIL_WIDTH } from "../../../sidebarSizing.js";
 import type { DesktopProject, DesktopSessionSummary, DesktopSessionTreePage } from "../../../protocol.js";
 import type { SidebarPeekHandlers } from "../app/useSidebarLayout.js";
+import { useClosingPresence } from "../useClosingPresence.js";
 import { Icon, type IconName } from "./Icon.js";
 
 const PROJECT_SESSION_COLLAPSE_LIMIT = 5;
@@ -20,18 +21,16 @@ type SidebarSectionName = "pinned" | "projects" | "dialogue";
 type ProjectSort = "priority" | "recent" | "manual";
 type ProjectDragPlacement = "before" | "after";
 type FloatingMenuAnchor = { readonly current: HTMLElement | null };
-type SidebarNavAction = "newTask" | "extensions" | "settings" | "search";
+type SidebarNavAction = "newTask" | "runtime" | "extensions" | "settings" | "search";
 
 const SIDEBAR_NAV_ITEMS: ReadonlyArray<{
-  action?: SidebarNavAction;
-  disabled?: boolean;
+  action: SidebarNavAction;
   icon: IconName;
   label: string;
-  title?: string;
 }> = [
-  { action: "newTask", icon: "circle-add", label: "新建" },
-  { disabled: true, icon: "timer", label: "自动化", title: "自动化功能暂未开放" },
-  { action: "extensions", icon: "plug", label: "插件" },
+  { action: "newTask", icon: "edit", label: "新建任务" },
+  { action: "runtime", icon: "activity", label: "自动化" },
+  { action: "extensions", icon: "plug", label: "技能" },
   { action: "search", icon: "search", label: "搜索" }
 ];
 
@@ -49,6 +48,7 @@ interface SidebarProps {
   peekTriggerHandlers: SidebarPeekHandlers;
   projects: DesktopProject[];
   sessions: DesktopSessionSummary[];
+  activeNavigation?: SidebarNavAction;
   activeProjectId?: string;
   selectedSessionId?: string;
   onOpenProject(): void;
@@ -56,6 +56,7 @@ interface SidebarProps {
   onSelectSession(projectId: string, sessionId: string): void;
   onLoadSessionChildren(projectId: string, parentSessionId: string, cursor?: string): Promise<DesktopSessionTreePage>;
   onSessionMenu(session: DesktopSessionSummary): void;
+  onSessionPin(session: DesktopSessionSummary): void;
   onProjectPinned(projectId: string, pinned: boolean): void;
   onReorderProjects(projectIds: string[]): void;
   onRefreshProject(projectId: string): void;
@@ -64,12 +65,17 @@ interface SidebarProps {
   onRenameProject(projectId: string): void;
   onNewTask(projectId: string): void;
   onRemoveProject(projectId: string): void;
+  onOpenRuntime(): void;
   onExtensions(): void;
   onSearch(): void;
   onSettings(): void;
   onResizeKeyDown: React.KeyboardEventHandler<HTMLDivElement>;
   onResizePointerDown: React.PointerEventHandler<HTMLDivElement>;
   onToggleSidebar(): void;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  onNavigateBack(): void;
+  onNavigateForward(): void;
 }
 
 export const Sidebar = memo(function Sidebar({
@@ -79,6 +85,7 @@ export const Sidebar = memo(function Sidebar({
   peekTriggerHandlers,
   projects,
   sessions,
+  activeNavigation,
   activeProjectId,
   selectedSessionId,
   onOpenProject,
@@ -86,6 +93,7 @@ export const Sidebar = memo(function Sidebar({
   onSelectSession,
   onLoadSessionChildren,
   onSessionMenu,
+  onSessionPin,
   onProjectPinned,
   onReorderProjects,
   onRefreshProject,
@@ -94,12 +102,17 @@ export const Sidebar = memo(function Sidebar({
   onRenameProject,
   onNewTask,
   onRemoveProject,
+  onOpenRuntime,
   onExtensions,
   onSearch,
   onSettings,
   onResizeKeyDown,
   onResizePointerDown,
-  onToggleSidebar
+  onToggleSidebar,
+  canGoBack,
+  canGoForward,
+  onNavigateBack,
+  onNavigateForward
 }: SidebarProps): React.JSX.Element {
   const [expandedSections, setExpandedSections] = useState<Record<SidebarSectionName, boolean>>({
     pinned: true,
@@ -165,10 +178,10 @@ export const Sidebar = memo(function Sidebar({
 
   const dialogueSessions = useMemo(() => {
     const projectIds = new Set(projects.map((project) => project.id));
-    return sessions.filter((session) => !session.pinned && !projectIds.has(session.projectId));
+    return sessions.filter((session) => !projectIds.has(session.projectId));
   }, [projects, sessions]);
 
-  // 会话置顶与项目置顶相互独立；项目内的置顶会话统一提升到顶部置顶段。
+  // 置顶区只是快捷入口；会话仍留在原项目树中，避免跨置顶状态的父子关系被拆开。
   const pinnedSessions = useMemo(() => sessions.filter((session) => session.pinned), [sessions]);
 
   const orderedProjects = useMemo(() => sortProjects(projects, projectSort), [projects, projectSort]);
@@ -253,6 +266,7 @@ export const Sidebar = memo(function Sidebar({
 
   const navActionHandlers: Record<SidebarNavAction, () => void> = {
     newTask: createTask,
+    runtime: onOpenRuntime,
     extensions: onExtensions,
     search: onSearch,
     settings: onSettings
@@ -297,7 +311,6 @@ export const Sidebar = memo(function Sidebar({
 
   const renderProject = (project: DesktopProject, section: "pinned" | "projects"): React.JSX.Element => {
     const projectSessions = sessionsByProject.get(project.id) ?? [];
-    const displaySessions = projectSessions.filter((session) => !session.pinned);
     const expanded = project.id === activeProjectId
       ? !collapsedProjectIds.has(project.id)
       : expandedProjectIds.has(project.id);
@@ -344,9 +357,10 @@ export const Sidebar = memo(function Sidebar({
           <ProjectSessions
             onSelectSession={onSelectSession}
             onSessionMenu={onSessionMenu}
+            onSessionPin={onSessionPin}
             projectId={project.id}
             selectedSessionId={selectedSessionId}
-            sessions={displaySessions}
+            sessions={projectSessions}
             expandedSessionIds={expandedSessionIds}
             loadingSessionIds={loadingSessionIds}
             sessionNextCursors={sessionNextCursors}
@@ -383,16 +397,15 @@ export const Sidebar = memo(function Sidebar({
           <nav aria-label="功能导航" className="cindy-sidebar-nav">
             {SIDEBAR_NAV_ITEMS.map((item) => (
               <button
-                aria-disabled={item.disabled ? "true" : undefined}
                 aria-label={item.label}
-                className={`cindy-sidebar-nav-item${item.action === "newTask" ? " cindy-sidebar-nav-new-button" : ""}`}
-                disabled={item.disabled}
+                className={`cindy-sidebar-nav-item${item.action === activeNavigation ? " is-active" : ""}`}
+                data-sidebar-nav-action={item.action}
                 key={item.label}
-                onClick={item.action ? navActionHandlers[item.action] : undefined}
-                title={item.title}
+                onClick={navActionHandlers[item.action]}
+                title={item.label}
                 type="button"
               >
-                <Icon name={item.icon} size={16} />
+                <Icon name={item.icon} size={17} />
                 <span>{item.label}</span>
               </button>
             ))}
@@ -404,8 +417,10 @@ export const Sidebar = memo(function Sidebar({
               <SessionList
                 onSelectSession={onSelectSession}
                 onSessionMenu={onSessionMenu}
+                onSessionPin={onSessionPin}
                 selectedSessionId={selectedSessionId}
                 sessions={pinnedSessions}
+                flat
                 expandedSessionIds={expandedSessionIds}
                 loadingSessionIds={loadingSessionIds}
                 sessionNextCursors={sessionNextCursors}
@@ -421,6 +436,8 @@ export const Sidebar = memo(function Sidebar({
               <div className="cindy-sidebar-section-actions cindy-sidebar-menu-anchor">
                 <button
                   ref={projectOrganizationButtonRef}
+                  aria-expanded={projectOrganizationMenuOpen}
+                  aria-haspopup="menu"
                   aria-label="项目排序"
                   className="cindy-sidebar-section-action"
                   onClick={() => {
@@ -428,12 +445,15 @@ export const Sidebar = memo(function Sidebar({
                     setProjectCreateMenuOpen(false);
                     setProjectOrganizationMenuOpen((current) => !current);
                   }}
+                  title="项目排序"
                   type="button"
                 >
                   <Icon name="more" size={14} />
                 </button>
                 <button
                   ref={projectCreateButtonRef}
+                  aria-expanded={projectCreateMenuOpen}
+                  aria-haspopup="menu"
                   aria-label="添加项目"
                   className="cindy-sidebar-section-action"
                   onClick={() => {
@@ -441,29 +461,28 @@ export const Sidebar = memo(function Sidebar({
                     setProjectOrganizationMenuOpen(false);
                     setProjectCreateMenuOpen((current) => !current);
                   }}
+                  title="添加项目"
                   type="button"
                 >
                   <Icon name="add" size={15} />
                 </button>
-                {projectOrganizationMenuOpen ? (
-                  <SidebarOrganizationMenu
-                    anchorRef={projectOrganizationButtonRef}
-                    onSortChange={(value) => { setProjectSort(value); setProjectOrganizationMenuOpen(false); }}
-                    sort={projectSort}
-                  />
-                ) : null}
-                {projectCreateMenuOpen ? (
-                  <SidebarCreationMenu
-                    anchorRef={projectCreateButtonRef}
-                    onCreateEmptyProject={() => { setProjectCreateMenuOpen(false); onCreateEmptyProject(); }}
-                    onOpenProject={() => { setProjectCreateMenuOpen(false); onOpenProject(); }}
-                  />
-                ) : null}
+                <SidebarOrganizationMenu
+                  anchorRef={projectOrganizationButtonRef}
+                  onSortChange={(value) => { setProjectSort(value); setProjectOrganizationMenuOpen(false); }}
+                  open={projectOrganizationMenuOpen}
+                  sort={projectSort}
+                />
+                <SidebarCreationMenu
+                  anchorRef={projectCreateButtonRef}
+                  onCreateEmptyProject={() => { setProjectCreateMenuOpen(false); onCreateEmptyProject(); }}
+                  onOpenProject={() => { setProjectCreateMenuOpen(false); onOpenProject(); }}
+                  open={projectCreateMenuOpen}
+                />
               </div>
             )}
             expanded={expandedSections.projects}
             icon="folder"
-            label="项目"
+            label="你的项目"
             compactDivider
             onToggle={() => toggleSection("projects")}
           >
@@ -475,6 +494,7 @@ export const Sidebar = memo(function Sidebar({
               limit={DIALOGUE_SESSION_COLLAPSE_LIMIT}
               onSelectSession={onSelectSession}
               onSessionMenu={onSessionMenu}
+              onSessionPin={onSessionPin}
               selectedSessionId={selectedSessionId}
               sessions={dialogueSessions}
               expandedSessionIds={expandedSessionIds}
@@ -489,7 +509,7 @@ export const Sidebar = memo(function Sidebar({
       </div>
 
       <div className="cindy-sidebar-footer">
-        <button aria-label="设置" className="cindy-sidebar-settings-item" onClick={onSettings} type="button">
+        <button aria-label="设置" className="cindy-sidebar-settings-item" onClick={onSettings} title="设置" type="button">
           <Icon name="settings" size={16} />
           <span>设置</span>
         </button>
@@ -510,16 +530,19 @@ export const Sidebar = memo(function Sidebar({
       ) : null}
       </aside>
       <SidebarChrome
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
         collapsed={!contentVisible}
         floating
-        onNewTask={createTask}
+        onNavigateBack={onNavigateBack}
+        onNavigateForward={onNavigateForward}
         onToggle={onToggleSidebar}
       />
     </>
   );
 });
 
-function SidebarChrome({ collapsed, floating = false, onNewTask, onToggle }: { collapsed: boolean; floating?: boolean; onNewTask(): void; onToggle(): void }): React.JSX.Element {
+function SidebarChrome({ collapsed, floating = false, canGoBack, canGoForward, onNavigateBack, onNavigateForward, onToggle }: { collapsed: boolean; floating?: boolean; canGoBack: boolean; canGoForward: boolean; onNavigateBack(): void; onNavigateForward(): void; onToggle(): void }): React.JSX.Element {
   return (
     <>
       {floating ? <div aria-hidden="true" className="cindy-sidebar-topbar-visual" /> : null}
@@ -530,17 +553,30 @@ function SidebarChrome({ collapsed, floating = false, onNewTask, onToggle }: { c
             aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
             className="cindy-chrome-button"
             onClick={onToggle}
+            title={collapsed ? "展开侧栏" : "收起侧栏"}
             type="button"
           >
             <Icon name="sidebar" size={15} />
           </button>
           <button
-            aria-label="新建对话"
-            className="cindy-chrome-button cindy-sidebar-new-button"
-            onClick={onNewTask}
+            aria-label="上一步"
+            className="cindy-chrome-button cindy-navigation-button"
+            disabled={!canGoBack}
+            onClick={onNavigateBack}
+            title="上一步"
             type="button"
           >
-            <Icon name="menu" size={16} />
+            <Icon name="arrow-left" size={15} />
+          </button>
+          <button
+            aria-label="下一步"
+            className="cindy-chrome-button cindy-navigation-button"
+            disabled={!canGoForward}
+            onClick={onNavigateForward}
+            title="下一步"
+            type="button"
+          >
+            <Icon name="arrow-right" size={15} />
           </button>
         </div>
       </div>
@@ -564,13 +600,14 @@ function SidebarSection({ label, icon, compactDivider, expanded, actions, onTogg
   );
 }
 
-function ProjectSessions({ projectId, sessions, selectedSessionId, onSelectSession, onSessionMenu, expandedSessionIds, loadingSessionIds, sessionNextCursors, onToggleSession, onLoadMoreSessionChildren }: { projectId: string; sessions: DesktopSessionSummary[]; selectedSessionId?: string; onSelectSession(projectId: string, sessionId: string): void; onSessionMenu(session: DesktopSessionSummary): void; expandedSessionIds: Set<string>; loadingSessionIds: Set<string>; sessionNextCursors: Map<string, string>; onToggleSession(session: DesktopSessionSummary): void; onLoadMoreSessionChildren(session: DesktopSessionSummary): void }): React.JSX.Element | null {
+function ProjectSessions({ projectId, sessions, selectedSessionId, onSelectSession, onSessionMenu, onSessionPin, expandedSessionIds, loadingSessionIds, sessionNextCursors, onToggleSession, onLoadMoreSessionChildren }: { projectId: string; sessions: DesktopSessionSummary[]; selectedSessionId?: string; onSelectSession(projectId: string, sessionId: string): void; onSessionMenu(session: DesktopSessionSummary): void; onSessionPin(session: DesktopSessionSummary): void; expandedSessionIds: Set<string>; loadingSessionIds: Set<string>; sessionNextCursors: Map<string, string>; onToggleSession(session: DesktopSessionSummary): void; onLoadMoreSessionChildren(session: DesktopSessionSummary): void }): React.JSX.Element | null {
   if (!sessions.length) return <div className="cindy-sidebar-empty-row cindy-sidebar-project-empty">没有聊天</div>;
   return (
     <CollapsibleSessionList
       limit={PROJECT_SESSION_COLLAPSE_LIMIT}
       onSelectSession={onSelectSession}
       onSessionMenu={onSessionMenu}
+      onSessionPin={onSessionPin}
       projectId={projectId}
       selectedSessionId={selectedSessionId}
       sessions={sessions}
@@ -584,11 +621,13 @@ function ProjectSessions({ projectId, sessions, selectedSessionId, onSelectSessi
 }
 
 interface SessionListProps {
+  flat?: boolean;
   projectId?: string;
   sessions: DesktopSessionSummary[];
   selectedSessionId?: string;
   onSelectSession(projectId: string, sessionId: string): void;
   onSessionMenu(session: DesktopSessionSummary): void;
+  onSessionPin(session: DesktopSessionSummary): void;
   expandedSessionIds: Set<string>;
   loadingSessionIds: Set<string>;
   sessionNextCursors: Map<string, string>;
@@ -615,11 +654,11 @@ function CollapsibleSessionList({ limit, ...props }: SessionListProps & { limit:
   );
 }
 
-function SessionList({ projectId, sessions, selectedSessionId, onSelectSession, onSessionMenu, expandedSessionIds, loadingSessionIds, sessionNextCursors, onToggleSession, onLoadMoreSessionChildren }: SessionListProps): React.JSX.Element {
+function SessionList({ flat = false, projectId, sessions, selectedSessionId, onSelectSession, onSessionMenu, onSessionPin, expandedSessionIds, loadingSessionIds, sessionNextCursors, onToggleSession, onLoadMoreSessionChildren }: SessionListProps): React.JSX.Element {
   const byParent = new Map<string | undefined, DesktopSessionSummary[]>();
   const ids = new Set(sessions.map((session) => session.id));
   for (const session of sessions) {
-    const parent = session.parentSessionId && ids.has(session.parentSessionId) ? session.parentSessionId : undefined;
+    const parent = !flat && session.parentSessionId && ids.has(session.parentSessionId) ? session.parentSessionId : undefined;
     const siblings = byParent.get(parent) ?? [];
     siblings.push(session);
     byParent.set(parent, siblings);
@@ -627,36 +666,65 @@ function SessionList({ projectId, sessions, selectedSessionId, onSelectSession, 
   const renderNode = (session: DesktopSessionSummary, depth: number, ancestors: Set<string>): React.JSX.Element[] => {
     if (ancestors.has(session.id)) return [];
     const nextAncestors = new Set(ancestors).add(session.id);
-    const expanded = expandedSessionIds.has(session.id);
+    const expandable = !flat && session.hasChildren;
+    const expanded = expandable && expandedSessionIds.has(session.id);
+    const loading = expandable && loadingSessionIds.has(session.id);
     const children = expanded ? (byParent.get(session.id) ?? []).flatMap((child) => renderNode(child, depth + 1, nextAncestors)) : [];
     const nextCursor = sessionNextCursors.get(session.id);
+    const running = isSessionRunning(session);
+    const title = session.title || session.firstUserMessage || "新对话";
+    const meta = sidebarSessionMeta(session, running);
+    const metaTitle = meta ? sidebarSessionUpdatedAt(session.updatedAt) : undefined;
     return [
       <div className="cindy-sidebar-session-tree-row" key={`${session.projectId}:${session.id}`}>
         <button
-          aria-expanded={session.hasChildren ? expanded : undefined}
-          aria-label={session.hasChildren ? (expanded ? "收起子会话" : "展开子会话") : undefined}
-          className={`cindy-sidebar-session-toggle${session.hasChildren ? "" : " is-empty"}`}
-          disabled={!session.hasChildren || loadingSessionIds.has(session.id)}
+          aria-expanded={expandable ? expanded : undefined}
+          aria-label={expandable ? (expanded ? "收起子会话" : "展开子会话") : undefined}
+          className={`cindy-sidebar-session-toggle${expandable ? "" : " is-empty"}`}
+          disabled={!expandable || loading}
           onClick={() => onToggleSession(session)}
           style={{ marginLeft: `${depth * 16}px` }}
           type="button"
         >
-          {loadingSessionIds.has(session.id) ? "…" : session.hasChildren ? <Icon name="chevron" size={12} /> : null}
+          {loading ? "…" : expandable ? <Icon name="chevron" size={12} /> : null}
         </button>
-        <button
-          aria-current={session.id === selectedSessionId ? "page" : undefined}
-          className={`cindy-sidebar-session-item${session.id === selectedSessionId ? " is-selected" : ""}${session.archived ? " is-archived" : ""}`}
-          onClick={() => onSelectSession(projectId ?? session.projectId, session.id)}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            onSessionMenu(session);
-          }}
-          title={session.firstUserMessage || session.title}
-          type="button"
-        >
-          {session.unread ? <span aria-label="未读" className="cindy-sidebar-session-unread" /> : null}
-          <span className="cindy-sidebar-session-title">{session.title || session.firstUserMessage || "新对话"}</span>
-        </button>
+        <div className={`cindy-sidebar-session-entry${session.id === selectedSessionId ? " is-selected" : ""}${session.archived ? " is-archived" : ""}${running ? " is-running" : ""}`}>
+          <button
+            aria-current={session.id === selectedSessionId ? "page" : undefined}
+            className="cindy-sidebar-session-item"
+            onClick={() => onSelectSession(projectId ?? session.projectId, session.id)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              onSessionMenu(session);
+            }}
+            title={session.firstUserMessage || session.title}
+            type="button"
+          >
+            {running ? <span aria-hidden="true" className={`cindy-sidebar-session-running${session.status === "waiting_permission" ? " is-waiting" : ""}`} /> : session.unread ? <span aria-label="未读" className="cindy-sidebar-session-unread" /> : null}
+            <span className="cindy-sidebar-session-title">{title}</span>
+            {meta && metaTitle ? <span aria-label={`上次活动：${metaTitle}`} className="cindy-sidebar-session-meta" title={metaTitle}>{meta}</span> : null}
+          </button>
+          <div className="cindy-sidebar-session-actions">
+            <button
+              aria-label={session.pinned ? "取消置顶任务" : "置顶任务"}
+              className="cindy-sidebar-session-pin"
+              onClick={() => onSessionPin(session)}
+              title={session.pinned ? "取消置顶任务" : "置顶任务"}
+              type="button"
+            >
+              <Icon name="pin" size={14} />
+            </button>
+            <button
+              aria-label={`${title} 的更多操作`}
+              className="cindy-sidebar-session-more"
+              onClick={() => onSessionMenu(session)}
+              title="更多操作"
+              type="button"
+            >
+              <Icon name="more" size={14} />
+            </button>
+          </div>
+        </div>
       </div>,
       ...children,
       ...(expanded && nextCursor ? [
@@ -716,7 +784,7 @@ const ProjectRow = memo(function ProjectRow({
   const suppressClickRef = useRef(false);
   return (
     <div
-      className={`cindy-project-row-wrap${selected ? " is-active" : ""}${dragActive ? " is-drag-active" : ""}`}
+      className={`cindy-project-row-wrap${selected ? " is-active" : ""}${sessionsExpanded ? " is-expanded" : ""}${dragActive ? " is-drag-active" : ""}`}
       draggable
       onDragEnd={(event) => {
         event.preventDefault();
@@ -749,22 +817,22 @@ const ProjectRow = memo(function ProjectRow({
         role="button"
         tabIndex={0}
       >
-        <Icon name={sessionsExpanded ? "folder-open" : "folder"} size={15} />
+        <Icon name={sessionsExpanded ? "folder-open" : "folder"} size={16} />
         <span className="cindy-project-row-label">{project.name}</span>
         {project.missing ? <span className="cindy-project-status is-failed" title="路径不可用" /> : running ? <span className="cindy-project-status is-running" title="正在运行" /> : null}
       </div>
       <div className={`cindy-project-row-actions${menuOpen ? " is-open" : ""} cindy-sidebar-menu-anchor`}>
         <button aria-label={`新建任务 ${project.name}`} className="cindy-project-row-action" onClick={onNewTask} title="新建任务" type="button"><Icon name="edit" size={14} /></button>
-        <button ref={menuButtonRef} aria-label={`${project.name} 项目操作`} className="cindy-project-row-action" onClick={onMenu} title="项目操作" type="button"><Icon name="more" size={14} /></button>
-        {menuOpen ? <ProjectMenu anchorRef={menuButtonRef} onOpenTerminal={onOpenTerminal} onPin={onPin} onRefresh={onRefresh} onRemove={onRemove} onRename={onRename} onReveal={onReveal} project={project} /> : null}
+        <button ref={menuButtonRef} aria-expanded={menuOpen} aria-haspopup="menu" aria-label={`${project.name} 项目操作`} className="cindy-project-row-action" onClick={onMenu} title="项目操作" type="button"><Icon name="more" size={14} /></button>
+        <ProjectMenu anchorRef={menuButtonRef} onOpenTerminal={onOpenTerminal} onPin={onPin} onRefresh={onRefresh} onRemove={onRemove} onRename={onRename} onReveal={onReveal} open={menuOpen} project={project} />
       </div>
     </div>
   );
 });
 
-function ProjectMenu({ anchorRef, project, onPin, onRefresh, onReveal, onOpenTerminal, onRename, onRemove }: { anchorRef: FloatingMenuAnchor; project: DesktopProject; onPin(): void; onRefresh(): void; onReveal(): void; onOpenTerminal(): void; onRename(): void; onRemove(): void }): React.JSX.Element {
+function ProjectMenu({ anchorRef, project, open, onPin, onRefresh, onReveal, onOpenTerminal, onRename, onRemove }: { anchorRef: FloatingMenuAnchor; project: DesktopProject; open: boolean; onPin(): void; onRefresh(): void; onReveal(): void; onOpenTerminal(): void; onRename(): void; onRemove(): void }): React.JSX.Element {
   return (
-    <FloatingSidebarMenu anchorRef={anchorRef} ariaLabel="项目操作菜单">
+    <FloatingSidebarMenu anchorRef={anchorRef} ariaLabel="项目操作菜单" open={open}>
       <button onClick={onPin} role="menuitem" type="button"><Icon name="pin" size={15} /><span>{project.pinned ? "取消置顶项目" : "置顶项目"}</span></button>
       <button onClick={onRefresh} role="menuitem" type="button"><Icon name="refresh" size={15} /><span>刷新项目状态</span></button>
       <button onClick={onReveal} role="menuitem" type="button"><Icon name="external" size={15} /><span>在 Finder 中显示</span></button>
@@ -776,9 +844,9 @@ function ProjectMenu({ anchorRef, project, onPin, onRefresh, onReveal, onOpenTer
   );
 }
 
-function SidebarOrganizationMenu({ anchorRef, sort, onSortChange }: { anchorRef: FloatingMenuAnchor; sort: ProjectSort; onSortChange(value: ProjectSort): void }): React.JSX.Element {
+function SidebarOrganizationMenu({ anchorRef, open, sort, onSortChange }: { anchorRef: FloatingMenuAnchor; open: boolean; sort: ProjectSort; onSortChange(value: ProjectSort): void }): React.JSX.Element {
   return (
-    <FloatingSidebarMenu anchorRef={anchorRef} ariaLabel="项目排序菜单" className="is-narrow">
+    <FloatingSidebarMenu anchorRef={anchorRef} ariaLabel="项目排序菜单" className="is-narrow" open={open}>
       <div className="cindy-sidebar-menu-heading">排序方式</div>
       {([
         ["priority", "优先级"],
@@ -794,38 +862,66 @@ function SidebarOrganizationMenu({ anchorRef, sort, onSortChange }: { anchorRef:
   );
 }
 
-function SidebarCreationMenu({ anchorRef, onCreateEmptyProject, onOpenProject }: { anchorRef: FloatingMenuAnchor; onCreateEmptyProject(): void; onOpenProject(): void }): React.JSX.Element {
+function SidebarCreationMenu({ anchorRef, open, onCreateEmptyProject, onOpenProject }: { anchorRef: FloatingMenuAnchor; open: boolean; onCreateEmptyProject(): void; onOpenProject(): void }): React.JSX.Element {
   return (
-    <FloatingSidebarMenu anchorRef={anchorRef} ariaLabel="添加项目菜单">
+    <FloatingSidebarMenu anchorRef={anchorRef} ariaLabel="添加项目菜单" open={open}>
       <button onClick={onCreateEmptyProject} role="menuitem" type="button"><Icon name="add" size={15} /><span>新建空项目</span></button>
       <button onClick={onOpenProject} role="menuitem" type="button"><Icon name="folder" size={15} /><span>使用现有文件夹</span></button>
     </FloatingSidebarMenu>
   );
 }
 
-function FloatingSidebarMenu({ anchorRef, ariaLabel, className = "", children }: { anchorRef: FloatingMenuAnchor; ariaLabel: string; className?: string; children: React.ReactNode }): React.JSX.Element {
-  const [position, setPosition] = useState<{ left: number; top: number }>();
+function FloatingSidebarMenu({ anchorRef, ariaLabel, className = "", children, open }: { anchorRef: FloatingMenuAnchor; ariaLabel: string; className?: string; children: React.ReactNode; open: boolean }): React.JSX.Element | null {
+  const presence = useClosingPresence(open);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ left: number; top: number; origin: "top-left" | "bottom-left" }>();
+
   useLayoutEffect(() => {
+    if (!presence.present) return;
+    let frame: number | undefined;
     const updatePosition = (): void => {
-      const anchor = anchorRef.current;
-      if (!anchor) return;
-      const rect = anchor.getBoundingClientRect();
-      const width = className === "is-narrow" ? 166 : 222;
-      setPosition({
-        left: Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - width - 8)),
-        top: Math.min(rect.bottom + 4, Math.max(8, window.innerHeight - 300))
+      if (frame !== undefined) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined;
+        const anchor = anchorRef.current;
+        const surface = surfaceRef.current;
+        if (!anchor || !surface) return;
+        const rect = anchor.getBoundingClientRect();
+        const width = surface.offsetWidth || (className === "is-narrow" ? 166 : 222);
+        const height = surface.offsetHeight;
+        const viewportPadding = 8;
+        const gap = 6;
+        const roomBelow = window.innerHeight - rect.bottom - gap;
+        const roomAbove = rect.top - gap;
+        const placeAbove = roomBelow < height && roomAbove > roomBelow;
+        const left = Math.min(Math.max(viewportPadding, rect.left), Math.max(viewportPadding, window.innerWidth - width - viewportPadding));
+        const top = placeAbove
+          ? Math.max(viewportPadding, rect.top - height - gap)
+          : Math.min(rect.bottom + gap, Math.max(viewportPadding, window.innerHeight - height - viewportPadding));
+        const origin = placeAbove ? "bottom-left" : "top-left";
+        setPosition((current) => current?.left === left && current.top === top && current.origin === origin
+          ? current
+          : { left, top, origin });
       });
     };
+
     updatePosition();
     window.addEventListener("resize", updatePosition);
     document.addEventListener("scroll", updatePosition, true);
+    const resizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updatePosition);
+    if (anchorRef.current) resizeObserver?.observe(anchorRef.current);
+    if (surfaceRef.current) resizeObserver?.observe(surfaceRef.current);
     return () => {
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
       window.removeEventListener("resize", updatePosition);
       document.removeEventListener("scroll", updatePosition, true);
+      resizeObserver?.disconnect();
     };
-  }, [anchorRef, className]);
+  }, [anchorRef, className, presence.present]);
+
+  if (!presence.present) return null;
   return createPortal(
-    <div aria-label={ariaLabel} className={`cindy-sidebar-menu${className ? ` ${className}` : ""}`} role="menu" style={{ left: position?.left, top: position?.top, visibility: position ? "visible" : "hidden" }}>
+    <div aria-label={ariaLabel} className={`cindy-sidebar-menu${className ? ` ${className}` : ""}`} data-menu-phase={presence.phase} data-origin={position?.origin ?? "top-left"} ref={surfaceRef} role="menu" style={{ left: position?.left, top: position?.top, visibility: position ? "visible" : "hidden" }}>
       {children}
     </div>,
     document.body
@@ -850,5 +946,35 @@ function reorderSectionProjectIds(fullIds: string[], sectionIds: string[], sourc
 }
 
 function hasRunningSession(sessions: DesktopSessionSummary[]): boolean {
-  return sessions.some((session) => session.status === "running" || session.status === "waiting_permission");
+  return sessions.some(isSessionRunning);
+}
+
+function isSessionRunning(session: DesktopSessionSummary): boolean {
+  return session.status === "running" || session.status === "waiting_permission";
+}
+
+/** 会话右侧只保留 Codex 风格的短状态，完整时间仍通过悬停标题提供。 */
+function sidebarSessionMeta(session: DesktopSessionSummary, running: boolean): string | undefined {
+  if (running) return session.status === "waiting_permission" ? "待确认" : "运行中";
+  const updatedAt = Date.parse(session.updatedAt);
+  if (!Number.isFinite(updatedAt)) return undefined;
+  const elapsedMs = Math.max(0, Date.now() - updatedAt);
+  const elapsedMinutes = Math.floor(elapsedMs / 60_000);
+  if (elapsedMinutes < 1) return "刚刚";
+  if (elapsedMinutes < 60) return `${elapsedMinutes} 分`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours} 小时`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  if (elapsedDays < 7) return `${elapsedDays} 天`;
+  const date = new Date(updatedAt);
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function sidebarSessionUpdatedAt(value: string): string {
+  const updatedAt = Date.parse(value);
+  if (!Number.isFinite(updatedAt)) return "未知时间";
+  return new Intl.DateTimeFormat("zh-CN", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(new Date(updatedAt));
 }

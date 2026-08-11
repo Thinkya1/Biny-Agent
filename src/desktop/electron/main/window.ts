@@ -18,7 +18,7 @@ export type WindowCloseDecision = "hide" | "close" | "cancel";
 /** 窗口底色要和渲染层主题一致，否则加载过程中会闪一下白底。 */
 function themeBackgroundColor(preference: DesktopThemePreference = "system"): string {
   const dark = preference === "dark" || (preference === "system" && nativeTheme.shouldUseDarkColors);
-  return dark ? "#2a2828" : "#f4f5f7";
+  return dark ? "#181818" : "#ffffff";
 }
 
 export function createDesktopWindow(

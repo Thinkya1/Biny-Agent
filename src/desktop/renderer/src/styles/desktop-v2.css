@@ -1255,7 +1255,7 @@ select {
   background: var(--border);
 }
 
-.desktop-model-dialog > .connect-dialog {
+.desktop-model-dialog > div > .connect-dialog {
   width: 100%;
   max-height: none;
   border: 0;

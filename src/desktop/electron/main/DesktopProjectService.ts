@@ -29,7 +29,8 @@ import {
   updateSessionCatalogMetadata,
   type SessionCatalogItem,
   type SessionCatalogMetadataPatch,
-  type SessionCatalogQuery
+  type SessionCatalogQuery,
+  type SessionCatalogRecord
 } from "../../../session/catalog.js";
 import { deleteSessionArtifacts } from "../../../session/cleanup.js";
 import { createSessionId, type SessionTurnStatus } from "../../../session/recorder.js";
@@ -182,6 +183,7 @@ export class DesktopProjectService {
         unread: item.unread ?? false,
         labels: item.labels,
         metadataRevision: item.metadataRevision,
+        personalization: item.personalization,
         hasChildren: item.hasChildren,
         rootSessionId: item.rootSessionId,
         parentSessionId: item.parentSessionId,
@@ -220,6 +222,7 @@ export class DesktopProjectService {
         unread: false,
         labels: undefined,
         metadataRevision: undefined,
+        personalization: undefined,
         hasChildren: false,
         rootSessionId: runtimeInfo.sessionId,
         parentSessionId: undefined,
@@ -277,6 +280,7 @@ export class DesktopProjectService {
         unread: item.unread ?? false,
         labels: item.labels,
         metadataRevision: item.metadataRevision,
+        personalization: item.personalization,
         hasChildren: item.hasChildren,
         rootSessionId: item.rootSessionId,
         parentSessionId: item.parentSessionId,
@@ -324,16 +328,17 @@ export class DesktopProjectService {
     sessionId: string,
     patch: SessionCatalogMetadataPatch,
     expectedRevision?: string
-  ): Promise<void> {
+  ): Promise<SessionCatalogRecord> {
     const dataRoot = await this.storage.ensureProjectData(project);
-    await updateSessionCatalogMetadata(dataRoot, sessionId, patch, expectedRevision);
+    const record = await updateSessionCatalogMetadata(dataRoot, sessionId, patch, expectedRevision);
     // 旧桌面状态仍保留作无 catalog 会话的兜底；catalog 成功后它不再是新值的来源。
     if (patch.title !== undefined) await this.state.setSessionTitle(project.id, sessionId, patch.title);
     if (patch.pinned !== undefined) await this.state.setSessionPinned(project.id, sessionId, patch.pinned);
+    return record;
   }
 
-  async markSessionRead(project: DesktopProject, sessionId: string, expectedRevision?: string): Promise<void> {
-    await this.updateSessionMetadata(project, sessionId, { unread: false }, expectedRevision);
+  async markSessionRead(project: DesktopProject, sessionId: string, expectedRevision?: string): Promise<SessionCatalogRecord> {
+    return await this.updateSessionMetadata(project, sessionId, { unread: false }, expectedRevision);
   }
 
   async duplicateSession(project: DesktopProject, sessionId: string): Promise<string> {

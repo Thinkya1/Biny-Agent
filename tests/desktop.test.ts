@@ -13,6 +13,7 @@ import { executeRuntimeCommand } from "../src/runtime/commands.js";
 import { SessionLeaseStore } from "../src/runtime/SessionLease.js";
 import { isTerminalRunEvent, pendingPermission, type AgentHostEvent } from "../src/runtime/agentEvents.js";
 import type { CredentialStore } from "../src/config/credentials.js";
+import { BINY_AGENT_DIR_ENV } from "../src/config/paths.js";
 import { createFileConfigStore } from "../src/config/store.js";
 import { defaultConfig } from "../src/config/schema.js";
 import { DesktopAgentManager } from "../src/desktop/electron/main/DesktopAgentManager.js";
@@ -49,7 +50,7 @@ import { highlightFencedCode, highlightWorkspaceFile } from "../src/desktop/rend
 import { splitAttachmentReferences, withAttachmentReferences } from "../src/desktop/attachmentReferences.js";
 import { tokenizeCommand } from "../src/desktop/renderer/src/commandHighlight.js";
 import { workspaceFileMarker } from "../src/desktop/renderer/src/workspaceFileMarker.js";
-import { listModelChoices, ModelManager } from "../src/llm/ModelManager.js";
+import { listConfiguredModelChoices, listModelChoices, ModelManager } from "../src/llm/ModelManager.js";
 import { FileModelsStore } from "../src/llm/ModelsStore.js";
 import type { SessionEvent } from "../src/session/recorder.js";
 import type { SessionUsage } from "../src/session/metadata.js";
@@ -71,6 +72,8 @@ await testInteractiveRuntimeAbort();
 await testInteractiveRuntimeTerminalStatuses();
 await testDraftSessionsDoNotReachTheSessionList();
 await testDesktopRestoresPersistedTerminalStatus();
+await testDesktopPinAfterOpeningSessionUsesFreshRevision();
+await testDesktopOpenSessionReturnsConsistentMetadataSnapshot();
 await testDesktopMessageEditFork();
 await testWorkspaceFilePreview();
 await testWorkspaceDirectoryListing();
@@ -92,9 +95,12 @@ await testDesktopSubagentSlashCommands();
 await testDesktopDoesNotResumePersistedIdleSession();
 await testDesktopCredentialsAreSeparated();
 await testDesktopWebSearchSettings();
+await testDesktopPersonalizationCasAndChatOverride();
+await testDesktopScopedMemoryCas();
 await testDesktopRequiresModelConfiguration();
 await testDesktopConnectionMetadata();
 await testWorkspaceSnapshotDoesNotReorderProjects();
+await testDesktopNavigationReadsDoNotPersistSelection();
 await testDesktopSidebarListsEveryProjectSession();
 await testDesktopProjectReorder();
 testProviderCatalogResolution();
@@ -605,6 +611,78 @@ async function testDesktopMessageEditFork(): Promise<void> {
   }
 }
 
+async function testDesktopPinAfterOpeningSessionUsesFreshRevision(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-pin-revision-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-pin-revision-data-"));
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    await ensureAgentDirs(dataRoot);
+    const recorder = new SessionRecorder(dataRoot, "running-session");
+    recorder.record({ type: "user_message", content: "keep this task visible" });
+    await recorder.close();
+
+    const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const document = await agents.openSession(project.id, "running-session");
+    assert.ok(document.session.metadataRevision, "opening a session must return the revision created by mark-read");
+    await agents.pinSession(project.id, "running-session", true, document.session.metadataRevision);
+
+    const pinned = (await projects.listSessions(project, undefined, new Map())).find((session) => session.id === "running-session");
+    assert.equal(pinned?.pinned, true);
+    await agents.closeAll();
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopOpenSessionReturnsConsistentMetadataSnapshot(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-open-metadata-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-open-metadata-data-"));
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    await ensureAgentDirs(dataRoot);
+    const recorder = new SessionRecorder(dataRoot, "metadata-session");
+    recorder.record({ type: "user_message", content: "open with consistent metadata" });
+    await recorder.close();
+    await projects.updateSessionMetadata(project, recorder.sessionId, {
+      title: "旧标题",
+      pinned: false,
+      unread: true,
+      labels: ["旧标签"]
+    });
+
+    const markSessionRead = projects.markSessionRead.bind(projects);
+    projects.markSessionRead = async (targetProject, sessionId, expectedRevision) => {
+      // 模拟 openSession 已读完旧摘要后，另一窗口先提交一组新元数据。
+      await projects.updateSessionMetadata(targetProject, sessionId, {
+        title: "并发新标题",
+        pinned: true,
+        labels: ["新标签"]
+      });
+      return await markSessionRead(targetProject, sessionId, expectedRevision);
+    };
+
+    const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const document = await agents.openSession(project.id, recorder.sessionId);
+    const current = (await projects.listSessions(project, undefined, new Map()))
+      .find((session) => session.id === recorder.sessionId);
+    assert.ok(current);
+    assert.equal(document.session.title, "并发新标题");
+    assert.equal(document.session.pinned, true);
+    assert.equal(document.session.unread, false);
+    assert.deepEqual(document.session.labels, ["新标签"]);
+    assert.equal(document.session.metadataRevision, current.metadataRevision);
+    await agents.closeAll();
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
 async function testWorkspaceFilePreview(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-file-preview-"));
   const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-data-"));
@@ -772,9 +850,12 @@ function testWorkspaceFileMarkers(): void {
 }
 
 async function testFilePanelSizing(): Promise<void> {
-  assert.equal(clampFilePanelWidth(650, 1_000, false), 650);
-  assert.equal(clampFilePanelWidth(650, 700, false), 380);
-  assert.equal(clampFilePanelWidth(700, 700, true), 656);
+  assert.equal(clampFilePanelWidth(650, 1_000), 650);
+  assert.equal(clampFilePanelWidth(650, 700), 380);
+  assert.equal(clampFilePanelWidth(700, 700), 380);
+  assert.equal(clampFilePanelWidth(650, 1_000, 260), 420);
+  assert.equal(clampFilePanelWidth(650, 900, 260), MIN_FILE_PANEL_WIDTH);
+  assert.equal(clampFilePanelWidth(650, 700, 260), MIN_FILE_PANEL_WIDTH);
 
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-file-panel-"));
   try {
@@ -1316,6 +1397,200 @@ async function testDesktopWebSearchSettings(): Promise<void> {
   }
 }
 
+async function testDesktopPersonalizationCasAndChatOverride(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-personalization-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-personalization-data-"));
+  const previousAgentDir = process.env[BINY_AGENT_DIR_ENV];
+  const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
+  let agents: DesktopAgentManager | undefined;
+  try {
+    process.env[BINY_AGENT_DIR_ENV] = desktopRoot;
+    process.env.BINY_RUNTIME_HOST_ENTRY = path.join(desktopRoot, "missing-runtime-host-entry.js");
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    const recorder = new SessionRecorder(dataRoot, "personalization-session");
+    recorder.record({ type: "user_message", content: "请为当前聊天使用独立的表达偏好" });
+    await recorder.close();
+
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const initial = await agents.personalizationOverview(project.id);
+    assert.match(initial.configRevision, /^sha256:/u);
+    assert.equal(initial.chat, undefined);
+
+    const saved = await agents.savePersonalizationSettings(project.id, {
+      expectedRevision: initial.configRevision,
+      settings: {
+        enabled: true,
+        personality: "friendly",
+        customInstructions: "先给结论，再说明关键依据。"
+      },
+      memory: { ...initial.memory, useMemories: true, generateMemories: false }
+    });
+    assert.notEqual(saved.configRevision, initial.configRevision);
+    assert.equal(saved.settings.personality, "friendly");
+    assert.equal(saved.memory.useMemories, true);
+    assert.equal(saved.memory.generateMemories, false);
+    assert.equal(saved.memory.maxRecalled, initial.memory.maxRecalled);
+    await assert.rejects(
+      agents.savePersonalizationSettings(project.id, {
+        expectedRevision: initial.configRevision,
+        settings: { enabled: true, personality: "pragmatic", customInstructions: "stale" },
+        memory: { ...initial.memory, useMemories: false, generateMemories: false }
+      }),
+      /Global config revision conflict/u
+    );
+
+    const document = await agents.openSession(project.id, recorder.sessionId);
+    assert.ok(document.session.metadataRevision);
+    const override = {
+      personality: "pragmatic" as const,
+      customInstructions: { mode: "replace" as const, value: "本聊天只列出可执行步骤。" },
+      useMemories: false,
+      contributeMemories: "inherit" as const
+    };
+    const workspace = await agents.saveChatPersonalization(
+      project.id,
+      recorder.sessionId,
+      override,
+      document.session.metadataRevision
+    );
+    const summary = workspace.sessions.find((session) => session.id === recorder.sessionId);
+    assert.deepEqual(summary?.personalization, override);
+    assert.notEqual(summary?.metadataRevision, document.session.metadataRevision);
+
+    const current = await agents.personalizationOverview(project.id, recorder.sessionId);
+    assert.deepEqual(current.chat?.override, override);
+    assert.equal(current.chat?.effective.personality, "pragmatic");
+    assert.equal(current.chat?.effective.useMemories, false);
+    assert.equal(current.chat?.effective.contributeMemories, false);
+    await assert.rejects(
+      agents.saveChatPersonalization(project.id, recorder.sessionId, override, document.session.metadataRevision),
+      /Session catalog revision conflict/u
+    );
+  } finally {
+    await agents?.closeAll();
+    if (previousAgentDir === undefined) delete process.env[BINY_AGENT_DIR_ENV];
+    else process.env[BINY_AGENT_DIR_ENV] = previousAgentDir;
+    if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
+    else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopScopedMemoryCas(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-scoped-memory-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-scoped-memory-data-"));
+  const previousAgentDir = process.env[BINY_AGENT_DIR_ENV];
+  const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
+  let agents: DesktopAgentManager | undefined;
+  try {
+    process.env[BINY_AGENT_DIR_ENV] = desktopRoot;
+    process.env.BINY_RUNTIME_HOST_ENTRY = path.join(desktopRoot, "missing-runtime-host-entry.js");
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    const recorder = new SessionRecorder(dataRoot, "memory-source-session");
+    recorder.record({ type: "user_message", content: "记住这条项目工作流" });
+    await recorder.close();
+    await state.setSelectedSession(project.id, recorder.sessionId);
+
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const initialProject = await agents.memoryOverview(project.id, "project");
+    assert.equal(initialProject.revision, 0);
+    assert.equal(initialProject.totalEntries, 0);
+    const projectMemory = await agents.addMemoryEntry(project.id, "project", {
+      topic: "发布流程",
+      note: "发布前先运行 Desktop 类型检查和定向测试，并保留失败输出供排查。",
+      kind: "workflow",
+      importance: 5
+    }, initialProject.revision);
+    assert.equal(projectMemory.revision, 1);
+    assert.equal(projectMemory.entries[0]?.kind, "workflow");
+    assert.equal(projectMemory.entries[0]?.importance, 5);
+    assert.ok(projectMemory.entries[0]?.updatedAt);
+    assert.equal(projectMemory.entries[0]?.lineage[0]?.sessionId, recorder.sessionId);
+    await assert.rejects(
+      agents.addMemoryEntry(project.id, "project", {
+        topic: "过期写入",
+        note: "这条写入携带过期的 scope revision，不能覆盖已经保存的项目记忆。",
+        kind: "fact",
+        importance: 3
+      }, initialProject.revision),
+      /Memory project revision conflict/u
+    );
+
+    const initialGlobal = await agents.memoryOverview(project.id, "global");
+    assert.equal(initialGlobal.revision, 0, "project 写入不能推进 global store revision");
+    await assert.rejects(
+      agents.addMemoryEntry(project.id, "global", {
+        topic: "项目事实",
+        note: "全局 scope 不应接受没有偏好语义的普通项目事实，即使用户显式点击保存。",
+        kind: "fact",
+        importance: 3
+      }, initialGlobal.revision),
+      /Global memory only accepts/u
+    );
+    const globalMemory = await agents.addMemoryEntry(project.id, "global", {
+      topic: "沟通偏好",
+      note: "用户明确希望长任务的进度同步保持简洁，并优先说明已验证的结果。",
+      kind: "preference",
+      importance: 4
+    }, initialGlobal.revision);
+    assert.equal(globalMemory.revision, 1);
+    assert.equal((await agents.memoryOverview(project.id, "project")).revision, 1);
+
+    const matches = await agents.searchMemory(project.id, "project", "Desktop 类型检查");
+    assert.equal(matches[0]?.id, projectMemory.entries[0]?.id);
+    assert.equal(matches[0]?.lineage?.[0]?.sessionId, recorder.sessionId);
+
+    const policy = await agents.saveMemorySettings(project.id, {
+      expectedRevision: globalMemory.configRevision,
+      settings: {
+        useMemories: true,
+        generateMemories: true,
+        extractModel: undefined,
+        consolidationModel: undefined,
+        excludeExternalContext: true,
+        maxRecalled: 4
+      }
+    });
+    assert.equal(policy.settings.maxRecalled, 4);
+    assert.notEqual(policy.configRevision, globalMemory.configRevision);
+    await assert.rejects(
+      agents.saveMemorySettings(project.id, {
+        expectedRevision: globalMemory.configRevision,
+        settings: { ...policy.settings, maxRecalled: 5 }
+      }),
+      /Global config revision conflict/u
+    );
+
+    const afterDelete = await agents.deleteMemoryEntry(
+      project.id,
+      "project",
+      projectMemory.entries[0]!.id,
+      projectMemory.revision
+    );
+    assert.equal(afterDelete.revision, 2);
+    assert.equal(afterDelete.totalEntries, 0);
+    const compacted = await agents.compactMemory(project.id, "project", afterDelete.revision);
+    assert.deepEqual(compacted, { scope: "project", before: 0, after: 0, revision: 2 });
+    await assert.rejects(agents.compactMemory(project.id, "project", 1), /Memory project revision conflict/u);
+    const cleared = await agents.clearMemory(project.id, "global", globalMemory.revision);
+    assert.equal(cleared.totalEntries, 0);
+    assert.equal(cleared.revision, 2);
+  } finally {
+    await agents?.closeAll();
+    if (previousAgentDir === undefined) delete process.env[BINY_AGENT_DIR_ENV];
+    else process.env[BINY_AGENT_DIR_ENV] = previousAgentDir;
+    if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
+    else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
 async function testDesktopRequiresModelConfiguration(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-model-setup-workspace-"));
   const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-model-setup-data-"));
@@ -1427,6 +1702,46 @@ async function testWorkspaceSnapshotDoesNotReorderProjects(): Promise<void> {
     assert.equal(state.project(first.id)?.lastOpenedAt, firstOpenedAt);
     assert.equal(state.project(second.id)?.lastOpenedAt, secondOpenedAt);
     assert.deepEqual(state.projects().map((project) => project.id), [first.id, second.id]);
+  } finally {
+    await rm(firstRoot, { recursive: true, force: true });
+    await rm(secondRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopNavigationReadsDoNotPersistSelection(): Promise<void> {
+  const firstRoot = await mkdtemp(path.join(os.tmpdir(), "biny-selection-a-"));
+  const secondRoot = await mkdtemp(path.join(os.tmpdir(), "biny-selection-b-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-selection-data-"));
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const first = await projects.createProject(firstRoot);
+    const second = await projects.createProject(secondRoot);
+    assert.equal(state.activeProjectId(), undefined, "upserting projects must not select them");
+
+    await state.commitSelection(second.id, "session-second");
+    const firstDataRoot = await projects.dataRoot(first);
+    await ensureAgentDirs(firstDataRoot);
+    const recorder = new SessionRecorder(firstDataRoot, "session-first");
+    recorder.record({ type: "user_message", content: "keep the prior selection" });
+    await recorder.close();
+
+    const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    await agents.workspaceSnapshot(first.id);
+    await agents.startDraft(first.id);
+    await agents.openSession(first.id, "session-first");
+    assert.equal(state.activeProjectId(), second.id);
+    assert.equal(state.selectedSessionId(second.id), "session-second");
+    assert.equal(state.selectedSessionId(first.id), undefined, "navigation reads wait for the Renderer commit");
+
+    await state.commitSelection(first.id, "session-first");
+    const restored = new DesktopStateStore(path.join(desktopRoot, "desktop-state.json"));
+    await restored.load();
+    assert.equal(restored.activeProjectId(), first.id);
+    assert.equal(restored.selectedSessionId(first.id), "session-first");
+    await assert.rejects(state.commitSelection("missing-project", undefined), /Unknown project/);
+    assert.equal(state.activeProjectId(), first.id);
+    await agents.closeAll();
   } finally {
     await rm(firstRoot, { recursive: true, force: true });
     await rm(secondRoot, { recursive: true, force: true });
@@ -1572,12 +1887,17 @@ function testProviderCatalogResolution(): void {
 
 function testModelChoicesDeduplicateEquivalentAliases(): void {
   const config = structuredClone(defaultConfig);
+  config.providers.deepseek!.apiKey = "test-key";
   config.models["deepseek-deepseek-v4-flash"] = { ...config.models["deepseek-v4-flash"] };
   assert.deepEqual(listModelChoices(config).map((model) => model.alias), [
     "deepseek-v4-flash",
     "deepseek-v4-pro",
     "deepseek/deepseek-chat",
     "deepseek/deepseek-reasoner"
+  ]);
+  assert.deepEqual(listConfiguredModelChoices(config).map((model) => model.alias), [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro"
   ]);
 }
 
@@ -1650,6 +1970,15 @@ function testDesktopUsagePresentation(): void {
   assert.equal(mixedSummary.unpricedCalls, 1);
   assert.equal(formatUsageCost(mixedSummary), "未知");
   assert.equal(formatTurnCost(unpricedUsage), "费用未知");
+
+  const replayedTurnUsage: SessionUsage = {
+    ...unpricedUsage,
+    inputTokens: 300,
+    cacheReadTokens: 200,
+    latestRequestInputTokens: 200,
+    latestRequestCacheReadTokens: 200
+  };
+  assert.equal(summarizeTimelineUsage([toTurn("replayed", replayedTurnUsage)]).latestCacheHitRate, 1);
 }
 
 function testHistoricalToolProjection(): void {

@@ -49,6 +49,7 @@ const promptSchema = z.string().min(1).max(1_000_000);
 const userMessageIndexSchema = z.number().int().nonnegative();
 const titleSchema = z.string().trim().min(1).max(120);
 const revisionSchema = z.string().max(200).optional();
+const configRevisionSchema = z.string().min(1).max(200);
 const sessionTreePageOptionsSchema = z.object({
   parentSessionId: idSchema.optional(),
   cursor: z.string().max(4_000).optional(),
@@ -114,15 +115,53 @@ const webSearchSettingsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(60_000),
   maxResults: z.number().int().min(1).max(10)
 });
+const personalitySchema = z.enum(["none", "friendly", "pragmatic"]);
+const customInstructionsSchema = z.string().refine(
+  (value) => Buffer.byteLength(value, "utf8") <= 4_096,
+  "Custom instructions must not exceed 4 KiB."
+);
+const chatPersonalizationSchema = z.object({
+  personality: z.union([z.literal("inherit"), personalitySchema]),
+  customInstructions: z.object({
+    mode: z.enum(["inherit", "replace", "disabled"]),
+    value: customInstructionsSchema.optional()
+  }).strict(),
+  useMemories: z.union([z.literal("inherit"), z.boolean()]),
+  contributeMemories: z.union([z.literal("inherit"), z.boolean()])
+}).strict();
+const memoryScopeSchema = z.enum(["global", "project"]);
 const memorySettingsSchema = z.object({
-  enabled: z.boolean(),
-  autoRemember: z.boolean(),
+  useMemories: z.boolean(),
+  generateMemories: z.boolean(),
   maxRecalled: z.number().int().min(1).max(20),
-  model: z.string().trim().min(1).max(240).optional()
-});
+  extractModel: z.string().trim().min(1).max(240).optional(),
+  consolidationModel: z.string().trim().min(1).max(240).optional(),
+  excludeExternalContext: z.boolean()
+}).strict();
+const personalizationSettingsSchema = z.object({
+  expectedRevision: configRevisionSchema,
+  settings: z.object({
+    enabled: z.boolean(),
+    personality: personalitySchema,
+    customInstructions: customInstructionsSchema
+  }).strict(),
+  memory: memorySettingsSchema
+}).strict();
 const memoryTopicSchema = z.string().trim().min(1).max(64);
 const memoryNoteSchema = z.string().trim().min(1).max(4_000);
 const memoryQuerySchema = z.string().trim().min(1).max(2_000);
+const memoryEntryIdSchema = z.string().min(1).max(512);
+const memoryRevisionSchema = z.number().int().nonnegative();
+const memorySettingsInputSchema = z.object({
+  expectedRevision: configRevisionSchema,
+  settings: memorySettingsSchema
+}).strict();
+const memoryEntryInputSchema = z.object({
+  topic: memoryTopicSchema,
+  note: memoryNoteSchema,
+  kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]),
+  importance: z.number().int().min(1).max(5)
+}).strict();
 const runtimeMutationSchema = z.enum([
   "task.create", "task.start", "task.cancel", "task.approve", "task.resume", "task.retry",
   "automation.create", "automation.pause", "automation.resume", "automation.run", "automation.delete",
@@ -152,7 +191,6 @@ export function registerDesktopIpc(context: IpcContext): void {
     const projectPath = result.filePaths[0];
     if (result.canceled || !projectPath) return undefined;
     const project = await context.projects.createProject(projectPath);
-    await context.state.setActiveProject(project.id);
     return await context.agents.workspaceSnapshot(project.id);
   });
 
@@ -169,14 +207,18 @@ export function registerDesktopIpc(context: IpcContext): void {
       : await dialog.showSaveDialog(options);
     if (result.canceled || !result.filePath) return undefined;
     const project = await context.projects.createEmptyProject(result.filePath);
-    await context.state.setActiveProject(project.id);
     return await context.agents.workspaceSnapshot(project.id);
   });
 
   handle(desktopIpc.selectProject, async (_event, projectId: unknown) => {
-    const id = idSchema.parse(projectId);
-    await context.state.setActiveProject(id);
-    return await context.agents.workspaceSnapshot(id);
+    return await context.agents.workspaceSnapshot(idSchema.parse(projectId));
+  });
+
+  handle(desktopIpc.commitSelection, async (_event, projectId: unknown, sessionId: unknown) => {
+    await context.state.commitSelection(
+      idSchema.parse(projectId),
+      sessionId === undefined ? undefined : idSchema.parse(sessionId)
+    );
   });
 
   handle(desktopIpc.setProjectPinned, async (_event, projectId: unknown, pinned: unknown) => {
@@ -444,32 +486,65 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.browser.clear();
   });
 
-  handle(desktopIpc.memoryOverview, async (_event, projectId: unknown) => {
-    return await context.agents.memoryOverview(idSchema.parse(projectId));
+  handle(desktopIpc.personalizationOverview, async (_event, projectId: unknown, sessionId: unknown) => {
+    return await context.agents.personalizationOverview(
+      idSchema.parse(projectId),
+      sessionId === undefined ? undefined : idSchema.parse(sessionId)
+    );
+  });
+
+  handle(desktopIpc.savePersonalizationSettings, async (_event, projectId: unknown, input: unknown) => {
+    return await context.agents.savePersonalizationSettings(
+      idSchema.parse(projectId),
+      personalizationSettingsSchema.parse(input)
+    );
+  });
+
+  handle(desktopIpc.saveChatPersonalization, async (_event, projectId: unknown, sessionId: unknown, input: unknown, expectedRevision: unknown) => {
+    return await context.agents.saveChatPersonalization(
+      idSchema.parse(projectId),
+      idSchema.parse(sessionId),
+      chatPersonalizationSchema.parse(input),
+      configRevisionSchema.parse(expectedRevision)
+    );
+  });
+
+  handle(desktopIpc.memoryOverview, async (_event, projectId: unknown, scope: unknown) => {
+    return await context.agents.memoryOverview(idSchema.parse(projectId), memoryScopeSchema.parse(scope));
   });
 
   handle(desktopIpc.saveMemorySettings, async (_event, projectId: unknown, input: unknown) => {
-    return await context.agents.saveMemorySettings(idSchema.parse(projectId), memorySettingsSchema.parse(input));
+    return await context.agents.saveMemorySettings(idSchema.parse(projectId), memorySettingsInputSchema.parse(input));
   });
 
-  handle(desktopIpc.searchMemory, async (_event, projectId: unknown, query: unknown) => {
-    return await context.agents.searchMemory(idSchema.parse(projectId), memoryQuerySchema.parse(query));
+  handle(desktopIpc.searchMemory, async (_event, projectId: unknown, scope: unknown, query: unknown) => {
+    return await context.agents.searchMemory(idSchema.parse(projectId), memoryScopeSchema.parse(scope), memoryQuerySchema.parse(query));
   });
 
-  handle(desktopIpc.addMemoryEntry, async (_event, projectId: unknown, topic: unknown, note: unknown) => {
-    return await context.agents.addMemoryEntry(idSchema.parse(projectId), memoryTopicSchema.parse(topic), memoryNoteSchema.parse(note));
+  handle(desktopIpc.addMemoryEntry, async (_event, projectId: unknown, scope: unknown, input: unknown, expectedRevision: unknown) => {
+    return await context.agents.addMemoryEntry(
+      idSchema.parse(projectId),
+      memoryScopeSchema.parse(scope),
+      memoryEntryInputSchema.parse(input),
+      memoryRevisionSchema.parse(expectedRevision)
+    );
   });
 
-  handle(desktopIpc.deleteMemoryEntry, async (_event, projectId: unknown, topic: unknown, index: unknown) => {
-    return await context.agents.deleteMemoryEntry(idSchema.parse(projectId), memoryTopicSchema.parse(topic), z.number().int().nonnegative().parse(index));
+  handle(desktopIpc.deleteMemoryEntry, async (_event, projectId: unknown, scope: unknown, entryId: unknown, expectedRevision: unknown) => {
+    return await context.agents.deleteMemoryEntry(
+      idSchema.parse(projectId),
+      memoryScopeSchema.parse(scope),
+      memoryEntryIdSchema.parse(entryId),
+      memoryRevisionSchema.parse(expectedRevision)
+    );
   });
 
-  handle(desktopIpc.clearMemory, async (_event, projectId: unknown) => {
-    return await context.agents.clearMemory(idSchema.parse(projectId));
+  handle(desktopIpc.clearMemory, async (_event, projectId: unknown, scope: unknown, expectedRevision: unknown) => {
+    return await context.agents.clearMemory(idSchema.parse(projectId), memoryScopeSchema.parse(scope), memoryRevisionSchema.parse(expectedRevision));
   });
 
-  handle(desktopIpc.compactMemory, async (_event, projectId: unknown) => {
-    return await context.agents.compactMemory(idSchema.parse(projectId));
+  handle(desktopIpc.compactMemory, async (_event, projectId: unknown, scope: unknown, expectedRevision: unknown) => {
+    return await context.agents.compactMemory(idSchema.parse(projectId), memoryScopeSchema.parse(scope), memoryRevisionSchema.parse(expectedRevision));
   });
 
   handle(desktopIpc.saveAttachment, async (_event, projectId: unknown, name: unknown, mimeType: unknown, bytes: unknown) => {
@@ -560,7 +635,7 @@ function applyNativeThemePreference(preference: DesktopThemePreference): void {
 
 function themeBackgroundColor(preference: DesktopThemePreference): string {
   const dark = preference === "dark" || (preference === "system" && nativeTheme.shouldUseDarkColors);
-  return dark ? "#2a2828" : "#f4f5f7";
+  return dark ? "#181818" : "#ffffff";
 }
 
 /** 先移除同名 handler 再注册：重复注册会被 Electron 直接拒绝（开发期热重载会遇到）。 */

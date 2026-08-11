@@ -23,6 +23,7 @@ export const desktopIpc = {
   openProject: "desktop:project:open",
   createEmptyProject: "desktop:project:create-empty",
   selectProject: "desktop:project:select",
+  commitSelection: "desktop:selection:commit",
   setProjectPinned: "desktop:project:pin",
   reorderProjects: "desktop:project:reorder",
   renameProject: "desktop:project:rename",
@@ -67,6 +68,9 @@ export const desktopIpc = {
   exportCookies: "desktop:browser:cookies:export",
   importCookies: "desktop:browser:cookies:import",
   clearCookies: "desktop:browser:cookies:clear",
+  personalizationOverview: "desktop:personalization:overview",
+  savePersonalizationSettings: "desktop:personalization:save",
+  saveChatPersonalization: "desktop:personalization:save-chat",
   memoryOverview: "desktop:memory:overview",
   saveMemorySettings: "desktop:memory:save-settings",
   searchMemory: "desktop:memory:search",
@@ -150,6 +154,7 @@ export interface DesktopSessionSummary {
   unread?: boolean;
   labels?: string[];
   metadataRevision?: string;
+  personalization?: DesktopChatPersonalizationOverride;
   hasChildren?: boolean;
   /** 最近一次运行来自 run ledger；live runtime 仍优先于这个历史投影。 */
   latestRun?: DesktopSessionRunSummary;
@@ -433,43 +438,148 @@ export interface DesktopCookieJarStatus {
   updatedAt?: string;
 }
 
-/** 记忆设置的渲染端视图；与 `context.memory` 配置一一对应。 */
-export interface DesktopMemorySettings {
+export type DesktopPersonality = "none" | "friendly" | "pragmatic";
+
+/** 全局个性化设置；Desktop 只接触无凭据的运行时投影。 */
+export interface DesktopPersonalizationSettings {
   enabled: boolean;
-  autoRemember: boolean;
+  personality: DesktopPersonality;
+  customInstructions: string;
+}
+
+export type DesktopChatInheritance = "inherit";
+
+export interface DesktopChatPersonalizationOverride {
+  personality: DesktopChatInheritance | DesktopPersonality;
+  customInstructions: {
+    mode: "inherit" | "replace" | "disabled";
+    value?: string;
+  };
+  useMemories: DesktopChatInheritance | boolean;
+  contributeMemories: DesktopChatInheritance | boolean;
+}
+
+export interface DesktopResolvedPersonalization {
+  enabled: boolean;
+  personality: DesktopPersonality;
+  customInstructions: string;
+  useMemories: boolean;
+  contributeMemories: boolean;
+}
+
+export interface DesktopPersonalizationOverview {
+  /** 全局 config 的 CAS revision；保存时必须原样带回。 */
+  configRevision: string;
+  settings: DesktopPersonalizationSettings;
+  /** UI 只直接编辑 use/generate，但保存时带回完整策略，避免覆盖其它记忆字段。 */
+  memory: DesktopMemorySettings;
+  chat?: {
+    sessionId: string;
+    override: DesktopChatPersonalizationOverride;
+    effective: DesktopResolvedPersonalization;
+    metadataRevision: string;
+  };
+}
+
+export interface DesktopPersonalizationSettingsInput {
+  expectedRevision: string;
+  settings: DesktopPersonalizationSettings;
+  memory: DesktopMemorySettings;
+}
+
+export type DesktopMemoryScope = "global" | "project";
+export type DesktopMemoryKind = "preference" | "working_style" | "fact" | "decision" | "workflow" | "gotcha";
+export type DesktopMemorySource = "explicit" | "completed_task" | "candidate" | "migration" | "consolidation";
+
+export interface DesktopMemoryLineage {
+  source: DesktopMemorySource;
+  externalContext: boolean;
+  sessionId?: string;
+  turnId?: string;
+  runId?: string;
+  candidateId?: string;
+  sourceEntryIds?: string[];
+  legacyPath?: string;
+  userEvidence?: string;
+}
+
+/** 记忆策略的渲染端视图；与 `context.memory` 的当前字段一一对应。 */
+export interface DesktopMemorySettings {
+  useMemories: boolean;
+  generateMemories: boolean;
   maxRecalled: number;
-  /** 记忆抽取/整理的专用模型别名；undefined 表示跟随会话模型。 */
-  model?: string;
+  /** 提取与整理可以使用不同模型；undefined 表示跟随会话模型。 */
+  extractModel?: string;
+  consolidationModel?: string;
+  excludeExternalContext: boolean;
 }
 
 export interface DesktopMemoryEntry {
+  id: string;
+  scope: DesktopMemoryScope;
+  revision: number;
   topic: string;
-  /** 条目在话题文件内的小节序号，删除时用它定位。 */
-  index: number;
+  kind: DesktopMemoryKind;
+  importance: number;
   title: string;
-  date?: string;
   summary: string;
+  decisions: string[];
+  paths: string[];
+  keywords: string[];
+  createdAt: string;
+  updatedAt: string;
+  lineage: DesktopMemoryLineage[];
 }
 
 export interface DesktopMemoryOverview {
+  scope: DesktopMemoryScope;
+  /** 全局记忆策略使用的 config CAS revision。 */
+  configRevision: string;
+  /** 当前 scope store 的 CAS revision。 */
+  revision: number;
   settings: DesktopMemorySettings;
   totalEntries: number;
   topics: Array<{ topic: string; entries: number }>;
   entries: DesktopMemoryEntry[];
 }
 
+export interface DesktopMemorySettingsSnapshot {
+  configRevision: string;
+  settings: DesktopMemorySettings;
+}
+
 export interface DesktopMemorySearchMatch {
+  id: string;
+  scope: DesktopMemoryScope;
   topic: string;
+  kind: DesktopMemoryKind;
+  lineage: DesktopMemoryLineage[];
+  importance: number;
+  createdAt: string;
+  updatedAt: string;
   path: string;
   excerpt: string;
   score: number;
 }
 
 export interface DesktopMemoryCompactionResult {
-  topic: string;
+  scope: DesktopMemoryScope;
   before: number;
   after: number;
+  revision: number;
   error?: string;
+}
+
+export interface DesktopMemorySettingsInput {
+  expectedRevision: string;
+  settings: DesktopMemorySettings;
+}
+
+export interface DesktopMemoryEntryInput {
+  topic: string;
+  note: string;
+  kind: DesktopMemoryKind;
+  importance: number;
 }
 
 export type DesktopSlashCommand = SlashCommandDefinition;
@@ -551,6 +661,7 @@ export interface DesktopApi {
   openProject(): Promise<DesktopWorkspaceSnapshot | undefined>;
   createEmptyProject(): Promise<DesktopWorkspaceSnapshot | undefined>;
   selectProject(projectId: string): Promise<DesktopWorkspaceSnapshot>;
+  commitSelection(projectId: string, sessionId: string | undefined): Promise<void>;
   setProjectPinned(projectId: string, pinned: boolean): Promise<DesktopWorkspaceSnapshot>;
   reorderProjects(projectIds: string[]): Promise<DesktopProject[]>;
   renameProject(projectId: string, name: string): Promise<DesktopWorkspaceSnapshot>;
@@ -595,13 +706,16 @@ export interface DesktopApi {
   exportCookies(): Promise<DesktopCookieJarStatus>;
   importCookies(): Promise<DesktopCookieJarStatus>;
   clearCookies(): Promise<DesktopCookieJarStatus>;
-  memoryOverview(projectId: string): Promise<DesktopMemoryOverview>;
-  saveMemorySettings(projectId: string, input: DesktopMemorySettings): Promise<DesktopMemoryOverview>;
-  searchMemory(projectId: string, query: string): Promise<DesktopMemorySearchMatch[]>;
-  addMemoryEntry(projectId: string, topic: string, note: string): Promise<DesktopMemoryOverview>;
-  deleteMemoryEntry(projectId: string, topic: string, index: number): Promise<DesktopMemoryOverview>;
-  clearMemory(projectId: string): Promise<DesktopMemoryOverview>;
-  compactMemory(projectId: string): Promise<DesktopMemoryCompactionResult[]>;
+  personalizationOverview(projectId: string, sessionId?: string): Promise<DesktopPersonalizationOverview>;
+  savePersonalizationSettings(projectId: string, input: DesktopPersonalizationSettingsInput): Promise<DesktopPersonalizationOverview>;
+  saveChatPersonalization(projectId: string, sessionId: string, input: DesktopChatPersonalizationOverride, expectedRevision: string): Promise<DesktopWorkspaceSnapshot>;
+  memoryOverview(projectId: string, scope: DesktopMemoryScope): Promise<DesktopMemoryOverview>;
+  saveMemorySettings(projectId: string, input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot>;
+  searchMemory(projectId: string, scope: DesktopMemoryScope, query: string): Promise<DesktopMemorySearchMatch[]>;
+  addMemoryEntry(projectId: string, scope: DesktopMemoryScope, input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  deleteMemoryEntry(projectId: string, scope: DesktopMemoryScope, entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  clearMemory(projectId: string, scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  compactMemory(projectId: string, scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryCompactionResult>;
   saveAttachment(projectId: string, name: string, mimeType: string, bytes: Uint8Array): Promise<DesktopAttachment>;
   resolveDroppedFile(file: File): string;
   listWorkspaceDirectory(projectId: string, relativePath: string): Promise<DesktopWorkspaceDirectory>;

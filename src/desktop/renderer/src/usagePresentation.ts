@@ -32,6 +32,11 @@ export function formatTokenCount(tokens: number): string {
   return tokens.toLocaleString("zh-CN");
 }
 
+export function formatCacheHitRate(rate: number | undefined): string {
+  if (rate === undefined) return "—";
+  return `${String(Math.round(Math.min(1, Math.max(0, rate)) * 100))}%`;
+}
+
 function formatUsd(value: number): string {
   return `$${value.toFixed(value >= 0.01 ? 2 : 6)}`;
 }

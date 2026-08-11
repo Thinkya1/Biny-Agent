@@ -13,6 +13,11 @@
  * 模型配置的保存与连通性测试也在这里：写入前先用候选配置实际发一次请求，避免存下一份用不了的配置。
  */
 import type { AgentAttachment, InteractiveAgentRunMode } from "../../../agent/AgentSession.js";
+import type {
+  MemoryEntriesResult,
+  MemoryOverview,
+  MemorySearchResult
+} from "../../../agent/context/memoryTypes.js";
 import type { ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -44,22 +49,30 @@ import {
   type RuntimeHostServer
 } from "../../../runtime/RuntimeHost.js";
 import { SessionLeaseError } from "../../../runtime/SessionLease.js";
+import { sessionCatalogRecordRevision } from "../../../session/catalog.js";
+import type { AgentPersonalizationState, GlobalPersonalizationUpdate } from "../../../personalization/index.js";
 import { activeRun, isTerminalRunEvent, runtimeIsBusy, type AgentHostEvent, type AgentRuntimeUpdate } from "../../../runtime/agentEvents.js";
 import { evaluateTaskRetry } from "../../../runtime/TaskRetryPolicy.js";
 import { isTaskRunTerminal } from "../../../runtime/TaskRunStore.js";
 import { withAttachmentReferences } from "../../attachmentReferences.js";
 import type {
   DesktopAttachment,
+  DesktopChatPersonalizationOverride,
   DesktopMemoryCompactionResult,
+  DesktopMemoryEntryInput,
   DesktopMemoryOverview,
+  DesktopMemoryScope,
   DesktopMemorySearchMatch,
-  DesktopMemorySettings,
+  DesktopMemorySettingsInput,
+  DesktopMemorySettingsSnapshot,
   DesktopModelCatalogResult,
   DesktopModelConfigurationInput,
   DesktopModelConnection,
   DesktopModelConnectionTestResult,
   DesktopModelLoginProvider,
   DesktopModelLoginStartResult,
+  DesktopPersonalizationOverview,
+  DesktopPersonalizationSettingsInput,
   DesktopRunReceipt,
   DesktopRuntimeMutation,
   DesktopRuntimeProjection,
@@ -167,7 +180,6 @@ export class DesktopAgentManager {
         this.runtimes.delete(projectId);
       }
     }
-    await this.state.setSelectedSession(projectId, undefined);
     this.runtimeErrors.delete(projectId);
     return await this.workspaceSnapshot(projectId);
   }
@@ -183,12 +195,28 @@ export class DesktopAgentManager {
   }
 
   async openSession(projectId: string, sessionId: string): Promise<DesktopSessionDocument> {
-    await this.state.setSelectedSession(projectId, sessionId);
     const project = this.projects.requireProject(projectId);
     const runtime = this.runtimes.get(projectId)?.runtime;
     const document = await this.projects.openSession(project, sessionId, runtime?.getSnapshot(), this.projectEvents(projectId));
-    await this.projects.markSessionRead(project, sessionId);
-    return { ...document, session: { ...document.session, unread: false } };
+    // markSessionRead 在锁内重读 catalog，返回的整条记录才与 revision 属于同一版本。
+    // 只拼 revision 会让并发重命名等操作产生「旧字段 + 新 revision」的伪一致快照。
+    const metadata = await this.projects.markSessionRead(project, sessionId);
+    return {
+      ...document,
+      session: {
+        ...document.session,
+        title: metadata.title ?? document.session.title,
+        pinned: metadata.pinned ?? document.session.pinned,
+        archived: metadata.archived ?? document.session.archived,
+        unread: metadata.unread ?? false,
+        labels: metadata.labels === undefined ? document.session.labels : [...metadata.labels],
+        personalization: metadata.personalization ?? document.session.personalization,
+        metadataRevision: sessionCatalogRecordRevision(metadata),
+        rootSessionId: metadata.rootSessionId,
+        parentSessionId: metadata.parentSessionId,
+        branchPoint: metadata.branchPoint
+      }
+    };
   }
 
   async renameSession(projectId: string, sessionId: string, title: string, expectedRevision?: string): Promise<DesktopWorkspaceSnapshot> {
@@ -437,14 +465,15 @@ export class DesktopAgentManager {
     }
     this.projects.requireProject(projectId);
     const current = await this.loadProjectConfig(projectId);
-    if (!current.models[alias]) throw new Error(`未知模型：${alias}`);
+    const configuredAlias = resolveConfiguredModelAlias(current, alias);
+    if (!configuredAlias) throw new Error(`未知模型：${alias}`);
     const projectSettings = await loadProjectSettings(this.projects.requireProject(projectId).path);
-    if (projectSettings.defaultModel === alias) {
-      throw new Error(`不能删除项目 .biny/settings.json 当前引用的模型：${alias}`);
+    if (projectSettings.defaultModel === configuredAlias) {
+      throw new Error(`不能删除项目 .biny/settings.json 当前引用的模型：${configuredAlias}`);
     }
-    const remaining = Object.entries(current.models).filter(([key]) => key !== alias);
+    const remaining = Object.entries(current.models).filter(([key]) => key !== configuredAlias);
     if (!remaining.length) throw new Error("至少需要保留一个可用模型。");
-    const nextDefault = current.defaultModel === alias ? remaining[0]![0] : current.defaultModel;
+    const nextDefault = current.defaultModel === configuredAlias ? remaining[0]![0] : current.defaultModel;
     const next = configSchema.parse({
       ...current,
       defaultModel: nextDefault,
@@ -493,126 +522,179 @@ export class DesktopAgentManager {
     return describeWebSearchSettings(next.web.search);
   }
 
-  /** 记忆面板总览：设置来自配置文件；条目列表需要活的 runtime（记忆禁用时不创建）。 */
-  async memoryOverview(projectId: string): Promise<DesktopMemoryOverview> {
+  /** 个性化总览：全局设置读取真实 global config，聊天有效值由当前 runtime 统一解析。 */
+  async personalizationOverview(projectId: string, sessionId?: string): Promise<DesktopPersonalizationOverview> {
     this.projects.requireProject(projectId);
-    const config = await this.loadProjectConfig(projectId);
-    const settings = describeMemorySettings(config);
-    if (!settings.enabled) return { settings, totalEntries: 0, topics: [], entries: [] };
-    const { runtime, commands } = await this.ensureRuntime(projectId);
-    const entries = commands
-      ? await runtime.runExclusiveOperation(
-        "memory",
-        async () => await requireLocalMemory(commands).listEntries()
-      )
-      : await requireRemoteRuntime(runtime).memory<DesktopMemoryOverview["entries"]>("list");
+    const state = sessionId === undefined
+      ? await this.currentPersonalizationState(projectId)
+      : await this.personalizationState(projectId, sessionId);
+    return describePersonalizationOverview(state, sessionId);
+  }
+
+  async savePersonalizationSettings(
+    projectId: string,
+    input: DesktopPersonalizationSettingsInput
+  ): Promise<DesktopPersonalizationOverview> {
+    this.projects.requireProject(projectId);
+    const state = await this.updateGlobalPersonalization(projectId, {
+      personalization: input.settings,
+      memory: input.memory
+    }, input.expectedRevision);
+    return describePersonalizationOverview(state);
+  }
+
+  async saveChatPersonalization(
+    projectId: string,
+    sessionId: string,
+    input: DesktopChatPersonalizationOverride,
+    expectedRevision: string
+  ): Promise<DesktopWorkspaceSnapshot> {
+    const managed = await this.runtimeForSession(projectId, sessionId, "任务运行期间不能修改当前聊天的个性化设置。");
+    if (managed.commands) {
+      await managed.commands.agent.updateChatPersonalization(input, expectedRevision);
+    } else {
+      await requireRemoteRuntime(managed.runtime).updateChatPersonalization(input, expectedRevision);
+    }
+    return await this.workspaceSnapshot(projectId);
+  }
+
+  /** 当前 scope 的 store 条目与 revision；策略始终来自全局 versioned config。 */
+  async memoryOverview(projectId: string, scope: DesktopMemoryScope): Promise<DesktopMemoryOverview> {
+    this.projects.requireProject(projectId);
+    const [personalization, store] = await Promise.all([
+      this.currentPersonalizationState(projectId),
+      this.readMemoryStore(projectId, scope)
+    ]);
+    const entries = store.entries.entries.filter((entry) => entry.scope === scope);
     const topicCounts = new Map<string, number>();
     for (const entry of entries) topicCounts.set(entry.topic, (topicCounts.get(entry.topic) ?? 0) + 1);
     return {
-      settings,
+      scope,
+      configRevision: requireConfigRevision(personalization),
+      // listStoredEntries 的 entries 与 revision 来自同一份 scope 快照；overview 可能在
+      // 另一进程并发写入时更新得更早或更晚，不能拿它的 revision 给这批条目做 CAS。
+      revision: store.entries.revision[scope],
+      settings: { ...personalization.memory },
       totalEntries: entries.length,
       topics: [...topicCounts.entries()].map(([topic, count]) => ({ topic, entries: count })),
       entries
     };
   }
 
-  async saveMemorySettings(projectId: string, input: DesktopMemorySettings): Promise<DesktopMemoryOverview> {
-    const managed = this.runtimes.get(projectId);
-    if (managed && runtimeIsBusy(managed.runtime.getSnapshot())) {
-      throw new Error("任务运行期间不能修改记忆设置。");
-    }
+  async saveMemorySettings(projectId: string, input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot> {
     this.projects.requireProject(projectId);
-    const current = await this.loadProjectConfig(projectId);
-    const next = configSchema.parse({
-      ...current,
-      context: {
-        ...current.context,
-        memory: {
-          enabled: input.enabled,
-          autoRemember: input.autoRemember,
-          maxRecalled: input.maxRecalled,
-          model: input.model
-        }
-      }
-    });
-    await this.saveProjectConfig(projectId, next);
-    // 记忆配置在 runtime 装配时读取；关闭后下次使用即按新配置重建。
-    if (managed) await this.rebuildManagedRuntime(projectId, managed);
-    return await this.memoryOverview(projectId);
+    const state = await this.updateGlobalPersonalization(
+      projectId,
+      { memory: input.settings },
+      input.expectedRevision
+    );
+    return { configRevision: requireConfigRevision(state), settings: { ...state.memory } };
   }
 
-  async searchMemory(projectId: string, query: string): Promise<DesktopMemorySearchMatch[]> {
+  async searchMemory(projectId: string, scope: DesktopMemoryScope, query: string): Promise<DesktopMemorySearchMatch[]> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.ensureRuntime(projectId);
-    if (commands) {
-      return await runtime.runExclusiveOperation(
+    const result = commands
+      ? await runtime.runExclusiveOperation(
         "memory",
-        async () => await requireLocalMemory(commands).findRelevant(query, [], 8)
-      );
-    }
-    return await requireRemoteRuntime(runtime).memory<DesktopMemorySearchMatch[]>("search", { query });
+        async () => await requireLocalMemory(commands).searchScoped(query, [], { scopes: [scope], limit: 8 })
+      )
+      : await requireRemoteRuntime(runtime).memory<MemorySearchResult>("search-v2", { scope, query });
+    return result.matches.map((match) => ({
+      id: match.entry.id,
+      scope: match.entry.scope,
+      topic: match.topic,
+      kind: match.entry.kind,
+      lineage: match.entry.lineage,
+      importance: match.entry.importance,
+      createdAt: match.entry.createdAt,
+      updatedAt: match.entry.updatedAt,
+      path: match.path,
+      excerpt: match.excerpt,
+      score: match.score
+    }));
   }
 
-  async addMemoryEntry(projectId: string, topic: string, note: string): Promise<DesktopMemoryOverview> {
+  async addMemoryEntry(
+    projectId: string,
+    scope: DesktopMemoryScope,
+    input: DesktopMemoryEntryInput,
+    expectedRevision: number
+  ): Promise<DesktopMemoryOverview> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.ensureRuntime(projectId);
+    const sessionId = this.state.selectedSessionId(projectId);
     const entry = {
-      topic,
-      title: note.split("\n", 1)[0]?.slice(0, 120) ?? "Project note",
-      summary: note,
-      decisions: [],
-      paths: [],
-      keywords: []
+      scope,
+      kind: input.kind,
+      topic: input.topic,
+      title: input.note.split("\n", 1)[0]?.slice(0, 120) || "手动记忆",
+      summary: input.note,
+      importance: input.importance,
+      lineage: {
+        source: "explicit" as const,
+        externalContext: false,
+        sessionId,
+        userEvidence: input.note
+      }
     };
     const result = commands
       ? await runtime.runExclusiveOperation(
         "memory",
-        async () => await requireLocalMemory(commands).write(entry)
+        async () => await requireLocalMemory(commands).writeScoped(entry, { expectedRevision })
       )
-      : await requireRemoteRuntime(runtime).memory<{ written: boolean; path?: string }>("write", { entry });
+      : await requireRemoteRuntime(runtime).memory<{ written: boolean; path?: string }>("write-v2", { entry, expectedRevision });
     if (!result.written) {
       throw new Error(result.path ? "已存在等价的记忆条目，未重复保存。" : "内容太短，至少需要 20 个字符才能作为持久记忆。");
     }
-    return await this.memoryOverview(projectId);
+    return await this.memoryOverview(projectId, scope);
   }
 
-  async deleteMemoryEntry(projectId: string, topic: string, index: number): Promise<DesktopMemoryOverview> {
+  async deleteMemoryEntry(
+    projectId: string,
+    scope: DesktopMemoryScope,
+    entryId: string,
+    expectedRevision: number
+  ): Promise<DesktopMemoryOverview> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.ensureRuntime(projectId);
-    const removed = commands
+    const result = commands
       ? await runtime.runExclusiveOperation(
         "memory",
-        async () => await requireLocalMemory(commands).deleteEntry(topic, index)
+        async () => await requireLocalMemory(commands).deleteStoredEntry(scope, entryId, { expectedRevision })
       )
-      : await requireRemoteRuntime(runtime).memory<boolean>("delete", { topic, index });
-    if (!removed) throw new Error("未找到该记忆条目，可能已被删除。");
-    return await this.memoryOverview(projectId);
+      : await requireRemoteRuntime(runtime).memory<{ deleted: boolean }>("delete-v2", { scope, id: entryId, expectedRevision });
+    if (!result.deleted) throw new Error("未找到该记忆条目，可能已被删除。");
+    return await this.memoryOverview(projectId, scope);
   }
 
-  async clearMemory(projectId: string): Promise<DesktopMemoryOverview> {
+  async clearMemory(projectId: string, scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryOverview> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.ensureRuntime(projectId);
     if (commands) {
-      await runtime.runExclusiveOperation("memory", async () => {
-        const memory = requireLocalMemory(commands);
-        for (const topic of await memory.listTopics()) await memory.forgetTopic(topic);
-      });
-    } else {
-      await requireRemoteRuntime(runtime).memory("clear");
-    }
-    return await this.memoryOverview(projectId);
-  }
-
-  async compactMemory(projectId: string): Promise<DesktopMemoryCompactionResult[]> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
-    if (commands) {
-      return await runtime.runExclusiveOperation(
+      await runtime.runExclusiveOperation(
         "memory",
-        async () => await requireLocalMemory(commands).compactTopics()
+        async () => await requireLocalMemory(commands).clearScope(scope, { expectedRevision })
       );
+    } else {
+      await requireRemoteRuntime(runtime).memory("clear-v2", { scope, expectedRevision });
     }
-    return await requireRemoteRuntime(runtime).memory<DesktopMemoryCompactionResult[]>("compact");
+    return await this.memoryOverview(projectId, scope);
+  }
+
+  async compactMemory(
+    projectId: string,
+    scope: DesktopMemoryScope,
+    expectedRevision: number
+  ): Promise<DesktopMemoryCompactionResult> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    return commands
+      ? await runtime.runExclusiveOperation(
+        "memory",
+        async () => await requireLocalMemory(commands).consolidateScope(scope, { expectedRevision })
+      )
+      : await requireRemoteRuntime(runtime).memory<DesktopMemoryCompactionResult>("consolidate-v2", { scope, expectedRevision });
   }
 
   /**
@@ -1170,6 +1252,85 @@ export class DesktopAgentManager {
     }
   }
 
+  private async personalizationState(projectId: string, sessionId: string): Promise<AgentPersonalizationState> {
+    const managed = await this.ensureRuntime(projectId);
+    const snapshot = managed.runtime.getSnapshot();
+    if (snapshot.info.sessionId !== sessionId) {
+      if (runtimeIsBusy(snapshot)) {
+        throw new Error("当前项目有其他聊天正在运行，暂时无法读取所选聊天的个性化覆盖。");
+      }
+      await managed.runtime.resumeSession(sessionId);
+    }
+    return await this.readManagedPersonalizationState(managed);
+  }
+
+  private async currentPersonalizationState(projectId: string): Promise<AgentPersonalizationState> {
+    return await this.readManagedPersonalizationState(await this.ensureRuntime(projectId));
+  }
+
+  private async readManagedPersonalizationState(managed: ManagedRuntime): Promise<AgentPersonalizationState> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return managed.commands
+          ? await managed.commands.agent.getPersonalizationState()
+          : await requireRemoteRuntime(managed.runtime).getPersonalizationState();
+      } catch (error) {
+        lastError = error;
+        // Host 启动时的记忆维护也会读取 config；loader 在校正文件权限时可能改变 ctime，
+        // 让两个只读请求之一得到瞬时快照冲突。这里只重试明确的只读竞态，不重试写操作。
+        if (attempt === 2 || !(error instanceof Error) || !error.message.includes("config.json changed while it was being read")) {
+          throw error;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+      }
+    }
+    throw lastError;
+  }
+
+  private async updateGlobalPersonalization(
+    projectId: string,
+    update: GlobalPersonalizationUpdate,
+    expectedRevision: string
+  ): Promise<AgentPersonalizationState> {
+    const managed = await this.ensureRuntime(projectId);
+    const commands = managed.commands;
+    return commands
+      ? await managed.runtime.runExclusiveOperation(
+        "personalization",
+        async () => await commands.agent.updateGlobalPersonalization(update, expectedRevision)
+      )
+      : await requireRemoteRuntime(managed.runtime).updateGlobalPersonalization(update, expectedRevision);
+  }
+
+  private async runtimeForSession(projectId: string, sessionId: string, busyMessage: string): Promise<ManagedRuntime> {
+    const managed = await this.ensureRuntime(projectId);
+    const snapshot = managed.runtime.getSnapshot();
+    if (runtimeIsBusy(snapshot)) throw new Error(busyMessage);
+    if (snapshot.info.sessionId !== sessionId) await managed.runtime.resumeSession(sessionId);
+    return managed;
+  }
+
+  private async readMemoryStore(
+    projectId: string,
+    scope: DesktopMemoryScope
+  ): Promise<{ overview: MemoryOverview; entries: MemoryEntriesResult }> {
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    if (commands) {
+      return await runtime.runExclusiveOperation("memory", async () => {
+        const memory = requireLocalMemory(commands);
+        return {
+          overview: await memory.getOverview(),
+          entries: await memory.listStoredEntries({ scopes: [scope] })
+        };
+      });
+    }
+    return await requireRemoteRuntime(runtime).memory<{ overview: MemoryOverview; entries: MemoryEntriesResult }>(
+      "overview-v2",
+      { scope }
+    );
+  }
+
   private buildConfigWithAuthenticatedLogin(current: AgentConfig, authenticated: AuthenticatedModelLogin): AgentConfig {
     const providerAlias = authenticated.provider;
     const providerType = authenticated.provider === "claude-code" ? "claude-subscription" : "openai-codex";
@@ -1234,6 +1395,15 @@ function modelAliasForAuthenticatedModel(providerAlias: string, modelId: string)
   return `${providerAlias}-${modelId}`.replace(/[^a-z0-9.-]+/gi, "-");
 }
 
+function resolveConfiguredModelAlias(config: AgentConfig, aliasOrReference: string): string | undefined {
+  if (config.models[aliasOrReference]) return aliasOrReference;
+  const separator = aliasOrReference.indexOf("/");
+  if (separator <= 0) return undefined;
+  const provider = aliasOrReference.slice(0, separator);
+  const model = aliasOrReference.slice(separator + 1);
+  return Object.entries(config.models).find(([, candidate]) => candidate.provider === provider && candidate.model === model)?.[0];
+}
+
 /**
  * Projects the saved provider configs into the credential/endpoint facts the
  * settings UI needs. Only presence is reported — an API key or refresh token
@@ -1255,9 +1425,32 @@ function describeWebSearchSettings(search: AgentConfig["web"]["search"]): Deskto
   };
 }
 
-function describeMemorySettings(config: AgentConfig): DesktopMemorySettings {
-  const memory = config.context.memory;
-  return { enabled: memory.enabled, autoRemember: memory.autoRemember, maxRecalled: memory.maxRecalled, model: memory.model };
+function describePersonalizationOverview(
+  state: AgentPersonalizationState,
+  sessionId?: string
+): DesktopPersonalizationOverview {
+  return {
+    configRevision: requireConfigRevision(state),
+    settings: { ...state.global },
+    memory: { ...state.memory },
+    chat: sessionId === undefined ? undefined : {
+      sessionId,
+      override: state.override,
+      effective: {
+        enabled: state.resolved.enabled,
+        personality: state.resolved.personality,
+        customInstructions: state.resolved.customInstructions,
+        useMemories: state.resolved.useMemories,
+        contributeMemories: state.resolved.contributeMemories
+      },
+      metadataRevision: state.catalogRevision
+    }
+  };
+}
+
+function requireConfigRevision(state: AgentPersonalizationState): string {
+  if (!state.configRevision) throw new Error("当前配置存储没有返回 versioned CAS revision。");
+  return state.configRevision;
 }
 
 function describeModelConnections(config: AgentConfig): DesktopModelConnection[] {
@@ -1288,9 +1481,7 @@ function describeCredentialSource(provider: ProviderConfig, apiKeyEnv: string | 
 }
 
 function requireLocalMemory(services: CommandRuntime) {
-  const memory = services.agent.getLocalMemory();
-  if (!memory) throw new Error("Local memory is disabled (context.memory.enabled = false).");
-  return memory;
+  return services.agent.getLocalMemory();
 }
 
 function requireRemoteRuntime(runtime: InteractiveRuntimeHandle): RuntimeHostClient {

@@ -94,7 +94,6 @@ export class DesktopStateStore {
     const index = this.state.projects.findIndex((candidate) => candidate.id === project.id);
     if (index === -1) this.state.projects.push({ ...project });
     else this.state.projects[index] = { ...project };
-    this.state.activeProjectId = project.id;
     await this.save();
   }
 
@@ -114,6 +113,17 @@ export class DesktopStateStore {
 
   async setActiveProject(projectId: string | undefined): Promise<void> {
     this.state.activeProjectId = projectId;
+    await this.save();
+  }
+
+  /** Renderer 确认导航成功后，一次提交当前项目与该项目的会话选择。 */
+  async commitSelection(projectId: string, sessionId: string | undefined): Promise<void> {
+    if (!this.state.projects.some((project) => project.id === projectId)) {
+      throw new Error(`Unknown project: ${projectId}`);
+    }
+    this.state.activeProjectId = projectId;
+    if (sessionId === undefined) delete this.state.selectedSessionIds[projectId];
+    else this.state.selectedSessionIds[projectId] = sessionId;
     await this.save();
   }
 

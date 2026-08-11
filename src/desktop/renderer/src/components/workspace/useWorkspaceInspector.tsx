@@ -5,16 +5,14 @@
  * 文件树、文件预览、终端切换和面板尺寸都属于 Inspector 自己的交互状态；会话区只拿到
  * 一个 dock 节点与 `previewFile` 命令，不再理解目录请求或终端布局。
  */
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { EmptyState as AstryxEmptyState } from "@astryxdesign/core/EmptyState";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { IconButton } from "@astryxdesign/core/IconButton";
-import { LayoutPanel } from "@astryxdesign/core/Layout";
-import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import type {
   DesktopWorkspaceDirectory,
   DesktopWorkspaceDirectoryEntry,
-  DesktopWorkspaceFilePreview
+  DesktopWorkspaceFilePreview,
+  DesktopSlashResult
 } from "../../../../protocol.js";
 import {
   clampFilePanelWidth,
@@ -26,6 +24,14 @@ import { workspaceFileMarker } from "../../workspaceFileMarker.js";
 import { CopyButton } from "../CopyButton.js";
 import { Icon } from "../Icon.js";
 import { TerminalView } from "../TerminalView.js";
+import { useClosingPresence } from "../../useClosingPresence.js";
+import {
+  InspectorReview,
+  InspectorSideChat,
+  InspectorToolLauncher,
+  type InspectorCommandState,
+  type InspectorToolAction
+} from "./InspectorToolLauncher.js";
 
 interface UseWorkspaceInspectorOptions {
   filePanelResizing: boolean;
@@ -37,7 +43,9 @@ interface UseWorkspaceInspectorOptions {
   onFilePanelWidthChange(width: number): void;
   onListDirectory(path: string): Promise<DesktopWorkspaceDirectory>;
   onOpenFile(path: string): void;
+  onOpenBrowser(): Promise<void>;
   onReadFile(path: string): Promise<DesktopWorkspaceFilePreview>;
+  onRunCommand(command: string): Promise<DesktopSlashResult>;
 }
 
 interface FilePreviewState {
@@ -54,7 +62,14 @@ interface FileDirectoryState {
   error?: string;
 }
 
-type InspectorView = "files" | "terminal";
+type InspectorView = "launcher" | "files" | "terminal" | "review" | "side-chat";
+
+const inspectorToolMetadata: Record<Exclude<InspectorView, "launcher">, { icon: "folder" | "message" | "shield" | "terminal"; label: string }> = {
+  files: { icon: "folder", label: "文件" },
+  terminal: { icon: "terminal", label: "终端" },
+  review: { icon: "shield", label: "审阅" },
+  "side-chat": { icon: "message", label: "侧边聊天" }
+};
 
 export function useWorkspaceInspector({
   filePanelResizing,
@@ -66,24 +81,41 @@ export function useWorkspaceInspector({
   onFilePanelWidthChange,
   onListDirectory,
   onOpenFile,
+  onOpenBrowser,
+  onRunCommand,
   onReadFile
 }: UseWorkspaceInspectorOptions): {
   dock?: React.JSX.Element;
+  layout: {
+    open: boolean;
+    resizing: boolean;
+    width: number;
+  };
+  open: boolean;
   filesOpen: boolean;
   terminalOpen: boolean;
   openFiles(): void;
   previewFile(path: string): void;
-  toggleFiles(): void;
+  toggleInspector(): void;
   toggleTerminal(): void;
 } {
   const previewRequestRef = useRef(0);
   const directoryRequestIdRef = useRef(0);
   const directoryRequestRef = useRef(new Map<string, number>());
+  const reviewRequestRef = useRef(0);
+  const reviewRunningRef = useRef(false);
+  const sideChatRequestRef = useRef(0);
+  const sideChatRunningRef = useRef(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [inspectorView, setInspectorView] = useState<InspectorView>("files");
+  const [inspectorView, setInspectorView] = useState<InspectorView>("launcher");
   const [preview, setPreview] = useState<FilePreviewState>();
   const [directoryStates, setDirectoryStates] = useState<Map<string, FileDirectoryState>>(new Map());
   const [expandedDirectories, setExpandedDirectories] = useState<Set<string>>(() => new Set());
+  const [reviewState, setReviewState] = useState<InspectorCommandState>({ status: "idle" });
+  const [sideChatState, setSideChatState] = useState<InspectorCommandState>({ status: "idle" });
+  const [launcherError, setLauncherError] = useState<string>();
+  // 和左侧侧栏共用 250ms 的几何过渡，关闭时要等宽度动画结束后再卸载。
+  const inspectorPresence = useClosingPresence(inspectorOpen && Boolean(projectId), 250);
   const activePreview = preview?.source === source ? preview : undefined;
 
   useLayoutEffect(() => {
@@ -93,6 +125,13 @@ export function useWorkspaceInspector({
     setPreview(undefined);
     setDirectoryStates(new Map());
     setExpandedDirectories(new Set());
+    reviewRequestRef.current += 1;
+    reviewRunningRef.current = false;
+    sideChatRequestRef.current += 1;
+    sideChatRunningRef.current = false;
+    setReviewState({ status: "idle" });
+    setSideChatState({ status: "idle" });
+    setLauncherError(undefined);
   }, [source]);
 
   const loadDirectory = useCallback((relativePath: string): void => {
@@ -129,25 +168,25 @@ export function useWorkspaceInspector({
     if (view === "files" && !directoryStates.has(".")) loadDirectory(".");
   }, [directoryStates, loadDirectory, projectId]);
 
-  const toggleInspectorView = useCallback((view: InspectorView): void => {
-    if (inspectorOpen && inspectorView === view) {
+  const toggleInspector = useCallback((): void => {
+    if (inspectorOpen) {
       setInspectorOpen(false);
       return;
     }
-    openInspector(view);
-  }, [inspectorOpen, inspectorView, openInspector]);
+    openInspector("launcher");
+  }, [inspectorOpen, openInspector]);
 
   const openFiles = useCallback((): void => {
     openInspector("files");
   }, [openInspector]);
 
-  const toggleFiles = useCallback((): void => {
-    toggleInspectorView("files");
-  }, [toggleInspectorView]);
-
   const toggleTerminal = useCallback((): void => {
-    toggleInspectorView("terminal");
-  }, [toggleInspectorView]);
+    if (inspectorOpen && inspectorView === "terminal") {
+      setInspectorOpen(false);
+      return;
+    }
+    openInspector("terminal");
+  }, [inspectorOpen, inspectorView, openInspector]);
 
   const previewFile = useCallback((path: string): void => {
     const request = previewRequestRef.current + 1;
@@ -184,45 +223,153 @@ export function useWorkspaceInspector({
     if (willExpand && (!state || state.status === "error")) loadDirectory(normalizedPath);
   }, [directoryStates, expandedDirectories, loadDirectory]);
 
-  const inspector = inspectorOpen && projectId ? (
-    <div className={`desktop-inspector-wrap${filePanelResizing ? " is-resizing" : ""}`} style={{ width: filePanelWidth }}>
+  const runReview = useCallback((): void => {
+    if (reviewRunningRef.current) return;
+    reviewRunningRef.current = true;
+    const request = reviewRequestRef.current + 1;
+    reviewRequestRef.current = request;
+    setReviewState({ status: "loading" });
+    void onRunCommand("/review").then((result) => {
+      if (reviewRequestRef.current !== request) return;
+      setReviewState({ status: "ready", result });
+    }).catch((error: unknown) => {
+      if (reviewRequestRef.current !== request) return;
+      setReviewState({ status: "error", error: errorMessage(error) });
+    }).finally(() => {
+      if (reviewRequestRef.current === request) reviewRunningRef.current = false;
+    });
+  }, [onRunCommand]);
+
+  const runSideChat = useCallback((input: string): void => {
+    if (sideChatRunningRef.current) return;
+    sideChatRunningRef.current = true;
+    const request = sideChatRequestRef.current + 1;
+    sideChatRequestRef.current = request;
+    setSideChatState({ status: "loading" });
+    // `--` 明确要求走前台问答，避免问题恰好以 status/start/cancel/agents 开头时触发控制命令。
+    void onRunCommand(`/subagent -- ${input}`).then((result) => {
+      if (sideChatRequestRef.current !== request) return;
+      setSideChatState({ status: "ready", result });
+    }).catch((error: unknown) => {
+      if (sideChatRequestRef.current !== request) return;
+      setSideChatState({ status: "error", error: errorMessage(error) });
+    }).finally(() => {
+      if (sideChatRequestRef.current === request) sideChatRunningRef.current = false;
+    });
+  }, [onRunCommand]);
+
+  const openBrowser = useCallback((): void => {
+    setLauncherError(undefined);
+    void onOpenBrowser().catch((error: unknown) => setLauncherError(errorMessage(error)));
+  }, [onOpenBrowser]);
+
+  const openLauncherAction = useCallback((action: InspectorToolAction): void => {
+    if (action === "browser") {
+      openBrowser();
+      return;
+    }
+    if (action === "review") {
+      openInspector("review");
+      runReview();
+      return;
+    }
+    openInspector(action);
+  }, [openBrowser, openInspector, runReview]);
+
+  useEffect(() => {
+    if (!inspectorOpen || !projectId) return;
+    const handleShortcut = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || event.repeat || isTextEntryTarget(event.target) || !event.metaKey) return;
+      if (event.shiftKey && !event.altKey && event.code === "KeyG") {
+        event.preventDefault();
+        openLauncherAction("review");
+        return;
+      }
+      if (!event.shiftKey && !event.altKey && event.code === "KeyT") {
+        event.preventDefault();
+        openLauncherAction("browser");
+        return;
+      }
+      if (!event.shiftKey && !event.altKey && event.code === "KeyP") {
+        event.preventDefault();
+        openLauncherAction("files");
+        return;
+      }
+      if (!event.shiftKey && event.altKey && event.code === "KeyS") {
+        event.preventDefault();
+        openLauncherAction("side-chat");
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [inspectorOpen, openLauncherAction, projectId]);
+
+  const activeTool = inspectorView === "launcher" ? undefined : inspectorToolMetadata[inspectorView];
+  const toolContent = !projectId ? null : inspectorView === "terminal" ? <TerminalView projectId={projectId} />
+    : inspectorView === "files" ? (
+      <FilePreviewPanel
+        directoryStates={directoryStates}
+        expandedDirectories={expandedDirectories}
+        onOpenFile={onOpenFile}
+        onPreviewFile={previewFile}
+        onShowFiles={showFileBrowser}
+        onToggleDirectory={toggleDirectory}
+        preview={activePreview}
+      />
+    ) : inspectorView === "review" ? <InspectorReview onRetry={runReview} state={reviewState} />
+      : inspectorView === "side-chat" ? <InspectorSideChat onSend={runSideChat} state={sideChatState} />
+        : null;
+
+  const inspector = inspectorPresence.present && projectId ? (
+    <div
+      className={`desktop-inspector-wrap is-${inspectorPresence.phase}${filePanelResizing ? " is-resizing" : ""}`}
+    >
       <FilePanelResizer
         onResizeEnd={onFilePanelResizeEnd}
         onResizeStart={onFilePanelResizeStart}
         onWidthChange={onFilePanelWidthChange}
         width={filePanelWidth}
       />
-      <LayoutPanel className="desktop-inspector" isScrollable={false} label="工作区检查器" padding={0} role="complementary" width="100%">
-        <header className="desktop-inspector-header">
-          <TabList hasDivider={false} onChange={(value) => openInspector(value as InspectorView)} size="sm" value={inspectorView}>
-            <Tab icon={<Icon name="folder" size={13} />} label="文件" value="files" />
-            <Tab icon={<Icon name="terminal" size={13} />} label="终端" value="terminal" />
-          </TabList>
+      <aside aria-label="工作区检查器" className="desktop-inspector" role="complementary">
+        <header className={`desktop-inspector-header${activeTool ? " is-tool" : ""}`}>
+          {activeTool ? (
+            <button aria-label="返回工作区工具" className="cindy-inspector-back" onClick={() => openInspector("launcher")} title="返回工作区工具" type="button">
+              <Icon name="arrow-left" size={15} />
+              <Icon name={activeTool.icon} size={14} />
+              <span>{activeTool.label}</span>
+            </button>
+          ) : <span aria-hidden="true" className="cindy-inspector-header-spacer" />}
+          <button aria-label="收起工作区工具" className="desktop-inspector-close" onClick={() => setInspectorOpen(false)} title="收起工作区工具" type="button">
+            <Icon name="panel-right" size={15} />
+          </button>
         </header>
-        <div className="desktop-inspector-body">
-          {inspectorView === "terminal" ? <TerminalView projectId={projectId} /> : (
-            <FilePreviewPanel
-              directoryStates={directoryStates}
-              expandedDirectories={expandedDirectories}
-              onOpenFile={onOpenFile}
-              onPreviewFile={previewFile}
-              onShowFiles={showFileBrowser}
-              onToggleDirectory={toggleDirectory}
-              preview={activePreview}
-            />
-          )}
+        <div className="desktop-inspector-body" id="desktop-inspector-panel">
+          <div className="t-page-slide cindy-inspector-pages" data-page={inspectorView === "launcher" ? "1" : "2"}>
+            <section aria-hidden={inspectorView === "launcher" ? undefined : true} className="t-page cindy-inspector-launcher-page" data-page-id="1" inert={inspectorView === "launcher" ? undefined : true}>
+              <InspectorToolLauncher error={launcherError} onAction={openLauncherAction} />
+            </section>
+            <section aria-hidden={inspectorView === "launcher" ? true : undefined} className="t-page cindy-inspector-tool-page" data-page-id="2" inert={inspectorView === "launcher" ? true : undefined}>
+              <div className="cindy-inspector-view-content" key={inspectorView}>{toolContent}</div>
+            </section>
+          </div>
         </div>
-      </LayoutPanel>
+      </aside>
     </div>
   ) : undefined;
 
   return {
     dock: inspector,
+    layout: {
+      open: inspectorOpen && Boolean(projectId),
+      resizing: filePanelResizing,
+      width: filePanelWidth
+    },
+    open: inspectorOpen && Boolean(projectId),
     filesOpen: inspectorOpen && inspectorView === "files",
     terminalOpen: inspectorOpen && inspectorView === "terminal",
     openFiles,
     previewFile,
-    toggleFiles,
+    toggleInspector,
     toggleTerminal
   };
 }
@@ -233,10 +380,10 @@ function FilePanelResizer({ width, onWidthChange, onResizeStart, onResizeEnd }: 
   onResizeStart(): void;
   onResizeEnd(width: number): void;
 }): React.JSX.Element {
-  const resizeWithKeyboard = (direction: -1 | 1): void => {
-    const layoutRoot = document.querySelector<HTMLElement>(".cindy-app-shell");
-    const layoutWidth = layoutRoot?.clientWidth ?? document.documentElement.clientWidth;
-    const next = clampFilePanelWidth(width + direction * 16, layoutWidth, false);
+  const resizeWithKeyboard = (direction: -1 | 1, resizer: HTMLDivElement): void => {
+    const layoutRoot = resizer.closest<HTMLElement>(".cindy-app-shell");
+    const currentWidth = resizer.parentElement?.getBoundingClientRect().width ?? width;
+    const next = clampFilePanelWidthForLayout(currentWidth + direction * 16, layoutRoot);
     onWidthChange(next);
     onResizeEnd(next);
   };
@@ -245,14 +392,13 @@ function FilePanelResizer({ width, onWidthChange, onResizeStart, onResizeEnd }: 
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     onResizeStart();
-    const layoutRoot = event.currentTarget.closest(".cindy-app-shell");
-    const layoutWidth = layoutRoot instanceof HTMLElement ? layoutRoot.clientWidth : document.documentElement.clientWidth;
+    const layoutRoot = event.currentTarget.closest<HTMLElement>(".cindy-app-shell");
     const startX = event.clientX;
     const startWidth = event.currentTarget.parentElement?.getBoundingClientRect().width ?? width;
     let currentWidth = startWidth;
     let active = true;
     const move = (moveEvent: PointerEvent): void => {
-      currentWidth = clampFilePanelWidth(startWidth + startX - moveEvent.clientX, layoutWidth, false);
+      currentWidth = clampFilePanelWidthForLayout(startWidth + startX - moveEvent.clientX, layoutRoot);
       onWidthChange(currentWidth);
     };
     const stop = (): void => {
@@ -276,14 +422,21 @@ function FilePanelResizer({ width, onWidthChange, onResizeStart, onResizeEnd }: 
       aria-valuenow={Math.round(width)}
       className="desktop-inspector-resizer"
       onKeyDown={(event) => {
-        if (event.key === "ArrowLeft") { event.preventDefault(); resizeWithKeyboard(1); }
-        if (event.key === "ArrowRight") { event.preventDefault(); resizeWithKeyboard(-1); }
+        if (event.key === "ArrowLeft") { event.preventDefault(); resizeWithKeyboard(1, event.currentTarget); }
+        if (event.key === "ArrowRight") { event.preventDefault(); resizeWithKeyboard(-1, event.currentTarget); }
       }}
       onPointerDown={startResize}
       role="separator"
       tabIndex={0}
     />
   );
+}
+
+function clampFilePanelWidthForLayout(width: number, layoutRoot: HTMLElement | null): number {
+  const appWidth = layoutRoot?.clientWidth ?? document.documentElement.clientWidth;
+  const sidebar = layoutRoot?.querySelector<HTMLElement>(":scope > .cindy-sidebar-block");
+  const sidebarWidth = sidebar?.getBoundingClientRect().width ?? 0;
+  return clampFilePanelWidth(width, appWidth, sidebarWidth);
 }
 
 function FilePreviewPanel({ preview, directoryStates, expandedDirectories, onOpenFile, onPreviewFile, onShowFiles, onToggleDirectory }: {
@@ -299,6 +452,8 @@ function FilePreviewPanel({ preview, directoryStates, expandedDirectories, onOpe
   const path = file?.path ?? preview?.path;
   const [query, setQuery] = useState("");
   const [fileTreeOpen, setFileTreeOpen] = useState(true);
+  const browserOnly = !preview;
+  const treeVisible = browserOnly || fileTreeOpen;
   return (
     <aside aria-label={preview ? "文件预览" : "文件浏览器"} className="file-preview-panel file-browser-panel">
       <header className="file-browser-path">
@@ -306,22 +461,22 @@ function FilePreviewPanel({ preview, directoryStates, expandedDirectories, onOpe
         <div className="file-browser-path-actions">
           {preview?.status === "ready" && path ? <IconButton icon={<Icon name="external" size={14} />} label="使用系统应用打开" onClick={() => onOpenFile(path)} size="sm" tooltip="使用系统应用打开" variant="ghost" /> : null}
           {preview ? <IconButton icon={<Icon name="close" size={14} />} label="关闭当前文件" onClick={onShowFiles} size="sm" tooltip="返回文件列表" variant="ghost" /> : null}
-          <IconButton
-            aria-pressed={fileTreeOpen}
-            icon={<Icon name="folder-panel" size={15} />}
-            label={fileTreeOpen ? "隐藏文件树" : "显示文件树"}
-            onClick={() => setFileTreeOpen((current) => !current)}
-            size="sm"
-            tooltip={fileTreeOpen ? "隐藏文件树" : "显示文件树"}
-            variant={fileTreeOpen ? "secondary" : "ghost"}
-          />
+          {preview ? (
+            <IconButton
+              aria-pressed={fileTreeOpen}
+              icon={<Icon name="folder-panel" size={15} />}
+              label={fileTreeOpen ? "隐藏文件树" : "显示文件树"}
+              onClick={() => setFileTreeOpen((current) => !current)}
+              size="sm"
+              tooltip={fileTreeOpen ? "隐藏文件树" : "显示文件树"}
+              variant={fileTreeOpen ? "secondary" : "ghost"}
+            />
+          ) : null}
         </div>
       </header>
-      <div className={`file-browser-body${fileTreeOpen ? "" : " is-tree-hidden"}`}>
-        <div className="file-browser-content">
-          {preview ? <FilePreviewContent preview={preview} /> : <FileBrowserEmpty />}
-        </div>
-        <div aria-hidden={!fileTreeOpen} className="file-browser-tree" inert={!fileTreeOpen}>
+      <div className={`file-browser-body${treeVisible ? "" : " is-tree-hidden"}${browserOnly ? " is-browser-only" : ""}`}>
+        {preview ? <div className="file-browser-content"><FilePreviewContent preview={preview} /></div> : null}
+        <div aria-hidden={treeVisible ? undefined : true} className="file-browser-tree" inert={treeVisible ? undefined : true}>
           <TextInput hasClear isLabelHidden label="筛选文件" onChange={setQuery} placeholder="筛选文件…" size="sm" startIcon={<Icon name="search" size={13} />} value={query} width="100%" />
           <FileTree
             directoryStates={directoryStates}
@@ -335,10 +490,6 @@ function FilePreviewPanel({ preview, directoryStates, expandedDirectories, onOpe
       </div>
     </aside>
   );
-}
-
-function FileBrowserEmpty(): React.JSX.Element {
-  return <AstryxEmptyState description="从右侧文件树选择一个文件进行预览。" icon={<Icon name="folder-panel" size={30} />} isCompact title="选择文件" />;
 }
 
 function FilePreviewContent({ preview }: { preview: FilePreviewState }): React.JSX.Element {
@@ -416,4 +567,8 @@ function formatBytes(bytes: number): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && (target.isContentEditable || target.matches("input, textarea, select"));
 }

@@ -27,12 +27,12 @@ export function TerminalView({ projectId }: { projectId: string }): React.JSX.El
       scrollback: 5_000,
       fontSize: 12,
       lineHeight: 1.25,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontFamily: pick("--font-mono", "ui-monospace, \"SF Mono\", SFMono-Regular, Menlo, monospace"),
       theme: {
-        background: pick("--code", "#242222"),
-        foreground: pick("--text", "#d4d4d4"),
-        cursor: pick("--accent", "#79a9ff"),
-        selectionBackground: pick("--surface-selected", "#393737")
+        background: pick("--code", "#202020"),
+        foreground: pick("--text", "#f5f5f5"),
+        cursor: pick("--accent", "#339cff"),
+        selectionBackground: pick("--surface-selected", "#2a4052")
       }
     });
     const fit = new FitAddon();

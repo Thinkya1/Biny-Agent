@@ -25,6 +25,7 @@ export interface FooterData {
   contextUsedTokens?: number;
   contextMaxTokens?: number;
   contextSource?: "estimated" | "provider";
+  cacheHitRate?: number;
 }
 
 /** 两行：工作区路径与会话，上下文用量与右对齐的模型。 */
@@ -75,6 +76,7 @@ export function footerLayout(data: FooterData, width: number): {
 
   const metaParts: string[] = [data.permissionMode];
   if (data.mode === "plan") metaParts.push("plan");
+  if (data.cacheHitRate !== undefined) metaParts.push(`CH ${String(Math.round(data.cacheHitRate * 100))}%`);
   const meta = ` · ${metaParts.join(" · ")}`;
 
   const model = data.thinkingLabel && data.thinkingLabel.toLowerCase() !== "off"

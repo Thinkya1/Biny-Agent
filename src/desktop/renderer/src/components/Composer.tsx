@@ -524,15 +524,6 @@ export const Composer = memo(function Composer({
                 <span className="context-usage-tip">上下文使用量<strong>{usage.used} / {usage.max} tokens</strong></span>
               </span>
             ) : null}
-            <ComposerActionButton
-              className="cindy-mic-button"
-              disabled
-              disabledReason="语音输入尚未配置。"
-              label="语音输入"
-              tooltip="语音输入尚未配置"
-            >
-              <Icon name="mic" size={15} />
-            </ComposerActionButton>
           </div>
         )}
         sendButton={(

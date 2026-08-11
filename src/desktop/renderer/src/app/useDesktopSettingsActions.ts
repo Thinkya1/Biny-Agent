@@ -7,9 +7,13 @@
 import { useCallback, type Dispatch, type RefObject, type SetStateAction } from "react";
 import type { ThinkingSelection } from "../../../../llm/ModelManager.js";
 import type {
-  DesktopMemorySettings,
+  DesktopChatPersonalizationOverride,
+  DesktopMemoryEntryInput,
+  DesktopMemoryScope,
+  DesktopMemorySettingsInput,
   DesktopModelConfigurationInput,
   DesktopModelLoginProvider,
+  DesktopPersonalizationSettingsInput,
   DesktopWebSearchSettingsInput,
   DesktopWorkspaceSnapshot
 } from "../../../protocol.js";
@@ -107,34 +111,60 @@ export function useDesktopSettingsActions({
     await open(url);
   }, []);
 
-  const loadMemoryOverview = useCallback(async () => {
-    const memoryOverview = window.biny.memoryOverview;
-    if (typeof memoryOverview !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await memoryOverview(requireProject(projectIdRef.current));
+  const loadPersonalizationOverview = useCallback(async (sessionId?: string) => {
+    const personalizationOverview = window.biny.personalizationOverview;
+    if (typeof personalizationOverview !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await personalizationOverview(requireProject(projectIdRef.current), sessionId);
   }, [projectIdRef]);
 
-  const saveMemorySettings = useCallback(async (input: DesktopMemorySettings) => {
+  const savePersonalizationSettings = useCallback(async (input: DesktopPersonalizationSettingsInput, sessionId?: string) => {
+    const save = window.biny.savePersonalizationSettings;
+    if (typeof save !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    const projectId = requireProject(projectIdRef.current);
+    await save(projectId, input);
+    return await window.biny.personalizationOverview(projectId, sessionId);
+  }, [projectIdRef]);
+
+  const saveChatPersonalization = useCallback(async (
+    sessionId: string,
+    input: DesktopChatPersonalizationOverride,
+    expectedRevision: string
+  ) => {
+    const save = window.biny.saveChatPersonalization;
+    if (typeof save !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    const projectId = requireProject(projectIdRef.current);
+    mergeProjectSnapshot(await save(projectId, sessionId, input, expectedRevision));
+    return await window.biny.personalizationOverview(projectId, sessionId);
+  }, [mergeProjectSnapshot, projectIdRef]);
+
+  const loadMemoryOverview = useCallback(async (scope: DesktopMemoryScope) => {
+    const memoryOverview = window.biny.memoryOverview;
+    if (typeof memoryOverview !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await memoryOverview(requireProject(projectIdRef.current), scope);
+  }, [projectIdRef]);
+
+  const saveMemorySettings = useCallback(async (input: DesktopMemorySettingsInput) => {
     return await window.biny.saveMemorySettings(requireProject(projectIdRef.current), input);
   }, [projectIdRef]);
 
-  const searchMemory = useCallback(async (query: string) => {
-    return await window.biny.searchMemory(requireProject(projectIdRef.current), query);
+  const searchMemory = useCallback(async (scope: DesktopMemoryScope, query: string) => {
+    return await window.biny.searchMemory(requireProject(projectIdRef.current), scope, query);
   }, [projectIdRef]);
 
-  const addMemoryEntry = useCallback(async (topic: string, note: string) => {
-    return await window.biny.addMemoryEntry(requireProject(projectIdRef.current), topic, note);
+  const addMemoryEntry = useCallback(async (scope: DesktopMemoryScope, input: DesktopMemoryEntryInput, expectedRevision: number) => {
+    return await window.biny.addMemoryEntry(requireProject(projectIdRef.current), scope, input, expectedRevision);
   }, [projectIdRef]);
 
-  const deleteMemoryEntry = useCallback(async (topic: string, index: number) => {
-    return await window.biny.deleteMemoryEntry(requireProject(projectIdRef.current), topic, index);
+  const deleteMemoryEntry = useCallback(async (scope: DesktopMemoryScope, entryId: string, expectedRevision: number) => {
+    return await window.biny.deleteMemoryEntry(requireProject(projectIdRef.current), scope, entryId, expectedRevision);
   }, [projectIdRef]);
 
-  const clearMemory = useCallback(async () => {
-    return await window.biny.clearMemory(requireProject(projectIdRef.current));
+  const clearMemory = useCallback(async (scope: DesktopMemoryScope, expectedRevision: number) => {
+    return await window.biny.clearMemory(requireProject(projectIdRef.current), scope, expectedRevision);
   }, [projectIdRef]);
 
-  const compactMemory = useCallback(async () => {
-    return await window.biny.compactMemory(requireProject(projectIdRef.current));
+  const compactMemory = useCallback(async (scope: DesktopMemoryScope, expectedRevision: number) => {
+    return await window.biny.compactMemory(requireProject(projectIdRef.current), scope, expectedRevision);
   }, [projectIdRef]);
 
   return {
@@ -147,11 +177,14 @@ export function useDesktopSettingsActions({
     fetchModelCatalog,
     loadCookieJarStatus,
     loadMemoryOverview,
+    loadPersonalizationOverview,
     loadWebSearchSettings,
     openBrowser,
     removeModelConfiguration,
     saveMemorySettings,
     saveModelConfiguration,
+    saveChatPersonalization,
+    savePersonalizationSettings,
     saveWebSearchSettings,
     searchMemory,
     startModelLogin,

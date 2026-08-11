@@ -21,7 +21,17 @@ import {
   statusMessage,
   visibleShortcutHints
 } from "../src/tui/components/chrome.js";
-import { ctrlCAction, isDoubleCtrlC, runtimeStatus, selectDialogRow, shouldConfirmAutocompleteOnEnter, skillSlashCommandItems } from "../src/tui/app.js";
+import {
+  ctrlCAction,
+  isDoubleCtrlC,
+  memoryPolicyOptionForOverride,
+  memoryPolicySelectOptions,
+  personalitySelectOptions,
+  runtimeStatus,
+  selectDialogRow,
+  shouldConfirmAutocompleteOnEnter,
+  skillSlashCommandItems
+} from "../src/tui/app.js";
 import type { PermissionChoice, ToolTranscriptItem, TranscriptState, TuiPermissionRequest, TuiState } from "../src/tui/types.js";
 import {
   ansi256ToHex,
@@ -49,6 +59,7 @@ import {
 import { isFullYesConfirmation, permissionResultFromAnswer } from "../src/permission/confirmation.js";
 import { permissionChoiceToResult } from "../src/tui/runtime/permissionChoice.js";
 import type { SessionEvent } from "../src/session/recorder.js";
+import { defaultChatPersonalizationOverride, resolveChatPersonalization } from "../src/personalization/index.js";
 
 /** 去掉 ANSI，方便对渲染出来的行做文本断言。 */
 function plain(line: string): string {
@@ -115,6 +126,7 @@ async function main(): Promise<void> {
   testSessionReplayFinalizesPendingTools();
   testSessionReplayRestoresTurnStatuses();
   testSlashCommandParity();
+  testPersonalizationSelectors();
   testStatusReportUsesRuntimeAndContextFields();
   testSkillSlashCommandItems();
   testSkillUserMessageHidesInstructions();
@@ -254,20 +266,45 @@ function testSlashCommandParity(): void {
   const tuiCommands = slashCommandsForSurface("tui");
   const desktopCommands = slashCommandsForSurface("desktop");
   const desktopNames = new Set(desktopCommands.map((command) => command.name));
-  assert.equal(tuiCommands.length, 23);
+  assert.equal(tuiCommands.length, 25);
   for (const removed of ["/help", "/approvals", "/sessions", "/quit"]) {
     assert.equal(tuiCommands.some((command) => command.name === removed), false);
   }
   assert.equal(tuiCommands.some((command) => command.name === "/plan"), false);
   assert.equal(tuiCommands.some((command) => command.name === "/mode"), false);
   assert.ok(tuiCommands.some((command) => command.name === "/memory"));
+  assert.ok(tuiCommands.some((command) => command.name === "/personality"));
+  assert.ok(tuiCommands.some((command) => command.name === "/memories"));
   assert.ok(tuiCommands.some((command) => command.name === "/undo"));
   assert.equal(tuiCommands.some((command) => command.name === "/continue"), false);
   assert.ok(tuiCommands.some((command) => command.name === "/fork"));
   assert.ok(tuiCommands.some((command) => command.name === "/new"));
   assert.ok(tuiCommands.some((command) => command.name === "/app"));
-  assert.ok(["/status", "/usage", "/memory", "/subagent"].every((name) => desktopNames.has(name)));
+  assert.ok(["/status", "/usage", "/personality", "/memories", "/memory", "/subagent"].every((name) => desktopNames.has(name)));
   assert.equal(desktopNames.has("/context"), false);
+}
+
+function testPersonalizationSelectors(): void {
+  assert.deepEqual(personalitySelectOptions.map((option) => option.value), ["inherit", "none", "friendly", "pragmatic"]);
+  assert.deepEqual(memoryPolicySelectOptions.map((option) => option.value), ["inherit", "both", "use", "contribute", "off"]);
+  const override = {
+    ...defaultChatPersonalizationOverride,
+    useMemories: false as const,
+    contributeMemories: "inherit" as const
+  };
+  const resolved = resolveChatPersonalization(
+    { enabled: true, personality: "none", customInstructions: "" },
+    {
+      useMemories: true,
+      generateMemories: true,
+      extractModel: undefined,
+      consolidationModel: undefined,
+      excludeExternalContext: true,
+      maxRecalled: 3
+    },
+    override
+  );
+  assert.equal(memoryPolicyOptionForOverride({ override, resolved }), "contribute");
 }
 
 function testStatusReportUsesRuntimeAndContextFields(): void {
@@ -307,7 +344,13 @@ function testStatusReportUsesRuntimeAndContextFields(): void {
       measuredAt: "2026-08-02T00:00:00.000Z"
     },
     memoryEnabled: false,
-    memoryTopics: []
+    memoryTopics: [],
+    memoryRecall: {
+      included: { global: 1, project: 2 },
+      trimmed: { global: 0, project: 1 },
+      omitted: [{ scope: "project", id: "entry-3", reason: "budget" }],
+      budgetOmission: { maxChars: 12_000, usedChars: 11_500, omitted: 1 }
+    }
   };
   const usage: UsageSummary = {
     calls: 2,
@@ -331,6 +374,8 @@ function testStatusReportUsesRuntimeAndContextFields(): void {
   assert.match(report, /Input budget: 12,345 \/ 981,056/u);
   assert.match(report, /Input measurement: estimated 12,600; provider 12,345; delta -255/u);
   assert.match(report, /Instructions: 1 loaded/u);
+  assert.match(report, /Memory recall: included global=1, project=2; trimmed global=0, project=1; omitted global=0, project=1/u);
+  assert.match(report, /Memory budget: 11,500\/12,000 chars; 1 omitted/u);
   assert.doesNotMatch(report, /^Context$/mu);
 }
 

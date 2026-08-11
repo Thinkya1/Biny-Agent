@@ -13,6 +13,11 @@ interface DesktopShellProps {
   children: React.ReactNode;
   overlays?: React.ReactNode;
   rightPanel?: React.ReactNode;
+  rightSidebar?: {
+    open: boolean;
+    resizing: boolean;
+    width: number;
+  };
   sideNav: React.ReactNode;
   sidebarLayout: SidebarLayoutSnapshot;
   theme: DesktopThemePreference;
@@ -34,18 +39,24 @@ function SidebarPinSpacer({ active }: { active: boolean }): React.JSX.Element {
   );
 }
 
-export function DesktopShell({ children, overlays, rightPanel, sideNav, sidebarLayout, theme }: DesktopShellProps): React.JSX.Element {
+export function DesktopShell({ children, overlays, rightPanel, rightSidebar, sideNav, sidebarLayout, theme }: DesktopShellProps): React.JSX.Element {
+  // Inspector 退场期间仍保留 dock 节点，横线要等右侧栏完全卸载后再恢复。
+  const rightSidebarVisible = rightPanel !== undefined && rightPanel !== null;
   const rootStyle = {
     "--cindy-sidebar-visual-width": `${sidebarLayout.visualWidth}px`,
     "--cindy-sidebar-flow-width": `${sidebarLayout.flowWidth}px`,
     "--cindy-sidebar-content-width": `${sidebarLayout.contentWidth}px`,
-    "--cindy-sidebar-expanded-width": `${sidebarLayout.expandedWidth}px`
+    "--cindy-sidebar-expanded-width": `${sidebarLayout.expandedWidth}px`,
+    // 和左栏一样，右侧只改变目标流宽度；动画插值由外壳统一驱动，主区因此会被连续推向左侧。
+    "--cindy-inspector-flow-width": `${rightSidebar?.open ? rightSidebar.width : 0}px`
   } as React.CSSProperties;
   return (
     <Theme mode={theme} theme={neutralTheme}>
       <div
         className="desktop-root cindy-root"
         data-sidebar-mode={sidebarLayout.mode}
+        data-right-sidebar-visible={rightSidebarVisible ? "true" : undefined}
+        data-inspector-resizing={rightSidebar?.resizing ? "true" : undefined}
         data-sidebar-resizing={sidebarLayout.resizing ? "true" : undefined}
         data-sidebar-transition={sidebarLayout.transition === "idle" ? undefined : sidebarLayout.transition}
         style={rootStyle}
@@ -58,6 +69,10 @@ export function DesktopShell({ children, overlays, rightPanel, sideNav, sidebarL
           </div>
           {rightPanel}
         </div>
+        <div
+          aria-hidden="true"
+          className="cindy-topbar-divider"
+        />
         <div
           aria-hidden="true"
           className="cindy-sidebar-divider"

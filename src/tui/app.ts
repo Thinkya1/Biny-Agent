@@ -42,6 +42,7 @@ import {
   type InteractiveRuntimeSnapshot
 } from "../runtime/agentEvents.js";
 import type { SessionSummary } from "../session/events.js";
+import type { UsageSummary } from "../session/metadata.js";
 import { FooterComponent, ShortcutsBarComponent, StatusIndicatorComponent, WelcomeComponent } from "./components/chrome.js";
 import { PermissionDialog, SelectDialog, TextViewerDialog } from "./components/dialogs.js";
 import { PendingAttachmentsComponent } from "./components/pendingAttachments.js";
@@ -60,6 +61,11 @@ import { formatSessionAge } from "./transcriptText.js";
 import type { PermissionChoice, TuiLaunchMode, TuiPermissionRequest, TuiState, TuiStatus } from "./types.js";
 import type { AgentAttachment, AgentRunMode } from "../agent/AgentSession.js";
 import type { SkillDefinition } from "../extensions/skills.js";
+import type {
+  AgentPersonalizationState,
+  ChatPersonalizationOverridePatch,
+  PersonalityPreset
+} from "../personalization/index.js";
 
 export interface TuiExitSummary {
   sessionId: string;
@@ -69,6 +75,21 @@ export interface TuiExitSummary {
 const TUI_SLASH_COMMANDS = slashCommandsForSurface("tui");
 const TUI_AUTOCOMPLETE_COMMANDS = TUI_SLASH_COMMANDS.filter((command) => command.name !== "/skills");
 const TUI_SHUTDOWN_DRAIN_MS = 1_500;
+
+export const personalitySelectOptions = [
+  { value: "inherit", label: "Inherit", description: "Use the global personality for this chat." },
+  { value: "none", label: "None", description: "Use no additional response-style preset." },
+  { value: "friendly", label: "Friendly", description: "Use a warm, approachable and collaborative tone." },
+  { value: "pragmatic", label: "Pragmatic", description: "Use a direct, concise and action-oriented tone." }
+] as const;
+
+export const memoryPolicySelectOptions = [
+  { value: "inherit", label: "Inherit", description: "Use the global memory defaults for this chat." },
+  { value: "both", label: "Use and contribute", description: "Recall relevant memory and contribute successful turns." },
+  { value: "use", label: "Use only", description: "Recall relevant memory without automatic contribution." },
+  { value: "contribute", label: "Contribute only", description: "Contribute successful turns without recalling memory." },
+  { value: "off", label: "All off", description: "Neither recall nor automatically contribute memory." }
+] as const;
 
 /** 把已加载 Skill 的元数据投影成 Pi 风格的 `skill:<name>` 补全项。 */
 export function skillSlashCommandItems(
@@ -114,6 +135,7 @@ export class BinyTui {
   private thinking: ThinkingSelection = "off";
   private gitBranch: string | undefined;
   private contextUsage: { usedTokens?: number; maxTokens?: number; source?: "estimated" | "provider" } = {};
+  private cacheHitRate: number | undefined;
   private overlay: OverlayHandle | undefined;
   private permissionDialog: PermissionDialog | undefined;
   /** 与 pi 一致：空闲时 Ctrl+C 需要在短时间内连续按两次才退出。 */
@@ -280,6 +302,7 @@ export class BinyTui {
       if (this.initialSession) await this.resumeSession(this.initialSession);
       if (this.launchMode === "resume-picker" && this.initialSession === undefined) await this.showSessionPicker();
       void this.refreshContextUsage();
+      void this.refreshUsage();
     } catch (error) {
       this.notify(`TUI startup failed: ${describeError(error)}`);
     }
@@ -292,7 +315,10 @@ export class BinyTui {
       if (update.event) this.dispatch(update.event);
       else if (update.snapshot.state.kind === "maintenance") this.dispatch({ type: "maintenance.started" });
       else this.refreshChrome();
-      if (isTerminalRunEvent(update.event)) void this.refreshContextUsage();
+      if (isTerminalRunEvent(update.event)) {
+        void this.refreshContextUsage();
+        void this.refreshUsage();
+      }
     });
   }
 
@@ -345,6 +371,7 @@ export class BinyTui {
       this.announceCurrentSession();
       this.setEditorText("");
       await this.refreshContextUsage();
+      await this.refreshUsage();
       this.notify("New chat started.");
     } catch (error) {
       this.showTextViewer("New chat", describeError(error));
@@ -411,7 +438,8 @@ export class BinyTui {
       mode: this.mode,
       contextUsedTokens: this.contextUsage.usedTokens,
       contextMaxTokens: this.contextUsage.maxTokens,
-      contextSource: this.contextUsage.source
+      contextSource: this.contextUsage.source,
+      cacheHitRate: this.cacheHitRate
     };
   }
 
@@ -428,6 +456,20 @@ export class BinyTui {
         maxTokens: context.budget.contextWindow ?? context.budget.maxTokens,
         source: context.budget.source
       };
+      this.refreshChrome();
+    } catch {
+      // Footer telemetry is best effort and must never interrupt the TUI.
+    }
+  }
+
+  private async refreshUsage(): Promise<void> {
+    const runtime = this.runtime;
+    if (!runtime) return;
+    try {
+      const summary: UsageSummary = this.commands
+        ? await this.commands.agent.usageSummary()
+        : (await requireRemoteRuntime(runtime).usage()).summary;
+      this.cacheHitRate = summary.latestCacheHitRate;
       this.refreshChrome();
     } catch {
       // Footer telemetry is best effort and must never interrupt the TUI.
@@ -778,6 +820,16 @@ export class BinyTui {
       return;
     }
 
+    if (command === "/personality") {
+      await this.handlePersonalityCommand(args);
+      return;
+    }
+
+    if (command === "/memories") {
+      await this.handleMemoriesCommand(args);
+      return;
+    }
+
     if (command === "/resume" && !args[0]) {
       await this.showSessionPicker();
       return;
@@ -880,6 +932,163 @@ export class BinyTui {
         void this.selectModel(item.value);
       }
     });
+  }
+
+  private async handlePersonalityCommand(args: string[]): Promise<void> {
+    const action = args[0]?.toLowerCase();
+    if (action === "instructions") {
+      await this.handleChatInstructionsCommand(args.slice(1));
+      return;
+    }
+    if (action !== undefined) {
+      if (!personalitySelectOptions.some((option) => option.value === action)) {
+        this.showTextViewer("Personality", "Usage: /personality [inherit|none|friendly|pragmatic] | instructions [set <text>|inherit|off]");
+        return;
+      }
+      await this.applyChatPersonalization({ personality: action as "inherit" | PersonalityPreset });
+      return;
+    }
+
+    const state = await this.readPersonalizationState();
+    this.showSelect({
+      title: "Chat personality",
+      hint: "↑↓ navigate · enter select · esc cancel",
+      selectedIndex: Math.max(0, personalitySelectOptions.findIndex((option) => option.value === state.override.personality)),
+      items: personalitySelectOptions.map((option) => ({
+        ...option,
+        label: option.value === state.override.personality ? `${option.label} ← current` : option.label
+      })),
+      onSelect: (item) => {
+        void this.applyChatPersonalization({ personality: item.value as "inherit" | PersonalityPreset });
+      }
+    });
+  }
+
+  private async handleChatInstructionsCommand(args: string[]): Promise<void> {
+    const action = args[0]?.toLowerCase();
+    if (!action) {
+      const state = await this.readPersonalizationState();
+      const current = state.override.customInstructions.mode;
+      this.showSelect({
+        title: "Chat instructions",
+        hint: "↑↓ navigate · enter select · esc cancel",
+        selectedIndex: current === "inherit" ? 0 : current === "disabled" ? 1 : 2,
+        items: [
+          {
+            value: "inherit",
+            label: current === "inherit" ? "Inherit global ← current" : "Inherit global",
+            description: "Use global custom instructions for this chat."
+          },
+          {
+            value: "off",
+            label: current === "disabled" ? "Disable ← current" : "Disable",
+            description: "Ignore global custom instructions in this chat."
+          },
+          {
+            value: "set",
+            label: current === "replace" ? "Replace text ← current" : "Replace text",
+            description: "Insert a command for entering chat-specific instructions."
+          }
+        ],
+        onSelect: (item) => {
+          if (item.value === "set") {
+            this.setEditorText("/personality instructions set ");
+            this.ui.requestRender();
+            return;
+          }
+          void this.applyChatPersonalization({
+            customInstructions: item.value === "inherit" ? { mode: "inherit" } : { mode: "disabled" }
+          });
+        }
+      });
+      return;
+    }
+    if (action === "set") {
+      const value = args.slice(1).join(" ").trim();
+      if (!value) {
+        this.showTextViewer("Personality", "Usage: /personality instructions set <text>");
+        return;
+      }
+      await this.applyChatPersonalization({ customInstructions: { mode: "replace", value } });
+      return;
+    }
+    if (action === "inherit") {
+      await this.applyChatPersonalization({ customInstructions: { mode: "inherit" } });
+      return;
+    }
+    if (action === "off" || action === "disabled" || action === "clear") {
+      await this.applyChatPersonalization({ customInstructions: { mode: "disabled" } });
+      return;
+    }
+    this.showTextViewer("Personality", "Usage: /personality instructions [set <text>|inherit|off]");
+  }
+
+  private async handleMemoriesCommand(args: string[]): Promise<void> {
+    const action = args[0]?.toLowerCase();
+    if (action !== undefined) {
+      if (!memoryPolicySelectOptions.some((option) => option.value === action)) {
+        this.showTextViewer("Memories", "Usage: /memories [inherit|both|use|contribute|off]");
+        return;
+      }
+      await this.applyChatMemoryPolicy(action as typeof memoryPolicySelectOptions[number]["value"]);
+      return;
+    }
+    const state = await this.readPersonalizationState();
+    const selected = memoryPolicyOptionForOverride(state);
+    this.showSelect({
+      title: "Chat memory policy",
+      hint: "↑↓ navigate · enter select · esc cancel",
+      selectedIndex: Math.max(0, memoryPolicySelectOptions.findIndex((option) => option.value === selected)),
+      items: memoryPolicySelectOptions.map((option) => ({
+        ...option,
+        label: option.value === selected ? `${option.label} ← current` : option.label
+      })),
+      onSelect: (item) => {
+        void this.applyChatMemoryPolicy(item.value as typeof memoryPolicySelectOptions[number]["value"]);
+      }
+    });
+  }
+
+  private async applyChatMemoryPolicy(
+    policy: typeof memoryPolicySelectOptions[number]["value"]
+  ): Promise<void> {
+    const patch: ChatPersonalizationOverridePatch = policy === "inherit"
+      ? { useMemories: "inherit", contributeMemories: "inherit" }
+      : policy === "both"
+        ? { useMemories: true, contributeMemories: true }
+        : policy === "use"
+          ? { useMemories: true, contributeMemories: false }
+          : policy === "contribute"
+            ? { useMemories: false, contributeMemories: true }
+            : { useMemories: false, contributeMemories: false };
+    await this.applyChatPersonalization(patch);
+  }
+
+  private async readPersonalizationState(): Promise<AgentPersonalizationState> {
+    const runtime = this.runtime;
+    if (!runtime) throw new Error("TUI runtime is not ready.");
+    return this.commands
+      ? await this.commands.agent.getPersonalizationState()
+      : await requireRemoteRuntime(runtime).getPersonalizationState();
+  }
+
+  private async applyChatPersonalization(patch: ChatPersonalizationOverridePatch): Promise<void> {
+    const runtime = this.runtime;
+    if (!runtime) return;
+    try {
+      const state = await this.readPersonalizationState();
+      if (!state.catalogRevision) throw new Error("Chat personalization revision is unavailable.");
+      const updated = this.commands
+        ? await runtime.runExclusiveOperation(
+          "personalization",
+          async () => await this.commands!.agent.updateChatPersonalization(patch, state.catalogRevision)
+        )
+        : await requireRemoteRuntime(runtime).updateChatPersonalization(patch, state.catalogRevision);
+      const memory = memoryPolicyOptionForOverride(updated);
+      this.notify(`Chat settings saved (${updated.override.personality}; memory ${memory}). They apply from the next root turn.`);
+    } catch (error) {
+      this.showTextViewer("Personalization", describeError(error));
+    }
   }
 
   private async selectModel(alias: string): Promise<void> {
@@ -1017,6 +1226,7 @@ export class BinyTui {
     });
     this.mode = "chat";
     await this.refreshContextUsage();
+    await this.refreshUsage();
   }
 
   // ---------------------------------------------------------------- 退出
@@ -1102,6 +1312,17 @@ function describeError(error: unknown): string {
 function requireRemoteRuntime(runtime: InteractiveRuntimeHandle): RuntimeHostClient {
   if (!(runtime instanceof RuntimeHostClient)) throw new Error("Remote runtime client is unavailable.");
   return runtime;
+}
+
+export function memoryPolicyOptionForOverride(
+  state: Pick<AgentPersonalizationState, "override" | "resolved">
+): typeof memoryPolicySelectOptions[number]["value"] {
+  const { useMemories, contributeMemories } = state.override;
+  if (useMemories === "inherit" && contributeMemories === "inherit") return "inherit";
+  if (state.resolved.useMemories && state.resolved.contributeMemories) return "both";
+  if (state.resolved.useMemories) return "use";
+  if (state.resolved.contributeMemories) return "contribute";
+  return "off";
 }
 
 export function runtimeStatus(snapshot: InteractiveRuntimeSnapshot | undefined): TuiStatus {

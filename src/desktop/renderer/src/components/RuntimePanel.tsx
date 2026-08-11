@@ -6,23 +6,28 @@
  */
 import { useEffect, useState } from "react";
 import type { DesktopRuntimeMutation, DesktopRuntimeProjection } from "../../../protocol.js";
+import { useClosingPresence } from "../useClosingPresence.js";
 import { Icon } from "./Icon.js";
 
 type RuntimeRecord = Record<string, unknown>;
 
 interface RuntimePanelProps {
+  open: boolean;
+  onClose(): void;
   projection?: DesktopRuntimeProjection;
   onError(error: unknown): void;
   onMutation(operation: DesktopRuntimeMutation, payload: Record<string, unknown>): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
-export function RuntimePanel({ projection, onError, onMutation, onRefresh }: RuntimePanelProps): React.JSX.Element {
+export function RuntimePanel({ open, onClose, projection, onError, onMutation, onRefresh }: RuntimePanelProps): React.JSX.Element | null {
   const [busyAction, setBusyAction] = useState<string>();
+  const presence = useClosingPresence(open);
 
   useEffect(() => {
+    if (!open) return;
     void onRefresh().catch(onError);
-  }, [onError, onRefresh]);
+  }, [onError, onRefresh, open]);
 
   const runAction = async (key: string, operation: DesktopRuntimeMutation, payload: Record<string, unknown>): Promise<void> => {
     setBusyAction(key);
@@ -42,16 +47,23 @@ export function RuntimePanel({ projection, onError, onMutation, onRefresh }: Run
   const graphs = records(projection?.graphs);
   const capabilities = records(projection?.capabilities);
 
+  if (!presence.present) return null;
+
   return (
-    <aside aria-label="后台运行" className="cindy-runtime-panel">
+    <aside aria-label="后台运行" className="cindy-runtime-panel" data-panel-phase={presence.phase}>
       <header className="cindy-runtime-panel-header">
         <div>
           <strong>后台运行</strong>
           <span>任务、自动化与 Graph 由 Runtime authority 管理</span>
         </div>
-        <button aria-label="刷新后台运行状态" className="cindy-runtime-panel-icon" disabled={busyAction !== undefined} onClick={() => void onRefresh().catch(onError)} title="刷新" type="button">
-          <Icon name="refresh" size={14} />
-        </button>
+        <div className="cindy-runtime-panel-actions">
+          <button aria-label="刷新后台运行状态" className="cindy-runtime-panel-icon" disabled={busyAction !== undefined} onClick={() => void onRefresh().catch(onError)} title="刷新" type="button">
+            <Icon name="refresh" size={14} />
+          </button>
+          <button aria-label="关闭后台运行面板" className="cindy-runtime-panel-icon" onClick={onClose} title="关闭" type="button">
+            <Icon name="close" size={14} />
+          </button>
+        </div>
       </header>
 
       <div className="cindy-runtime-summary" aria-label="后台运行统计">

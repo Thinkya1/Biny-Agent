@@ -10,7 +10,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ThinkingOrb } from "thinking-orbs";
 import type { DesktopProject, DesktopRuntimeMutation, DesktopRuntimeProjection } from "../../../protocol.js";
 import type { TimelineTurn } from "../sessionTimeline.js";
-import { formatUsageCost } from "../usagePresentation.js";
+import { pickThinkingMessage } from "../thinkingMessages.js";
+import { formatCacheHitRate, formatUsageCost } from "../usagePresentation.js";
 import { Icon } from "./Icon.js";
 import { MessageTimeline } from "./MessageTimeline.js";
 import { RuntimePanel } from "./RuntimePanel.js";
@@ -28,7 +29,12 @@ interface WorkspaceProps {
   sessionUsage: UsageSummary;
   onOpenProject(): void;
   onPreviewFile(path: string): void;
-  onToggleFiles(): void;
+  inspectorOpen: boolean;
+  onToggleInspector(): void;
+  runtimePanelOpen: boolean;
+  onRuntimePanelOpenChange(open: boolean): void;
+  thinking: boolean;
+  thinkingStartedAt?: string;
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
   onResume(): Promise<void>;
@@ -55,7 +61,12 @@ export function Workspace({
   sessionUsage,
   onOpenProject,
   onPreviewFile,
-  onToggleFiles,
+  inspectorOpen,
+  onToggleInspector,
+  runtimePanelOpen,
+  onRuntimePanelOpenChange,
+  thinking,
+  thinkingStartedAt,
   onOpenExternal,
   onResolvePermission,
   onResume,
@@ -69,7 +80,6 @@ export function Workspace({
   onRuntimeRefresh,
   children
 }: WorkspaceProps): React.JSX.Element {
-  const [runtimePanelOpen, setRuntimePanelOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
   const usageControlRef = useRef<HTMLDivElement>(null);
   const closeUsage = useCallback(() => setUsageOpen(false), []);
@@ -79,11 +89,14 @@ export function Workspace({
   if (isHome) {
     return (
       <div className="workspace cindy-workspace cindy-workspace-home">
-        <div className="cindy-home-mode" aria-label="当前模式">
-          <Icon name="message" size={15} />
-          <span>对话</span>
-          <Icon name="chevron" size={13} />
-        </div>
+        <RuntimePanel
+          onClose={() => onRuntimePanelOpenChange(false)}
+          onError={onRuntimeError}
+          onMutation={onRuntimeMutation}
+          onRefresh={onRuntimeRefresh}
+          open={runtimePanelOpen && Boolean(projectId)}
+          projection={runtimeProjection}
+        />
         <div className="cindy-home-content">
           <div className="cindy-home-composer">{children}</div>
         </div>
@@ -95,30 +108,34 @@ export function Workspace({
     <div className="workspace cindy-workspace cindy-workspace-chat">
       <div className="cindy-workspace-main">
         <header className="cindy-chat-toolbar">
-          <div className="cindy-chat-title">
-            <strong>{sessionTitle ?? project?.name ?? "Biny"}</strong>
-            {project ? <span>{project.name}{project.branch ? ` · ${project.branch}` : ""}</span> : <span>打开一个本地项目开始</span>}
+          <div className="cindy-chat-drag-region">
+            <div className="cindy-chat-title">
+              <strong>{sessionTitle ?? project?.name ?? "Biny"}</strong>
+              {project ? <span>{project.name}{project.branch ? ` · ${project.branch}` : ""}</span> : <span>打开一个本地项目开始</span>}
+            </div>
           </div>
           <div className="cindy-chat-actions">
             <button
-              aria-label="打开文件面板"
-              className="cindy-toolbar-button"
+              aria-expanded={inspectorOpen}
+              aria-label={inspectorOpen ? "收起工作区工具" : "打开工作区工具"}
+              className={`cindy-toolbar-button${inspectorOpen ? " is-active" : ""}`}
               disabled={!projectId}
-              onClick={onToggleFiles}
+              onClick={onToggleInspector}
+              title={inspectorOpen ? "收起工作区工具" : "打开工作区工具"}
               type="button"
             >
               <Icon name="panel-right" size={15} />
             </button>
           </div>
         </header>
-        {runtimePanelOpen ? (
-          <RuntimePanel
-            onError={onRuntimeError}
-            onMutation={onRuntimeMutation}
-            onRefresh={onRuntimeRefresh}
-            projection={runtimeProjection}
-          />
-        ) : null}
+        <RuntimePanel
+          onClose={() => onRuntimePanelOpenChange(false)}
+          onError={onRuntimeError}
+          onMutation={onRuntimeMutation}
+          onRefresh={onRuntimeRefresh}
+          open={runtimePanelOpen}
+          projection={runtimeProjection}
+        />
         <div className="cindy-chat-body">
           {loading ? <LoadingState /> : runtimeError ? <RuntimeError error={runtimeError} onOpenProject={onOpenProject} /> : turns.length > 0 && projectId ? (
             <ChatScroll>
@@ -143,28 +160,32 @@ export function Workspace({
         </div>
         <div className="cindy-chat-composer">
           {children}
-          <div className="cindy-composer-status" aria-label="会话状态">
+          <div aria-label="会话状态" aria-live="polite" className="cindy-composer-status">
+            {thinking ? <ThinkingStatus key={thinkingStartedAt ?? "thinking"} startedAt={thinkingStartedAt} /> : null}
             <div className="cindy-composer-status-actions">
               <div className="cindy-usage-control" ref={usageControlRef}>
                 <button
                   aria-expanded={usageOpen}
-                  aria-label="查看本会话费用"
+                  aria-label="查看本会话费用与缓存命中率"
                   className={`cindy-composer-status-button${usageOpen ? " is-open" : ""}`}
                   onClick={() => setUsageOpen((current) => !current)}
-                  title="本会话费用"
+                  title="本会话费用与缓存命中率"
                   type="button"
                 >
                   <Icon name="chart" size={13} />
-                  <span>{sessionUsage.calls ? formatUsageCost(sessionUsage) : "费用"}</span>
+                  <span>
+                    {sessionUsage.calls ? formatUsageCost(sessionUsage) : "费用"}
+                    {sessionUsage.latestCacheHitRate === undefined ? "" : ` · CH ${formatCacheHitRate(sessionUsage.latestCacheHitRate)}`}
+                  </span>
                 </button>
-                {usageOpen ? <UsageSummaryPopover anchorRef={usageControlRef} onClose={closeUsage} summary={sessionUsage} /> : null}
+                <UsageSummaryPopover anchorRef={usageControlRef} onClose={closeUsage} open={usageOpen} summary={sessionUsage} />
               </div>
               <button
                 aria-expanded={runtimePanelOpen}
                 aria-label="打开后台运行面板"
                 className={`cindy-composer-status-button${runtimePanelOpen ? " is-open" : ""}`}
                 disabled={!projectId}
-                onClick={() => setRuntimePanelOpen((current) => !current)}
+                onClick={() => onRuntimePanelOpenChange(!runtimePanelOpen)}
                 title="后台运行"
                 type="button"
               >
@@ -177,6 +198,34 @@ export function Workspace({
       {streaming ? <span className="cindy-streaming-state" aria-hidden="true" /> : null}
     </div>
   );
+}
+
+function ThinkingStatus({ startedAt }: { startedAt?: string }): React.JSX.Element {
+  const [elapsedSeconds, setElapsedSeconds] = useState(() => elapsedSecondsSince(startedAt));
+  const [thinkingMessage] = useState(() => pickThinkingMessage());
+
+  useEffect(() => {
+    const update = (): void => setElapsedSeconds(elapsedSecondsSince(startedAt));
+    update();
+    if (!startedAt) return;
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+
+  return (
+    <div className="cindy-thinking-status" role="status">
+      <ThinkingOrb aria-label={thinkingMessage} className="cindy-thinking-status-orb" size={20} state="connecting" theme="auto" />
+      <span className="cindy-thinking-status-label">{thinkingMessage}…</span>
+      <span className="cindy-thinking-status-duration">{elapsedSeconds}s</span>
+    </div>
+  );
+}
+
+function elapsedSecondsSince(startedAt?: string): number {
+  if (!startedAt) return 0;
+  const timestamp = Date.parse(startedAt);
+  if (!Number.isFinite(timestamp)) return 0;
+  return Math.max(0, Math.floor((Date.now() - timestamp) / 1_000));
 }
 
 function ChatScroll({ children }: { children: React.ReactNode }): React.JSX.Element {

@@ -27,7 +27,10 @@ import type {
 import { DEFAULT_FILE_PANEL_WIDTH } from "../../filePanelSizing.js";
 import { DEFAULT_FONT_PREFERENCE, SYSTEM_FONT_FAMILY } from "../../fontPreference.js";
 import {
+  canNavigateBack,
+  canNavigateForward,
   createNavigationState,
+  moveNavigation,
   pushNavigation,
   replaceNavigation,
   type DesktopNavigationState,
@@ -88,6 +91,7 @@ export function App(): React.JSX.Element {
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTargetTab, setSettingsTargetTab] = useState<SettingsTab>();
+  const [runtimePanelOpen, setRuntimePanelOpen] = useState(false);
   const [page, setPage] = useState<DesktopPage>("chat");
   const [contextBudget, setContextBudget] = useState<ContextBudgetStatus>();
   const [renameTarget, setRenameTarget] = useState<RenameTarget>();
@@ -96,6 +100,7 @@ export function App(): React.JSX.Element {
   const selectedRef = useRef<string | undefined>(undefined);
   const projectRef = useRef<string | undefined>(undefined);
   const navigationRef = useRef<DesktopNavigationState>(createNavigationState());
+  const [navigationState, setNavigationState] = useState<DesktopNavigationState>(() => createNavigationState());
   const loadRequestRef = useRef(0);
   const menuActionRef = useRef<(action: DesktopMenuAction) => void>(() => undefined);
   const modelSetupWasRequiredRef = useRef(false);
@@ -134,6 +139,7 @@ export function App(): React.JSX.Element {
 
   const openExtensions = useCallback((): void => {
     setPage("extensions");
+    setRuntimePanelOpen(false);
     setSearchOpen(false);
     setSettingsOpen(false);
     setSettingsTargetTab(undefined);
@@ -157,6 +163,7 @@ export function App(): React.JSX.Element {
 
   const commitNavigation = useCallback((next: DesktopNavigationState): void => {
     navigationRef.current = next;
+    setNavigationState(next);
   }, []);
 
   const mergeWorkspaceProject = useCallback((snapshot: DesktopWorkspaceSnapshot): void => {
@@ -222,11 +229,14 @@ export function App(): React.JSX.Element {
     fetchModelCatalog,
     loadCookieJarStatus,
     loadMemoryOverview,
+    loadPersonalizationOverview,
     loadWebSearchSettings,
     openBrowser,
     removeModelConfiguration,
     saveMemorySettings,
     saveModelConfiguration,
+    saveChatPersonalization,
+    savePersonalizationSettings,
     saveWebSearchSettings,
     searchMemory,
     startModelLogin,
@@ -239,56 +249,97 @@ export function App(): React.JSX.Element {
     setWorkspace
   });
 
-  const openSession = useCallback(async (projectId: string, sessionId: string, showLoader = true): Promise<void> => {
-    const request = loadRequestRef.current + 1;
-    loadRequestRef.current = request;
-    setPage("chat");
-    setSelectedSessionId(sessionId);
-    // 上下文用量属于某一个会话，换会话就作废，等新会话跑出 context.updated 再显示。
-    setContextBudget(undefined);
+  const openSession = useCallback(async (
+    projectId: string,
+    sessionId: string,
+    showLoader = true,
+    activeRequest?: number,
+    nextWorkspace?: DesktopWorkspaceSnapshot
+  ): Promise<boolean> => {
+    const request = activeRequest ?? loadRequestRef.current + 1;
+    if (activeRequest === undefined) loadRequestRef.current = request;
+    if (loadRequestRef.current !== request) return false;
     if (showLoader) setLoading(true);
     try {
       const nextDocument = await window.biny.openSession(projectId, sessionId);
-      if (loadRequestRef.current === request) {
-        setDocument(nextDocument);
-        setSidebarSessions((current) => mergeProjectSessionPage(current, projectId, [nextDocument.session]));
+      if (loadRequestRef.current !== request) return false;
+      if (nextWorkspace) {
+        projectRef.current = nextWorkspace.project.id;
+        mergeWorkspaceProject(nextWorkspace);
       }
+      setPage("chat");
+      selectedRef.current = sessionId;
+      setSelectedSessionId(sessionId);
+      // 上下文用量属于某一个会话，换会话就作废，等新会话跑出 context.updated 再显示。
+      setContextBudget(undefined);
+      setDocument(nextDocument);
+      setSidebarSessions((current) => mergeProjectSessionPage(current, projectId, [nextDocument.session]));
+      setWorkspace((current) => current?.project.id === projectId
+        ? {
+            ...current,
+            selectedSessionId: sessionId,
+            sessions: mergeProjectSessionPage(current.sessions, projectId, [nextDocument.session])
+          }
+        : current);
+      // 读取成功且仍持有最新请求后才提交持久化选择；失败或过期请求不会触碰主进程状态。
+      void window.biny.commitSelection(projectId, sessionId).catch((error) => setToast(errorMessage(error)));
+      return true;
     } catch (error) {
-      if (loadRequestRef.current === request) {
-        setDocument(undefined);
-        setToast(errorMessage(error));
-      }
+      if (loadRequestRef.current !== request) return false;
+      throw error;
     } finally {
-      if (loadRequestRef.current === request) setLoading(false);
+      if (showLoader && loadRequestRef.current === request) setLoading(false);
     }
-  }, []);
+  }, [mergeWorkspaceProject]);
 
-  const adoptWorkspace = useCallback(async (snapshot: DesktopWorkspaceSnapshot, preferredSessionId?: string): Promise<void> => {
+  const adoptWorkspace = useCallback(async (
+    snapshot: DesktopWorkspaceSnapshot,
+    preferredSessionId?: string,
+    activeRequest?: number
+  ): Promise<boolean> => {
+    const request = activeRequest ?? loadRequestRef.current + 1;
+    if (activeRequest === undefined) loadRequestRef.current = request;
+    if (loadRequestRef.current !== request) return false;
+    if (preferredSessionId) return await openSession(snapshot.project.id, preferredSessionId, true, request, snapshot);
     setPage("chat");
+    projectRef.current = snapshot.project.id;
+    selectedRef.current = undefined;
     mergeWorkspaceProject(snapshot);
     // 进入 Desktop 本身不等于恢复旧会话；只有用户点击会话、显式 handoff 或
     // 正在运行的 Host 会话才允许打开聊天正文。
-    const nextSessionId = preferredSessionId;
-    if (nextSessionId) await openSession(snapshot.project.id, nextSessionId);
-    else {
-      loadRequestRef.current += 1;
-      setSelectedSessionId(undefined);
-      setDocument(undefined);
-      setLoading(false);
-    }
+    setSelectedSessionId(undefined);
+    setDocument(undefined);
+    setContextBudget(undefined);
+    setLoading(false);
+    void window.biny.commitSelection(snapshot.project.id, undefined).catch((error) => setToast(errorMessage(error)));
+    return true;
   }, [mergeWorkspaceProject, openSession]);
 
-  const openNavigationTarget = useCallback(async (target: DesktopNavigationTarget): Promise<void> => {
-    if (target.sessionId === undefined) {
-      await adoptWorkspace(await window.biny.startDraft(target.projectId));
-      setFocusToken((value) => value + 1);
-      return;
+  const openNavigationTarget = useCallback(async (target: DesktopNavigationTarget): Promise<boolean> => {
+    // 从项目选择到会话读取共用同一个请求号，较早的跨项目请求不能在较新的点击后重新取得提交权。
+    const request = loadRequestRef.current + 1;
+    loadRequestRef.current = request;
+    setLoading(true);
+    try {
+      if (target.sessionId === undefined) {
+        const snapshot = await window.biny.startDraft(target.projectId);
+        if (loadRequestRef.current !== request) return false;
+        const adopted = await adoptWorkspace(snapshot, undefined, request);
+        if (adopted) setFocusToken((value) => value + 1);
+        return adopted;
+      }
+      if (target.projectId === projectRef.current) {
+        return await openSession(target.projectId, target.sessionId, false, request);
+      }
+      const snapshot = await window.biny.selectProject(target.projectId);
+      if (loadRequestRef.current !== request) return false;
+      return await openSession(target.projectId, target.sessionId, false, request, snapshot);
+    } catch (error) {
+      if (loadRequestRef.current !== request) return false;
+      throw error;
+    } finally {
+      if (loadRequestRef.current === request) setLoading(false);
     }
-    if (target.projectId === projectRef.current) {
-      await openSession(target.projectId, target.sessionId);
-      return;
-    }
-    await adoptWorkspace(await window.biny.selectProject(target.projectId), target.sessionId);
   }, [adoptWorkspace, openSession]);
 
   useEffect(() => {
@@ -308,8 +359,8 @@ export function App(): React.JSX.Element {
         // 在 bootstrap 中带 selectedSessionId。历史 session 仍只展示在侧栏。
         const nextSessionId = bootstrap.selectedSessionId;
         if (nextSessionId) {
-          await openSession(bootstrap.workspace.project.id, nextSessionId);
-          commitNavigation(pushNavigation(createNavigationState(), { projectId: bootstrap.workspace.project.id, sessionId: nextSessionId }));
+          const opened = await openSession(bootstrap.workspace.project.id, nextSessionId);
+          if (opened) commitNavigation(pushNavigation(createNavigationState(), { projectId: bootstrap.workspace.project.id, sessionId: nextSessionId }));
         }
         else setLoading(false);
       } else {
@@ -365,18 +416,21 @@ export function App(): React.JSX.Element {
 
   const selectProject = useCallback(async (projectId: string): Promise<void> => {
     if (projectId === projectRef.current) return;
+    const request = loadRequestRef.current + 1;
+    loadRequestRef.current = request;
     setLoading(true);
-    setDocument(undefined);
     try {
       const snapshot = await window.biny.selectProject(projectId);
-      await adoptWorkspace(snapshot);
+      if (loadRequestRef.current === request) await adoptWorkspace(snapshot, undefined, request);
     } catch (error) {
-      setLoading(false);
-      setToast(errorMessage(error));
+      if (loadRequestRef.current === request) setToast(errorMessage(error));
+    } finally {
+      if (loadRequestRef.current === request) setLoading(false);
     }
   }, [adoptWorkspace]);
 
   const newTask = useCallback(async (targetProjectId = projectRef.current): Promise<void> => {
+    setRuntimePanelOpen(false);
     const projectId = targetProjectId;
     if (!projectId) {
       await openProject();
@@ -385,24 +439,50 @@ export function App(): React.JSX.Element {
     const target: DesktopNavigationTarget = { projectId, sessionId: undefined };
     const previousNavigation = navigationRef.current;
     try {
-      await openNavigationTarget(target);
-      commitNavigation(pushNavigation(previousNavigation, target));
+      if (await openNavigationTarget(target)) commitNavigation(pushNavigation(previousNavigation, target));
     } catch (error) {
       setToast(errorMessage(error));
     }
   }, [commitNavigation, openNavigationTarget, openProject]);
 
+  const openRuntimePanel = useCallback((): void => {
+    if (!projectRef.current) {
+      setToast("请先打开项目，再查看自动化与后台运行。");
+      return;
+    }
+    setPage("chat");
+    setSearchOpen(false);
+    setRuntimePanelOpen(true);
+  }, []);
+
   const navigateToSession = useCallback(async (projectId: string, sessionId: string): Promise<void> => {
     const previousNavigation = navigationRef.current;
     const target: DesktopNavigationTarget = { projectId, sessionId };
-    commitNavigation(pushNavigation(previousNavigation, target));
     try {
-      await openNavigationTarget(target);
+      if (await openNavigationTarget(target)) commitNavigation(pushNavigation(previousNavigation, target));
     } catch (error) {
-      commitNavigation(previousNavigation);
       setToast(errorMessage(error));
     }
   }, [commitNavigation, openNavigationTarget]);
+
+  const navigateHistory = useCallback(async (direction: -1 | 1): Promise<void> => {
+    const previousNavigation = navigationRef.current;
+    const nextNavigation = moveNavigation(previousNavigation, direction);
+    if (!nextNavigation.target) return;
+    try {
+      if (await openNavigationTarget(nextNavigation.target)) commitNavigation(nextNavigation.state);
+    } catch (error) {
+      setToast(errorMessage(error));
+    }
+  }, [commitNavigation, openNavigationTarget]);
+
+  const toggleSessionPinned = useCallback(async (session: DesktopSessionSummary, pinned = !session.pinned): Promise<void> => {
+    try {
+      mergeProjectSnapshot(await window.biny.pinSession(session.projectId, session.id, pinned, session.metadataRevision));
+    } catch (error) {
+      setToast(errorMessage(error));
+    }
+  }, [mergeProjectSnapshot]);
 
   const openSessionMenu = useCallback(async (session: DesktopSessionSummary): Promise<void> => {
     try {
@@ -413,7 +493,7 @@ export function App(): React.JSX.Element {
         return;
       }
       if (action === "pin" || action === "unpin") {
-        mergeProjectSnapshot(await window.biny.pinSession(session.projectId, session.id, action === "pin", session.metadataRevision));
+        await toggleSessionPinned(session, action === "pin");
         return;
       }
       if (action === "archive" || action === "unarchive") {
@@ -426,7 +506,7 @@ export function App(): React.JSX.Element {
         if (projectRef.current !== session.projectId) {
           snapshot = await window.biny.selectProject(session.projectId);
         }
-        await adoptWorkspace(snapshot);
+        await adoptWorkspace(snapshot, snapshot.selectedSessionId);
         if (snapshot.selectedSessionId) {
           commitNavigation(pushNavigation(previousNavigation, {
             projectId: session.projectId,
@@ -439,7 +519,7 @@ export function App(): React.JSX.Element {
       const deletingSelectedSession = projectRef.current === session.projectId && selectedRef.current === session.id;
       const snapshot = await window.biny.deleteSession(session.projectId, session.id);
       if (projectRef.current === session.projectId) {
-        await adoptWorkspace(snapshot);
+        await adoptWorkspace(snapshot, snapshot.selectedSessionId);
         if (deletingSelectedSession) {
           commitNavigation(replaceNavigation(navigationRef.current, {
             projectId: session.projectId,
@@ -452,7 +532,7 @@ export function App(): React.JSX.Element {
     } catch (error) {
       setToast(errorMessage(error));
     }
-  }, [adoptWorkspace, commitNavigation, mergeProjectSnapshot]);
+  }, [adoptWorkspace, commitNavigation, mergeProjectSnapshot, toggleSessionPinned]);
 
   useEffect(() => {
     menuActionRef.current = (action) => {
@@ -501,6 +581,12 @@ export function App(): React.JSX.Element {
     const projectId = projectRef.current;
     if (!projectId) throw new Error("请先打开一个项目。");
     setSlashResult(await window.biny.runSlashCommand(projectId, selectedRef.current, command));
+  }, []);
+
+  const runInspectorCommand = useCallback(async (command: string): Promise<DesktopSlashResult> => {
+    const projectId = projectRef.current;
+    if (!projectId) throw new Error("请先打开一个项目。");
+    return await window.biny.runSlashCommand(projectId, selectedRef.current, command);
   }, []);
 
   const editPrompt = useCallback(async (
@@ -565,7 +651,7 @@ export function App(): React.JSX.Element {
     const previousNavigation = navigationRef.current;
     try {
       const snapshot = await window.biny.duplicateSession(projectId, sessionId);
-      await adoptWorkspace(snapshot);
+      await adoptWorkspace(snapshot, snapshot.selectedSessionId);
       if (snapshot.selectedSessionId) commitNavigation(pushNavigation(previousNavigation, { projectId, sessionId: snapshot.selectedSessionId }));
       setToast("已创建会话分支");
     } catch (error) {
@@ -686,7 +772,9 @@ export function App(): React.JSX.Element {
     onFilePanelWidthChange: setFilePanelWidth,
     onListDirectory: listWorkspaceDirectory,
     onOpenFile: openWorkspaceFile,
+    onOpenBrowser: openBrowser,
     onReadFile: readWorkspaceFile,
+    onRunCommand: runInspectorCommand,
     projectId: workspace?.project.id,
     source: `${workspace?.project.id ?? "none"}:${document?.session.id ?? "draft"}`
   });
@@ -717,6 +805,7 @@ export function App(): React.JSX.Element {
   const selectedPendingPermission = pendingPermissionSnapshot?.sessionId === selectedSessionId ? pendingPermissionSnapshot : undefined;
   const selectedRunId = selectedActiveRun?.runId ?? selectedPendingPermission?.runId;
   const selectedRunning = Boolean(activeSessionId && activeSessionId === selectedSessionId);
+  const selectedThinking = selectedActiveRun?.status === "thinking";
   const activeElsewhere = Boolean(activeSessionId && selectedSessionId && activeSessionId !== selectedSessionId);
   const composer = (
     <Composer
@@ -771,12 +860,15 @@ export function App(): React.JSX.Element {
             onImportCookies={async () => await window.biny.importCookies()}
             onLoadCookieJarStatus={loadCookieJarStatus}
             onLoadMemoryOverview={loadMemoryOverview}
+            onLoadPersonalizationOverview={loadPersonalizationOverview}
             onLoadWebSearchSettings={loadWebSearchSettings}
             onOpenBrowser={openBrowser}
             onOpenExternal={async (url) => await window.biny.openExternal(url)}
             onRemoveModelConfiguration={removeModelConfiguration}
             onSaveMemorySettings={saveMemorySettings}
             onSaveModelConfiguration={saveModelConfiguration}
+            onSaveChatPersonalization={saveChatPersonalization}
+            onSavePersonalizationSettings={savePersonalizationSettings}
             onSaveWebSearchSettings={saveWebSearchSettings}
             onSearchMemory={searchMemory}
             onSkipModelSetup={closeSettings}
@@ -785,6 +877,8 @@ export function App(): React.JSX.Element {
             onTestModelConfiguration={testModelConfiguration}
             onThemePreference={changeThemePreference}
             open={settingsOpen}
+            sessionId={selectedSessionId}
+            sessionRunning={Boolean(activeSessionId)}
             targetTab={settingsTargetTab}
             themePreference={themePreference}
             fontPreference={fontPreference}
@@ -815,13 +909,16 @@ export function App(): React.JSX.Element {
       </>
       )}
       rightPanel={inspector.dock}
+      rightSidebar={inspector.layout}
       sidebarLayout={sidebarLayout}
       sideNav={(
         <Sidebar
+          activeNavigation={page === "extensions" ? "extensions" : runtimePanelOpen ? "runtime" : undefined}
           activeProjectId={workspace?.project.id}
           onCreateEmptyProject={() => void createEmptyProject()}
           onNewTask={(projectId) => void newTask(projectId)}
           onOpenProject={() => void openProject()}
+          onOpenRuntime={openRuntimePanel}
           onOpenTerminalProject={(projectId) => { void window.biny.openProjectTerminal(projectId).catch((error) => setToast(errorMessage(error))); }}
           onProjectPinned={(projectId, pinned) => void toggleProjectPinned(projectId, pinned)}
           onRefreshProject={(projectId) => { void window.biny.refreshProject(projectId).then(mergeProjectSnapshot).catch((error) => setToast(errorMessage(error))); }}
@@ -833,11 +930,16 @@ export function App(): React.JSX.Element {
           onSelectSession={(projectId, sessionId) => void navigateToSession(projectId, sessionId)}
           onLoadSessionChildren={loadSessionChildren}
           onSessionMenu={(session) => void openSessionMenu(session)}
+          onSessionPin={(session) => { void toggleSessionPinned(session); }}
           onExtensions={openExtensions}
           onSettings={() => openSettings()}
           onResizeKeyDown={onSidebarResizeKeyDown}
           onResizePointerDown={onSidebarResizePointerDown}
           onToggleSidebar={toggleSidebar}
+          canGoBack={canNavigateBack(navigationState)}
+          canGoForward={canNavigateForward(navigationState)}
+          onNavigateBack={() => { void navigateHistory(-1); }}
+          onNavigateForward={() => { void navigateHistory(1); }}
           layout={sidebarLayout}
           projects={projects}
           selectedSessionId={selectedSessionId}
@@ -857,18 +959,23 @@ export function App(): React.JSX.Element {
         onOpenExternal={(url) => void window.biny.openExternal(url).catch((error) => setToast(errorMessage(error)))}
         onOpenProject={() => void openProject()}
         onPreviewFile={inspector.previewFile}
+        inspectorOpen={inspector.open}
         onResolvePermission={resolvePermission}
         onResume={resumeInterruptedTurn}
         onRollbackFiles={rollbackFiles}
         onRetry={(input) => void sendPrompt(input, "chat", []).catch((error) => setToast(errorMessage(error)))}
-        onToggleFiles={inspector.toggleFiles}
+        onToggleInspector={inspector.toggleInspector}
+        onRuntimePanelOpenChange={setRuntimePanelOpen}
         project={workspace?.project}
         projectId={workspace?.project.id}
         runtimeError={workspace?.runtimeError}
+        runtimePanelOpen={runtimePanelOpen}
         runtimeProjection={workspace?.runtimeProjection}
         sessionId={selectedSessionId}
         sessionTitle={sessionSummary?.title}
         sessionUsage={sessionUsage}
+        thinking={selectedThinking}
+        thinkingStartedAt={selectedActiveRun?.startedAt}
         turns={visibleTurns}
         onRuntimeError={reportRuntimeError}
         onRuntimeMutation={mutateRuntime}

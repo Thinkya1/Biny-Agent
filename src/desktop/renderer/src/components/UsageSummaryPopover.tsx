@@ -6,17 +6,22 @@
  */
 import { useEffect, type RefObject } from "react";
 import type { UsageSummary } from "../../../../session/metadata.js";
-import { formatTokenCount, formatUsageCost } from "../usagePresentation.js";
+import { formatCacheHitRate, formatTokenCount, formatUsageCost } from "../usagePresentation.js";
+import { useClosingPresence } from "../useClosingPresence.js";
 import { Icon } from "./Icon.js";
 
 interface UsageSummaryPopoverProps {
   anchorRef: RefObject<HTMLDivElement | null>;
+  open: boolean;
   onClose(): void;
   summary: UsageSummary;
 }
 
-export function UsageSummaryPopover({ anchorRef, onClose, summary }: UsageSummaryPopoverProps): React.JSX.Element {
+export function UsageSummaryPopover({ anchorRef, open, onClose, summary }: UsageSummaryPopoverProps): React.JSX.Element | null {
+  const presence = useClosingPresence(open);
+
   useEffect(() => {
+    if (!open) return;
     const closeOnOutsidePointer = (event: PointerEvent): void => {
       const target = event.target;
       if (!(target instanceof Node) || anchorRef.current?.contains(target)) return;
@@ -31,10 +36,12 @@ export function UsageSummaryPopover({ anchorRef, onClose, summary }: UsageSummar
       window.removeEventListener("pointerdown", closeOnOutsidePointer);
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [anchorRef, onClose]);
+  }, [anchorRef, onClose, open]);
+
+  if (!presence.present) return null;
 
   return (
-    <section aria-label="本会话费用" className="cindy-usage-popover" role="dialog">
+    <section aria-label="本会话费用与用量" className="cindy-usage-popover" data-popover-phase={presence.phase} role="dialog">
       <header className="cindy-usage-popover-header">
         <div>
           <strong>本会话费用</strong>
@@ -66,6 +73,18 @@ export function UsageSummaryPopover({ anchorRef, onClose, summary }: UsageSummar
         <div className="cindy-usage-stat">
           <span>输出 Token</span>
           <strong>{formatTokenCount(summary.outputTokens)}</strong>
+        </div>
+        <div className="cindy-usage-stat">
+          <span>最近缓存命中</span>
+          <strong>{formatCacheHitRate(summary.latestCacheHitRate)}</strong>
+        </div>
+        <div className="cindy-usage-stat">
+          <span>缓存读取</span>
+          <strong>{formatTokenCount(summary.cacheReadTokens)}</strong>
+        </div>
+        <div className="cindy-usage-stat">
+          <span>缓存写入</span>
+          <strong>{formatTokenCount(summary.cacheWriteTokens)}</strong>
         </div>
       </div>
 

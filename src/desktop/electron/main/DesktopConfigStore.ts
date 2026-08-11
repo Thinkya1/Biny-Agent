@@ -14,6 +14,12 @@ import {
 } from "../../../config/credentials.js";
 import type { AgentConfig } from "../../../config/schema.js";
 import type { AgentConfigStore } from "../../../config/store.js";
+import {
+  assertConfigRevision,
+  configDocumentRevision,
+  withGlobalConfigWriteLock,
+  type VersionedConfigSnapshot
+} from "../../../config/versioned.js";
 
 export class DesktopConfigStore implements AgentConfigStore {
   private writeTail = Promise.resolve();
@@ -29,14 +35,31 @@ export class DesktopConfigStore implements AgentConfigStore {
   }
 
   async save(config: AgentConfig, workspaceRoot = this.root): Promise<void> {
-    const run = this.writeTail.then(async () => {
-      const previous = await this.load(workspaceRoot);
-      await saveStoredCredentials(config, this.credentials, previous);
-      await saveConfig(workspaceRoot, config, { globalDir: this.root });
-      this.currentRevision += 1;
-    });
+    const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(
+      this.root,
+      async () => await this.saveUnlocked(config, workspaceRoot)
+    ));
     this.writeTail = run.catch(() => undefined);
     await run;
+  }
+
+  async loadVersioned(workspaceRoot = this.root): Promise<VersionedConfigSnapshot> {
+    const config = await this.load(workspaceRoot);
+    return { config, revision: configDocumentRevision(config) };
+  }
+
+  async saveVersioned(
+    config: AgentConfig,
+    expectedRevision: string,
+    workspaceRoot = this.root
+  ): Promise<VersionedConfigSnapshot> {
+    const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(this.root, async () => {
+      assertConfigRevision(expectedRevision, await this.load(workspaceRoot));
+      await this.saveUnlocked(config, workspaceRoot);
+      return await this.loadVersioned(workspaceRoot);
+    }));
+    this.writeTail = run.then(() => undefined, () => undefined);
+    return await run;
   }
 
   configPath(): string {
@@ -45,5 +68,12 @@ export class DesktopConfigStore implements AgentConfigStore {
 
   revision(): number {
     return this.currentRevision;
+  }
+
+  private async saveUnlocked(config: AgentConfig, workspaceRoot: string): Promise<void> {
+    const previous = await this.load(workspaceRoot);
+    await saveStoredCredentials(config, this.credentials, previous);
+    await saveConfig(workspaceRoot, config, { globalDir: this.root });
+    this.currentRevision += 1;
   }
 }

@@ -52,6 +52,7 @@ await testSubagentQueueLimitAndNumericValidation();
 await testQueuedSubagentCancellationAndListenerIsolation();
 await testSubagentListenerReentrancyIsSafe();
 await testSubagentInspectionControls();
+await testSubagentForegroundSeparator();
 await testStatusCommandUsesStructuredContextStatus();
 await testCliBackgroundSubagentIsReachable();
 await testSubagentParentCancellationAndTimeout();
@@ -370,6 +371,35 @@ async function testSubagentInspectionControls(): Promise<void> {
   await runtime.close();
 }
 
+async function testSubagentForegroundSeparator(): Promise<void> {
+  const tasks: string[] = [];
+  const commandRuntime = fakeCommandRuntime({
+    runSubagentTask: async (task) => {
+      tasks.push(task);
+      return `answered:${task}`;
+    }
+  });
+  const runtime = new InteractiveAgentRuntime(commandRuntime);
+
+  for (const task of [
+    "status of the current implementation",
+    "start by checking the parser",
+    "cancel paths need review",
+    "agents should preserve this question"
+  ]) {
+    const response = await executeRuntimeCommand(runtime, commandRuntime, `/subagent -- ${task}`, "desktop");
+    assert.equal(response?.content, `answered:${task}`);
+  }
+
+  assert.deepEqual(tasks, [
+    "status of the current implementation",
+    "start by checking the parser",
+    "cancel paths need review",
+    "agents should preserve this question"
+  ]);
+  await runtime.close();
+}
+
 async function testStatusCommandUsesStructuredContextStatus(): Promise<void> {
   const commandRuntime = fakeCommandRuntime();
   const runtime = new InteractiveAgentRuntime(commandRuntime);
@@ -592,12 +622,14 @@ async function testRuntimeCloseDefersCleanupForNonCooperativeRun(): Promise<void
   let closeCalls = 0;
   let closedWhileWriting = false;
   const runtime = new InteractiveAgentRuntime(fakeCommandRuntime({
-    run: async function* (): AsyncGenerator<AgentSessionEvent> {
+    run: async function* (_input, options): AsyncGenerator<AgentSessionEvent> {
       writerActive = true;
       started.resolve();
       try {
         await release.promise;
-        yield completed("late completion");
+        // 这个 fake 位于 AgentSession.prompt 边界；真实 AgentSession 会把已观察到的 abort
+        // 收敛成 canonical cancelled，再向 Interactive runtime 交付 terminal done。
+        yield options.abortSignal?.aborted ? cancelled("late cancellation") : completed("late completion");
       } finally {
         writerActive = false;
       }
@@ -1341,6 +1373,20 @@ function completed(content: string): Extract<AgentSessionEvent, { type: "done" }
       finishReason: "stop",
       steps: 1,
       output: content
+    }
+  };
+}
+
+function cancelled(content: string): Extract<AgentSessionEvent, { type: "done" }> {
+  return {
+    type: "done",
+    content,
+    outcome: {
+      status: "cancelled",
+      stopReason: "cancelled",
+      steps: 0,
+      output: content,
+      error: "Current turn cancelled."
     }
   };
 }

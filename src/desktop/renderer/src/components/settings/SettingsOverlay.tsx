@@ -7,7 +7,7 @@ import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { Dialog } from "@astryxdesign/core/Dialog";
 import { createPortal } from "react-dom";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
-import type { DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopMemorySettings, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopThemePreference, DesktopWebSearchProvider, DesktopWebSearchSettings, DesktopWebSearchSettingsInput, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { DesktopChatPersonalizationOverride, DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEntryInput, DesktopMemoryKind, DesktopMemoryOverview, DesktopMemoryScope, DesktopMemorySearchMatch, DesktopMemorySettingsInput, DesktopMemorySettingsSnapshot, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopPersonalizationOverview, DesktopPersonalizationSettingsInput, DesktopThemePreference, DesktopWebSearchProvider, DesktopWebSearchSettings, DesktopWebSearchSettingsInput, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
   catalogForConnection,
   customCatalogEntry,
@@ -23,6 +23,7 @@ import { Icon } from "../Icon.js";
 import { ProviderBrandGlyph } from "../ProviderBrandGlyph.js";
 import { SettingsAbout } from "./SettingsAbout.js";
 import { SettingsAppearance } from "./SettingsAppearance.js";
+import { SettingsPersonalization } from "./SettingsPersonalization.js";
 
 interface SettingsOverlayProps {
   open: boolean;
@@ -41,13 +42,18 @@ interface SettingsOverlayProps {
   onTestModelConfiguration(configuration: DesktopModelConfigurationInput): Promise<DesktopModelConnectionTestResult>;
   onRemoveModelConfiguration(alias: string): Promise<void>;
   onFetchModelCatalog(providerAlias: string): Promise<DesktopModelCatalogResult>;
-  onLoadMemoryOverview(): Promise<DesktopMemoryOverview>;
-  onSaveMemorySettings(input: DesktopMemorySettings): Promise<DesktopMemoryOverview>;
-  onSearchMemory(query: string): Promise<DesktopMemorySearchMatch[]>;
-  onAddMemoryEntry(topic: string, note: string): Promise<DesktopMemoryOverview>;
-  onDeleteMemoryEntry(topic: string, index: number): Promise<DesktopMemoryOverview>;
-  onClearMemory(): Promise<DesktopMemoryOverview>;
-  onCompactMemory(): Promise<DesktopMemoryCompactionResult[]>;
+  sessionId?: string;
+  sessionRunning: boolean;
+  onLoadPersonalizationOverview(sessionId?: string): Promise<DesktopPersonalizationOverview>;
+  onSavePersonalizationSettings(input: DesktopPersonalizationSettingsInput, sessionId?: string): Promise<DesktopPersonalizationOverview>;
+  onSaveChatPersonalization(sessionId: string, input: DesktopChatPersonalizationOverride, expectedRevision: string): Promise<DesktopPersonalizationOverview>;
+  onLoadMemoryOverview(scope: DesktopMemoryScope): Promise<DesktopMemoryOverview>;
+  onSaveMemorySettings(input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot>;
+  onSearchMemory(scope: DesktopMemoryScope, query: string): Promise<DesktopMemorySearchMatch[]>;
+  onAddMemoryEntry(scope: DesktopMemoryScope, input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  onDeleteMemoryEntry(scope: DesktopMemoryScope, entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  onClearMemory(scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  onCompactMemory(scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryCompactionResult>;
   onOpenExternal(url: string): Promise<void>;
   onLoadWebSearchSettings(): Promise<DesktopWebSearchSettings>;
   onSaveWebSearchSettings(input: DesktopWebSearchSettingsInput): Promise<DesktopWebSearchSettings>;
@@ -61,10 +67,11 @@ interface SettingsOverlayProps {
   onCancelModelLogin(provider: DesktopModelLoginProvider, authRequestId: string): Promise<void>;
 }
 
-export type SettingsTab = "外观" | "模型" | "记忆" | "联网搜索" | "关于";
+export type SettingsTab = "外观" | "个性化" | "模型" | "记忆" | "联网搜索" | "关于";
 
 const settingsNav: Array<{ badge?: string; tab: SettingsTab; label: string }> = [
   { tab: "外观", label: "外观" },
+  { tab: "个性化", label: "个性化" },
   { tab: "模型", label: "模型供应商" },
   { tab: "记忆", label: "记忆" },
   { badge: "Beta", tab: "联网搜索", label: "联网搜索" },
@@ -73,6 +80,7 @@ const settingsNav: Array<{ badge?: string; tab: SettingsTab; label: string }> = 
 
 const settingsTitles: Record<SettingsTab, string> = {
   外观: "外观",
+  个性化: "个性化",
   模型: "模型供应商",
   记忆: "记忆",
   联网搜索: "联网搜索",
@@ -82,6 +90,7 @@ const settingsTitles: Record<SettingsTab, string> = {
 const settingsSubtitles: Record<SettingsTab, string> = {
   模型: "模型连接、API key 与默认模型管理。",
   外观: "显示模式、界面字体和字号。",
+  个性化: "设置 Biny 的表达方式、长期偏好与当前聊天覆盖。",
   记忆: "记忆检索、自动总结、整理与条目管理。",
   联网搜索: "配置联网搜索与数据来源。",
   关于: "版本与产品信息。"
@@ -104,6 +113,11 @@ export function SettingsOverlay({
   onTestModelConfiguration,
   onRemoveModelConfiguration,
   onFetchModelCatalog,
+  sessionId,
+  sessionRunning,
+  onLoadPersonalizationOverview,
+  onSavePersonalizationSettings,
+  onSaveChatPersonalization,
   onLoadMemoryOverview,
   onSaveMemorySettings,
   onSearchMemory,
@@ -230,6 +244,14 @@ export function SettingsOverlay({
             }}
           /> : null}
           {tab === "外观" ? <SettingsAppearance theme={themePreference} onThemeChange={onThemePreference} font={fontPreference} onFontChange={onFontPreference} /> : null}
+          {tab === "个性化" ? <SettingsPersonalization
+            onLoad={onLoadPersonalizationOverview}
+            onNotify={setMessage}
+            onSaveChat={onSaveChatPersonalization}
+            onSaveSettings={onSavePersonalizationSettings}
+            sessionId={sessionId}
+            sessionRunning={sessionRunning}
+          /> : null}
           {tab === "记忆" ? <SettingsMemory
             models={workspace?.models ?? []}
             onLoad={onLoadMemoryOverview}
@@ -1672,38 +1694,53 @@ function SettingsWebSearch({ onLoad, onSave, onNotify, onOpenExternal, onLoadCoo
   );
 }
 
-const memoryTopicOptions = [
+const projectMemoryTopicOptions = [
   { value: "project", label: "project · 项目事实" },
   { value: "decisions", label: "decisions · 决策" },
   { value: "debugging", label: "debugging · 调试经验" },
   { value: "workflows", label: "workflows · 工作流" }
 ];
+const globalMemoryTopicOptions = [
+  { value: "preferences", label: "preferences · 长期偏好" },
+  { value: "working-style", label: "working-style · 工作方式" }
+];
+const memoryKindOptions: Array<{ value: DesktopMemoryKind; label: string }> = [
+  { value: "preference", label: "偏好" },
+  { value: "working_style", label: "工作方式" },
+  { value: "fact", label: "事实" },
+  { value: "decision", label: "决策" },
+  { value: "workflow", label: "流程" },
+  { value: "gotcha", label: "踩坑" }
+];
 
 /**
- * 记忆设置面板：开关/检索条数/自动总结/专用模型走显式保存（改配置要重建 runtime）；
- * 整理、添加、搜索、删除是即时操作，成功后用主进程返回的最新总览整体替换本地状态。
+ * 记忆策略是全局配置；条目库按 global/project 切换，并分别使用自己的 CAS revision。
  */
 function SettingsMemory({ models, onLoad, onSaveSettings, onSearch, onAdd, onDeleteEntry, onClear, onCompact, onNotify }: {
   models: ModelChoice[];
-  onLoad(): Promise<DesktopMemoryOverview>;
-  onSaveSettings(input: DesktopMemorySettings): Promise<DesktopMemoryOverview>;
-  onSearch(query: string): Promise<DesktopMemorySearchMatch[]>;
-  onAdd(topic: string, note: string): Promise<DesktopMemoryOverview>;
-  onDeleteEntry(topic: string, index: number): Promise<DesktopMemoryOverview>;
-  onClear(): Promise<DesktopMemoryOverview>;
-  onCompact(): Promise<DesktopMemoryCompactionResult[]>;
+  onLoad(scope: DesktopMemoryScope): Promise<DesktopMemoryOverview>;
+  onSaveSettings(input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot>;
+  onSearch(scope: DesktopMemoryScope, query: string): Promise<DesktopMemorySearchMatch[]>;
+  onAdd(scope: DesktopMemoryScope, input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  onDeleteEntry(scope: DesktopMemoryScope, entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  onClear(scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  onCompact(scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryCompactionResult>;
   onNotify(message: string): void;
 }): React.JSX.Element {
+  const [scope, setScope] = useState<DesktopMemoryScope>("project");
   const [overview, setOverview] = useState<DesktopMemoryOverview>();
   const [loadError, setLoadError] = useState<string>();
-  const [enabled, setEnabled] = useState(true);
-  const [autoRemember, setAutoRemember] = useState(true);
+  const [useMemories, setUseMemories] = useState(true);
+  const [generateMemories, setGenerateMemories] = useState(true);
+  const [excludeExternalContext, setExcludeExternalContext] = useState(true);
   const [maxRecalled, setMaxRecalled] = useState(3);
-  // "" 表示未指定专用模型（跟随会话模型）。
-  const [modelAlias, setModelAlias] = useState("");
+  const [extractModel, setExtractModel] = useState("");
+  const [consolidationModel, setConsolidationModel] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [noteTopic, setNoteTopic] = useState("project");
+  const [noteKind, setNoteKind] = useState<DesktopMemoryKind>("fact");
+  const [importance, setImportance] = useState(3);
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<DesktopMemorySearchMatch[]>();
   const [compactReport, setCompactReport] = useState<string>();
@@ -1711,82 +1748,118 @@ function SettingsMemory({ models, onLoad, onSaveSettings, onSearch, onAdd, onDel
 
   const adopt = useCallback((next: DesktopMemoryOverview): void => {
     setOverview(next);
-    setEnabled(next.settings.enabled);
-    setAutoRemember(next.settings.autoRemember);
+    setUseMemories(next.settings.useMemories);
+    setGenerateMemories(next.settings.generateMemories);
+    setExcludeExternalContext(next.settings.excludeExternalContext);
     setMaxRecalled(next.settings.maxRecalled);
-    setModelAlias(next.settings.model ?? "");
+    setExtractModel(next.settings.extractModel ?? "");
+    setConsolidationModel(next.settings.consolidationModel ?? "");
   }, []);
 
-  // 加载期间组件可能被卸载（用户切走分页），用 cancelled 标志避免对已卸载组件 setState。
   useEffect(() => {
     let cancelled = false;
-    onLoad()
+    setOverview(undefined);
+    setLoadError(undefined);
+    setSearchResults(undefined);
+    setCompactReport(undefined);
+    setConfirmClear(false);
+    onLoad(scope)
       .then((next) => { if (!cancelled) adopt(next); })
       .catch((error: unknown) => { if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error)); });
     return () => { cancelled = true; };
-  }, [adopt, onLoad]);
+  }, [adopt, onLoad, scope]);
+
+  const chooseScope = (next: DesktopMemoryScope): void => {
+    if (busy || next === scope) return;
+    setScope(next);
+    setNoteTopic(next === "global" ? "preferences" : "project");
+    setNoteKind(next === "global" ? "preference" : "fact");
+  };
 
   if (loadError) return <div className="settings-sections"><section><h3>无法加载记忆设置</h3><p>{loadError}</p></section></div>;
   if (!overview) return <div className="settings-sections"><section><p>正在加载记忆…</p></section></div>;
 
   const saved = overview.settings;
-  const settingsDirty = enabled !== saved.enabled
-    || autoRemember !== saved.autoRemember
+  const settingsDirty = useMemories !== saved.useMemories
+    || generateMemories !== saved.generateMemories
+    || excludeExternalContext !== saved.excludeExternalContext
     || maxRecalled !== saved.maxRecalled
-    || (modelAlias || undefined) !== saved.model;
+    || (extractModel || undefined) !== saved.extractModel
+    || (consolidationModel || undefined) !== saved.consolidationModel;
+  const topicOptions = scope === "global" ? globalMemoryTopicOptions : projectMemoryTopicOptions;
+  const kindOptions = scope === "global" ? memoryKindOptions.slice(0, 2) : memoryKindOptions.slice(2);
 
-  /** 即时操作的统一包装：串行化、错误 toast、成功后按需替换总览。 */
-  const execute = async (operation: () => Promise<DesktopMemoryOverview | undefined>, success?: string): Promise<boolean> => {
+  /** 即时操作的统一包装；CAS 冲突后重读当前 scope，避免继续提交旧 revision。 */
+  const execute = async (operation: () => Promise<DesktopMemoryOverview>, success?: string): Promise<boolean> => {
     if (busy) return false;
     setBusy(true);
     try {
-      const next = await operation();
-      if (next) adopt(next);
+      adopt(await operation());
       if (success) onNotify(success);
       return true;
     } catch (error) {
       onNotify(error instanceof Error ? error.message : String(error));
+      try {
+        adopt(await onLoad(scope));
+      } catch {
+        // 原始错误更有操作价值；刷新失败留给下一次显式刷新处理。
+      }
       return false;
     } finally {
       setBusy(false);
     }
   };
 
-  const saveSettings = (): void => {
-    void execute(async () => await onSaveSettings({
-      enabled,
-      autoRemember,
-      maxRecalled,
-      model: modelAlias || undefined
-    }), "记忆设置已保存");
+  const saveSettings = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const next = await onSaveSettings({
+        expectedRevision: overview.configRevision,
+        settings: {
+          useMemories,
+          generateMemories,
+          excludeExternalContext,
+          maxRecalled,
+          extractModel: extractModel || undefined,
+          consolidationModel: consolidationModel || undefined
+        }
+      });
+      adopt({ ...overview, configRevision: next.configRevision, settings: next.settings });
+      onNotify("记忆设置已保存");
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : String(error));
+      try {
+        adopt(await onLoad(scope));
+      } catch {
+        // 保留原始 CAS/配置错误。
+      }
+    } finally {
+      setBusy(false);
+    }
   };
 
   const compact = (): void => {
     setCompactReport(undefined);
     void execute(async () => {
-      const results = await onCompact();
-      if (!results.length) {
-        setCompactReport("记忆库为空，无需整理。");
-      } else {
-        const mergedCount = results.filter((result) => !result.error && result.after < result.before).length;
-        setCompactReport(results.map((result) => result.error
-          ? `${result.topic}：整理失败（${result.error}）`
-          : result.after < result.before
-            ? `${result.topic}：${String(result.before)} 条 → ${String(result.after)} 条`
-            : `${result.topic}：${String(result.before)} 条，无可合并内容`).join("\n"));
-        onNotify(mergedCount ? `整理完成，${String(mergedCount)} 个话题得到精简` : "整理完成，暂无可合并的条目");
-      }
-      return await onLoad();
+      const result = await onCompact(scope, overview.revision);
+      setCompactReport(result.error
+        ? `整理失败：${result.error}`
+        : result.after < result.before
+          ? `${String(result.before)} 条 → ${String(result.after)} 条`
+          : `${String(result.before)} 条，无可合并内容`);
+      onNotify(result.error ? "记忆整理未完成" : result.after < result.before ? "记忆整理完成" : "暂无可合并的记忆");
+      return await onLoad(scope);
     });
   };
 
   const search = (): void => {
     const trimmed = query.trim();
-    if (!trimmed) return;
+    if (!trimmed || busy) return;
     void (async () => {
       setBusy(true);
       try {
-        setSearchResults(await onSearch(trimmed));
+        setSearchResults(await onSearch(scope, trimmed));
       } catch (error) {
         onNotify(error instanceof Error ? error.message : String(error));
       } finally {
@@ -1798,7 +1871,12 @@ function SettingsMemory({ models, onLoad, onSaveSettings, onSearch, onAdd, onDel
   const addNote = (): void => {
     const trimmed = note.trim();
     if (!trimmed) return;
-    void execute(async () => await onAdd(noteTopic, trimmed), "记忆已添加").then((ok) => { if (ok) setNote(""); });
+    void execute(async () => await onAdd(scope, {
+      topic: noteTopic,
+      note: trimmed,
+      kind: noteKind,
+      importance
+    }, overview.revision), "记忆已添加").then((ok) => { if (ok) setNote(""); });
   };
 
   const clearAll = (): void => {
@@ -1807,49 +1885,53 @@ function SettingsMemory({ models, onLoad, onSaveSettings, onSearch, onAdd, onDel
       return;
     }
     setConfirmClear(false);
-    void execute(async () => await onClear(), "已清空全部记忆");
+    void execute(async () => await onClear(scope, overview.revision), `已清空${scope === "global" ? "全局" : "项目"}记忆`);
   };
 
   return (
     <div className="settings-sections">
-      <section>
-        <h3>记忆功能</h3>
-        <div className="setting-row">
-          <span><strong>启用记忆</strong><small>启用后在全局 Biny 数据目录的项目分区中自动沉淀与检索可审计记忆</small></span>
-          <button aria-checked={enabled} className={`setting-switch${enabled ? " is-on" : ""}`} onClick={() => setEnabled(!enabled)} role="switch" type="button"><span className="setting-switch-knob" /></button>
+      <section className="memory-scope-section">
+        <div className="section-heading-row">
+          <div><h3>记忆库</h3><p>全局记忆跨项目复用；项目记忆只在当前工作区使用。</p></div>
+          <span className="memory-revision">版本 {overview.revision}</span>
         </div>
-        <div className="setting-row">
-          <span><strong>自动总结对话</strong><small>任务成功后自动提取一条持久记忆；关闭后仍可检索与手动保存</small></span>
-          <button aria-checked={autoRemember} className={`setting-switch${autoRemember ? " is-on" : ""}`} disabled={!enabled} onClick={() => setAutoRemember(!autoRemember)} role="switch" type="button"><span className="setting-switch-knob" /></button>
-        </div>
-        <div className="setting-row">
-          <span><strong>最大检索记忆数</strong><small>每次对话自动注入上下文的相关记忆条数（1-20）</small></span>
-          <span className="memory-range-control">
-            <input
-              disabled={!enabled}
-              max={20}
-              min={1}
-              onChange={(event) => setMaxRecalled(Number(event.target.value))}
-              type="range"
-              value={maxRecalled}
-            />
-            <em>{maxRecalled}</em>
-          </span>
-        </div>
-        <div className="setting-row">
-          <span><strong>记忆工具模型</strong><small>为记忆提取与整理指定专用模型；留空使用当前会话模型</small></span>
-          <select className="web-search-select" disabled={!enabled} onChange={(event) => setModelAlias(event.target.value)} value={modelAlias}>
-            <option value="">跟随会话模型</option>
-            {models.map((model) => <option key={model.alias} value={model.alias}>{model.displayName}</option>)}
-          </select>
-        </div>
-        <div className="settings-button-row">
-          <button disabled={busy || !settingsDirty} onClick={saveSettings} type="button">{busy ? "处理中…" : "保存设置"}</button>
+        <div aria-label="记忆范围" className="settings-segmented" role="tablist">
+          <button aria-selected={scope === "project"} className={scope === "project" ? "is-selected" : ""} disabled={busy} onClick={() => chooseScope("project")} role="tab" type="button">当前项目</button>
+          <button aria-selected={scope === "global"} className={scope === "global" ? "is-selected" : ""} disabled={busy} onClick={() => chooseScope("global")} role="tab" type="button">全局</button>
         </div>
       </section>
 
       <section>
-        <h3>统计</h3>
+        <div className="section-heading-row"><div><h3>记忆策略</h3><p>策略保存在全局配置中，对两个记忆库共同生效。</p></div><span className="settings-scope-badge">全局</span></div>
+        <div className="setting-row">
+          <span><strong>使用记忆</strong><small>新根回合检索相关的全局与项目记忆</small></span>
+          <button aria-checked={useMemories} className={`setting-switch${useMemories ? " is-on" : ""}`} onClick={() => setUseMemories((value) => !value)} role="switch" type="button"><span className="setting-switch-knob" /></button>
+        </div>
+        <div className="setting-row">
+          <span><strong>生成记忆</strong><small>任务成功后提取可复用信息；关闭后不影响已有记忆</small></span>
+          <button aria-checked={generateMemories} className={`setting-switch${generateMemories ? " is-on" : ""}`} onClick={() => setGenerateMemories((value) => !value)} role="switch" type="button"><span className="setting-switch-knob" /></button>
+        </div>
+        <div className="setting-row">
+          <span><strong>排除外部上下文</strong><small>不把网页、附件等外部内容自动沉淀为记忆</small></span>
+          <button aria-checked={excludeExternalContext} className={`setting-switch${excludeExternalContext ? " is-on" : ""}`} onClick={() => setExcludeExternalContext((value) => !value)} role="switch" type="button"><span className="setting-switch-knob" /></button>
+        </div>
+        <div className="setting-row">
+          <span><strong>最大检索记忆数</strong><small>每个新根回合自动注入的相关记忆条数（1-20）</small></span>
+          <span className="memory-range-control"><input max={20} min={1} onChange={(event) => setMaxRecalled(Number(event.target.value))} type="range" value={maxRecalled} /><em>{maxRecalled}</em></span>
+        </div>
+        <div className="setting-row">
+          <span><strong>提取模型</strong><small>生成候选记忆时使用；留空跟随会话模型</small></span>
+          <select className="web-search-select" onChange={(event) => setExtractModel(event.target.value)} value={extractModel}><option value="">跟随会话模型</option>{models.map((model) => <option key={model.alias} value={model.alias}>{model.displayName}</option>)}</select>
+        </div>
+        <div className="setting-row">
+          <span><strong>整理模型</strong><small>合并同类记忆时使用；留空跟随会话模型</small></span>
+          <select className="web-search-select" onChange={(event) => setConsolidationModel(event.target.value)} value={consolidationModel}><option value="">跟随会话模型</option>{models.map((model) => <option key={model.alias} value={model.alias}>{model.displayName}</option>)}</select>
+        </div>
+        <div className="settings-button-row"><button disabled={busy || !settingsDirty} onClick={() => { void saveSettings(); }} type="button">{busy ? "处理中…" : "保存策略"}</button></div>
+      </section>
+
+      <section>
+        <h3>{scope === "global" ? "全局统计" : "项目统计"}</h3>
         <div className="memory-stat-grid">
           <div className="memory-stat-card"><strong>{overview.totalEntries}</strong><span>记忆总数</span></div>
           <div className="memory-stat-card"><strong>{overview.topics.length}</strong><span>话题数</span></div>
@@ -1857,94 +1939,72 @@ function SettingsMemory({ models, onLoad, onSaveSettings, onSearch, onAdd, onDel
         </div>
       </section>
 
-      {saved.enabled ? (
-        <>
-          <section>
-            <h3>记忆整理</h3>
-            <div className="setting-row">
-              <span><strong>整理记忆库</strong><small>用模型合并重复与相近条目、丢弃无长期价值的内容，逐话题重写文件</small></span>
-              <button className="ghost-button" disabled={busy || !overview.totalEntries} onClick={compact} type="button">{busy ? "处理中…" : "立即整理"}</button>
-            </div>
-            {compactReport ? <pre className="settings-memory-report">{compactReport}</pre> : null}
-          </section>
+      <section>
+        <h3>记忆整理</h3>
+        <div className="setting-row">
+          <span><strong>整理当前记忆库</strong><small>合并重复与相近条目，同时保留每条来源 lineage</small></span>
+          <button className="ghost-button" disabled={busy || !overview.totalEntries} onClick={compact} type="button">{busy ? "处理中…" : "立即整理"}</button>
+        </div>
+        {compactReport ? <pre className="settings-memory-report">{compactReport}</pre> : null}
+      </section>
 
-          <section>
-            <h3>添加记忆</h3>
-            <textarea
-              className="memory-note-input"
-              onChange={(event) => setNote(event.target.value)}
-              placeholder="输入您希望 AI 记住的内容…（至少 20 个字符）"
-              rows={3}
-              value={note}
-            />
-            <div className="memory-add-row">
-              <select className="web-search-select" onChange={(event) => setNoteTopic(event.target.value)} value={noteTopic}>
-                {memoryTopicOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-              </select>
-              <button disabled={busy || note.trim().length < 20} onClick={addNote} type="button">添加记忆</button>
-            </div>
-          </section>
+      <section>
+        <h3>添加记忆</h3>
+        <textarea className="memory-note-input" onChange={(event) => setNote(event.target.value)} placeholder={scope === "global" ? "输入明确的长期偏好或工作方式…（至少 20 个字符）" : "输入希望 Biny 在当前项目记住的内容…（至少 20 个字符）"} rows={3} value={note} />
+        <div className="memory-add-row is-detailed">
+          <select className="web-search-select" onChange={(event) => setNoteTopic(event.target.value)} value={noteTopic}>{topicOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
+          <select aria-label="记忆类型" className="web-search-select" onChange={(event) => setNoteKind(event.target.value as DesktopMemoryKind)} value={noteKind}>{kindOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
+          <label className="memory-importance-input"><span>重要度</span><input max={5} min={1} onChange={(event) => setImportance(Number(event.target.value))} type="number" value={importance} /></label>
+          <button disabled={busy || note.trim().length < 20} onClick={addNote} type="button">添加记忆</button>
+        </div>
+      </section>
 
-          <section>
-            <h3>搜索记忆</h3>
-            <div className="memory-search-row">
-              <input
-                className="settings-inline-input"
-                onChange={(event) => setQuery(event.target.value)}
-                onKeyDown={(event) => { if (event.key === "Enter") search(); }}
-                placeholder="按关键词搜索记忆…"
-                value={query}
-              />
-              <button className="ghost-button" disabled={busy || !query.trim()} onClick={search} type="button">搜索</button>
-            </div>
-            {searchResults ? (
-              searchResults.length ? (
-                <div className="memory-entry-list">
-                  {searchResults.map((match) => (
-                    <div className="memory-entry" key={`${match.topic}-${match.path}`}>
-                      <div className="memory-entry-head">
-                        <span className="memory-topic-tag">{match.topic}</span>
-                        <small>匹配度 {match.score}</small>
-                      </div>
-                      <p>{match.excerpt}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : <p className="memory-empty-hint">没有匹配的记忆。</p>
-            ) : null}
-          </section>
-
-          <section>
-            <div className="section-heading-row">
-              <div><h3>记忆列表</h3></div>
-              <span className="settings-inline-actions">
-                <button className="ghost-button" disabled={busy} onClick={() => { setConfirmClear(false); void execute(onLoad); }} type="button">刷新</button>
-                <button className="ghost-button is-danger" disabled={busy || !overview.totalEntries} onClick={clearAll} type="button">{confirmClear ? "确认清空？" : "清空全部"}</button>
-              </span>
-            </div>
-            {overview.entries.length ? (
-              <div className="memory-entry-list">
-                {overview.entries.map((entry) => (
-                  <div className="memory-entry" key={`${entry.topic}-${String(entry.index)}`}>
-                    <div className="memory-entry-head">
-                      <span className="memory-topic-tag">{entry.topic}</span>
-                      <small>{formatMemoryDate(entry.date)}</small>
-                      <button aria-label={`删除记忆：${entry.title}`} className="icon-button memory-entry-delete" disabled={busy} onClick={() => void execute(async () => await onDeleteEntry(entry.topic, entry.index), "记忆已删除")} type="button"><Icon name="close" size={12} /></button>
-                    </div>
-                    <strong>{entry.title}</strong>
-                    {entry.summary && entry.summary !== entry.title ? <p>{entry.summary}</p> : null}
-                  </div>
-                ))}
+      <section>
+        <h3>搜索记忆</h3>
+        <div className="memory-search-row">
+          <input className="settings-inline-input" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") search(); }} placeholder={`搜索${scope === "global" ? "全局" : "项目"}记忆…`} value={query} />
+          <button className="ghost-button" disabled={busy || !query.trim()} onClick={search} type="button">搜索</button>
+        </div>
+        {searchResults ? searchResults.length ? (
+          <div className="memory-entry-list">
+            {searchResults.map((match) => (
+              <div className="memory-entry" key={match.id}>
+                <div className="memory-entry-head"><span className="memory-topic-tag">{match.topic}</span><span className="memory-kind-tag">{memoryKindLabel(match.kind)}</span><span className="memory-importance">重要度 {match.importance}/5</span><small>{formatMemoryDate(match.updatedAt)} · 匹配度 {match.score}</small></div>
+                <p>{match.excerpt}</p>
+                <small className="memory-provenance">{memoryLineageLabel(match.lineage)}</small>
               </div>
-            ) : <p className="memory-empty-hint">记忆库为空。任务成功后会自动沉淀，也可在上方手动添加。</p>}
-          </section>
-        </>
-      ) : (
-        <section>
-          <h3>记忆已停用</h3>
-          <p className="memory-empty-hint">启用记忆并保存设置后，即可整理、添加、搜索与管理记忆条目。</p>
-        </section>
-      )}
+            ))}
+          </div>
+        ) : <p className="memory-empty-hint">没有匹配的记忆。</p> : null}
+      </section>
+
+      <section>
+        <div className="section-heading-row">
+          <div><h3>记忆列表</h3><p>来源、类型、时间与重要度均来自可审计存储记录。</p></div>
+          <span className="settings-inline-actions">
+            <button className="ghost-button" disabled={busy} onClick={() => { setConfirmClear(false); void execute(async () => await onLoad(scope)); }} type="button">刷新</button>
+            <button className="ghost-button is-danger" disabled={busy || !overview.totalEntries} onClick={clearAll} type="button">{confirmClear ? "确认清空？" : "清空当前范围"}</button>
+          </span>
+        </div>
+        {overview.entries.length ? (
+          <div className="memory-entry-list">
+            {overview.entries.map((entry) => (
+              <div className="memory-entry" key={entry.id}>
+                <div className="memory-entry-head">
+                  <span className="memory-topic-tag">{entry.topic}</span>
+                  <span className="memory-kind-tag">{memoryKindLabel(entry.kind)}</span>
+                  <span className="memory-importance">重要度 {entry.importance}/5</span>
+                  <small>{entry.updatedAt === entry.createdAt ? "创建于" : "更新于"} {formatMemoryDate(entry.updatedAt)}</small>
+                  <button aria-label={`删除记忆：${entry.title}`} className="icon-button memory-entry-delete" disabled={busy} onClick={() => { void execute(async () => await onDeleteEntry(scope, entry.id, overview.revision), "记忆已删除"); }} type="button"><Icon name="close" size={12} /></button>
+                </div>
+                <strong>{entry.title}</strong>
+                {entry.summary && entry.summary !== entry.title ? <p>{entry.summary}</p> : null}
+                <small className="memory-provenance">{memoryLineageLabel(entry.lineage)}</small>
+              </div>
+            ))}
+          </div>
+        ) : <p className="memory-empty-hint">当前范围还没有记忆。任务成功后可自动生成，也可在上方手动添加。</p>}
+      </section>
     </div>
   );
 }
@@ -1954,4 +2014,31 @@ function formatMemoryDate(value?: string): string {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return value;
   return new Date(parsed).toLocaleString(undefined, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function memoryKindLabel(kind: DesktopMemoryKind): string {
+  return memoryKindOptions.find((option) => option.value === kind)?.label ?? kind;
+}
+
+function memoryLineageLabel(lineage: NonNullable<DesktopMemoryOverview["entries"][number]["lineage"]>): string {
+  const sources = [...new Set(lineage.map((item) => memorySourceLabel(item.source)))];
+  const sessionIds = [...new Set(lineage.flatMap((item) => item.sessionId ? [item.sessionId] : []))];
+  const external = lineage.some((item) => item.externalContext);
+  return [
+    sources.join(" / "),
+    sessionIds.length ? `来源聊天 ${sessionIds.map(shortSessionId).join("、")}` : "",
+    external ? "含外部上下文" : ""
+  ].filter(Boolean).join(" · ");
+}
+
+function memorySourceLabel(source: DesktopMemoryOverview["entries"][number]["lineage"][number]["source"]): string {
+  if (source === "explicit") return "手动添加";
+  if (source === "completed_task") return "任务完成";
+  if (source === "candidate") return "候选确认";
+  if (source === "migration") return "旧版迁移";
+  return "记忆整理";
+}
+
+function shortSessionId(sessionId: string): string {
+  return sessionId.length <= 16 ? sessionId : `${sessionId.slice(0, 8)}…${sessionId.slice(-4)}`;
 }
