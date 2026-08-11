@@ -380,11 +380,20 @@ export function mapResponsesStopReason(status: unknown, incompleteDetails: unkno
 export type AgentModelFinishReason = "stop" | "tool-calls" | "length" | "error" | "aborted" | "other";
 
 export function mapOpenAiUsage(value: Record<string, any>): AgentUsage {
+  const promptDetails = isRecord(value.prompt_tokens_details) ? value.prompt_tokens_details : {};
   return {
     inputTokens: readNumber(value.prompt_tokens),
     outputTokens: readNumber(value.completion_tokens),
     totalTokens: readNumber(value.total_tokens),
-    reasoningTokens: isRecord(value.completion_tokens_details) ? readNumber(value.completion_tokens_details.reasoning_tokens) : undefined
+    reasoningTokens: isRecord(value.completion_tokens_details) ? readNumber(value.completion_tokens_details.reasoning_tokens) : undefined,
+    cacheReadTokens: readNumber(promptDetails.cached_tokens)
+      ?? readNumber(promptDetails.cache_read_tokens)
+      ?? readNumber(value.prompt_cache_hit_tokens)
+      ?? readNumber(value.cache_read_input_tokens),
+    cacheWriteTokens: readNumber(promptDetails.cache_write_tokens)
+      ?? readNumber(promptDetails.cache_creation_tokens)
+      ?? readNumber(value.prompt_cache_write_tokens)
+      ?? readNumber(value.cache_write_input_tokens)
   };
 }
 
@@ -393,7 +402,39 @@ export function mapResponsesUsage(value: Record<string, any>): AgentUsage {
   const outputTokens = readNumber(value.output_tokens);
   const totalTokens = readNumber(value.total_tokens) ?? sumUsage({ inputTokens }, outputTokens);
   const outputDetails = isRecord(value.output_tokens_details) ? value.output_tokens_details : {};
-  return { inputTokens, outputTokens, totalTokens, reasoningTokens: readNumber(outputDetails.reasoning_tokens) };
+  const inputDetails = isRecord(value.input_tokens_details) ? value.input_tokens_details : {};
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    reasoningTokens: readNumber(outputDetails.reasoning_tokens),
+    cacheReadTokens: readNumber(inputDetails.cached_tokens)
+      ?? readNumber(inputDetails.cache_read_tokens)
+      ?? readNumber(value.prompt_cache_hit_tokens)
+      ?? readNumber(value.cache_read_input_tokens),
+    cacheWriteTokens: readNumber(inputDetails.cache_write_tokens)
+      ?? readNumber(inputDetails.cache_creation_tokens)
+      ?? readNumber(value.prompt_cache_write_tokens)
+      ?? readNumber(value.cache_write_input_tokens)
+  };
+}
+
+/** 将 Anthropic 的未缓存输入与缓存读写输入归一化为 Biny 的完整 inputTokens。 */
+export function mapAnthropicUsage(value: Record<string, any>): AgentUsage {
+  const uncachedInputTokens = readNumber(value.input_tokens);
+  const cacheReadTokens = readNumber(value.cache_read_input_tokens);
+  const cacheWriteTokens = readNumber(value.cache_creation_input_tokens);
+  const inputParts = [uncachedInputTokens, cacheReadTokens, cacheWriteTokens]
+    .filter((token): token is number => token !== undefined);
+  const inputTokens = inputParts.length ? inputParts.reduce((total, token) => total + token, 0) : undefined;
+  const outputTokens = readNumber(value.output_tokens);
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens: readNumber(value.total_tokens) ?? sumUsage({ inputTokens }, outputTokens),
+    cacheReadTokens,
+    cacheWriteTokens
+  };
 }
 
 export function sumUsage(usage: AgentUsage | undefined, outputTokens: number | undefined): number | undefined {

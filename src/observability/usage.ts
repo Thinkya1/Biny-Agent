@@ -37,6 +37,8 @@ export function createSessionUsage(
     reasoningTokens: snapshot.reasoningTokens,
     cacheReadTokens: snapshot.cacheReadTokens,
     cacheWriteTokens: snapshot.cacheWriteTokens,
+    latestRequestInputTokens: snapshot.inputTokens,
+    latestRequestCacheReadTokens: snapshot.cacheReadTokens,
     costUsd: cost.costUsd,
     pricingKnown: cost.known,
     time
@@ -84,6 +86,22 @@ export function calculateUsageCost(
   return { costUsd: known ? cost : undefined, known };
 }
 
+/**
+ * 计算最近一次模型请求的缓存命中率。
+ *
+ * Biny 的 `inputTokens` 是 provider 回报的完整输入量，已经包含缓存读写部分，因此这里
+ * 直接用 cache read 除以完整输入，不能再把缓存 token 加回分母，否则会重复计算。
+ */
+export function calculateCacheHitRate(
+  usage: Pick<SessionUsage, "inputTokens" | "cacheReadTokens" | "latestRequestInputTokens" | "latestRequestCacheReadTokens">
+): number | undefined {
+  const hasLatestRequest = usage.latestRequestInputTokens !== undefined;
+  const inputTokens = hasLatestRequest ? usage.latestRequestInputTokens : usage.inputTokens;
+  const cacheReadTokens = hasLatestRequest ? usage.latestRequestCacheReadTokens : usage.cacheReadTokens;
+  if (inputTokens === undefined || cacheReadTokens === undefined || inputTokens <= 0) return undefined;
+  return Math.min(1, Math.max(0, cacheReadTokens / inputTokens));
+}
+
 export function summarizeUsage(records: SessionUsage[]): UsageSummary {
   let inputTokens = 0;
   let outputTokens = 0;
@@ -122,7 +140,8 @@ export function summarizeUsage(records: SessionUsage[]): UsageSummary {
     costUsd: unpricedCalls === 0 && records.length > 0 ? costUsd : undefined,
     pricingKnown: records.length > 0 && unpricedCalls === 0,
     pricedCalls,
-    unpricedCalls
+    unpricedCalls,
+    latestCacheHitRate: calculateCacheHitRate(records.at(-1) ?? {})
   };
 }
 
@@ -137,6 +156,7 @@ export function formatUsageSummary(summary: UsageSummary): string {
     `Reasoning tokens: ${String(summary.reasoningTokens)}`,
     `Total tokens: ${String(summary.totalTokens)}`,
     `Cache read/write: ${String(summary.cacheReadTokens)}/${String(summary.cacheWriteTokens)}`,
+    `Latest cache hit rate: ${summary.latestCacheHitRate === undefined ? "unknown" : `${String(Math.round(summary.latestCacheHitRate * 100))}%`}`,
     `Cost: ${summary.pricingKnown && summary.costUsd !== undefined ? `$${summary.costUsd.toFixed(6)}` : "unknown (configure model pricing)"}`,
     `Priced calls: ${String(summary.pricedCalls)}; unpriced calls: ${String(summary.unpricedCalls)}`
   ].join("\n");
@@ -167,6 +187,10 @@ export function sumSessionUsage(records: readonly SessionUsage[]): SessionUsage 
     reasoningTokens: sumDefined(records, "reasoningTokens"),
     cacheReadTokens: sumDefined(records, "cacheReadTokens"),
     cacheWriteTokens: sumDefined(records, "cacheWriteTokens"),
+    latestRequestInputTokens: last.latestRequestInputTokens ?? last.inputTokens,
+    latestRequestCacheReadTokens: last.latestRequestInputTokens !== undefined
+      ? last.latestRequestCacheReadTokens
+      : last.cacheReadTokens,
     costUsd: pricingKnown ? sumDefined(records, "costUsd") : undefined,
     pricingKnown,
     time: last.time

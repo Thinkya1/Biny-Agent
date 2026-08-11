@@ -8,11 +8,12 @@ import { createMcpResourceTools, expandEnvTemplate, McpToolHost } from "../src/e
 import { loadPlugins } from "../src/extensions/plugins.js";
 import { formatExtensionReport } from "../src/extensions/report.js";
 import { createSkillResourceTool, createSkillTool, expandSkillCommand, loadSkills } from "../src/extensions/skills.js";
-import { calculateUsageCost, summarizeUsage } from "../src/observability/usage.js";
+import { calculateUsageCost, sumSessionUsage, summarizeUsage } from "../src/observability/usage.js";
 import { PermissionManager } from "../src/permission/PermissionManager.js";
 import { analyzePermissionRequest } from "../src/permission/policy.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { AiRegistry } from "../src/llm/AiRegistry.js";
+import { createMemoryTools } from "../src/extensions/memory.js";
 
 async function waitFor(check: () => boolean, timeoutMs = 5_000): Promise<void> {
   const start = Date.now();
@@ -31,9 +32,34 @@ async function main(): Promise<void> {
     await testMcpStdioTool(workspaceRoot);
     testUsageCostAccounting();
     testShellPermissionBoundary();
+    testScopedMemoryToolSchemas();
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
+}
+
+function testScopedMemoryToolSchemas(): void {
+  const [saveMemory, recallMemory] = createMemoryTools(() => undefined);
+  assert.ok(saveMemory && recallMemory);
+  assert.deepEqual((saveMemory.parameters.properties.scope as { enum?: string[] }).enum, ["global", "project"]);
+  assert.deepEqual((recallMemory.parameters.properties.scope as { enum?: string[] }).enum, ["all", "global", "project"]);
+  const missingEvidence = saveMemory.resolveExecution({
+    scope: "global",
+    kind: "preference",
+    topic: "style",
+    title: "Concise replies",
+    summary: "The user prefers concise replies with the result first."
+  });
+  assert.equal("isError" in missingEvidence && missingEvidence.isError, true);
+  const explicit = saveMemory.resolveExecution({
+    scope: "global",
+    kind: "preference",
+    topic: "style",
+    title: "Concise replies",
+    summary: "The user prefers concise replies with the result first.",
+    userEvidence: "Please keep replies concise and lead with the result."
+  });
+  assert.equal("isError" in explicit, false);
 }
 
 function testEmptySkillReport(): void {
@@ -141,6 +167,29 @@ function testUsageCostAccounting(): void {
   }]);
   assert.equal(summary.pricingKnown, true);
   assert.equal(summary.costUsd, 0.004);
+
+  const firstRequest = {
+    operation: "agent" as const,
+    modelAlias: "test",
+    provider: "test",
+    model: "test",
+    inputTokens: 100,
+    cacheReadTokens: 0,
+    pricingKnown: false
+  };
+  const lastRequest = {
+    ...firstRequest,
+    inputTokens: 200,
+    cacheReadTokens: 200
+  };
+  const liveSummary = summarizeUsage([firstRequest, lastRequest]);
+  const turnUsage = sumSessionUsage([firstRequest, lastRequest]);
+  assert.equal(turnUsage.inputTokens, 300);
+  assert.equal(turnUsage.cacheReadTokens, 200);
+  assert.equal(liveSummary.latestCacheHitRate, 1);
+  assert.equal(summarizeUsage([turnUsage]).latestCacheHitRate, liveSummary.latestCacheHitRate);
+  // 回合记录经过 JSONL 持久化和 replay 后，仍需保留最后一次请求而不是退化为回合平均值。
+  assert.equal(summarizeUsage([JSON.parse(JSON.stringify(turnUsage))]).latestCacheHitRate, liveSummary.latestCacheHitRate);
 }
 
 async function testSkillsAndPlugins(workspaceRoot: string): Promise<void> {

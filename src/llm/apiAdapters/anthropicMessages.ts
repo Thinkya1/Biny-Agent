@@ -9,6 +9,7 @@ import {
   anthropicTool,
   applyAnthropicThinking,
   isRecord,
+  mapAnthropicUsage,
   mapAnthropicStopReason,
   parseJson,
   parseToolArguments,
@@ -76,12 +77,10 @@ export async function* streamAnthropic(
         yield { type: "tool-call", id: readString(block.id) ?? randomToolCallId(), name: readString(block.name) ?? "unknown", arguments: parsed.args, invalid: parsed.invalid };
       }
     }
-    const inputTokens = isRecord(payload.usage) ? readNumber(payload.usage.input_tokens) : undefined;
-    const outputTokens = isRecord(payload.usage) ? readNumber(payload.usage.output_tokens) : undefined;
     yield {
       type: "finish",
       reason: mapAnthropicStopReason(readString(payload.stop_reason)),
-      usage: { inputTokens, outputTokens, totalTokens: sumUsage({ inputTokens }, outputTokens) }
+      usage: isRecord(payload.usage) ? mapAnthropicUsage(payload.usage) : undefined
     };
     return;
   }
@@ -95,7 +94,7 @@ export async function* streamAnthropic(
     if (eventType === "error") {
       throw new Error(providerPayloadError(payload, "Anthropic provider"));
     } else if (eventType === "message_start" && isRecord(payload.message) && isRecord(payload.message.usage)) {
-      usage = { inputTokens: readNumber(payload.message.usage.input_tokens) };
+      usage = mapAnthropicUsage(payload.message.usage);
     } else if (eventType === "content_block_start") {
       const index = readNumber(payload.index) ?? blocks.size;
       const block = isRecord(payload.content_block) ? payload.content_block : {};

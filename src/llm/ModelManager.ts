@@ -192,7 +192,7 @@ export function listModelChoices(config: AgentConfig): ModelChoice[] {
 }
 
 export function listConfiguredModelChoices(config: AgentConfig): ModelChoice[] {
-  return listModelChoices(config).filter((model) => model.available);
+  return listModelChoices(config).filter((model) => model.source === "configured" && model.available);
 }
 
 export function hasUsableModelConfiguration(config: AgentConfig, alias = config.defaultModel): boolean {
