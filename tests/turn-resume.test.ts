@@ -416,7 +416,10 @@ async function runAgentWorker(options: WorkerOptions): Promise<void> {
     },
     agent: { ...defaultConfig.agent, hardStepLimit: 6 },
     permission: { ...defaultConfig.permission, mode: "full-access" },
-    context: { ...defaultConfig.context, memory: { enabled: false } }
+    context: {
+      ...defaultConfig.context,
+      memory: { ...defaultConfig.context.memory, useMemories: false, generateMemories: false }
+    }
   });
   const registry = new ToolRegistry();
   registry.register(crashTestTool("tool_a", options));

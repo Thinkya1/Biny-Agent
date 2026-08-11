@@ -18,7 +18,7 @@ ARCHITECTURE.local.md
 *.md
 !/README.md
 AGENTS.md
-
+docs/TUI_INTERACTION_REQUIREMENTS.md
 # Local agent evaluation runs and reports
 /jobs/
 /reports/

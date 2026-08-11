@@ -182,13 +182,17 @@ async function testSubagentBudgetExhaustionReturnsPartialFindings(): Promise<voi
     }) as typeof fetch;
 
     const config = configSchema.parse({
+      ...defaultConfig,
       defaultModel: "test-model",
       providers: { active: { type: "openai", apiKey: "test-key", baseUrl: "https://api.openai.com/v1" } },
       models: { "test-model": { provider: "active", model: "test-model" } },
       thinking: { enabled: false, effort: "high" },
       permission: defaultConfig.permission,
       workspace: defaultConfig.workspace,
-      context: { ...defaultConfig.context, memory: { enabled: false } }
+      context: {
+        ...defaultConfig.context,
+        memory: { ...defaultConfig.context.memory, useMemories: false, generateMemories: false }
+      }
     });
     const registry = new ToolRegistry();
     registry.registerBuiltinTool(listFilesTool());
@@ -248,14 +252,14 @@ async function testMemoryTopicLifecycle(): Promise<void> {
     await writeFile(path.join(oldMemoryDir, "old.md"), "Old project-local memory must remain ignored.", "utf8");
 
     const disabled = await runMemoryCommand(undefined, []);
-    assert.match(disabled, /disabled/);
+    assert.match(disabled, /unavailable/);
 
     const empty = await runMemoryCommand(memory, ["list"]);
     assert.match(empty, /empty/);
     assert.deepEqual(await memory.listTopics(), []);
 
     const added = await runMemoryCommand(memory, ["add", "decisions", "Always run pnpm typecheck before committing changes."]);
-    assert.match(added, /Saved memory note/);
+    assert.match(added, /Saved project\/fact memory/);
 
     const tooShort = await runMemoryCommand(memory, ["add", "decisions", "too short"]);
     assert.match(tooShort, /Skipped/);
@@ -267,13 +271,13 @@ async function testMemoryTopicLifecycle(): Promise<void> {
     assert.match(shown, /pnpm typecheck/);
 
     const forgotten = await runMemoryCommand(memory, ["forget", "decisions"]);
-    assert.match(forgotten, /Forgot memory topic decisions/);
+    assert.match(forgotten, /Deleted 1 project memory entry/);
     assert.deepEqual(await memory.listTopics(), []);
     // 索引中的话题行也要被清掉。
     assert.ok(!((await memory.readIndex()) ?? "").includes("decisions.md"));
 
     const missing = await runMemoryCommand(memory, ["forget", "decisions"]);
-    assert.match(missing, /No memory topic/);
+    assert.match(missing, /No project memory entry or topic/);
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
@@ -300,7 +304,7 @@ async function testMemoryTools(): Promise<void> {
     assert.equal(saved.saved, true);
     assert.equal(saved.path, path.relative(
       await realpath(globalAgentDir()),
-      path.join(projectMemoryDir(await realpath(workspaceRoot)), "workflows.md")
+      path.join(projectMemoryDir(await realpath(workspaceRoot)), "entries", "workflows.md")
     ));
 
     // 无效参数走 isError 分支而不是抛异常。
@@ -314,8 +318,10 @@ async function testMemoryTools(): Promise<void> {
 
     const topicExecution = await recallTool.resolveExecution({ query: "anything", topic: "workflows" });
     assert.ok(!("isError" in topicExecution));
-    const topicResult = await topicExecution.execute({ toolCallId: "recall-2" }) as { content?: string };
-    assert.match(topicResult.content ?? "", /Release flow/);
+    const topicResult = await topicExecution.execute({ toolCallId: "recall-2" }) as {
+      entries: Array<{ title: string }>;
+    };
+    assert.equal(topicResult.entries[0]?.title, "Release flow");
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }

@@ -7,6 +7,9 @@ import { BINY_AGENT_DIR_ENV, globalAgentDir, globalConfigPath, projectMemoryDir,
 import { configSchema, defaultConfig } from "../src/config/schema.js";
 import { BINY_KEYCHAIN_SERVICE, MacKeychainCredentialStore } from "../src/config/credentials.js";
 import { resolveRunBudget } from "../src/agent/runBudget.js";
+import { createFileConfigStore } from "../src/config/store.js";
+import { ConfigRevisionConflictError } from "../src/config/versioned.js";
+import type { CredentialStore } from "../src/config/credentials.js";
 
 await testGlobalPathResolution();
 testRunBudget();
@@ -16,6 +19,7 @@ await testRemovedProjectBudgetFieldsAreRejected();
 await testProjectCredentialFieldsAreRejected();
 await testProjectModelAliasMustBeGlobal();
 await testLegacyProjectConfigIsIgnored();
+await testVersionedGlobalConfigRejectsStaleWriters();
 await testMacKeychainCredentialStore();
 
 async function testGlobalPathResolution(): Promise<void> {
@@ -123,7 +127,8 @@ async function testProjectOverridesAndGlobalPersistence(): Promise<void> {
     assert.equal(effective.context.compaction.reserveTokens, 2_048);
     assert.equal(effective.context.compaction.keepRecentTokens, 8_192);
     assert.equal(effective.context.compaction.maxSummaryTokens, 1_024);
-    assert.equal(effective.context.memory.maxRecalled, 1);
+    // 个性化和记忆策略只有 global + chat 两层；旧 project memory override 迁移后被移除。
+    assert.equal(effective.context.memory.maxRecalled, defaultConfig.context.memory.maxRecalled);
     assert.equal(effective.sandbox.mode, "workspace-write");
 
     const changed = structuredClone(effective);
@@ -198,6 +203,49 @@ async function testLegacyProjectConfigIsIgnored(): Promise<void> {
     await saveConfigFile(globalRoot, defaultConfig);
     await saveConfigFile(workspace, { ...defaultConfig, defaultModel: "deepseek-v4-pro" });
     assert.equal((await loadConfig(workspace, { globalDir: globalRoot })).defaultModel, defaultConfig.defaultModel);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testVersionedGlobalConfigRejectsStaleWriters(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-config-cas-"));
+  const workspace = path.join(root, "project");
+  const globalRoot = path.join(root, "global");
+  await fs.mkdir(workspace);
+  const credentialStore: CredentialStore = {
+    persistent: false,
+    get: async () => undefined,
+    set: async () => undefined,
+    delete: async () => undefined
+  };
+  try {
+    const firstStore = createFileConfigStore(workspace, { globalDir: globalRoot, credentialStore });
+    const secondStore = createFileConfigStore(workspace, { globalDir: globalRoot, credentialStore });
+    const firstLoad = firstStore.loadVersioned;
+    const firstSave = firstStore.saveVersioned;
+    const secondLoad = secondStore.loadVersioned;
+    const secondSave = secondStore.saveVersioned;
+    if (!firstLoad || !firstSave || !secondLoad || !secondSave) throw new Error("Versioned config store API is unavailable.");
+    const first = await firstLoad();
+    const second = await secondLoad();
+
+    const friendly = structuredClone(first.config);
+    friendly.personalization.personality = "friendly";
+    await firstSave(friendly, first.revision);
+    const concurrentReads = await Promise.all(
+      Array.from({ length: 24 }, async () => await loadConfigFile(globalRoot))
+    );
+    assert.equal(concurrentReads.every((config) => config.personalization.personality === "friendly"), true);
+
+    const stale = structuredClone(second.config);
+    stale.personalization.personality = "pragmatic";
+    await assert.rejects(
+      secondSave(stale, second.revision),
+      (error: unknown) => error instanceof ConfigRevisionConflictError
+    );
+    assert.equal((await firstLoad()).config.personalization.personality, "friendly");
+    await assert.rejects(fs.access(path.join(globalRoot, ".config.write.lock")));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

@@ -8,6 +8,7 @@ import { defaultConfig } from "../src/config/schema.js";
 import { saveConfig } from "../src/config/loader.js";
 import { runtimeHostPaths, startRuntimeHost, connectRuntimeHost, spawnRuntimeHost } from "../src/runtime/RuntimeHost.js";
 import type { InteractiveRuntimeHandle } from "../src/runtime/InteractiveAgentRuntime.js";
+import { defaultChatPersonalizationOverride, resolveChatPersonalization } from "../src/personalization/index.js";
 
 const snapshot = {
   revision: 0,
@@ -46,6 +47,27 @@ async function main(): Promise<void> {
   let interruptedStarts = 0;
   let cancellationRequests = 0;
   let activeRunId = "run-host-test";
+  const exclusiveOperations: string[] = [];
+  let memoryExpectedRevision: number | undefined;
+  let chatExpectedRevision: string | undefined;
+  let globalExpectedRevision: string | undefined;
+  const globalPersonalization = { enabled: true, personality: "none" as const, customInstructions: "" };
+  const memoryPolicy = {
+    useMemories: false,
+    generateMemories: false,
+    extractModel: undefined,
+    consolidationModel: undefined,
+    excludeExternalContext: true,
+    maxRecalled: 3
+  };
+  const personalizationState = () => ({
+    global: globalPersonalization,
+    memory: memoryPolicy,
+    override: defaultChatPersonalizationOverride,
+    resolved: resolveChatPersonalization(globalPersonalization, memoryPolicy),
+    catalogRevision: "catalog-revision-1",
+    configRevision: "config-revision-1"
+  });
   const runtime: FakeRuntime = {
     publish(update): void {
       currentSnapshot = update.snapshot;
@@ -94,7 +116,10 @@ async function main(): Promise<void> {
     },
     answerPermission: () => undefined,
     resumeSession: async () => { throw new Error("not used"); },
-    runExclusiveOperation: async (_operation, execute) => await execute(new AbortController().signal),
+    runExclusiveOperation: async (operation, execute) => {
+      exclusiveOperations.push(operation);
+      return await execute(new AbortController().signal);
+    },
     startBackgroundOperation: () => { throw new Error("not used"); },
     compactConversation: async () => "",
     getSnapshot: () => currentSnapshot,
@@ -115,7 +140,32 @@ async function main(): Promise<void> {
           reasoningLabel: thinking === "max" ? "Max" : "Off",
           thinking: thinking ?? "off"
         };
-      }
+      },
+      getPersonalizationState: async () => personalizationState(),
+      updateChatPersonalization: async (_patch: unknown, expectedRevision: string) => {
+        chatExpectedRevision = expectedRevision;
+        return personalizationState();
+      },
+      updateGlobalPersonalization: async (_update: unknown, expectedRevision: string) => {
+        globalExpectedRevision = expectedRevision;
+        return personalizationState();
+      },
+      getLocalMemory: () => ({
+        loadMaintenanceStatus: async () => ({ state: "idle", eligible: 0, processed: 0, written: 0, failed: 0 }),
+        processEligibleCandidates: async () => ({ scanned: 0, processed: 0, written: 0, failed: 0, startedAt: "", finishedAt: "" }),
+        getOverview: async () => ({
+          scopes: {
+            global: { scope: "global", revision: 3, entryCount: 0, candidateCount: 0, indexChars: 0 },
+            project: { scope: "project", revision: 7, entryCount: 0, candidateCount: 0, indexChars: 0 }
+          },
+          revision: { global: 3, project: 7 }
+        }),
+        listStoredEntries: async () => ({ entries: [], revision: { global: 3, project: 7 } }),
+        writeScoped: async (_entry: unknown, options: { expectedRevision: number }) => {
+          memoryExpectedRevision = options.expectedRevision;
+          return { written: true, revision: options.expectedRevision + 1 };
+        }
+      })
     }
   } as unknown as CommandRuntime;
   const host = await startRuntimeHost(workspace, runtime, commands);
@@ -124,6 +174,7 @@ async function main(): Promise<void> {
   assert.ok(client);
   assert.equal(client.getSnapshot().info.sessionId, "session-host-test");
   assert.equal(client.hostInfo?.hostEpoch, host.info.hostEpoch);
+  assert.equal(client.hostInfo?.capabilities.includes("personalization"), true);
 
   const updatePromise = new Promise<AgentRuntimeUpdate>((resolve) => {
     const unsubscribe = client.subscribe((update) => {
@@ -175,6 +226,31 @@ async function main(): Promise<void> {
   const switched = await client.switchModel("test-model", "max");
   assert.equal(switched.thinking, "max");
   assert.equal(switchedThinking, "max");
+
+  assert.equal((await client.getPersonalizationState()).catalogRevision, "catalog-revision-1");
+  await client.updateChatPersonalization({ personality: "friendly" }, "catalog-revision-1");
+  assert.equal(chatExpectedRevision, "catalog-revision-1");
+  await client.updateGlobalPersonalization({ personalization: globalPersonalization }, "config-revision-1");
+  assert.equal(globalExpectedRevision, "config-revision-1");
+
+  const exclusiveOperationsBeforeMemory = exclusiveOperations.length;
+  await client.memory("write-v2", {
+    expectedRevision: 7,
+    entry: {
+      scope: "project",
+      kind: "fact",
+      topic: "runtime-host",
+      title: "Scoped revision",
+      summary: "The scoped memory revision must reach the owner unchanged.",
+      lineage: { source: "explicit", externalContext: false }
+    }
+  });
+  assert.equal(memoryExpectedRevision, 7, "v2 memory CAS must not be replaced by the Runtime Host snapshot revision");
+  assert.deepEqual(
+    exclusiveOperations.slice(exclusiveOperationsBeforeMemory),
+    ["memory"],
+    "attached v2 memory requests must use the runtime maintenance boundary"
+  );
 
   // 同一 run 的取消可绕过滞后的 revision；Host 改为按 runId 匹配而不是取消当前运行。
   currentSnapshot = { ...currentSnapshot, revision: currentSnapshot.revision + 1 };

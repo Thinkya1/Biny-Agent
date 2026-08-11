@@ -14,11 +14,27 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentAttachment, AgentRunMode, ResumedAgentSession } from "../agent/AgentSession.js";
-import type { ContextStatus, MemoryEntry } from "../agent/context/types.js";
+import type { ContextStatus, MemoryEntry as LegacyMemoryEntry } from "../agent/context/types.js";
+import type {
+  MemoryEntryInput,
+  MemoryKind,
+  MemoryLineage,
+  MemoryLineageSource,
+  MemoryScope
+} from "../agent/context/memoryTypes.js";
 import { thinkingLevelSchema } from "../config/schema.js";
+import {
+  chatPersonalizationOverrideSchema,
+  memoryPolicySchema,
+  personalizationSettingsSchema,
+  type AgentPersonalizationState,
+  type ChatPersonalizationOverridePatch,
+  type GlobalPersonalizationUpdate
+} from "../personalization/index.js";
 import type { ModelChoice, ModelRuntimeInfo, ThinkingSelection } from "../llm/ModelManager.js";
 import type { PermissionMode, PermissionResult } from "../permission/PermissionManager.js";
 import type { SessionSummary } from "../session/events.js";
+import type { UsageSummary } from "../session/metadata.js";
 import type { RuntimeCommandResult } from "./commands.js";
 import type { CommandRuntime } from "./CommandRuntime.js";
 import type { CommandSurface } from "./commandRegistry.js";
@@ -55,6 +71,7 @@ const reconnectDelayMs = 250;
 const maxUnixSocketPathLength = 90;
 const hostStartupTimeoutMs = 8_000;
 const hostJournalFile = "runtime-host-events.jsonl";
+const memoryMaintenanceIntervalMs = 60 * 60 * 1_000;
 
 const hostCapabilities = [
   "runtime.authority",
@@ -65,7 +82,9 @@ const hostCapabilities = [
   "task.ledger",
   "automation.scheduler",
   "agent.graph",
-  "capability.channel"
+  "capability.channel",
+  "personalization",
+  "memory.v2"
 ] as const;
 
 type OperationLane = "query" | "mutation" | "admission" | "control" | "run";
@@ -414,6 +433,7 @@ export async function startRuntimeHost(
     await writeRegistration(registration);
     server.startAutomationScheduler();
     if (options.resumeInterrupted) await server.resumeInterruptedTurn();
+    server.startMemoryMaintenance();
     return server;
   } catch (error) {
     await server?.close().catch(() => undefined);
@@ -440,6 +460,9 @@ export class RuntimeHostServer {
   private readonly createRuntime: RuntimeHostFactory | undefined;
   private closePromise: Promise<void> | undefined;
   private runtimeRestartPromise: Promise<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }> | undefined;
+  private memoryMaintenanceTimer: ReturnType<typeof setInterval> | undefined;
+  private memoryMaintenanceAbort: AbortController | undefined;
+  private memoryMaintenancePromise: Promise<void> | undefined;
   private listening = false;
   private initialized = false;
 
@@ -473,12 +496,25 @@ export class RuntimeHostServer {
         getTaskRuns: () => this.commands.taskRuns
       });
     }
-    this.unsubscribe = runtime.subscribe((update) => this.publish(update));
+    this.unsubscribe = runtime.subscribe((update) => this.handleRuntimeUpdate(update));
   }
 
   startAutomationScheduler(): void {
     this.automationScheduler?.start();
     this.graphSupervisor?.start();
+  }
+
+  /**
+   * 候选抽取是可中断的后台维护：启动时补扫，之后每小时扫描一次。用户一旦开始新回合，
+   * handleRuntimeUpdate 会立即中断模型调用，让前台聊天始终优先；候选仍留在磁盘等待下次扫描。
+   */
+  startMemoryMaintenance(): void {
+    if (this.memoryMaintenanceTimer) return;
+    void this.runMemoryMaintenance();
+    this.memoryMaintenanceTimer = setInterval(() => {
+      void this.runMemoryMaintenance();
+    }, memoryMaintenanceIntervalMs);
+    this.memoryMaintenanceTimer.unref?.();
   }
 
   async runAutomation(automationId: string): Promise<unknown> {
@@ -574,6 +610,9 @@ export class RuntimeHostServer {
       this.unsubscribe();
       this.automationScheduler?.stop();
       this.graphSupervisor?.stop();
+      if (this.memoryMaintenanceTimer) clearInterval(this.memoryMaintenanceTimer);
+      this.memoryMaintenanceTimer = undefined;
+      this.memoryMaintenanceAbort?.abort();
       for (const connection of this.connections) connection.socket.destroy();
       this.connections.clear();
       if (this.listening) {
@@ -607,6 +646,39 @@ export class RuntimeHostServer {
       this.connections.delete(connection);
       if (connection.clientId) this.commands.capabilities?.releaseOwner(connection.clientId);
     });
+  }
+
+  private handleRuntimeUpdate(update: AgentRuntimeUpdate): void {
+    if (update.snapshot.state.kind !== "idle") this.memoryMaintenanceAbort?.abort();
+    this.publish(update);
+  }
+
+  private async runMemoryMaintenance(): Promise<void> {
+    if (this.memoryMaintenancePromise || this.runtime.getSnapshot().state.kind !== "idle") return;
+    const controller = new AbortController();
+    this.memoryMaintenanceAbort = controller;
+    const commands = this.commands;
+    const promise = (async () => {
+      await commands.agent.getLocalMemory().loadMaintenanceStatus({ signal: controller.signal });
+      const state = await commands.agent.getPersonalizationState();
+      controller.signal.throwIfAborted();
+      // 关闭贡献后保留既有候选；重新开启时，下一次扫描会继续处理。
+      if (!state.memory.generateMemories || this.runtime.getSnapshot().state.kind !== "idle") return;
+      await commands.agent.getLocalMemory().processEligibleCandidates({
+        excludeExternalContext: state.memory.excludeExternalContext,
+        signal: controller.signal
+      });
+    })().catch((error: unknown) => {
+      if (!controller.signal.aborted) {
+        // LocalMemory 将抽取/整理失败写入 maintenanceStatus；Host 不改变任何任务终态。
+        void error;
+      }
+    }).finally(() => {
+      if (this.memoryMaintenancePromise === promise) this.memoryMaintenancePromise = undefined;
+      if (this.memoryMaintenanceAbort === controller) this.memoryMaintenanceAbort = undefined;
+    });
+    this.memoryMaintenancePromise = promise;
+    await promise;
   }
 
   private read(connection: HostConnection, chunk: string): void {
@@ -1049,12 +1121,42 @@ export class RuntimeHostServer {
         );
       case "agent.sessions":
         return await this.commands.agent.listSessions();
+      case "personalization.get":
+        return await this.commands.agent.getPersonalizationState();
+      case "personalization.update-chat":
+        return await this.runtime.runExclusiveOperation(
+          "personalization",
+          async () => await this.commands.agent.updateChatPersonalization(
+            chatPersonalizationOverrideSchema.partial().strict().parse(payload.patch),
+            requiredString(payload.expectedRevision, "expectedRevision")
+          )
+        );
+      case "personalization.update-global": {
+        const update = asRecord(payload.update);
+        return await this.runtime.runExclusiveOperation(
+          "personalization",
+          async () => await this.commands.agent.updateGlobalPersonalization({
+            personalization: update.personalization === undefined
+              ? undefined
+              : personalizationSettingsSchema.parse(update.personalization),
+            memory: update.memory === undefined
+              ? undefined
+              : memoryPolicySchema.parse(update.memory)
+          }, requiredString(payload.expectedRevision, "expectedRevision"))
+        );
+      }
       case "skills.list":
         return this.commands.listSkills();
       case "skills.expand":
         return await this.commands.expandSkillCommand(requiredString(payload.input, "input"));
       case "memory":
-        return await this.executeMemory(payload);
+        // Keep attached clients on the same maintenance boundary as the local
+        // Desktop/TUI paths. Some v2 operations (notably consolidation) call
+        // a model, and even writes must not race the active session.
+        return await this.runtime.runExclusiveOperation(
+          "memory",
+          async () => await this.executeMemory(payload)
+        );
       case "runtime.restart":
         this.assertRevision(payload);
         return await this.restartRuntime(optionalString(payload.sessionId));
@@ -1239,8 +1341,50 @@ export class RuntimeHostServer {
 
   private async executeMemory(payload: Record<string, unknown>): Promise<unknown> {
     const memory = this.commands.agent.getLocalMemory();
-    if (!memory) throw new Error("Local memory is disabled (context.memory.enabled = false).");
     const action = requiredString(payload.action, "action");
+    if (action === "overview-v2") {
+      const scope = readMemoryScope(payload.scope);
+      const [overview, entries] = await Promise.all([
+        memory.getOverview(),
+        memory.listStoredEntries({ scopes: [scope] })
+      ]);
+      return { overview, entries };
+    }
+    if (action === "search-v2") {
+      const scope = readMemoryScope(payload.scope);
+      return await memory.searchScoped(
+        requiredString(payload.query, "query"),
+        payload.paths === undefined ? [] : readStringArray(payload.paths, "paths"),
+        {
+          scopes: [scope],
+          limit: optionalSafeInteger(payload.limit),
+          maxChars: optionalSafeInteger(payload.maxChars)
+        }
+      );
+    }
+    if (action === "write-v2") {
+      return await memory.writeScoped(readScopedMemoryEntry(payload.entry), {
+        expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
+      });
+    }
+    if (action === "delete-v2") {
+      return await memory.deleteStoredEntry(
+        readMemoryScope(payload.scope),
+        requiredString(payload.id, "id"),
+        { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") }
+      );
+    }
+    if (action === "clear-v2") {
+      return await memory.clearScope(readMemoryScope(payload.scope), {
+        expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
+      });
+    }
+    if (action === "consolidate-v2") {
+      return await memory.consolidateScope(readMemoryScope(payload.scope), {
+        expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision"),
+        topic: optionalString(payload.topic)
+      });
+    }
     if (action !== "list" && action !== "search") this.assertRevision(payload);
     if (action === "list") return await memory.listEntries();
     if (action === "search") return await memory.findRelevant(requiredString(payload.query, "query"), [], 8);
@@ -1282,7 +1426,7 @@ export class RuntimeHostServer {
     this.unsubscribe();
     this.runtime = next.runtime;
     this.commands = next.commands;
-    this.unsubscribe = next.runtime.subscribe((update) => this.publish(update));
+    this.unsubscribe = next.runtime.subscribe((update) => this.handleRuntimeUpdate(update));
     this.commands.graphs.recoverRunningNodes(this.commands.taskRuns);
     await previous.close();
     this.history.splice(0);
@@ -1749,6 +1893,10 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   }
 
   async executeCommand(input: string, source: HostSurface): Promise<RuntimeCommandResult | undefined> {
+    const command = input.trim().replace(/^\/+/, "/").split(/\s+/, 1)[0];
+    if (command === "/personality" || command === "/memories") {
+      await this.ensureOwnerCapability("personalization");
+    }
     return await this.request<RuntimeCommandResult | undefined>("command", { input, source, expectedRevision: this.currentRevision() });
   }
 
@@ -1756,8 +1904,8 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     return await this.request<ContextStatus>("agent.context", {});
   }
 
-  async usage(): Promise<{ summary: unknown; report: string; modelRequests?: unknown }> {
-    return await this.request<{ summary: unknown; report: string; modelRequests?: unknown }>("agent.usage", {});
+  async usage(): Promise<{ summary: UsageSummary; report: string; modelRequests?: unknown }> {
+    return await this.request<{ summary: UsageSummary; report: string; modelRequests?: unknown }>("agent.usage", {});
   }
 
   async listModels(): Promise<ModelChoice[]> {
@@ -1793,6 +1941,36 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     return await this.request<SessionSummary[]>("agent.sessions", {});
   }
 
+  async getPersonalizationState(): Promise<AgentPersonalizationState> {
+    return await this.requestWithOwnerCompatibility(
+      "personalization.get",
+      {},
+      "personalization"
+    );
+  }
+
+  async updateChatPersonalization(
+    patch: ChatPersonalizationOverridePatch,
+    expectedRevision: string
+  ): Promise<AgentPersonalizationState> {
+    return await this.requestWithOwnerCompatibility(
+      "personalization.update-chat",
+      { patch, expectedRevision },
+      "personalization"
+    );
+  }
+
+  async updateGlobalPersonalization(
+    update: GlobalPersonalizationUpdate,
+    expectedRevision: string
+  ): Promise<AgentPersonalizationState> {
+    return await this.requestWithOwnerCompatibility(
+      "personalization.update-global",
+      { update, expectedRevision },
+      "personalization"
+    );
+  }
+
   async listSkills(): Promise<Awaited<ReturnType<CommandRuntime["listSkills"]>>> {
     return await this.request("skills.list", {});
   }
@@ -1802,7 +1980,10 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   }
 
   async memory<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
-    return await this.request<T>("memory", { action, ...payload, expectedRevision: this.currentRevision() });
+    const v2 = action.endsWith("-v2");
+    return await this.request<T>("memory", v2
+      ? { action, ...payload }
+      : { action, ...payload, expectedRevision: this.currentRevision() });
   }
 
   /** 让 owner 按指定会话或新会话重建 AgentSession。 */
@@ -2105,6 +2286,24 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     }));
   }
 
+  private async requestWithOwnerCompatibility<T>(operation: string, payload: unknown, capability: string): Promise<T> {
+    await this.ensureOwnerCapability(capability);
+    try {
+      return await this.request<T>(operation, payload);
+    } catch (error) {
+      // 同 protocol 的旧 detached Host 不认识新增 operation；具备 composition root
+      // 的 Desktop/TUI 可以在空闲时替换 owner，再无损重试一次。
+      if (this.options.spawnOptions === undefined || !isRuntimeHostUnknownOperationError(error, operation)) throw error;
+      await this.restartOwner();
+      return await this.request<T>(operation, payload);
+    }
+  }
+
+  private async ensureOwnerCapability(capability: string): Promise<void> {
+    if (this.options.spawnOptions === undefined || this.capabilities.includes(capability)) return;
+    await this.restartOwner();
+  }
+
   private createCompletion(runId: string): Promise<AgentRunOutcome> {
     return new Promise<AgentRunOutcome>((resolve, reject) => this.completions.set(runId, { resolve, reject }));
   }
@@ -2244,6 +2443,7 @@ function operationLane(operation: string): OperationLane {
     || operation === "agent.usage"
     || operation === "agent.models"
     || operation === "agent.sessions"
+    || operation === "personalization.get"
     || operation === "skills.list"
     || operation === "run.inspect"
     || operation === "run.list"
@@ -2344,7 +2544,7 @@ function readStringArray(value: unknown, name: string): string[] {
   return value;
 }
 
-function readMemoryEntry(value: unknown): MemoryEntry {
+function readMemoryEntry(value: unknown): LegacyMemoryEntry {
   const record = asRecord(value);
   return {
     topic: requiredString(record.topic, "entry.topic"),
@@ -2354,6 +2554,63 @@ function readMemoryEntry(value: unknown): MemoryEntry {
     paths: readStringArray(record.paths, "entry.paths"),
     keywords: readStringArray(record.keywords, "entry.keywords")
   };
+}
+
+function readMemoryScope(value: unknown): MemoryScope {
+  if (value === "global" || value === "project") return value;
+  throw new Error("Runtime Host memory scope must be global or project.");
+}
+
+function readScopedMemoryEntry(value: unknown): MemoryEntryInput {
+  const record = asRecord(value);
+  const importance = record.importance === undefined ? undefined : requiredInteger(record.importance, "entry.importance");
+  if (importance !== undefined && (importance < 1 || importance > 5)) {
+    throw new Error("Runtime Host memory entry importance must be between 1 and 5.");
+  }
+  const lineageValues = Array.isArray(record.lineage) ? record.lineage : [record.lineage];
+  if (lineageValues.some((item) => item === undefined)) throw new Error("Runtime Host memory entry lineage is required.");
+  return {
+    scope: readMemoryScope(record.scope),
+    kind: readMemoryKind(record.kind),
+    topic: requiredString(record.topic, "entry.topic"),
+    title: requiredString(record.title, "entry.title"),
+    summary: requiredString(record.summary, "entry.summary"),
+    decisions: record.decisions === undefined ? undefined : readStringArray(record.decisions, "entry.decisions"),
+    paths: record.paths === undefined ? undefined : readStringArray(record.paths, "entry.paths"),
+    keywords: record.keywords === undefined ? undefined : readStringArray(record.keywords, "entry.keywords"),
+    importance,
+    lineage: lineageValues.map(readMemoryLineage)
+  };
+}
+
+function readMemoryKind(value: unknown): MemoryKind {
+  if (value === "preference" || value === "working_style" || value === "fact" || value === "decision" || value === "workflow" || value === "gotcha") {
+    return value;
+  }
+  throw new Error("Runtime Host memory entry kind is invalid.");
+}
+
+function readMemoryLineage(value: unknown): MemoryLineage {
+  const record = asRecord(value);
+  if (typeof record.externalContext !== "boolean") throw new Error("Runtime Host memory lineage externalContext must be boolean.");
+  return {
+    source: readMemoryLineageSource(record.source),
+    externalContext: record.externalContext,
+    sessionId: optionalString(record.sessionId),
+    turnId: optionalString(record.turnId),
+    runId: optionalString(record.runId),
+    candidateId: optionalString(record.candidateId),
+    sourceEntryIds: record.sourceEntryIds === undefined ? undefined : readStringArray(record.sourceEntryIds, "entry.lineage.sourceEntryIds"),
+    legacyPath: optionalString(record.legacyPath),
+    userEvidence: optionalString(record.userEvidence)
+  };
+}
+
+function readMemoryLineageSource(value: unknown): MemoryLineageSource {
+  if (value === "explicit" || value === "completed_task" || value === "candidate" || value === "migration" || value === "consolidation") {
+    return value;
+  }
+  throw new Error("Runtime Host memory lineage source is invalid.");
 }
 
 function readAttachments(value: unknown): AgentAttachment[] {
@@ -2663,6 +2920,10 @@ function isNoSuchProcess(error: unknown): boolean {
 
 function isRuntimeHostThinkingSelectionError(error: unknown): boolean {
   return error instanceof Error && error.message === "Runtime Host thinking selection is invalid.";
+}
+
+function isRuntimeHostUnknownOperationError(error: unknown, operation: string): boolean {
+  return error instanceof Error && error.message === `Unknown Runtime Host operation: ${operation}`;
 }
 
 function isAlreadyExists(error: unknown): boolean {

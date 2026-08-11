@@ -1,344 +1,467 @@
-import { constants, promises as fs } from "node:fs";
-import type { FileHandle } from "node:fs/promises";
-import path from "node:path";
+/**
+ * 本地记忆的模型编排与旧 API 适配层。
+ *
+ * MemoryStorage 负责纯磁盘事实；本类只负责抽取/整理模型调用、6 小时候选维护，以及把旧的
+ * topic/index API 映射到一条一文件的 scoped v2 存储。
+ */
 import { z } from "zod";
 import type { AgentModel, ModelRequestContext, ModelRequestObserver } from "../core/types.js";
 import { generateNativeText, nativeJsonMessages, parseNativeJson } from "../../llm/nativeJson.js";
-import { globalAgentDir, projectMemoryDir } from "../../config/paths.js";
-import { redactSecrets } from "../../utils/secrets.js";
-import type { MemoryCompactionTopicResult, MemoryEntry, MemoryEntrySummary, MemoryMatch } from "./types.js";
 import type { ModelUsageObserver } from "../../observability/usage.js";
+import { redactSecrets } from "../../utils/secrets.js";
+import type {
+  MemoryCompactionTopicResult,
+  MemoryEntry as LegacyMemoryEntry,
+  MemoryEntrySummary,
+  MemoryMatch as LegacyMemoryMatch
+} from "./types.js";
+import {
+  assertAllowedScopedEntry,
+  normalizeMemoryTopic,
+  sanitizeMemoryEntryInput
+} from "./memoryFormat.js";
+import { MemoryStorage } from "./memoryStorage.js";
+import {
+  MemoryRevisionConflictError,
+  type MemoryCandidate,
+  type MemoryCandidateInput,
+  type MemoryCandidateMutationOptions,
+  type MemoryCandidateMutationResult,
+  type MemoryCandidateScanOptions,
+  type MemoryCandidateScanResult,
+  type MemoryClearResult,
+  type MemoryConsolidationOptions,
+  type MemoryConsolidationResult,
+  type MemoryDeleteResult,
+  type MemoryEntriesResult,
+  type MemoryEntry,
+  type MemoryEntryInput,
+  type MemoryListOptions,
+  type MemoryMaintenanceOptions,
+  type MemoryMaintenanceResult,
+  type MemoryMaintenanceStatus,
+  type MemoryMutationOptions,
+  type MemoryOverview,
+  type MemoryReadOptions,
+  type MemoryScope,
+  type MemorySearchOptions,
+  type MemorySearchResult,
+  type ScopedMemoryWriteResult
+} from "./memoryTypes.js";
 
-const indexFileName = "MEMORY.md";
-const maxTopicChars = 24_000;
 const memoryModelTimeoutMs = 30_000;
-
-interface PinnedMemoryDirectory {
-  workspaceRoot: string;
-  storageRoot: string;
-  path: string;
-  device: number | bigint;
-  inode: number | bigint;
-}
-
-interface PinnedMemoryFile {
-  handle: FileHandle;
-  name: string;
-  device: number | bigint;
-  inode: number | bigint;
-}
+const maintenanceCandidateLimit = 32;
 
 export interface MemoryWriteResult {
   written: boolean;
   path?: string;
 }
 
-/**
- * Durable, auditable project memory. This is intentionally keyword and path based:
- * it never builds a vector index or turns source code into embedding records.
- */
+const extractedEntrySchema = z.object({
+  scope: z.enum(["global", "project"]).default("project"),
+  kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]).default("fact"),
+  topic: z.string().default("project"),
+  title: z.string(),
+  summary: z.string(),
+  decisions: z.array(z.string()).default([]),
+  paths: z.array(z.string()).default([]),
+  keywords: z.array(z.string()).default([]),
+  importance: z.number().default(3),
+  explicitUserEvidence: z.string().optional()
+});
+
+const candidateExtractionSchema = z.object({
+  memory: extractedEntrySchema.nullable().default(null)
+});
+
+const consolidationSchema = z.object({
+  entries: z.array(z.object({
+    sourceEntryIds: z.array(z.string()).optional(),
+    kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]).optional(),
+    topic: z.string().optional(),
+    title: z.string(),
+    summary: z.string(),
+    decisions: z.array(z.string()).default([]),
+    paths: z.array(z.string()).default([]),
+    keywords: z.array(z.string()).default([]),
+    importance: z.number().default(3)
+  })).default([])
+});
+
+/** Durable, local-first memory. maxRecalled is a total entry count across global + project. */
 export class LocalMemory {
+  private readonly storage: MemoryStorage;
+  private maintenance: MemoryMaintenanceStatus = {
+    state: "idle",
+    eligible: 0,
+    processed: 0,
+    written: 0,
+    failed: 0
+  };
+  private maintenancePromise: Promise<MemoryMaintenanceResult> | undefined;
+
   constructor(
     private readonly workspaceRoot: string,
-    private readonly getModel: () => AgentModel,
+    private readonly getExtractionModel: () => AgentModel,
     private readonly onUsage: ModelUsageObserver = () => undefined,
-    /** 每回合自动注入上下文的记忆条数上限，来自 context.memory.maxRecalled。 */
+    /** global + project 合计自动注入条数上限。 */
     readonly recallLimit: number = 3,
     private readonly onModelRequest: ModelRequestObserver = () => undefined,
-    private readonly getModelRequestContext: () => ModelRequestContext | undefined = () => undefined
-  ) {}
-
-  async findRelevant(query: string, paths: string[], limit: number = this.recallLimit, signal?: AbortSignal): Promise<MemoryMatch[]> {
-    signal?.throwIfAborted();
-    const terms = tokenize([query, ...paths].join(" "));
-    if (!terms.length) return [];
-
-    const directory = await resolveMemoryDirectory(this.workspaceRoot, false);
-    if (!directory) return [];
-    const index = await readOptionalMemoryFile(this.workspaceRoot, directory, indexFileName, maxTopicChars, signal);
-    const topicFiles = [...new Set([...indexedTopicFiles(index), ...await this.listTopicFiles(directory, signal)])];
-    const matches = await Promise.all(topicFiles.map(async (fileName) => {
-      signal?.throwIfAborted();
-      const filePath = path.join(directory.path, fileName);
-      const content = await readOptionalMemoryFile(this.workspaceRoot, directory, fileName, maxTopicChars, signal);
-      if (!content) return undefined;
-      const score = scoreMemory(fileName, `${indexLineForFile(index, fileName)}\n${content}`, terms);
-      if (!score) return undefined;
-      return {
-        topic: fileName.replace(/\.md$/, ""),
-        path: path.relative(directory.workspaceRoot, filePath),
-        excerpt: createExcerpt(content, terms),
-        score
-      };
-    }));
-
-    signal?.throwIfAborted();
-    return matches
-      .filter((match): match is MemoryMatch => Boolean(match))
-      .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
-      .slice(0, limit);
+    private readonly getModelRequestContext: () => ModelRequestContext | undefined = () => undefined,
+    private readonly getConsolidationModel: () => AgentModel = getExtractionModel
+  ) {
+    this.storage = new MemoryStorage(workspaceRoot);
   }
 
+  // ------------------------------ v2 public API ------------------------------
+
+  async getOverview(options: MemoryReadOptions = {}): Promise<MemoryOverview> {
+    return await this.storage.getOverview(options);
+  }
+
+  async listStoredEntries(options: MemoryListOptions = {}): Promise<MemoryEntriesResult> {
+    return await this.storage.listStoredEntries(options);
+  }
+
+  async searchScoped(query: string, paths: string[], options: MemorySearchOptions = {}): Promise<MemorySearchResult> {
+    return await this.storage.searchScoped(query, paths, { ...options, limit: options.limit ?? this.recallLimit });
+  }
+
+  async writeScoped(input: MemoryEntryInput, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
+    return await this.storage.writeScoped(input, options);
+  }
+
+  async deleteStoredEntry(scope: MemoryScope, id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
+    return await this.storage.deleteStoredEntry(scope, id, options);
+  }
+
+  async clearScope(scope: MemoryScope, options: MemoryMutationOptions): Promise<MemoryClearResult> {
+    return await this.storage.clearScope(scope, options);
+  }
+
+  async enqueueCandidate(input: MemoryCandidateInput, options: MemoryCandidateMutationOptions): Promise<MemoryCandidateMutationResult> {
+    return await this.storage.enqueueCandidate(input, options);
+  }
+
+  async scanEligibleCandidates(options: MemoryCandidateScanOptions = {}): Promise<MemoryCandidateScanResult> {
+    return await this.storage.scanEligibleCandidates(options);
+  }
+
+  async removeCandidate(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
+    return await this.storage.removeCandidate(id, options);
+  }
+
+  async consolidateScope(scope: MemoryScope, options: MemoryConsolidationOptions): Promise<MemoryConsolidationResult> {
+    options.signal?.throwIfAborted();
+    const snapshot = await this.storage.listStoredEntries({ scopes: [scope], topic: options.topic, signal: options.signal });
+    const actualRevision = snapshot.revision[scope];
+    if (actualRevision !== options.expectedRevision) {
+      throw new MemoryRevisionConflictError(scope, options.expectedRevision, actualRevision);
+    }
+    const entries = snapshot.entries;
+    const before = entries.length;
+    if (before < 2) return { scope, before, after: before, revision: actualRevision };
+
+    let parsed: z.infer<typeof consolidationSchema>;
+    try {
+      parsed = await this.consolidateEntriesWithModel(scope, entries, options.signal);
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      return {
+        scope,
+        before,
+        after: before,
+        revision: actualRevision,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+    if (!parsed.entries.length || parsed.entries.length >= before) {
+      return parsed.entries.length === before
+        ? { scope, before, after: before, revision: actualRevision }
+        : { scope, before, after: before, revision: actualRevision, error: "Model returned an unusable consolidation result." };
+    }
+
+    const sourceById = new Map(entries.map((entry) => [entry.id, entry]));
+    const groups = parsed.entries.map((entry) => ({
+      entry,
+      sourceIds: entry.sourceEntryIds ?? (parsed.entries.length === 1 ? entries.map(({ id }) => id) : [])
+    }));
+    const covered = new Set(groups.flatMap(({ sourceIds }) => sourceIds));
+    if (groups.some(({ sourceIds }) => !sourceIds.length || sourceIds.some((id) => !sourceById.has(id)))
+      || entries.some(({ id }) => !covered.has(id))) {
+      return {
+        scope,
+        before,
+        after: before,
+        revision: actualRevision,
+        error: "Consolidation output did not preserve lineage for every source entry."
+      };
+    }
+
+    const replacements: MemoryEntryInput[] = groups.map(({ entry, sourceIds }) => {
+      const sources = sourceIds.map((id) => sourceById.get(id)).filter((value): value is MemoryEntry => value !== undefined);
+      const lineages = sources.flatMap((source) => source.lineage);
+      const externalContext = lineages.some((lineage) => lineage.externalContext);
+      return sanitizeMemoryEntryInput({
+        scope,
+        kind: entry.kind ?? sources[0]?.kind ?? "fact",
+        topic: entry.topic ?? sources[0]?.topic ?? options.topic ?? "project",
+        title: entry.title,
+        summary: entry.summary,
+        decisions: entry.decisions,
+        paths: entry.paths,
+        keywords: entry.keywords,
+        importance: entry.importance,
+        lineage: [
+          ...lineages,
+          { source: "consolidation", externalContext, sourceEntryIds: sourceIds }
+        ]
+      });
+    });
+
+    try {
+      const result = await this.storage.replaceEntries(
+        scope,
+        entries.map(({ id }) => id),
+        replacements,
+        { expectedRevision: actualRevision, signal: options.signal }
+      );
+      return { scope, before, after: result.entries.length, revision: result.revision };
+    } catch (error) {
+      if (error instanceof MemoryRevisionConflictError) throw error;
+      options.signal?.throwIfAborted();
+      return {
+        scope,
+        before,
+        after: before,
+        revision: actualRevision,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  processEligibleCandidates(options: MemoryMaintenanceOptions = {}): Promise<MemoryMaintenanceResult> {
+    if (this.maintenancePromise) return this.maintenancePromise;
+    const promise = this.runEligibleCandidateMaintenance(options).finally(() => {
+      if (this.maintenancePromise === promise) this.maintenancePromise = undefined;
+    });
+    this.maintenancePromise = promise;
+    return promise;
+  }
+
+  maintenanceStatus(): MemoryMaintenanceStatus {
+    return { ...this.maintenance };
+  }
+
+  async loadMaintenanceStatus(options: MemoryReadOptions = {}): Promise<MemoryMaintenanceStatus> {
+    this.maintenance = await this.storage.readMaintenanceStatus(options);
+    return this.maintenanceStatus();
+  }
+
+  // ---------------------------- compatibility API ----------------------------
+
+  async findRelevant(query: string, paths: string[], limit: number = this.recallLimit, signal?: AbortSignal): Promise<LegacyMemoryMatch[]> {
+    signal?.throwIfAborted();
+    if (!query.trim() && !paths.length) return [];
+    const result = await this.searchScoped(query, paths, { limit, signal });
+    return result.matches.map(({ topic, path: matchPath, excerpt, score }) => ({ topic, path: matchPath, excerpt, score }));
+  }
+
+  /** 旧自动沉淀路径保持立即写入；v2 runtime 应改用 completed-only enqueueCandidate。 */
   async rememberSuccessfulTask(task: string, answer: string, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     const safeTask = redactSecrets(task).trim();
     const safeAnswer = redactSecrets(answer).trim();
     if (safeTask.length + safeAnswer.length < 180) return;
-
-    const proposal = await this.extractProposal(safeTask, safeAnswer, signal);
+    const proposal = await this.extractLegacyProposal(safeTask, safeAnswer, signal);
     signal?.throwIfAborted();
-    if (proposal) await this.write(proposal, signal);
+    if (!proposal) return;
+    await this.write(proposal, signal);
   }
 
-  async write(rawEntry: MemoryEntry, signal?: AbortSignal): Promise<MemoryWriteResult> {
+  async write(rawEntry: LegacyMemoryEntry, signal?: AbortSignal): Promise<MemoryWriteResult> {
     signal?.throwIfAborted();
-    const entry = sanitizeMemoryEntry(rawEntry);
-    if (!entry.summary || entry.summary.length < 20) return { written: false, path: undefined };
-
-    const directory = await resolveMemoryDirectory(this.workspaceRoot, true);
-    signal?.throwIfAborted();
-    if (!directory) throw new Error("Failed to create local memory storage.");
-    const topicFileName = `${normalizeTopic(entry.topic)}.md`;
-    assertMemoryFileName(topicFileName, false);
-    const filePath = path.join(directory.path, topicFileName);
-    const indexFile = await openPinnedMemoryFile(this.workspaceRoot, directory, indexFileName, true);
-    if (!indexFile) throw new Error("Failed to open the local memory index.");
-    try {
-      const topicFile = await openPinnedMemoryFile(this.workspaceRoot, directory, topicFileName, true);
-      if (!topicFile) throw new Error(`Failed to open local memory topic: ${topicFileName}`);
-      try {
-        const existing = await readPinnedMemoryFile(this.workspaceRoot, directory, topicFile, Number.MAX_SAFE_INTEGER);
-        signal?.throwIfAborted();
-        if (isDuplicate(existing, entry)) return { written: false, path: path.relative(directory.storageRoot, filePath) };
-
-        const index = await readPinnedMemoryFile(this.workspaceRoot, directory, indexFile, maxTopicChars);
-        signal?.throwIfAborted();
-        const line = `- [${topicFileName}](${topicFileName}) | tags: ${entry.keywords.join(", ") || "general"}`;
-        const lines = index
-          ? index.split("\n").filter((value) => !value.startsWith(`- [${topicFileName}]`))
-          : ["# Biny Project Memory", "", "This index links to short, auditable project notes.", ""];
-        lines.push(line);
-
-        await assertPinnedMemoryFile(this.workspaceRoot, directory, topicFile);
-        await assertPinnedMemoryFile(this.workspaceRoot, directory, indexFile);
-        await topicFile.handle.appendFile(renderEntry(entry), "utf8");
-        const nextIndex = `${lines.filter(Boolean).join("\n")}\n`;
-        await indexFile.handle.truncate(0);
-        await indexFile.handle.write(nextIndex, 0, "utf8");
-      } finally {
-        await topicFile.handle.close();
-      }
-    } finally {
-      await indexFile.handle.close();
-    }
-    return { written: true, path: path.relative(directory.storageRoot, filePath) };
+    const entry: MemoryEntryInput = {
+      scope: "project",
+      kind: kindFromLegacyEntry(rawEntry),
+      topic: rawEntry.topic,
+      title: rawEntry.title,
+      summary: rawEntry.summary,
+      decisions: rawEntry.decisions,
+      paths: rawEntry.paths,
+      keywords: rawEntry.keywords,
+      importance: 3,
+      lineage: { source: "explicit", externalContext: false }
+    };
+    if (redactSecrets(rawEntry.summary).trim().length < 20) return { written: false, path: undefined };
+    const result = await this.retryScopedMutation("project", signal, async (expectedRevision) => (
+      await this.storage.writeScoped(entry, { expectedRevision, signal })
+    ));
+    return { written: result.written, path: result.path };
   }
 
   async listTopics(): Promise<string[]> {
-    const directory = await resolveMemoryDirectory(this.workspaceRoot, false);
-    if (!directory) return [];
-    return (await this.listTopicFiles(directory)).map((fileName) => fileName.replace(/\.md$/, ""));
+    const result = await this.storage.listStoredEntries({ scopes: ["project"] });
+    return [...new Set(result.entries.map((entry) => entry.topic))].sort();
   }
 
-  /** 按话题读取完整记忆内容；话题不存在时返回 undefined。 */
+  /** 旧 show API 聚合同 topic 的独立 entry；磁盘上不再生成聚合 topic 文件。 */
   async readTopic(topic: string): Promise<string | undefined> {
-    const directory = await resolveMemoryDirectory(this.workspaceRoot, false);
-    if (!directory) return undefined;
-    const fileName = `${normalizeTopic(topic)}.md`;
-    assertMemoryFileName(fileName, false);
-    return await readOptionalMemoryFile(this.workspaceRoot, directory, fileName, maxTopicChars);
+    const normalized = normalizeMemoryTopic(topic);
+    const result = await this.storage.listStoredEntries({ scopes: ["project"], topic: normalized });
+    if (!result.entries.length) return undefined;
+    return result.entries.sort(compareLegacyEntryOrder).map(renderLegacySection).join("");
   }
 
-  /** 读取 MEMORY.md 索引，用于 /memory 列表展示。 */
   async readIndex(): Promise<string | undefined> {
-    const directory = await resolveMemoryDirectory(this.workspaceRoot, false);
-    if (!directory) return undefined;
-    return await readOptionalMemoryFile(this.workspaceRoot, directory, indexFileName, maxTopicChars);
+    return await this.storage.readIndex("project");
   }
 
-  /** 删除一个话题文件并同步清理索引行；话题不存在时返回 false。 */
   async forgetTopic(topic: string): Promise<boolean> {
-    const directory = await resolveMemoryDirectory(this.workspaceRoot, false);
-    if (!directory) return false;
-    const fileName = `${normalizeTopic(topic)}.md`;
-    assertMemoryFileName(fileName, false);
-    const filePath = path.join(directory.path, fileName);
-    try {
-      // 删除前先校验目标仍是常规单链接文件，防止软链/硬链把删除引到存储外。
-      await assertSafeExistingMemoryLeaf(filePath, fileName, false);
-      await fs.unlink(filePath);
-    } catch (error) {
-      if (isNotFound(error)) return false;
-      throw error;
-    }
-    const indexFile = await openPinnedMemoryFile(this.workspaceRoot, directory, indexFileName, false);
-    if (indexFile) {
-      try {
-        const index = await readPinnedMemoryFile(this.workspaceRoot, directory, indexFile, maxTopicChars);
-        const lines = index.split("\n").filter((line) => !line.startsWith(`- [${fileName}]`));
-        await indexFile.handle.truncate(0);
-        await indexFile.handle.write(`${lines.filter(Boolean).join("\n")}\n`, 0, "utf8");
-      } finally {
-        await indexFile.handle.close();
-      }
-    }
-    return true;
+    const result = await this.retryScopedMutation("project", undefined, async (expectedRevision) => (
+      await this.storage.deleteTopic("project", topic, { expectedRevision })
+    ));
+    return result.deleted > 0;
   }
 
-  /** 列出所有话题中的记忆条目（`##` 小节），按日期倒序，供图形界面逐条展示。 */
   async listEntries(signal?: AbortSignal): Promise<MemoryEntrySummary[]> {
-    const directory = await resolveMemoryDirectory(this.workspaceRoot, false);
-    if (!directory) return [];
-    const entries: MemoryEntrySummary[] = [];
-    for (const fileName of await this.listTopicFiles(directory, signal)) {
-      const content = await readOptionalMemoryFile(this.workspaceRoot, directory, fileName, maxTopicChars, signal);
-      if (!content) continue;
-      const topic = fileName.replace(/\.md$/, "");
-      parseMemorySections(content).sections.forEach((section, index) => {
-        entries.push({ topic, index, title: section.title, date: section.date, summary: section.summary.slice(0, 500) });
-      });
+    const result = await this.storage.listStoredEntries({ scopes: ["project"], signal });
+    const byTopic = new Map<string, MemoryEntry[]>();
+    for (const entry of result.entries) {
+      const entries = byTopic.get(entry.topic) ?? [];
+      entries.push(entry);
+      byTopic.set(entry.topic, entries);
     }
-    // index 仍指向各自话题文件内的原始小节序号，倒序只影响展示顺序。
-    return entries.sort((left, right) => (right.date ?? "").localeCompare(left.date ?? ""));
+    const summaries: MemoryEntrySummary[] = [];
+    for (const [topic, entries] of byTopic) {
+      entries.sort(compareLegacyEntryOrder).forEach((entry, index) => summaries.push({
+        topic,
+        index,
+        title: entry.title,
+        date: entry.createdAt,
+        summary: entry.summary.slice(0, 500)
+      }));
+    }
+    return summaries.sort((left, right) => (right.date ?? "").localeCompare(left.date ?? ""));
   }
 
-  /** 删除某话题内的一个小节；删空后连同话题文件与索引行一起清掉。 */
   async deleteEntry(topic: string, index: number, signal?: AbortSignal): Promise<boolean> {
     signal?.throwIfAborted();
-    const directory = await resolveMemoryDirectory(this.workspaceRoot, false);
-    if (!directory) return false;
-    const fileName = `${normalizeTopic(topic)}.md`;
-    assertMemoryFileName(fileName, false);
-    let file: PinnedMemoryFile | undefined;
-    try {
-      file = await openPinnedMemoryFile(this.workspaceRoot, directory, fileName, false, signal);
-    } catch (error) {
-      if (isNotFound(error)) return false;
-      throw error;
-    }
-    if (!file) return false;
-    let remaining = 0;
-    try {
-      const content = await readPinnedMemoryFile(this.workspaceRoot, directory, file, Number.MAX_SAFE_INTEGER);
-      const { preamble, sections } = parseMemorySections(content);
-      if (index < 0 || index >= sections.length) return false;
-      const rest = sections.filter((_, sectionIndex) => sectionIndex !== index);
-      remaining = rest.length;
-      if (remaining) {
-        await assertPinnedMemoryFile(this.workspaceRoot, directory, file);
-        await file.handle.truncate(0);
-        await file.handle.write(renderTopicFile(preamble, rest.map((section) => section.raw)), 0, "utf8");
+    const normalized = normalizeMemoryTopic(topic);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const snapshot = await this.storage.listStoredEntries({ scopes: ["project"], topic: normalized, signal });
+      const target = snapshot.entries.sort(compareLegacyEntryOrder)[index];
+      if (!target) return false;
+      try {
+        return (await this.storage.deleteStoredEntry("project", target.id, {
+          expectedRevision: snapshot.revision.project,
+          signal
+        })).deleted;
+      } catch (error) {
+        if (!(error instanceof MemoryRevisionConflictError) || attempt === 3) throw error;
       }
-    } finally {
-      await file.handle.close();
     }
-    return remaining ? true : await this.forgetTopic(topic);
+    return false;
   }
 
-  /**
-   * 记忆整理：逐话题让模型合并重复/相近条目、丢弃无长期价值的内容，再整体重写话题文件。
-   * 单个话题失败只标记该话题并保持原文件不动，不影响其余话题。
-   */
   async compactTopics(topics?: string[], signal?: AbortSignal): Promise<MemoryCompactionTopicResult[]> {
-    signal?.throwIfAborted();
-    const targets = topics?.length ? topics.map((topic) => normalizeTopic(topic)) : await this.listTopics();
+    const targets = topics?.length ? topics.map(normalizeMemoryTopic) : await this.listTopics();
     const results: MemoryCompactionTopicResult[] = [];
     for (const topic of [...new Set(targets)]) {
       signal?.throwIfAborted();
-      results.push(await this.compactTopic(topic, signal));
+      const overview = await this.storage.getOverview({ signal });
+      const result = await this.consolidateScope("project", {
+        expectedRevision: overview.scopes.project.revision,
+        topic,
+        signal
+      });
+      results.push({ topic, before: result.before, after: result.after, error: result.error });
     }
     return results;
   }
 
-  private async compactTopic(topic: string, signal?: AbortSignal): Promise<MemoryCompactionTopicResult> {
-    const content = await this.readTopic(topic);
-    if (!content) return { topic, before: 0, after: 0, error: "Topic not found." };
-    const before = parseMemorySections(content).sections.length;
-    if (before < 2) return { topic, before, after: before };
-
-    let merged: MemoryEntry[];
+  private async runEligibleCandidateMaintenance(options: MemoryMaintenanceOptions): Promise<MemoryMaintenanceResult> {
+    const now = options.now ?? new Date();
+    const startedAt = now.toISOString();
+    this.maintenance = {
+      state: "running",
+      startedAt,
+      lastScanAt: startedAt,
+      eligible: 0,
+      processed: 0,
+      written: 0,
+      failed: 0,
+      error: undefined
+    };
+    await this.storage.writeMaintenanceStatus(this.maintenance, options.signal);
+    let scanned = 0;
+    let processed = 0;
+    let written = 0;
+    let failed = 0;
+    let lastError: string | undefined;
     try {
-      merged = await this.mergeEntriesWithModel(topic, content, signal);
-    } catch (error) {
-      signal?.throwIfAborted();
-      return { topic, before, after: before, error: error instanceof Error ? error.message : String(error) };
-    }
-    signal?.throwIfAborted();
-    // 合并结果必须严格更少且非空，否则视为模型输出不可用，保留原文件。
-    if (!merged.length || merged.length >= before) {
-      return merged.length === before
-        ? { topic, before, after: before }
-        : { topic, before, after: before, error: "Model returned an unusable merge result." };
-    }
-    await this.rewriteTopic(topic, merged, signal);
-    return { topic, before, after: merged.length };
-  }
-
-  /** 用给定条目整体重写话题文件并同步索引行；文件防御逻辑与 write 一致。 */
-  private async rewriteTopic(topic: string, entries: MemoryEntry[], signal?: AbortSignal): Promise<void> {
-    const directory = await resolveMemoryDirectory(this.workspaceRoot, true);
-    if (!directory) throw new Error("Failed to open local memory storage.");
-    const topicFileName = `${normalizeTopic(topic)}.md`;
-    assertMemoryFileName(topicFileName, false);
-    const keywords = [...new Set(entries.flatMap((entry) => entry.keywords))].slice(0, 12);
-    const indexFile = await openPinnedMemoryFile(this.workspaceRoot, directory, indexFileName, true, signal);
-    if (!indexFile) throw new Error("Failed to open the local memory index.");
-    try {
-      const topicFile = await openPinnedMemoryFile(this.workspaceRoot, directory, topicFileName, true, signal);
-      if (!topicFile) throw new Error(`Failed to open local memory topic: ${topicFileName}`);
-      try {
-        const index = await readPinnedMemoryFile(this.workspaceRoot, directory, indexFile, maxTopicChars);
-        signal?.throwIfAborted();
-        const lines = index
-          ? index.split("\n").filter((value) => !value.startsWith(`- [${topicFileName}]`))
-          : ["# Biny Project Memory", "", "This index links to short, auditable project notes.", ""];
-        lines.push(`- [${topicFileName}](${topicFileName}) | tags: ${keywords.join(", ") || "general"}`);
-
-        await assertPinnedMemoryFile(this.workspaceRoot, directory, topicFile);
-        await assertPinnedMemoryFile(this.workspaceRoot, directory, indexFile);
-        await topicFile.handle.truncate(0);
-        await topicFile.handle.write(entries.map((entry) => renderEntry(entry)).join(""), 0, "utf8");
-        await indexFile.handle.truncate(0);
-        await indexFile.handle.write(`${lines.filter(Boolean).join("\n")}\n`, 0, "utf8");
-      } finally {
-        await topicFile.handle.close();
+      const scan = await this.storage.scanEligibleCandidates({ now, limit: maintenanceCandidateLimit, signal: options.signal });
+      scanned = scan.candidates.length;
+      this.maintenance.eligible = scanned;
+      for (const candidate of scan.candidates) {
+        options.signal?.throwIfAborted();
+        try {
+          if (candidate.lineage.externalContext && options.excludeExternalContext) {
+            await this.removeCandidateWithRetry(candidate.id, options.signal, now);
+            processed += 1;
+            continue;
+          }
+          const proposal = await this.extractCandidate(candidate, options.signal);
+          options.signal?.throwIfAborted();
+          if (proposal) {
+            const input = this.classifyCandidateProposal(candidate, proposal);
+            const writeResult = await this.writeScopedWithRetry(input, options.signal, now);
+            if (writeResult.written) written += 1;
+            const overview = await this.storage.getOverview({ signal: options.signal });
+            await this.consolidateScope(input.scope, {
+              expectedRevision: overview.scopes[input.scope].revision,
+              topic: input.topic,
+              signal: options.signal
+            });
+          }
+          await this.removeCandidateWithRetry(candidate.id, options.signal, now);
+          processed += 1;
+        } catch (error) {
+          options.signal?.throwIfAborted();
+          failed += 1;
+          lastError = error instanceof Error ? error.message : String(error);
+        }
+        this.maintenance.processed = processed;
+        this.maintenance.written = written;
+        this.maintenance.failed = failed;
+        this.maintenance.error = lastError;
+        await this.storage.writeMaintenanceStatus(this.maintenance, options.signal);
       }
+      const finishedAt = new Date().toISOString();
+      return { scanned, processed, written, failed, startedAt, finishedAt };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      throw error;
     } finally {
-      await indexFile.handle.close();
+      const finishedAt = new Date().toISOString();
+      this.maintenance = {
+        state: "idle",
+        lastScanAt: startedAt,
+        lastFinishedAt: finishedAt,
+        eligible: scanned,
+        processed,
+        written,
+        failed,
+        error: lastError
+      };
+      // Abort 后仍要留下已验证的清理/失败状态；状态写入不复用已中止 signal。
+      await this.storage.writeMaintenanceStatus(this.maintenance).catch((error) => {
+        this.maintenance.error ??= error instanceof Error ? error.message : String(error);
+      });
     }
   }
 
-  private async mergeEntriesWithModel(topic: string, content: string, signal?: AbortSignal): Promise<MemoryEntry[]> {
-    const prompt = [
-      "Consolidate this project memory topic file. Merge duplicate or near-duplicate entries,",
-      "combine entries about the same subject, and drop entries with no durable value.",
-      "Keep every distinct durable fact; preserve concrete paths, decisions, and keywords.",
-      "Never invent new facts and never include credentials or secrets.",
-      `Topic: ${topic}`,
-      "Current entries (Markdown):",
-      content
-    ].join("\n\n");
-    const model = this.getModel();
-    const response = await generateNativeText(model, nativeJsonMessages(
-      "You consolidate project memory records without losing durable facts.",
-      prompt
-    ), {
-      signal,
-      maxOutputTokens: 4_096,
-      timeoutMs: memoryModelTimeoutMs,
-      onRequestMetrics: this.onModelRequest,
-      requestContext: { ...(this.getModelRequestContext() ?? {}), operation: "memory" }
-    });
-    if (response.usage) await this.onUsage(response.usage, "memory");
-    signal?.throwIfAborted();
-    const parsed = compactedEntriesSchema.safeParse(parseNativeJson(response.text));
-    if (!parsed.success) throw new Error("Model returned invalid memory compaction JSON.");
-    return parsed.data.entries
-      .map((entry) => sanitizeMemoryEntry({ ...entry, topic }))
-      .filter((entry) => entry.summary.length >= 20);
-  }
-
-  private async extractProposal(task: string, answer: string, signal?: AbortSignal): Promise<MemoryEntry | undefined> {
+  private async extractLegacyProposal(task: string, answer: string, signal?: AbortSignal): Promise<LegacyMemoryEntry | undefined> {
     const prompt = [
       "Extract one durable, auditable local-project memory from a successful coding task.",
       "Skip transient chatter. Never include credentials, secrets, or full source code.",
@@ -349,115 +472,237 @@ export class LocalMemory {
       "Result:",
       answer
     ].join("\n\n");
-
     try {
-      const model = this.getModel();
-      const response = await generateNativeText(model, nativeJsonMessages(
+      const parsed = extractedEntrySchema.safeParse(parseNativeJson(await this.modelText(
+        this.getExtractionModel(),
         "You write concise project memory records, not explanations.",
-        prompt
-      ), {
-        signal,
-        maxOutputTokens: 2_048,
-        timeoutMs: memoryModelTimeoutMs,
-        onRequestMetrics: this.onModelRequest,
-        requestContext: { ...(this.getModelRequestContext() ?? {}), operation: "memory" }
-      });
-      signal?.throwIfAborted();
-      if (response.usage) await this.onUsage(response.usage, "memory");
-      signal?.throwIfAborted();
-      return parseMemoryEntry(parseNativeJson(response.text));
+        prompt,
+        2_048,
+        signal
+      )));
+      if (!parsed.success || parsed.data.summary.length < 20) return undefined;
+      return {
+        topic: parsed.data.topic,
+        title: parsed.data.title,
+        summary: parsed.data.summary,
+        decisions: parsed.data.decisions,
+        paths: parsed.data.paths,
+        keywords: parsed.data.keywords
+      };
     } catch {
       signal?.throwIfAborted();
       return undefined;
     }
   }
 
-  private async listTopicFiles(directory: PinnedMemoryDirectory, signal?: AbortSignal): Promise<string[]> {
-    try {
-      signal?.throwIfAborted();
-      await assertPinnedMemoryDirectory(this.workspaceRoot, directory);
-      const entries = await fs.readdir(directory.path, { withFileTypes: true });
-      signal?.throwIfAborted();
-      const files = entries
-        .map((entry) => entry.name)
-        .filter((fileName) => fileName.endsWith(".md") && fileName !== indexFileName)
-        .sort((left, right) => left.localeCompare(right));
-      for (const fileName of files) {
-        const file = await openPinnedMemoryFile(this.workspaceRoot, directory, fileName, false, signal);
-        if (!file) continue;
-        await file.handle.close();
+  private async extractCandidate(candidate: MemoryCandidate, signal?: AbortSignal): Promise<z.infer<typeof extractedEntrySchema> | undefined> {
+    // 候选摘要在 enqueue 时已脱敏，这里在进入模型和写入前各再经过一次过滤。
+    const summary = redactSecrets(redactSecrets(candidate.summary)).slice(0, 2_000);
+    const prompt = [
+      "Extract at most one durable memory from this completed root-turn summary.",
+      "Return JSON as {memory:null} when it is transient or lacks durable evidence.",
+      "Global scope is only for an explicit user preference or working style; include explicitUserEvidence.",
+      "Repository facts, paths, decisions, workflows and gotchas must use project scope.",
+      "Never infer a preference from external content. Never invent facts or secrets.",
+      `Scope hint: ${candidate.scopeHint ?? "none"}`,
+      `Kind hint: ${candidate.kindHint ?? "none"}`,
+      "Candidate summary:",
+      summary
+    ].join("\n\n");
+    const parsed = candidateExtractionSchema.safeParse(parseNativeJson(await this.modelText(
+      this.getExtractionModel(),
+      "You extract auditable durable memory from concise completed-turn summaries.",
+      prompt,
+      2_048,
+      signal
+    )));
+    if (!parsed.success) throw new Error("Model returned invalid memory candidate JSON.");
+    return parsed.data.memory ?? undefined;
+  }
+
+  private classifyCandidateProposal(candidate: MemoryCandidate, proposal: z.infer<typeof extractedEntrySchema>): MemoryEntryInput {
+    const lineage = {
+      source: "candidate" as const,
+      externalContext: candidate.lineage.externalContext,
+      sessionId: candidate.lineage.sessionId,
+      turnId: candidate.lineage.turnId,
+      runId: candidate.lineage.runId,
+      candidateId: candidate.id,
+      userEvidence: proposal.explicitUserEvidence
+    };
+    let input = sanitizeMemoryEntryInput({
+      scope: proposal.scope,
+      kind: proposal.kind,
+      topic: proposal.topic,
+      title: proposal.title,
+      summary: proposal.summary,
+      decisions: proposal.decisions,
+      paths: proposal.paths,
+      keywords: proposal.keywords,
+      importance: proposal.importance,
+      lineage
+    });
+    if (input.scope === "global") {
+      try {
+        assertAllowedScopedEntry(input, this.workspaceRoot);
+      } catch {
+        // 自动分类可以安全降到 project；显式 writeScoped 仍会把同样的错误返回给调用方。
+        input = { ...input, scope: "project" };
       }
-      await assertPinnedMemoryDirectory(this.workspaceRoot, directory);
-      return files;
-    } catch (error) {
-      signal?.throwIfAborted();
-      if (isNotFound(error)) return [];
-      throw error;
     }
+    return input;
+  }
+
+  private async consolidateEntriesWithModel(
+    scope: MemoryScope,
+    entries: MemoryEntry[],
+    signal?: AbortSignal
+  ): Promise<z.infer<typeof consolidationSchema>> {
+    const prompt = [
+      "Consolidate this project memory topic file into fewer durable entries when facts overlap.",
+      "Return JSON {entries:[...]}; every output must list sourceEntryIds.",
+      "Every input id must appear in at least one output sourceEntryIds so lineage is lossless.",
+      "Never delete information merely because it is old. Never invent facts or secrets.",
+      `Scope: ${scope}`,
+      "Current entries:",
+      JSON.stringify(entries.map((entry) => ({
+        id: entry.id,
+        kind: entry.kind,
+        topic: entry.topic,
+        title: entry.title,
+        summary: entry.summary,
+        decisions: entry.decisions,
+        paths: entry.paths,
+        keywords: entry.keywords,
+        importance: entry.importance
+      })))
+    ].join("\n\n");
+    const parsed = consolidationSchema.safeParse(parseNativeJson(await this.modelText(
+      this.getConsolidationModel(),
+      "You consolidate durable memory without losing facts or source lineage.",
+      prompt,
+      4_096,
+      signal
+    )));
+    if (!parsed.success) throw new Error("Model returned invalid memory consolidation JSON.");
+    return parsed.data;
+  }
+
+  private async modelText(
+    model: AgentModel,
+    system: string,
+    prompt: string,
+    maxOutputTokens: number,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const response = await generateNativeText(model, nativeJsonMessages(system, prompt), {
+      signal,
+      maxOutputTokens,
+      timeoutMs: memoryModelTimeoutMs,
+      onRequestMetrics: this.onModelRequest,
+      requestContext: { ...(this.getModelRequestContext() ?? {}), operation: "memory" }
+    });
+    if (response.usage) await this.onUsage(response.usage, "memory");
+    signal?.throwIfAborted();
+    return response.text;
+  }
+
+  private async writeScopedWithRetry(input: MemoryEntryInput, signal: AbortSignal | undefined, now: Date): Promise<ScopedMemoryWriteResult> {
+    return await this.retryScopedMutation(input.scope, signal, async (expectedRevision) => (
+      await this.storage.writeScoped(input, { expectedRevision, signal, now })
+    ));
+  }
+
+  private async removeCandidateWithRetry(id: string, signal: AbortSignal | undefined, now: Date): Promise<void> {
+    await this.retryScopedMutation("project", signal, async (expectedRevision) => (
+      await this.storage.removeCandidate(id, { expectedRevision, signal, now })
+    ));
+  }
+
+  private async retryScopedMutation<T>(
+    scope: MemoryScope,
+    signal: AbortSignal | undefined,
+    operation: (expectedRevision: number) => Promise<T>
+  ): Promise<T> {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      signal?.throwIfAborted();
+      const overview = await this.storage.getOverview({ signal });
+      try {
+        return await operation(overview.scopes[scope].revision);
+      } catch (error) {
+        if (!(error instanceof MemoryRevisionConflictError) || attempt === 3) throw error;
+      }
+    }
+    throw new Error(`Unable to mutate ${scope} memory after repeated revision conflicts.`);
   }
 }
 
-export function formatMemoryMatches(matches: MemoryMatch[]): string {
+export function formatMemoryMatches(matches: LegacyMemoryMatch[]): string {
   if (!matches.length) return "";
   return matches.map((match) => `- ${match.topic}: ${match.excerpt}`).join("\n");
 }
 
-export { redactSecrets };
+export { redactSecrets, MemoryRevisionConflictError };
+export type {
+  MemoryBudgetOmission,
+  MemoryCandidate,
+  MemoryCandidateInput,
+  MemoryCandidateLineage,
+  MemoryCandidateMutationOptions,
+  MemoryCandidateMutationResult,
+  MemoryCandidateScanOptions,
+  MemoryCandidateScanResult,
+  MemoryClearResult,
+  MemoryConsolidationOptions,
+  MemoryConsolidationResult,
+  MemoryDeleteResult,
+  MemoryEntriesResult,
+  MemoryEntry,
+  MemoryEntryInput,
+  MemoryKind,
+  MemoryLineage,
+  MemoryLineageSource,
+  MemoryListOptions,
+  MemoryMaintenanceOptions,
+  MemoryMaintenanceResult,
+  MemoryMaintenanceStatus,
+  MemoryMatch,
+  MemoryMutationOptions,
+  MemoryOmissionReason,
+  MemoryOverview,
+  MemoryReadOptions,
+  MemoryRecallOmission,
+  MemoryRecallReport,
+  MemoryRecallScopeCounts,
+  MemoryScope,
+  MemoryScopeOverview,
+  MemoryScopeRevision,
+  MemorySearchOptions,
+  MemorySearchResult,
+  ScopedMemoryWriteResult
+} from "./memoryTypes.js";
 
 export function normalizeTopic(value: string): string {
-  const normalized = value.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-  return normalized || "project";
+  return normalizeMemoryTopic(value);
 }
 
-function parseMemoryEntry(value: unknown): MemoryEntry | undefined {
-  try {
-    const parsed = typeof value === "string"
-      ? JSON.parse(stripCodeFence(value)) as Record<string, unknown>
-      : value as Record<string, unknown>;
-    const summary = stringValue(parsed.summary);
-    if (!summary) return undefined;
-    return {
-      topic: normalizeTopic(stringValue(parsed.topic) ?? "project"),
-      title: stringValue(parsed.title) ?? "Project note",
-      summary,
-      decisions: stringArray(parsed.decisions),
-      paths: stringArray(parsed.paths),
-      keywords: stringArray(parsed.keywords)
-    };
-  } catch {
-    return undefined;
-  }
+function kindFromLegacyEntry(entry: LegacyMemoryEntry): MemoryEntryInput["kind"] {
+  const topic = normalizeMemoryTopic(entry.topic);
+  if (topic.includes("decision")) return "decision";
+  if (topic.includes("workflow")) return "workflow";
+  if (topic.includes("debug") || topic.includes("gotcha")) return "gotcha";
+  return "fact";
 }
 
-function stripCodeFence(value: string): string {
-  return value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+function compareLegacyEntryOrder(left: MemoryEntry, right: MemoryEntry): number {
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? redactSecrets(value).trim() : undefined;
-}
-
-function stringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string").map((item) => redactSecrets(item).trim()).filter(Boolean);
-}
-
-function sanitizeMemoryEntry(entry: MemoryEntry): MemoryEntry {
-  return {
-    topic: normalizeTopic(redactSecrets(entry.topic)),
-    title: redactSecrets(entry.title).replace(/\s+/g, " ").trim().slice(0, 120),
-    summary: redactSecrets(entry.summary).trim().slice(0, 2_000),
-    decisions: entry.decisions.map((value) => redactSecrets(value).trim()).filter(Boolean).slice(0, 8),
-    paths: entry.paths.map((value) => redactSecrets(value).trim()).filter(Boolean).slice(0, 16),
-    keywords: entry.keywords.map((value) => redactSecrets(value).trim().toLowerCase()).filter(Boolean).slice(0, 12)
-  };
-}
-
-function renderEntry(entry: MemoryEntry): string {
+function renderLegacySection(entry: MemoryEntry): string {
   return [
     `## ${entry.title || "Project note"}`,
     "",
-    `- Date: ${new Date().toISOString()}`,
+    `- Date: ${entry.createdAt}`,
     `- Summary: ${entry.summary}`,
     ...(entry.decisions.length ? ["- Decisions:", ...entry.decisions.map((decision) => `  - ${decision}`)] : []),
     ...(entry.paths.length ? [`- Paths: ${entry.paths.join(", ")}`] : []),
@@ -465,308 +710,4 @@ function renderEntry(entry: MemoryEntry): string {
     "",
     ""
   ].join("\n");
-}
-
-const compactedEntriesSchema = z.object({
-  entries: z.array(z.object({
-    title: z.string(),
-    summary: z.string(),
-    decisions: z.array(z.string()).default([]),
-    paths: z.array(z.string()).default([]),
-    keywords: z.array(z.string()).default([])
-  })).default([])
-});
-
-interface ParsedMemorySection {
-  title: string;
-  date?: string;
-  summary: string;
-  /** 小节原文（含 `##` 标题行），删除/重写时按整段搬运，避免破坏手工编辑的内容。 */
-  raw: string;
-}
-
-/** 把话题文件拆成 `##` 小节。文件可能被人手工编辑过，字段缺失时按能取到的内容降级。 */
-function parseMemorySections(content: string): { preamble: string; sections: ParsedMemorySection[] } {
-  const lines = content.split("\n");
-  const sections: ParsedMemorySection[] = [];
-  let preambleEnd = lines.length;
-  let current: string[] | undefined;
-  const flush = (): void => {
-    if (!current) return;
-    const title = current[0]?.replace(/^##\s*/, "").trim() || "Project note";
-    const date = current.find((line) => line.trim().startsWith("- Date:"))?.replace(/^\s*- Date:\s*/, "").trim();
-    const summary = current.find((line) => line.trim().startsWith("- Summary:"))?.replace(/^\s*- Summary:\s*/, "").trim()
-      ?? current.slice(1).map((line) => line.trim()).find(Boolean)
-      ?? "";
-    sections.push({ title, date, summary, raw: current.join("\n") });
-  };
-  lines.forEach((line, index) => {
-    if (line.startsWith("## ")) {
-      if (!current) preambleEnd = index;
-      flush();
-      current = [line];
-    } else if (current) {
-      current.push(line);
-    }
-  });
-  flush();
-  return { preamble: lines.slice(0, preambleEnd).join("\n"), sections };
-}
-
-function renderTopicFile(preamble: string, sectionRaws: string[]): string {
-  const head = preamble.trim() ? `${preamble.replace(/\s+$/, "")}\n\n` : "";
-  return `${head}${sectionRaws.map((raw) => `${raw.replace(/\s+$/, "")}\n\n`).join("")}`;
-}
-
-function isDuplicate(existing: string, entry: MemoryEntry): boolean {
-  const normalizedExisting = normalizeForDedup(existing);
-  const title = normalizeForDedup(entry.title);
-  const summary = normalizeForDedup(entry.summary);
-  return Boolean(title) && Boolean(summary) && normalizedExisting.includes(title) && normalizedExisting.includes(summary);
-}
-
-function normalizeForDedup(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-function scoreMemory(fileName: string, content: string, terms: string[]): number {
-  const lowerName = fileName.toLowerCase();
-  const lowerContent = content.toLowerCase();
-  return terms.reduce((score, term) => {
-    let next = score;
-    if (lowerName.includes(term)) next += 8;
-    if (lowerContent.includes(term)) next += 3;
-    return next;
-  }, 0);
-}
-
-function createExcerpt(content: string, terms: string[]): string {
-  const lines = content.split("\n").map((line) => line.trim()).filter(Boolean);
-  const matched = lines.find((line) => terms.some((term) => line.toLowerCase().includes(term)));
-  return redactSecrets(matched ?? lines.at(-1) ?? "").slice(0, 500);
-}
-
-/**
- * 检索词切分。ASCII 走原有的分隔符切词；CJK 文本没有空格分界，按连续汉字段生成
- * 二元词组（bigram），让中文任务描述也能命中记忆内容的子串匹配。
- */
-function tokenize(value: string): string[] {
-  const lower = value.toLowerCase();
-  const ascii = lower.split(/[^a-z0-9_$./-]+/).filter((term) => term.length >= 2);
-  const cjk: string[] = [];
-  for (const run of lower.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+/g) ?? []) {
-    if (run.length === 1) cjk.push(run);
-    for (let index = 0; index + 1 < run.length; index += 1) cjk.push(run.slice(index, index + 2));
-  }
-  return [...new Set([...ascii, ...cjk])].slice(0, 32);
-}
-
-function indexedTopicFiles(index: string | undefined): string[] {
-  if (!index) return [];
-  return [...index.matchAll(/\]\(([^)]+\.md)\)/g)]
-    .map((match) => match[1])
-    .filter((fileName): fileName is string => {
-      if (!fileName || fileName === indexFileName) return false;
-      return path.basename(fileName) === fileName;
-    });
-}
-
-function indexLineForFile(index: string | undefined, fileName: string): string {
-  return index?.split("\n").find((line) => line.includes(`(${fileName})`)) ?? "";
-}
-
-async function resolveMemoryDirectory(workspaceRoot: string, create: boolean): Promise<PinnedMemoryDirectory | undefined> {
-  const workspacePath = path.resolve(workspaceRoot);
-  const canonicalWorkspace = await fs.realpath(workspacePath);
-  const configuredAgentPath = path.resolve(globalAgentDir());
-  const agent = await ensureRealDirectory(configuredAgentPath, create, "global agent directory");
-  if (!agent) return undefined;
-  const canonicalAgent = await fs.realpath(configuredAgentPath);
-
-  const memoryRootPath = path.join(canonicalAgent, "memory");
-  const memoryRoot = await ensureRealDirectory(memoryRootPath, create, "global project memory root");
-  if (!memoryRoot) return undefined;
-  const canonicalMemoryRoot = await fs.realpath(memoryRootPath);
-  if (canonicalMemoryRoot !== memoryRootPath) {
-    throw new Error("Global project memory root resolves outside the global agent directory.");
-  }
-
-  const memoryPath = projectMemoryDir(canonicalWorkspace);
-  const memory = await ensureRealDirectory(memoryPath, create, "current project memory");
-  if (!memory) return undefined;
-  const canonicalMemory = await fs.realpath(memoryPath);
-  if (canonicalMemory !== path.join(canonicalMemoryRoot, path.basename(memoryPath))) {
-    throw new Error("Project memory storage resolves outside the current project's global memory directory.");
-  }
-  return {
-    workspaceRoot: canonicalWorkspace,
-    storageRoot: canonicalAgent,
-    path: canonicalMemory,
-    device: memory.dev,
-    inode: memory.ino
-  };
-}
-
-async function ensureRealDirectory(directory: string, create: boolean, label: string): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> {
-  let stat;
-  try {
-    stat = await fs.lstat(directory);
-  } catch (error) {
-    if (!isNotFound(error) || !create) {
-      if (isNotFound(error)) return undefined;
-      throw error;
-    }
-    try {
-      await fs.mkdir(directory, { mode: 0o700 });
-    } catch (mkdirError) {
-      if (!isAlreadyExists(mkdirError)) throw mkdirError;
-    }
-    stat = await fs.lstat(directory);
-  }
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error(`Local memory storage ${label} must be a real directory, not a symbolic link.`);
-  }
-  await fs.chmod(directory, 0o700);
-  return stat;
-}
-
-async function assertPinnedMemoryDirectory(workspaceRoot: string, expected: PinnedMemoryDirectory): Promise<void> {
-  const current = await resolveMemoryDirectory(workspaceRoot, false);
-  if (!current || current.path !== expected.path || current.device !== expected.device || current.inode !== expected.inode) {
-    throw new Error("Local memory storage changed during access.");
-  }
-}
-
-async function openPinnedMemoryFile(
-  workspaceRoot: string,
-  directory: PinnedMemoryDirectory,
-  fileName: string,
-  create: boolean,
-  signal?: AbortSignal
-): Promise<PinnedMemoryFile | undefined> {
-  signal?.throwIfAborted();
-  assertMemoryFileName(fileName, fileName === indexFileName);
-  await assertPinnedMemoryDirectory(workspaceRoot, directory);
-  const filePath = path.join(directory.path, fileName);
-  await assertSafeExistingMemoryLeaf(filePath, fileName, create);
-
-  let handle: FileHandle;
-  try {
-    handle = await fs.open(
-      filePath,
-      constants.O_RDWR | noFollowFlag() | (create ? constants.O_CREAT : 0),
-      0o600
-    );
-  } catch (error) {
-    if (!create && isNotFound(error)) return undefined;
-    if (isSymbolicLinkError(error)) throw unsafeMemoryFileError(fileName);
-    throw error;
-  }
-
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1) throw unsafeMemoryFileError(fileName);
-    await assertPinnedMemoryDirectory(workspaceRoot, directory);
-    await assertMemoryLeafBinding(directory, fileName, stat.dev, stat.ino);
-    if (create) await handle.chmod(0o600);
-    signal?.throwIfAborted();
-    return { handle, name: fileName, device: stat.dev, inode: stat.ino };
-  } catch (error) {
-    await handle.close();
-    throw error;
-  }
-}
-
-async function assertSafeExistingMemoryLeaf(filePath: string, fileName: string, allowMissing: boolean): Promise<void> {
-  try {
-    const stat = await fs.lstat(filePath);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) throw unsafeMemoryFileError(fileName);
-  } catch (error) {
-    if (allowMissing && isNotFound(error)) return;
-    throw error;
-  }
-}
-
-async function assertPinnedMemoryFile(
-  workspaceRoot: string,
-  directory: PinnedMemoryDirectory,
-  file: PinnedMemoryFile
-): Promise<void> {
-  const stat = await file.handle.stat();
-  if (!stat.isFile() || stat.nlink !== 1 || stat.dev !== file.device || stat.ino !== file.inode) {
-    throw unsafeMemoryFileError(file.name);
-  }
-  await assertPinnedMemoryDirectory(workspaceRoot, directory);
-  await assertMemoryLeafBinding(directory, file.name, file.device, file.inode);
-}
-
-async function assertMemoryLeafBinding(directory: PinnedMemoryDirectory, fileName: string, device: number | bigint, inode: number | bigint): Promise<void> {
-  const filePath = path.join(directory.path, fileName);
-  const stat = await fs.lstat(filePath);
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || stat.dev !== device || stat.ino !== inode) {
-    throw unsafeMemoryFileError(fileName);
-  }
-  if (await fs.realpath(filePath) !== filePath) throw unsafeMemoryFileError(fileName);
-}
-
-async function readOptionalMemoryFile(
-  workspaceRoot: string,
-  directory: PinnedMemoryDirectory,
-  fileName: string,
-  maxChars = maxTopicChars,
-  signal?: AbortSignal
-): Promise<string | undefined> {
-  const file = await openPinnedMemoryFile(workspaceRoot, directory, fileName, false, signal);
-  if (!file) return undefined;
-  try {
-    const content = await file.handle.readFile({ encoding: "utf8", signal });
-    await assertPinnedMemoryFile(workspaceRoot, directory, file);
-    return content.slice(0, maxChars);
-  } finally {
-    await file.handle.close();
-  }
-}
-
-async function readPinnedMemoryFile(
-  workspaceRoot: string,
-  directory: PinnedMemoryDirectory,
-  file: PinnedMemoryFile,
-  maxChars: number
-): Promise<string> {
-  await assertPinnedMemoryFile(workspaceRoot, directory, file);
-  const content = await file.handle.readFile({ encoding: "utf8" });
-  await assertPinnedMemoryFile(workspaceRoot, directory, file);
-  return content.slice(0, maxChars);
-}
-
-function assertMemoryFileName(fileName: string, allowIndex: boolean): void {
-  if (
-    !fileName
-    || fileName.includes("\0")
-    || path.basename(fileName) !== fileName
-    || !fileName.endsWith(".md")
-    || (!allowIndex && fileName.toLowerCase() === indexFileName.toLowerCase())
-  ) {
-    throw new Error(`Invalid local memory file name: ${fileName}`);
-  }
-}
-
-function unsafeMemoryFileError(fileName: string): Error {
-  return new Error(`Local memory file must be a single regular file, not a symbolic link or hard link: ${fileName}`);
-}
-
-function isNotFound(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
-function isAlreadyExists(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
-}
-
-function isSymbolicLinkError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && (error.code === "ELOOP" || error.code === "EMLINK");
-}
-
-function noFollowFlag(): number {
-  return typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
 }

@@ -16,6 +16,7 @@
 - **工作区工具** —— 文件读写与补丁、代码搜索、Git、Shell、受管进程、联网搜索/抓取和 Todo。
 - **安全与恢复** —— 统一权限确认、可选的 macOS 工作区沙箱、Git checkpoint/undo；异常中断后可恢复 Session，无法确认副作用的操作不会自动重试。
 - **后台运行** —— Runtime Host 通过本地 SQLite authority 管理 AgentRun、TaskRun、Automation、Goal/Graph 和 Capability 状态；Session/Agent 回合事实仍以 JSONL 为 canonical source，SQLite 中对应的 session event 只是可重建投影。任务可在 Host 重启后继续查询；只有显式恢复或已持久化的 Automation/Graph 唤醒才会再次创建运行。
+- **个性化与分层记忆** —— 全局个性化、全局用户记忆、项目记忆和会话历史彼此独立；聊天可分别覆盖表达风格、指令、是否读取记忆和是否贡献记忆。记忆保持本地 Markdown 可审计，不使用 embedding 或云端记忆。
 - **扩展能力** ——
   - Skill：已支持全局/项目目录扫描、显式调用和按需读取资源；生态兼容与复杂编排仍在完善。
   - MCP：已支持配置并连接启用的 stdio/http server、发现并调用工具；配置体验、跨服务兼容和异常恢复仍在完善。
@@ -72,15 +73,32 @@ harbor run \
 
 ```json
 {
+  "format": "biny-config",
+  "configVersion": 1,
   "defaultModel": "coder",
   "providers": {
     "deepseek": { "type": "deepseek", "apiKeyEnv": "DEEPSEEK_API_KEY" }
   },
   "models": {
     "coder": { "provider": "deepseek", "model": "deepseek-v4-flash" }
+  },
+  "personalization": {
+    "enabled": true,
+    "personality": "none",
+    "customInstructions": ""
+  },
+  "context": {
+    "memory": {
+      "useMemories": false,
+      "generateMemories": false,
+      "maxRecalled": 3,
+      "excludeExternalContext": true
+    }
   }
 }
 ```
+
+`personalization.customInstructions` 最多 4 KiB。`personality` 支持 `none`、`friendly` 和 `pragmatic`，只改变表达方式，不改变工具、权限或 Plan 约束。`useMemories` 控制当前聊天是否读取记忆，`generateMemories` 控制成功回合是否在空闲后贡献候选；两者相互独立，且默认都关闭。Desktop 可在 **设置 → 个性化** 修改全局默认值，TUI 使用 `/personality` 和 `/memories` 设置当前聊天覆盖；`/memory` 继续负责查看、搜索、添加、删除和整理实际数据。
 
 模型目录由仓库内的 `models.dev` 快照提供，不需要为每个模型手写 `models` 条目。更新快照时运行：
 
@@ -97,7 +115,9 @@ API 地址、SDK、环境变量或密钥。Provider endpoint、协议和凭据�
 
 ## 数据与会话
 
-会话和 Memory 按项目保存在 `~/.biny/agent/`，附件与工具结果归档在项目 `.biny/`。对 Session/Agent 回合而言，session JSONL 是 canonical runtime facts：新事件带有唯一 `eventId`、session 内连续的 `eventSeq`，以及本次执行的 `runId` 和任务级 `turnId`；旧 session 缺少这些字段时仍按历史事实读取。`.biny/runtime.sqlite` 是后台状态 authority，同时保存可从 JSONL 重建的 session event projection；TaskRun、Automation、Goal/Graph、Capability 的 event 与 projection 在同一 SQLite 事务内提交。catalog、run ledger 和 TurnStore 分别保存列表/运行状态投影与可恢复 checkpoint。`biny resume latest` 只有在用户明确执行该命令时才会校验 checkpoint 与 runtime high-water，并为 continuation 创建新的 `runId`、复用原 `turnId`；副作用不确定的工具只进入 `unknown/blocked`，不会自动重试。终态顺序是 checkpoint、canonical `turn_status`、run ledger、UI/Host 事件；终态事实已落盘但 ledger 投影失败时，下次启动会从 JSONL 修复。
+会话和 Memory 保存在 `~/.biny/agent/`，附件与工具结果归档在项目 `.biny/`。全局用户偏好位于 `memory/global/`，项目事实仍位于按项目哈希隔离的分区；每条 durable memory 是一个带 YAML frontmatter 的 Markdown 文件，`MEMORY.md` 只是有界索引。项目事实不会跨项目召回。成功回合先写入带 session/turn/run lineage 的候选，默认等待聊天空闲 6 小时后由 Runtime Host 后台抽取；失败、取消、阻塞、不完整或使用外部 Web/MCP 上下文的回合默认不会自动贡献。这个后台流程失败也不会反转任务终态。
+
+对 Session/Agent 回合而言，session JSONL 是 canonical runtime facts：新事件带有唯一 `eventId`、session 内连续的 `eventSeq`，以及本次执行的 `runId` 和任务级 `turnId`；旧 session 缺少这些字段时仍按历史事实读取。`.biny/runtime.sqlite` 是后台状态 authority，同时保存可从 JSONL 重建的 session event projection；TaskRun、Automation、Goal/Graph、Capability 的 event 与 projection 在同一 SQLite 事务内提交。catalog、run ledger 和 TurnStore 分别保存列表/运行状态投影与可恢复 checkpoint。`biny resume latest` 只有在用户明确执行该命令时才会校验 checkpoint 与 runtime high-water，并为 continuation 创建新的 `runId`、复用原 `turnId`；副作用不确定的工具只进入 `unknown/blocked`，不会自动重试。终态顺序是 checkpoint、canonical `turn_status`、run ledger、UI/Host 事件；终态事实已落盘但 ledger 投影失败时，下次启动会从 JSONL 修复。
 
 模型请求也会以不含 prompt/response 正文的 `model_request` 事件写入 session，并关联 `sessionId`、`runId`、`turnId`、step、工具调用 id、首事件/首输出延迟、重试、provider usage 和结构化错误分类。`/status` 展示 provider 请求汇总以及本地输入 token 估算与 provider 实际值的对照；Runtime 事件流和 JSON 接口可供宿主或外部诊断读取。Biny 不提供用户可见的 `/trace` 命令，避免把底层事件明细变成另一套交互协议。
 
@@ -111,7 +131,7 @@ TUI 中，运行时第一次 `Ctrl+C` 只请求取消，500ms 内第二次才退
 
 TaskRun 的 `retry` 不是普通对话里的“继续”，也不能用确认参数强行重放。只有同时满足以下条件才允许进入重试准入：TaskRun 和最新 TaskAttempt 都是 `failed`；失败分类是 `RateLimit`，或已证明在 provider dispatch 之前发生了 `continuation_abandoned_before_provider_dispatch`；Attempt 的副作用安全性是 `safe` 或 `idempotent`。工具失败、超时、取消、预算耗尽、验证失败，以及 `unknown`/`unsafe` 副作用都会拒绝重试；当前通用 TaskRun 入口尚未绑定执行 adapter 时也会拒绝启动，而不会只把状态改成 `running`。需要继续普通任务时，请发送新的 prompt 或使用明确的 Session/AgentRun continuation。
 
-桌面端切换模型时，如果发现驻留 Host 是旧版本且当前项目处于空闲状态，会自动替换 owner 并重试请求；运行中的任务不会被强制重启。
+桌面端切换模型或读取个性化设置时，如果发现驻留 Host 缺少当前能力且项目处于空闲状态，会自动替换 owner 并重试请求；运行中的任务不会被强制重启。
 
 需要手动托管 owner 时可运行 `biny runtime-host --workspace-root <workspace> --persistence-root <data-root>`；通常不需要手动启动。
 

@@ -5,6 +5,7 @@
  * 兼容性，因此除 `operation` 等必需项外都保持可选。
  */
 import type { AgentUsage } from "../agent/core/types.js";
+import type { PersonalizationMetadata } from "../personalization/index.js";
 
 export type UsageOperation = "agent" | "plan" | "compaction" | "memory" | "subagent";
 export type ContextBudgetSource = "estimated" | "provider";
@@ -65,6 +66,8 @@ export interface SessionContextState {
   memoryTopics: string[];
   budget: SessionContextUsage;
   checkpoint?: SessionContextCheckpoint;
+  /** 自定义指令正文不进入 JSONL；只保存不可逆 hash 与枚举/版本元数据。 */
+  personalization?: PersonalizationMetadata;
 }
 
 export interface SessionUsage {
@@ -78,6 +81,10 @@ export interface SessionUsage {
   reasoningTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  /** 回合聚合记录中，最后一次 provider 请求的完整输入 token。 */
+  latestRequestInputTokens?: number;
+  /** 回合聚合记录中，最后一次 provider 请求命中的缓存 token。 */
+  latestRequestCacheReadTokens?: number;
   costUsd?: number;
   pricingKnown: boolean;
   time?: string;
@@ -95,9 +102,21 @@ export interface UsageSummary {
   pricingKnown: boolean;
   pricedCalls: number;
   unpricedCalls: number;
+  /** 最近一次模型请求的缓存命中率；provider 未提供缓存 token 时为空。 */
+  latestCacheHitRate?: number;
 }
 
-export function usageSnapshot(usage: AgentUsage): Omit<SessionUsage, "operation" | "modelAlias" | "provider" | "model" | "costUsd" | "pricingKnown" | "time"> {
+export function usageSnapshot(usage: AgentUsage): Omit<SessionUsage,
+  | "operation"
+  | "modelAlias"
+  | "provider"
+  | "model"
+  | "latestRequestInputTokens"
+  | "latestRequestCacheReadTokens"
+  | "costUsd"
+  | "pricingKnown"
+  | "time"
+> {
   return {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,

@@ -42,9 +42,12 @@ export function formatStatusReport(
   const repoMapSummary = `${String(context.repoMapEntries)} entries${context.repoMapDirty ? " (dirty)" : ""}`;
   const memorySummary = context.memoryEnabled
     ? context.memoryTopics.length
-      ? `enabled (${context.memoryTopics.join(", ")})`
-      : "enabled"
-    : "disabled";
+      ? `use enabled (${context.memoryTopics.join(", ")})`
+      : "use enabled"
+    : "use disabled (stored data retained)";
+  const memoryRecall = context.memoryRecall;
+  const omittedGlobal = memoryRecall?.omitted.filter((item) => item.scope === "global").length ?? 0;
+  const omittedProject = memoryRecall?.omitted.filter((item) => item.scope === "project").length ?? 0;
   const usageSummary = usage.calls
     ? `${formatCount(usage.totalTokens)} total (${formatCount(usage.inputTokens)} input + ${formatCount(usage.outputTokens)} output; ${formatCount(usage.reasoningTokens)} reasoning)`
     : "no model calls recorded";
@@ -79,6 +82,14 @@ export function formatStatusReport(
     `Instructions: ${instructionSummary}; ${formatCount(context.instructionBytes)}/${formatCount(context.instructionCapBytes)} bytes`,
     `Repo map: ${repoMapSummary}`,
     `Memory: ${memorySummary}`,
+    ...(memoryRecall
+      ? [
+        `Memory recall: included global=${String(memoryRecall.included.global)}, project=${String(memoryRecall.included.project)}; trimmed global=${String(memoryRecall.trimmed.global)}, project=${String(memoryRecall.trimmed.project)}; omitted global=${String(omittedGlobal)}, project=${String(omittedProject)}`,
+        ...(memoryRecall.budgetOmission
+          ? [`Memory budget: ${formatCount(memoryRecall.budgetOmission.usedChars)}/${formatCount(memoryRecall.budgetOmission.maxChars)} chars; ${String(memoryRecall.budgetOmission.omitted)} omitted`]
+          : [])
+      ]
+      : []),
     ...(contextComposition.length
       ? [
         "Context composition:",

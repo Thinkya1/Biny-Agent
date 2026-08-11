@@ -67,13 +67,17 @@ async function main(): Promise<void> {
   }) as typeof fetch;
 
   const config = configSchema.parse({
+    ...defaultConfig,
     defaultModel: "test-model",
     providers: { active: { type: "openai", apiKey: "test-key", baseUrl: "https://example.test/v1" } },
     models: { "test-model": { provider: "active", model: "test-model" } },
     thinking: { enabled: false, effort: "high" },
     permission: defaultConfig.permission,
     workspace: defaultConfig.workspace,
-    context: { ...defaultConfig.context, memory: { enabled: false } }
+    context: {
+      ...defaultConfig.context,
+      memory: { ...defaultConfig.context.memory, useMemories: false, generateMemories: false }
+    }
   });
   const recorder = new SessionRecorder(workspaceRoot);
   const registry = new ToolRegistry();
@@ -686,7 +690,10 @@ async function testQueuedFollowUp(): Promise<void> {
     defaultModel: "queued-model",
     providers: { test: { type: "openai", apiKey: "test-key", baseUrl: "https://example.test/v1" } },
     models: { "queued-model": { provider: "test", model: "queued-model" } },
-    context: { ...defaultConfig.context, memory: { enabled: false } }
+    context: {
+      ...defaultConfig.context,
+      memory: { ...defaultConfig.context.memory, useMemories: false, generateMemories: false }
+    }
   });
   const recorder = new SessionRecorder(workspaceRoot);
   const agent = new AgentSession({
@@ -1043,7 +1050,14 @@ async function testOpenAiResponsesTransport(): Promise<void> {
   assert.deepEqual(events.find((event) => event.type === "finish"), {
     type: "finish",
     reason: "stop",
-    usage: { inputTokens: 2, outputTokens: 3, totalTokens: 5, reasoningTokens: undefined }
+    usage: {
+      inputTokens: 2,
+      outputTokens: 3,
+      totalTokens: 5,
+      reasoningTokens: undefined,
+      cacheReadTokens: undefined,
+      cacheWriteTokens: undefined
+    }
   });
 }
 

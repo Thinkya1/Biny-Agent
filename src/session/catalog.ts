@@ -5,9 +5,16 @@
  * parent/root/branchPoint。旧会话没有 catalog 文件时按根会话处理，不在读取列表时回写迁移数据。
  */
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants, promises as fs, type Stats } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { projectSessionsDir } from "../config/paths.js";
+import {
+  chatPersonalizationOverrideSchema,
+  cloneChatPersonalizationOverride,
+  type ChatPersonalizationOverride
+} from "../personalization/index.js";
 import { listSessionSummaries, type SessionSummary } from "./events.js";
 import { ensureAgentDirs } from "./store.js";
 
@@ -15,6 +22,10 @@ const catalogVersion = 1 as const;
 const defaultPageSize = 32;
 const maxPageSize = 50;
 const catalogDirectoryName = ".catalog";
+const catalogLockDirectoryName = ".locks";
+const catalogLockTimeoutMs = 5_000;
+const catalogLockQueues = new Map<string, Promise<void>>();
+export const SESSION_CATALOG_MISSING_REVISION = "missing" as const;
 
 export type SessionBranchPoint =
   | { kind: "event"; index: number }
@@ -31,6 +42,7 @@ export interface SessionCatalogRecord {
   archived?: boolean;
   unread?: boolean;
   labels?: string[];
+  personalization?: ChatPersonalizationOverride;
   createdAt: string;
   updatedAt: string;
 }
@@ -47,6 +59,7 @@ export interface SessionCatalogItem {
   archived?: boolean;
   unread?: boolean;
   labels?: string[];
+  personalization?: ChatPersonalizationOverride;
   metadataRevision?: string;
   hasChildren: boolean;
 }
@@ -82,6 +95,7 @@ export interface SessionCatalogMetadataPatch {
   archived?: boolean;
   unread?: boolean;
   labels?: string[];
+  personalization?: ChatPersonalizationOverride;
 }
 
 export class SessionCatalogConflictError extends Error {
@@ -101,6 +115,11 @@ interface SessionCatalogCursor {
   updatedAt: string;
   sessionId: string;
   parentSessionId?: string;
+}
+
+interface FileIdentity {
+  dev: number;
+  ino: number;
 }
 
 export function sessionCatalogDirectory(workspaceRoot: string): string {
@@ -123,6 +142,9 @@ export async function registerSessionBranch(
     rootSessionId: parent?.rootSessionId ?? options.parentSessionId,
     parentSessionId: options.parentSessionId,
     branchPoint: options.branchPoint,
+    personalization: parent?.personalization === undefined
+      ? undefined
+      : cloneChatPersonalizationOverride(parent.personalization),
     createdAt: now,
     updatedAt: now
   });
@@ -136,18 +158,17 @@ export async function writeSessionCatalogRecord(
   assertCatalogRecord(record);
   const directory = await ensureCatalogDirectory(workspaceRoot);
   const target = catalogFilePath(directory, record.sessionId);
-  const existing = await readCatalogFile(target);
-  const actualRevision = existing === undefined ? undefined : sessionCatalogRecordRevision(existing);
-  if (options.expectedRevision !== undefined && options.expectedRevision !== actualRevision) {
-    throw new SessionCatalogConflictError(record.sessionId, options.expectedRevision, actualRevision);
-  }
-  const next: SessionCatalogRecord = {
-    ...existing,
-    ...record,
-    version: catalogVersion
-  };
-  await writeAtomically(target, `${JSON.stringify(next)}\n`);
-  return next;
+  return await withCatalogRecordLock(directory, record.sessionId, async () => {
+    const existing = await readCatalogFile(target);
+    assertExpectedRevision(record.sessionId, existing, options.expectedRevision);
+    const next: SessionCatalogRecord = {
+      ...existing,
+      ...record,
+      version: catalogVersion
+    };
+    await writeAtomically(target, `${JSON.stringify(next)}\n`);
+    return next;
+  });
 }
 
 /** 读取、校验并更新一个会话的常用元数据；expectedRevision 用于挡住过期 Renderer 覆盖新值。 */
@@ -159,24 +180,43 @@ export async function updateSessionCatalogMetadata(
 ): Promise<SessionCatalogRecord> {
   assertSessionId(sessionId);
   const directory = await ensureCatalogDirectory(workspaceRoot);
-  const existing = await readCatalogFile(catalogFilePath(directory, sessionId));
   const item = (await listSessionCatalog(workspaceRoot)).find((candidate) => candidate.id === sessionId);
-  if (!item && !existing) throw new Error(`Session not found: ${sessionId}`);
-  const base = existing ?? {
-    version: catalogVersion,
-    sessionId,
-    rootSessionId: item?.rootSessionId ?? sessionId,
-    parentSessionId: item?.parentSessionId,
-    branchPoint: item?.branchPoint,
-    createdAt: item?.summary.createdAt ?? new Date().toISOString(),
-    updatedAt: item?.summary.updatedAt ?? new Date().toISOString()
-  } satisfies SessionCatalogRecord;
-  return await writeSessionCatalogRecord(workspaceRoot, {
-    ...base,
-    ...patch,
-    labels: patch.labels === undefined ? base.labels : [...patch.labels],
-    updatedAt: new Date().toISOString()
-  }, { expectedRevision });
+  const target = catalogFilePath(directory, sessionId);
+  return await withCatalogRecordLock(directory, sessionId, async () => {
+    // expectedRevision 的校验和 patch 合并必须基于锁内重读的版本，否则两个 Desktop
+    // 进程可能同时通过校验，再用各自在锁外读到的旧对象互相覆盖。
+    const existing = await readCatalogFile(target);
+    assertExpectedRevision(sessionId, existing, expectedRevision);
+    if (!item && !existing) throw new Error(`Session not found: ${sessionId}`);
+    const now = new Date().toISOString();
+    const base = existing ?? {
+      version: catalogVersion,
+      sessionId,
+      rootSessionId: item?.rootSessionId ?? sessionId,
+      parentSessionId: item?.parentSessionId,
+      branchPoint: item?.branchPoint,
+      createdAt: item?.summary.createdAt ?? now,
+      updatedAt: item?.summary.updatedAt ?? now
+    } satisfies SessionCatalogRecord;
+    const next: SessionCatalogRecord = {
+      ...base,
+      title: patch.title === undefined ? base.title : patch.title,
+      pinned: patch.pinned === undefined ? base.pinned : patch.pinned,
+      archived: patch.archived === undefined ? base.archived : patch.archived,
+      unread: patch.unread === undefined || patch.unread === false && base.unread === undefined
+        ? base.unread
+        : patch.unread,
+      labels: patch.labels === undefined ? base.labels : [...patch.labels],
+      personalization: patch.personalization === undefined
+        ? base.personalization
+        : cloneChatPersonalizationOverride(patch.personalization),
+      updatedAt: now
+    };
+    assertCatalogRecord(next);
+    if (existing && catalogMetadataEquals(existing, next)) return existing;
+    await writeAtomically(target, `${JSON.stringify(next)}\n`);
+    return next;
+  });
 }
 
 export async function readSessionCatalogRecord(
@@ -192,12 +232,14 @@ export async function deleteSessionCatalogRecord(workspaceRoot: string, sessionI
   assertSessionId(sessionId);
   const directory = await ensureCatalogDirectory(workspaceRoot);
   const target = catalogFilePath(directory, sessionId);
-  try {
-    await assertCatalogFile(target);
-    await fs.unlink(target);
-  } catch (error) {
-    if (!isNotFound(error)) throw error;
-  }
+  await withCatalogRecordLock(directory, sessionId, async () => {
+    try {
+      await assertCatalogFile(target);
+      await fs.unlink(target);
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+  });
 }
 
 /**
@@ -324,6 +366,9 @@ function toCatalogItem(summary: SessionSummary, record: SessionCatalogRecord | u
     archived: record?.archived,
     unread: record?.unread,
     labels: record?.labels,
+    personalization: record?.personalization === undefined
+      ? undefined
+      : cloneChatPersonalizationOverride(record.personalization),
     metadataRevision: record === undefined ? undefined : sessionCatalogRecordRevision(record),
     hasChildren: false
   };
@@ -353,12 +398,13 @@ function catalogRevision(items: readonly SessionCatalogItem[]): string {
     archived: item.archived,
     unread: item.unread,
     labels: item.labels,
+    personalization: item.personalization,
     metadataRevision: item.metadataRevision
   }));
   return `sha256:${createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`;
 }
 
-function sessionCatalogRecordRevision(record: SessionCatalogRecord): string {
+export function sessionCatalogRecordRevision(record: SessionCatalogRecord): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(record)).digest("hex")}`;
 }
 
@@ -415,6 +461,142 @@ function catalogFilePath(directory: string, sessionId: string): string {
   return path.join(directory, `${sessionId}.json`);
 }
 
+function assertExpectedRevision(
+  sessionId: string,
+  record: SessionCatalogRecord | undefined,
+  expectedRevision: string | undefined
+): void {
+  const actualRevision = record === undefined ? undefined : sessionCatalogRecordRevision(record);
+  if (expectedRevision === SESSION_CATALOG_MISSING_REVISION) {
+    if (record === undefined) return;
+    throw new SessionCatalogConflictError(sessionId, expectedRevision, actualRevision);
+  }
+  if (expectedRevision !== undefined && expectedRevision !== actualRevision) {
+    throw new SessionCatalogConflictError(sessionId, expectedRevision, actualRevision);
+  }
+}
+
+function catalogMetadataEquals(left: SessionCatalogRecord, right: SessionCatalogRecord): boolean {
+  return left.title === right.title
+    && left.pinned === right.pinned
+    && left.archived === right.archived
+    && left.unread === right.unread
+    && optionalStringArraysEqual(left.labels, right.labels)
+    && JSON.stringify(left.personalization) === JSON.stringify(right.personalization);
+}
+
+function optionalStringArraysEqual(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  return left === right || left !== undefined
+    && right !== undefined
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+async function withCatalogRecordLock<T>(
+  directory: string,
+  sessionId: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  // 同一进程先异步排队，避免后来的同步 BEGIN IMMEDIATE 阻塞事件循环，导致前一个异步
+  // operation 无法完成。operation 内不得再次调用同 session 的 catalog mutator，否则会等待自身。
+  const lockDirectory = await ensureCatalogLockDirectory(directory);
+  const databasePath = path.join(lockDirectory, `${sessionId}.sqlite`);
+  const predecessor = catalogLockQueues.get(databasePath) ?? Promise.resolve();
+  let releaseTurn: () => void = () => undefined;
+  const turn = new Promise<void>((resolve) => {
+    releaseTurn = resolve;
+  });
+  const tail = predecessor.then(() => turn);
+  catalogLockQueues.set(databasePath, tail);
+  await predecessor;
+  try {
+    return await withCatalogDatabaseLock(databasePath, operation);
+  } finally {
+    releaseTurn();
+    if (catalogLockQueues.get(databasePath) === tail) catalogLockQueues.delete(databasePath);
+  }
+}
+
+async function withCatalogDatabaseLock<T>(databasePath: string, operation: () => Promise<T>): Promise<T> {
+  const identity = await ensureCatalogLockDatabase(databasePath);
+  const database = new DatabaseSync(databasePath, { timeout: catalogLockTimeoutMs });
+  let transactionOpen = false;
+  try {
+    await assertCatalogLockDatabase(databasePath, identity);
+    database.exec("BEGIN IMMEDIATE");
+    transactionOpen = true;
+    await assertCatalogLockDatabase(databasePath, identity);
+    const result = await operation();
+    database.exec("COMMIT");
+    transactionOpen = false;
+    return result;
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {
+        // close 仍会让 SQLite 释放进程持有的文件锁，不能用回滚错误覆盖原始失败原因。
+      }
+    }
+    throw error;
+  } finally {
+    database.close();
+  }
+}
+
+async function ensureCatalogLockDirectory(directory: string): Promise<string> {
+  const lockDirectory = path.join(directory, catalogLockDirectoryName);
+  await fs.mkdir(lockDirectory, { recursive: true, mode: 0o700 });
+  const stat = await fs.lstat(lockDirectory);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || await fs.realpath(lockDirectory) !== lockDirectory) {
+    throw new Error("Session catalog lock directory must be a real directory.");
+  }
+  await fs.chmod(lockDirectory, 0o700);
+  return lockDirectory;
+}
+
+async function ensureCatalogLockDatabase(databasePath: string): Promise<FileIdentity> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await fs.open(
+      databasePath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+      0o600
+    );
+    await handle.chmod(0o600);
+    await handle.sync();
+  } catch (error) {
+    if (!isAlreadyExists(error)) throw error;
+  } finally {
+    await handle?.close();
+  }
+  const stat = await assertCatalogLockDatabase(databasePath);
+  await fs.chmod(databasePath, 0o600);
+  return fileIdentity(stat);
+}
+
+async function assertCatalogLockDatabase(
+  databasePath: string,
+  expectedIdentity?: FileIdentity
+): Promise<Stats> {
+  const stat = await fs.lstat(databasePath);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || await fs.realpath(databasePath) !== databasePath) {
+    throw new Error(`Unsafe session catalog lock database: ${path.basename(databasePath)}`);
+  }
+  if (expectedIdentity !== undefined && !sameFileIdentity(expectedIdentity, fileIdentity(stat))) {
+    throw new Error("Session catalog lock database changed during access.");
+  }
+  return stat;
+}
+
+function fileIdentity(stat: Stats): FileIdentity {
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
 async function readCatalogFile(filePath: string): Promise<SessionCatalogRecord | undefined> {
   try {
     await assertCatalogFile(filePath);
@@ -467,12 +649,14 @@ function isCatalogRecord(value: unknown): value is SessionCatalogRecord {
   if (value.archived !== undefined && typeof value.archived !== "boolean") return false;
   if (value.unread !== undefined && typeof value.unread !== "boolean") return false;
   if (value.labels !== undefined && (!Array.isArray(value.labels) || !value.labels.every((label) => typeof label === "string"))) return false;
+  if (value.personalization !== undefined && !chatPersonalizationOverrideSchema.safeParse(value.personalization).success) return false;
   return typeof value.createdAt === "string" && typeof value.updatedAt === "string";
 }
 
 function assertCatalogMetadata(record: SessionCatalogRecord): void {
   if (record.title !== undefined && (!record.title.trim() || record.title.length > 120)) throw new Error("Invalid session catalog title.");
   if (record.labels !== undefined && record.labels.some((label) => !label.trim() || label.length > 64)) throw new Error("Invalid session catalog labels.");
+  if (record.personalization !== undefined) chatPersonalizationOverrideSchema.parse(record.personalization);
 }
 
 function assertBranchPoint(value: SessionBranchPoint): void {
@@ -502,4 +686,8 @@ function sessionTime(value: string): number {
 
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 }

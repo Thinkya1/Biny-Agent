@@ -183,7 +183,10 @@ function testConfig(endpoint: string): AgentConfig {
       }
     },
     permission: { ...defaultConfig.permission, mode: "full-access", criticalAlwaysAsk: false },
-    context: { ...defaultConfig.context, memory: { ...defaultConfig.context.memory, enabled: false } }
+    context: {
+      ...defaultConfig.context,
+      memory: { ...defaultConfig.context.memory, useMemories: false, generateMemories: false }
+    }
   });
 }
 

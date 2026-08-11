@@ -669,7 +669,8 @@ async function testSessionReplayAndAgentResume(): Promise<void> {
     assert.equal(replay.usage[0]?.inputTokens, 1_234);
 
     const config = testConfig();
-    config.context.memory.enabled = false;
+    config.context.memory.useMemories = false;
+    config.context.memory.generateMemories = false;
     const provider = new ContextTestModel();
     const agent = new AgentSession({
       workspaceRoot,
@@ -714,7 +715,8 @@ async function testCheckpointIsResumeTruthSource(): Promise<void> {
   await withTempWorkspace(async (workspaceRoot) => {
     await ensureAgentDirs(workspaceRoot);
     const config = testConfig();
-    config.context.memory.enabled = false;
+    config.context.memory.useMemories = false;
+    config.context.memory.generateMemories = false;
     const firstProvider = new ContextTestModel();
     const firstRecorder = new SessionRecorder(workspaceRoot, "checkpoint-resume");
     const firstAgent = new AgentSession({
@@ -1049,7 +1051,8 @@ async function testSessionPathBoundaries(): Promise<void> {
       await fs.rename(originalSessionsRoot, sessionsRoot);
 
       const config = testConfig();
-      config.context.memory.enabled = false;
+      config.context.memory.useMemories = false;
+      config.context.memory.generateMemories = false;
       const provider = new ContextTestModel();
       const agent = new AgentSession({
         workspaceRoot,
@@ -1195,7 +1198,8 @@ async function testFailedCurrentSessionResumeKeepsRecorderUsable(): Promise<void
       JSON.stringify({ type: "assistant_message", content: "valid suffix" })
     ].join("\n") + "\n", "utf8");
     const config = testConfig();
-    config.context.memory.enabled = false;
+    config.context.memory.useMemories = false;
+    config.context.memory.generateMemories = false;
     const provider = new ContextTestModel();
     const agent = new AgentSession({
       workspaceRoot,
@@ -1379,7 +1383,7 @@ async function testMemoryRedactionDedupAndWriter(): Promise<void> {
     });
     assert.equal(duplicate.written, false);
 
-    const debugFile = path.join(projectMemoryDir(await fs.realpath(workspaceRoot)), "debugging.md");
+    const debugFile = path.join(projectMemoryDir(await fs.realpath(workspaceRoot)), "entries", "debugging.md");
     const stored = await fs.readFile(debugFile, "utf8");
     assert.equal(stored.includes("sk-supersecretvalue123"), false);
     assert.match(stored, /\[redacted\]/);
@@ -1454,8 +1458,8 @@ async function testMemoryQueueLifecycleAndUsagePersistence(): Promise<void> {
     assert.ok(Date.now() - shutdownStartedAt < 800);
 
     const config = testConfig();
-    config.context.memory.enabled = true;
-    config.context.memory.autoRemember = true;
+    config.context.memory.useMemories = true;
+    config.context.memory.generateMemories = true;
     const provider = new ContextTestModel();
     await ensureAgentDirs(workspaceRoot);
     const recorder = new SessionRecorder(workspaceRoot, "memory-usage");
@@ -1469,9 +1473,25 @@ async function testMemoryQueueLifecycleAndUsagePersistence(): Promise<void> {
     });
     await agent.initialize();
     await agent.runTask(`Remember this successful context workflow: ${"grounded details ".repeat(20)}`);
+    const overview = await agent.getLocalMemory().getOverview();
     await agent.close();
     const replay = await replaySession(recorder.filePath);
-    assert.equal(replay.usage.some((usage) => usage.operation === "memory"), true);
+    assert.equal(overview.scopes.project.candidateCount, 1);
+    assert.equal(replay.usage.some((usage) => usage.operation === "memory"), false);
+
+    const shortAgent = new AgentSession({
+      workspaceRoot,
+      config,
+      model: new ContextTestModel().model,
+      toolRegistry: new ToolRegistry(),
+      permissionManager: new PermissionManager({ ...config.permission, source: "test" }),
+      recorder: new SessionRecorder(workspaceRoot, "short-memory-usage")
+    });
+    await shortAgent.initialize();
+    await shortAgent.runTask("hi");
+    const afterShortTurn = await shortAgent.getLocalMemory().getOverview();
+    await shortAgent.close();
+    assert.equal(afterShortTurn.scopes.project.candidateCount, 1);
   });
 }
 
@@ -1553,7 +1573,9 @@ async function testMemoryStorageBoundaries(): Promise<void> {
       assert.equal(await fs.readFile(victim, "utf8"), victimContent);
 
       await fs.rm(path.join(memoryDir, "MEMORY.md"), { force: true });
-      await fs.link(victim, path.join(memoryDir, "debugging.md"));
+      const entriesDir = path.join(memoryDir, "entries");
+      await fs.mkdir(entriesDir);
+      await fs.link(victim, path.join(entriesDir, "debugging.md"));
       await assert.rejects(store.listTopics(), /single regular file/);
       await assert.rejects(store.write(entry), /single regular file/);
       assert.equal(await fs.readFile(victim, "utf8"), victimContent);

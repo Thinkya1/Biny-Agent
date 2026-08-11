@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { AgentConfig } from "../config/schema.js";
+import { configSchema, type AgentConfig } from "../config/schema.js";
 import { createFileConfigStore, type AgentConfigStore } from "../config/store.js";
 import {
   listModelChoices,
@@ -24,6 +24,13 @@ import {
   type InterruptedTurnTerminal
 } from "../session/turnStore.js";
 import { ensureAgentDirs, resolveSessionFile, sessionIdFromFile } from "../session/store.js";
+import {
+  readSessionCatalogRecord,
+  SESSION_CATALOG_MISSING_REVISION,
+  sessionCatalogRecordRevision,
+  updateSessionCatalogMetadata,
+  writeSessionCatalogRecord
+} from "../session/catalog.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { agentLoopContinue } from "./core/agentLoop.js";
 import type {
@@ -37,7 +44,13 @@ import type {
   ModelRequestMetrics
 } from "./core/types.js";
 import { ToolExecutionCoordinator } from "./toolExecutionCoordinator.js";
-import { buildSystemPrompt, refreshRuntimeSystemPrompt, withActiveRunCompactionSummary } from "./prompts.js";
+import {
+  buildSystemPrompt,
+  personalizationRuntimePolicyFromSystemPrompt,
+  refreshRuntimeSystemPrompt,
+  systemPromptForTelemetry,
+  withActiveRunCompactionSummary
+} from "./prompts.js";
 import type {
   AgentPermissionRequest,
   AgentPermissionResult,
@@ -46,7 +59,7 @@ import type {
   AgentTurnOutcome
 } from "./types.js";
 import { ContextMemory } from "./context/ContextMemory.js";
-import { LocalMemory } from "./context/LocalMemory.js";
+import { LocalMemory, MemoryRevisionConflictError, redactSecrets } from "./context/LocalMemory.js";
 import { runMemoryCommand } from "./context/memoryCommands.js";
 import { WorkspaceContext } from "./context/WorkspaceContext.js";
 import type { CompactionResult, ContextStatus } from "./context/types.js";
@@ -90,6 +103,21 @@ import {
   diffWorkspaceStates,
   type WorkspaceStateSnapshot
 } from "../harness/WorkspaceState.js";
+import {
+  chatPersonalizationOverrideSchema,
+  cloneChatPersonalizationOverride,
+  defaultChatPersonalizationOverride,
+  globalPersonalizationUpdateSchema,
+  mergeChatPersonalizationOverride,
+  metadataForPersonalization,
+  personalizationSettingsSchema,
+  memoryPolicySchema,
+  resolveChatPersonalization,
+  type AgentPersonalizationState,
+  type ChatPersonalizationOverridePatch,
+  type GlobalPersonalizationUpdate,
+  type ResolvedChatPersonalization
+} from "../personalization/index.js";
 
 export interface AgentSessionOptions {
   workspaceRoot: string;
@@ -198,6 +226,7 @@ interface NativeTurnArgs {
   workspaceBaseline: Promise<WorkspaceStateSnapshot> | undefined;
   captureWorkspaceBaseline: () => Promise<void>;
   messageQueues: ActiveRunMessageQueues;
+  personalization: ResolvedChatPersonalization;
 }
 
 interface QueuedRunMessage {
@@ -224,7 +253,7 @@ const maxQueuedRunMessages = 100;
  */
 export class AgentSession {
   private readonly contextMemory: ContextMemory;
-  private readonly localMemory: LocalMemory | undefined;
+  private readonly localMemory: LocalMemory;
   private usageRecords: SessionUsage[] = [];
   private modelRequestRecords: ModelRequestMetrics[] = [];
   private unpersistedRelatedUsage: SessionUsage[] = [];
@@ -236,8 +265,17 @@ export class AgentSession {
   /** 与 ContextMemory history 一一对应；内部 steering 消息没有持久化引用。 */
   private contextMessageReferences: Array<SessionMessageReference | undefined> = [];
   private nextSessionMessageIndex = 0;
+  /** 新 root turn 开始时替换；同一 turn 的所有 model step 固定使用这份快照。 */
+  private activeConfig: AgentConfig;
+  private activePersonalization: ResolvedChatPersonalization;
 
   constructor(private readonly options: AgentSessionOptions) {
+    this.activeConfig = options.config;
+    this.activePersonalization = resolveChatPersonalization(
+      options.config.personalization,
+      options.config.context.memory,
+      defaultChatPersonalizationOverride
+    );
     const persistenceRoot = this.persistenceRoot();
     const workspace = new WorkspaceContext(
       options.workspaceRoot,
@@ -256,23 +294,28 @@ export class AgentSession {
       await this.recordModelRequest(metrics);
     };
     const memoryConfig = options.config.context.memory;
-    const memoryModelAlias = memoryConfig.model;
-    // 记忆抽取/整理可以指定专用小模型；未配置时跟随会话模型。懒创建并缓存，避免每次写记忆都重建 adapter。
-    let memoryModel: AgentModel | undefined;
-    const getMemoryModel = memoryModelAlias
-      ? (): AgentModel => (memoryModel ??= createNativeModelForConfig(options.config, memoryModelAlias))
-      : getModel;
+    // 抽取与整理可使用不同模型。getter 读取 root-turn 快照，因此外部配置变更不会让运行中的
+    // turn 漂移；下一根回合才会切换。按 alias 缓存 adapter，避免每个候选重复创建。
+    const memoryModels = new Map<string, AgentModel>();
+    const memoryModel = (field: "extractModel" | "consolidationModel"): AgentModel => {
+      const alias = this.activeConfig.context.memory[field];
+      if (!alias) return getModel();
+      const cached = memoryModels.get(alias);
+      if (cached) return cached;
+      const created = createNativeModelForConfig(this.activeConfig, alias);
+      memoryModels.set(alias, created);
+      return created;
+    };
     const initialContextBudget = options.modelManager?.getContextBudget();
-    this.localMemory = memoryConfig.enabled
-      ? new LocalMemory(
-        persistenceRoot,
-        getMemoryModel,
-        onUsage,
-        memoryConfig.maxRecalled,
-        onModelRequest,
-        () => this.sideModelRequestContext()
-      )
-      : undefined;
+    this.localMemory = new LocalMemory(
+      persistenceRoot,
+      () => memoryModel("extractModel"),
+      onUsage,
+      memoryConfig.maxRecalled,
+      onModelRequest,
+      () => this.sideModelRequestContext(),
+      () => memoryModel("consolidationModel")
+    );
     this.contextMemory = new ContextMemory(
       getModel,
       workspace,
@@ -289,6 +332,10 @@ export class AgentSession {
       options.config.context.compaction,
       onModelRequest,
       () => this.sideModelRequestContext()
+    );
+    this.contextMemory.setPersonalization(
+      metadataForPersonalization(this.activePersonalization),
+      this.activePersonalization.useMemories
     );
     this.recorder = options.recorder;
     this.turnStore = new TurnStore(this.persistenceRoot(), options.recorder.sessionId);
@@ -441,9 +488,92 @@ export class AgentSession {
     }
   }
 
-  /** 持久记忆存储句柄；记忆工具与 /memory 命令共用（禁用时为 undefined）。 */
-  getLocalMemory(): LocalMemory | undefined {
+  /** 持久记忆存储句柄；读取/自动贡献开关不影响显式 /memory 管理操作。 */
+  getLocalMemory(): LocalMemory {
     return this.localMemory;
+  }
+
+  /** 三端共享的读模型；正文只在 global/chat 配置中，resolved 元数据可安全投影到 session。 */
+  async getPersonalizationState(): Promise<AgentPersonalizationState> {
+    return (await this.readPersonalizationState()).state;
+  }
+
+  /** 更新当前聊天覆盖。catalog 的内容哈希是跨进程 CAS，过期界面不能覆盖新值。 */
+  async updateChatPersonalization(
+    patch: ChatPersonalizationOverridePatch,
+    expectedRevision: string
+  ): Promise<AgentPersonalizationState> {
+    const release = this.beginOperation("personalization update");
+    try {
+      const existing = await readSessionCatalogRecord(this.persistenceRoot(), this.recorder.sessionId);
+      const current = existing?.personalization === undefined
+        ? defaultChatPersonalizationOverride
+        : existing.personalization;
+      const personalization = mergeChatPersonalizationOverride(current, patch);
+      const now = new Date().toISOString();
+      if (existing) {
+        await updateSessionCatalogMetadata(
+          this.persistenceRoot(),
+          this.recorder.sessionId,
+          { personalization },
+          expectedRevision
+        );
+      } else if (this.recorder.isUnrecordedDraft()) {
+        await writeSessionCatalogRecord(this.persistenceRoot(), {
+          version: 1,
+          sessionId: this.recorder.sessionId,
+          rootSessionId: this.recorder.sessionId,
+          personalization,
+          createdAt: now,
+          updatedAt: now
+        }, { expectedRevision });
+      } else {
+        await updateSessionCatalogMetadata(
+          this.persistenceRoot(),
+          this.recorder.sessionId,
+          { personalization },
+          expectedRevision
+        );
+      }
+      return (await this.readPersonalizationState()).state;
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * 更新全局基础策略。调用方必须带 overview 返回的 configRevision；不支持 versioned CAS 的
+   * 嵌入式测试 store 只能读取，不能通过这个入口执行可能丢更新的写入。
+   */
+  async updateGlobalPersonalization(
+    update: GlobalPersonalizationUpdate,
+    expectedRevision: string
+  ): Promise<AgentPersonalizationState> {
+    const release = this.beginOperation("global personalization update");
+    try {
+      const store = this.options.configStore;
+      if (!store?.loadVersioned || !store.saveVersioned) {
+        throw new Error("This config store does not support versioned personalization updates.");
+      }
+      const current = await store.loadVersioned(this.options.workspaceRoot);
+      const parsedUpdate = globalPersonalizationUpdateSchema.parse(update);
+      const next = configSchema.parse({
+        ...current.config,
+        personalization: parsedUpdate.personalization === undefined
+          ? current.config.personalization
+          : personalizationSettingsSchema.parse(parsedUpdate.personalization),
+        context: {
+          ...current.config.context,
+          memory: parsedUpdate.memory === undefined
+            ? current.config.context.memory
+            : memoryPolicySchema.parse(parsedUpdate.memory)
+        }
+      });
+      const saved = await store.saveVersioned(next, expectedRevision, this.options.workspaceRoot);
+      return (await this.readPersonalizationState(saved)).state;
+    } finally {
+      release();
+    }
   }
 
   async runMemoryCommand(args: string[]): Promise<string> {
@@ -510,6 +640,21 @@ export class AgentSession {
       ? AbortSignal.any([runOptions.abortSignal, turnController.signal])
       : turnController.signal;
     const continuing = Boolean(runOptions.continueFrom?.length);
+    const persistedPolicy = continuing
+      ? personalizationRuntimePolicyFromSystemPrompt(runOptions.continueSystemPrompt)
+      : undefined;
+    let turnPersonalization: ResolvedChatPersonalization = persistedPolicy === undefined
+      ? this.activePersonalization
+      : {
+        ...this.activePersonalization,
+        ...persistedPolicy,
+        enabled: true,
+        customInstructions: ""
+      };
+    this.contextMemory.setPersonalization(
+      metadataForPersonalization(turnPersonalization),
+      turnPersonalization.useMemories
+    );
     const runtimeRunId = runOptions.runId ?? randomUUID();
     const runtimeTurnId = runOptions.turnId ?? randomUUID();
     runOptions = { ...runOptions, runId: runtimeRunId, turnId: runtimeTurnId };
@@ -603,20 +748,31 @@ export class AgentSession {
     } else {
     // 先把用户原始输入（以及附件引用）写进 JSONL，再组装上下文或检查模型能力。
     // 这样即使模型不支持图片、上下文构建失败或进程随后中断，恢复会话时仍能看到这次输入。
-    recordUserMessage();
     try {
+      const snapshot = await this.readPersonalizationState();
+      this.activeConfig = snapshot.config;
+      this.activePersonalization = snapshot.state.resolved;
+      turnPersonalization = snapshot.state.resolved;
+      this.contextMemory.setPersonalization(
+        metadataForPersonalization(turnPersonalization),
+        turnPersonalization.useMemories
+      );
+      recordUserMessage();
       const initialTools = this.options.toolRegistry.list().filter((tool) => mode !== "plan" || tool.risk === "read");
       const baseSystemPrompt = buildSystemPrompt({
         mode: mode === "plan" ? "plan" : "qa",
         extensionPrompt: this.extensionPrompt(),
         tools: initialTools,
+        personalization: turnPersonalization,
         cwd: this.options.workspaceRoot
       });
       const prepared = await this.contextMemory.prepareTurn(
         input,
         baseSystemPrompt,
         abortSignal,
-        this.supportedAttachments(runOptions.attachments)
+        this.supportedAttachments(runOptions.attachments),
+        turnPersonalization.useMemories,
+        turnPersonalization.maxRecalled
       );
       if (prepared.compaction) {
         this.persistContextCheckpoint(
@@ -706,7 +862,8 @@ export class AgentSession {
       completedStepsBeforeRun,
       workspaceBaseline,
       captureWorkspaceBaseline,
-      messageQueues
+      messageQueues,
+      personalization: turnPersonalization
     });
     return;
     } finally {
@@ -736,7 +893,8 @@ export class AgentSession {
       completedStepsBeforeRun,
       workspaceBaseline,
       captureWorkspaceBaseline,
-      messageQueues
+      messageQueues,
+      personalization
     } = args;
     const nativeModel = this.options.modelManager?.getModel() ?? this.options.model;
     const nativeSettings: NativeModelSettings | undefined = this.options.modelManager?.getModelSettings()
@@ -900,7 +1058,7 @@ export class AgentSession {
       type: "start",
       provider: activeModelSettings.model.provider,
       modelId: activeModelSettings.model.modelId,
-      input: { systemPrompt, messages }
+      input: { systemPrompt: systemPromptForTelemetry(systemPrompt), messages }
     });
     try {
       const loop = agentLoopContinue(nativeContext, {
@@ -1246,7 +1404,13 @@ export class AgentSession {
       }
       await this.recordTurnOutcome(outcome);
       if (outcome.status === "completed") {
-        this.rememberSuccessfulTask(input, content);
+        await this.enqueueCompletedMemoryCandidate(
+          input,
+          content,
+          runOptions.continueFrom?.length ? [...runOptions.continueFrom, ...newMessages] : newMessages,
+          personalization,
+          runOptions
+        ).catch(() => undefined);
         yield { type: "status", status: "completed" };
       } else if (outcome.status === "incomplete") {
         yield { type: "status", status: "incomplete" };
@@ -1422,10 +1586,57 @@ export class AgentSession {
     this.recordModelUsage(usage, operation, modelAlias);
   }
 
-  /** 自动沉淀受 context.memory.autoRemember 控制；显式 save_memory 工具不受影响。 */
-  rememberSuccessfulTask(task: string, answer: string): void {
-    if (!this.options.config.context.memory.autoRemember) return;
-    this.contextMemory.queueSuccessfulTask(task, answer);
+  private async enqueueCompletedMemoryCandidate(
+    task: string,
+    answer: string,
+    messages: AgentMessage[],
+    personalization: ResolvedChatPersonalization,
+    runOptions: AgentRunOptions
+  ): Promise<void> {
+    if (!personalization.contributeMemories) return;
+    const sessionId = this.recorder.sessionId;
+    const turnId = runOptions.turnId;
+    const runId = runOptions.runId;
+    if (!turnId || !runId) return;
+    const externalContext = this.usedExternalContext(messages);
+    const summary = completedMemoryCandidateSummary(task, answer);
+    if (!summary) return;
+    const input = {
+      summary,
+      completed: true as const,
+      lineage: {
+        source: "completed_task" as const,
+        sessionId,
+        turnId,
+        runId,
+        externalContext
+      }
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const overview = await this.localMemory.getOverview();
+      try {
+        await this.localMemory.enqueueCandidate(input, {
+          expectedRevision: overview.scopes.project.revision,
+          excludeExternalContext: personalization.excludeExternalContext
+        });
+        return;
+      } catch (error) {
+        if (!(error instanceof MemoryRevisionConflictError) || attempt > 0) throw error;
+      }
+    }
+  }
+
+  private usedExternalContext(messages: readonly AgentMessage[]): boolean {
+    const externalTools = new Set(
+      this.options.toolRegistry.listEntries()
+        .filter((entry) => entry.source === "mcp" || entry.source === "plugin" || entry.source === "subagent")
+        .map((entry) => entry.tool.name)
+    );
+    externalTools.add("web_search");
+    externalTools.add("web_fetch");
+    return messages.some((message) => message.role === "assistant" && message.content.some(
+      (part) => part.type === "toolCall" && externalTools.has(part.name)
+    ));
   }
 
   async compactConversation(hint?: string, signal?: AbortSignal): Promise<string> {
@@ -1855,6 +2066,39 @@ export class AgentSession {
     return this.options.configStore ?? createFileConfigStore(this.persistenceRoot());
   }
 
+  private async readPersonalizationState(
+    supplied?: { config: AgentConfig; revision: string }
+  ): Promise<{ state: AgentPersonalizationState; config: AgentConfig }> {
+    const store = this.options.configStore;
+    const snapshot = supplied ?? (store?.loadVersioned
+      ? await store.loadVersioned(this.options.workspaceRoot)
+      : store
+        ? { config: await store.load(this.options.workspaceRoot), revision: undefined }
+        : { config: this.options.config, revision: undefined });
+    const record = await readSessionCatalogRecord(this.persistenceRoot(), this.recorder.sessionId);
+    const override = record?.personalization === undefined
+      ? cloneChatPersonalizationOverride(defaultChatPersonalizationOverride)
+      : chatPersonalizationOverrideSchema.parse(record.personalization);
+    const resolved = resolveChatPersonalization(
+      snapshot.config.personalization,
+      snapshot.config.context.memory,
+      override
+    );
+    return {
+      config: snapshot.config,
+      state: {
+        global: { ...snapshot.config.personalization },
+        memory: { ...snapshot.config.context.memory },
+        override: cloneChatPersonalizationOverride(override),
+        resolved: { ...resolved },
+        catalogRevision: record === undefined
+          ? SESSION_CATALOG_MISSING_REVISION
+          : sessionCatalogRecordRevision(record),
+        configRevision: snapshot.revision
+      }
+    };
+  }
+
   /**
    * 只把权限模式写回配置文件。
    *
@@ -2241,6 +2485,26 @@ function readVerificationChecks(value: unknown): StructuredVerificationCheck[] |
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function completedMemoryCandidateSummary(task: string, answer: string): string | undefined {
+  const taskSummary = boundedCandidateText(task, 600);
+  const outcomeSummary = boundedCandidateText(answer, 1_200);
+  // 短寒暄和一次性确认不具备可复用价值。门槛只计算脱敏后的真实内容，
+  // 不能让固定的标签或占位符把 hi/ok 之类的回合推过 durable 候选门槛。
+  if (Array.from(`${taskSummary}\n${outcomeSummary}`).length < 180) return undefined;
+  return [
+    `Completed task: ${taskSummary || "(no public task summary)"}`,
+    `Outcome: ${outcomeSummary || "(no public outcome summary)"}`
+  ].join("\n");
+}
+
+function boundedCandidateText(value: string, maxCharacters: number): string {
+  const normalized = redactSecrets(value).replace(/\s+/gu, " ").trim();
+  const characters = Array.from(normalized);
+  return characters.length <= maxCharacters
+    ? normalized
+    : `${characters.slice(0, Math.max(0, maxCharacters - 1)).join("")}…`;
 }
 
 function readRunFacts(value: unknown): RunFacts | undefined {

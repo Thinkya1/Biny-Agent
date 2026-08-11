@@ -25,6 +25,7 @@ export type RuntimeOperation =
   | "mcp"
   | "permission"
   | "memory"
+  | "personalization"
   | "model_catalog"
   | "checkpoint";
 

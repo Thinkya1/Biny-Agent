@@ -1457,6 +1457,7 @@ function publicOperationName(operation: RuntimeOperation): string {
   if (operation === "compact") return "conversation compaction";
   if (operation === "mcp") return "MCP reconnection";
   if (operation === "memory") return "a memory command";
+  if (operation === "personalization") return "personalization settings";
   if (operation === "checkpoint") return "checkpoint restore";
   return "a subagent task";
 }

@@ -9,6 +9,7 @@ import { constants, promises as fs, type Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { configSchema, defaultConfig, type AgentConfig } from "./schema.js";
+import { migrateGlobalConfigDocument } from "./migrations.js";
 import { globalConfigDir } from "./paths.js";
 import { loadProjectSettings, type ProjectSettings } from "./projectSettings.js";
 
@@ -59,17 +60,26 @@ export async function loadConfigFile(root: string): Promise<AgentConfig> {
     throw error;
   }
   let handle: FileHandle | undefined;
+  let config: AgentConfig | undefined;
+  let migrated = false;
   try {
     handle = await openExistingConfig(location);
-    await handle.chmod(0o600);
+    await tightenConfigMode(handle);
     const raw = await readBoundedConfig(location, handle);
-    return configSchema.parse(JSON.parse(raw));
+    const migration = migrateGlobalConfigDocument(JSON.parse(raw));
+    config = configSchema.parse(migration.document);
+    migrated = migration.migrated;
   } catch (error) {
     if (isNotFound(error)) return configSchema.parse(defaultConfig);
     throw new Error(`Failed to load ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     await handle?.close();
   }
+  if (!config) throw new Error(`Failed to load ${CONFIG_FILE}: parsed configuration is unavailable.`);
+  // 迁移写回保留原文中的 credential 字段；不能走 public saveConfigFile（它会主动移除凭据），
+  // 也不能再次 load，否则旧文档会递归触发同一次迁移。
+  if (migrated) await writeConfigDocumentFile(root, config);
+  return config;
 }
 
 export async function saveConfig(workspaceRoot: string, config: AgentConfig, options: ConfigPathOptions = {}): Promise<void> {
@@ -85,7 +95,10 @@ export async function saveConfig(workspaceRoot: string, config: AgentConfig, opt
 /** 保存指定目录下的完整配置文件；凭据字段会被显式清空，不会写入 JSON。 */
 export async function saveConfigFile(root: string, config: AgentConfig): Promise<void> {
   const parsed = configSchema.parse(config);
-  const settings = withoutCredentials(parsed);
+  await writeConfigDocumentFile(root, withoutCredentials(parsed));
+}
+
+async function writeConfigDocumentFile(root: string, settings: AgentConfig): Promise<void> {
   const serialized = `${JSON.stringify(settings, null, 2)}\n`;
   if (Buffer.byteLength(serialized, "utf8") > maxConfigFileBytes) {
     throw new Error(`${CONFIG_FILE} exceeds the ${String(maxConfigFileBytes)}-byte size limit.`);
@@ -104,14 +117,14 @@ export async function saveConfigFile(root: string, config: AgentConfig): Promise
     const temporaryStat = await assertTemporaryConfigBinding(location, temporaryPath, handle);
     temporaryIdentity = { dev: temporaryStat.dev, ino: temporaryStat.ino };
     await handle.writeFile(serialized, "utf8");
-    await handle.chmod(0o600);
+    await tightenConfigMode(handle);
     await handle.sync();
     await assertTemporaryConfigBinding(location, temporaryPath, handle);
     await assertConfigRoot(location);
     await validateOptionalExistingConfig(location, false);
     await fs.rename(temporaryPath, location.filePath);
     await assertConfigBinding(location, handle);
-    await handle.chmod(0o600);
+    await tightenConfigMode(handle);
     await handle.sync();
   } finally {
     await handle?.close().catch(() => undefined);
@@ -127,7 +140,7 @@ export async function ensureConfig(workspaceRoot: string, options: ConfigPathOpt
   let existing: FileHandle | undefined;
   try {
     existing = await openExistingConfig(location);
-    await existing.chmod(0o600);
+    await tightenConfigMode(existing);
     return;
   } catch (error) {
     if (!isNotFound(error)) throw error;
@@ -141,13 +154,13 @@ export async function ensureConfig(workspaceRoot: string, options: ConfigPathOpt
     created = await fs.open(location.filePath, writeNewFlags(), 0o600);
     await assertConfigBinding(location, created);
     await created.writeFile(`${JSON.stringify(withoutCredentials(configSchema.parse(defaultConfig)), null, 2)}\n`, "utf8");
-    await created.chmod(0o600);
+    await tightenConfigMode(created);
     await created.sync();
   } catch (error) {
     if (!isAlreadyExists(error)) throw error;
     const raced = await openExistingConfig(location);
     try {
-      await raced.chmod(0o600);
+      await tightenConfigMode(raced);
     } finally {
       await raced.close();
     }
@@ -188,7 +201,7 @@ async function validateOptionalExistingConfig(location: ConfigLocation, tightenM
   let handle: FileHandle | undefined;
   try {
     handle = await openExistingConfig(location);
-    if (tightenMode) await handle.chmod(0o600);
+    if (tightenMode) await tightenConfigMode(handle);
   } catch (error) {
     if (!isNotFound(error)) throw error;
   } finally {
@@ -201,6 +214,11 @@ async function assertConfigRoot(location: ConfigLocation): Promise<void> {
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== location.device || stat.ino !== location.inode) {
     throw new Error("Configuration root changed during access.");
   }
+}
+
+/** 已经是 0600 时不触碰 ctime，避免多个只读 Host 互相制造“读取中发生变化”的假冲突。 */
+async function tightenConfigMode(handle: FileHandle): Promise<void> {
+  if (((await handle.stat()).mode & 0o777) !== 0o600) await handle.chmod(0o600);
 }
 
 async function assertSafeConfigLeaf(filePath: string): Promise<void> {

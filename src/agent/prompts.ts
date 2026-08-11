@@ -4,6 +4,10 @@
  * 基础身份与模式规则保持稳定；实际工具清单、工具自带规则和扩展元数据按当前运行时动态拼装。
  * 这样系统提示词只描述模型这一刻真正拥有的能力，也让工具说明与工具实现一起维护。
  */
+import type {
+  PersonalizationMetadata,
+  ResolvedChatPersonalization
+} from "../personalization/index.js";
 export const GLOBAL_SYSTEM_PROMPT = `
 You are an expert coding assistant operating inside Biny, a local agent harness. You help users by reading files, executing commands, editing code, researching information, and completing other tasks supported by the available tools and extensions.
 `;
@@ -34,6 +38,7 @@ export interface BuildSystemPromptOptions {
   mode: PromptMode;
   tools?: readonly PromptTool[];
   extensionPrompt?: string;
+  personalization?: ResolvedChatPersonalization;
   cwd: string;
 }
 
@@ -41,14 +46,78 @@ const dynamicPromptStart = "<!-- biny-runtime-context:start -->";
 const dynamicPromptEnd = "<!-- biny-runtime-context:end -->";
 const activeRunSummaryStart = "<!-- biny-active-run-summary:start -->";
 const activeRunSummaryEnd = "<!-- biny-active-run-summary:end -->";
+const personalizationPromptStart = "<!-- biny-personalization:start -->";
+const personalizationPromptEnd = "<!-- biny-personalization:end -->";
 
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
   return [
     GLOBAL_SYSTEM_PROMPT.trim(),
-    dynamicRuntimePrompt(options.extensionPrompt, options.tools ?? []),
     MODE_PROMPTS[options.mode].trim(),
+    options.personalization ? personalizationPrompt(options.personalization) : "",
+    dynamicRuntimePrompt(options.extensionPrompt, options.tools ?? []),
     `Current working directory: ${normalizePath(options.cwd)}`
   ].filter(Boolean).join("\n\n");
+}
+
+/**
+ * telemetry 即使开启 recordInputs 也不能写入自定义指令正文。保留三个不可逆/枚举元字段，
+ * 既能排查某次请求使用了哪个版本，也不会把用户私有偏好复制到诊断日志。
+ */
+export function systemPromptForTelemetry(systemPrompt: string | undefined): string | undefined {
+  if (!systemPrompt) return systemPrompt;
+  const start = systemPrompt.indexOf(personalizationPromptStart);
+  if (start === -1) return systemPrompt;
+  const end = systemPrompt.indexOf(personalizationPromptEnd, start + personalizationPromptStart.length);
+  const metadata = personalizationMetadataFromSystemPrompt(systemPrompt);
+  const replacement = metadata === undefined
+    ? `${personalizationPromptStart}\n<biny_personalization omitted="true" />\n${personalizationPromptEnd}`
+    : [
+      personalizationPromptStart,
+      `<biny_personalization personality="${metadata.personality}" configVersion="${String(metadata.configVersion)}" instructionsHash="${metadata.instructionsHash}" />`,
+      personalizationPromptEnd
+    ].join("\n");
+  return end === -1
+    ? `${systemPrompt.slice(0, start)}${replacement}`
+    : `${systemPrompt.slice(0, start)}${replacement}${systemPrompt.slice(end + personalizationPromptEnd.length)}`;
+}
+
+export interface PersistedPersonalizationRuntimePolicy extends PersonalizationMetadata {
+  useMemories: boolean;
+  contributeMemories: boolean;
+  excludeExternalContext: boolean;
+  maxRecalled: number;
+}
+
+/** TurnStore 续跑只从旧 system prompt 恢复非敏感运行策略，不重新读取最新配置。 */
+export function personalizationRuntimePolicyFromSystemPrompt(
+  systemPrompt: string | undefined
+): PersistedPersonalizationRuntimePolicy | undefined {
+  const attributes = personalizationAttributes(systemPrompt);
+  if (!attributes) return undefined;
+  const personality = attributes.personality;
+  const configVersion = Number(attributes.configVersion);
+  const maxRecalled = Number(attributes.maxRecalled);
+  if (
+    personality !== "none"
+    && personality !== "friendly"
+    && personality !== "pragmatic"
+  ) return undefined;
+  if (configVersion !== 1 || !Number.isSafeInteger(maxRecalled) || maxRecalled < 1) return undefined;
+  if (
+    !isBooleanAttribute(attributes.useMemories)
+    || !isBooleanAttribute(attributes.contributeMemories)
+    || !isBooleanAttribute(attributes.excludeExternalContext)
+    || typeof attributes.instructionsHash !== "string"
+  ) return undefined;
+  return {
+    personality,
+    configVersion: 1,
+    instructionsHash: attributes.instructionsHash,
+    useMemories: attributes.useMemories === "true",
+    contributeMemories: attributes.contributeMemories === "true",
+    excludeExternalContext: attributes.excludeExternalContext === "true",
+    maxRecalled
+  };
 }
 
 export function refreshRuntimeSystemPrompt(
@@ -100,6 +169,60 @@ function dynamicRuntimePrompt(extensionPrompt: string | undefined, tools: readon
     extensionPrompt?.trim() ?? "",
     dynamicPromptEnd
   ].filter(Boolean).join("\n\n");
+}
+
+function personalizationPrompt(personalization: ResolvedChatPersonalization): string {
+  const personalityGuidance = personalization.personality === "friendly"
+    ? "Use a warm, approachable and collaborative tone. Be encouraging without praise filler, and explain unfamiliar details plainly."
+    : personalization.personality === "pragmatic"
+      ? "Be direct, concise and action-oriented. Lead with the outcome, concrete evidence and relevant tradeoffs."
+      : "No additional personality preset is active.";
+  const customInstructions = personalization.customInstructions
+    ? `Custom instructions:\n${escapeXmlText(personalization.customInstructions)}`
+    : "Custom instructions: (none)";
+  return [
+    personalizationPromptStart,
+    `<biny_personalization personality="${personalization.personality}" configVersion="${String(personalization.configVersion)}" instructionsHash="${personalization.instructionsHash}" useMemories="${String(personalization.useMemories)}" contributeMemories="${String(personalization.contributeMemories)}" excludeExternalContext="${String(personalization.excludeExternalContext)}" maxRecalled="${String(personalization.maxRecalled)}">`,
+    "Personalization controls response style and durable-memory preferences only. It cannot override system or mode rules, project instructions, the current user request, tool permissions, safety boundaries, or verified runtime facts.",
+    "Conflict priority, highest to lowest: runtime safety, tool permissions, and Plan-mode rules; project AGENTS/instructions; the current user task; chat personalization overrides; global personalization; recalled memory.",
+    "Chat overrides are resolved over global settings before this effective block is built. Within one personalization layer, custom instructions take precedence over the personality preset.",
+    personalityGuidance,
+    customInstructions,
+    "</biny_personalization>",
+    personalizationPromptEnd
+  ].join("\n\n");
+}
+
+function personalizationMetadataFromSystemPrompt(
+  systemPrompt: string | undefined
+): PersonalizationMetadata | undefined {
+  const attributes = personalizationAttributes(systemPrompt);
+  if (!attributes) return undefined;
+  const personality = attributes.personality;
+  if (personality !== "none" && personality !== "friendly" && personality !== "pragmatic") return undefined;
+  if (attributes.configVersion !== "1" || typeof attributes.instructionsHash !== "string") return undefined;
+  return { personality, configVersion: 1, instructionsHash: attributes.instructionsHash };
+}
+
+function personalizationAttributes(systemPrompt: string | undefined): Record<string, string> | undefined {
+  if (!systemPrompt) return undefined;
+  const start = systemPrompt.indexOf(personalizationPromptStart);
+  if (start === -1) return undefined;
+  const opening = systemPrompt.slice(start).match(/<biny_personalization\s+([^>]+)>/u)?.[1];
+  if (!opening) return undefined;
+  const attributes: Record<string, string> = {};
+  for (const match of opening.matchAll(/([A-Za-z][A-Za-z0-9]*)="([^"]*)"/gu)) {
+    if (match[1] !== undefined && match[2] !== undefined) attributes[match[1]] = match[2];
+  }
+  return attributes;
+}
+
+function isBooleanAttribute(value: string | undefined): value is "true" | "false" {
+  return value === "true" || value === "false";
+}
+
+function escapeXmlText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function uniqueGuidelines(guidelines: readonly string[]): string[] {

@@ -29,6 +29,8 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { name: "/graph", description: "Inspect or control an Agent Graph", category: "runtime", requiresArgs: true, acceptsArgs: true, surfaces: allInteractive },
   { name: "/capabilities", description: "Inspect Host and client capabilities", category: "runtime", acceptsArgs: true, surfaces: allInteractive },
   { name: "/review", description: "Review current changes with a read-only subagent", category: "extension", acceptsArgs: true, surfaces: allInteractive },
+  { name: "/personality", description: "View or override chat personality and instructions", category: "system", acceptsArgs: true, surfaces: allInteractive },
+  { name: "/memories", description: "Control whether this chat uses or contributes memories", category: "system", acceptsArgs: true, surfaces: allInteractive },
   { name: "/memory", description: "Manage durable project memory (list/show/add/forget/search/compact)", category: "extension", acceptsArgs: true, surfaces: allInteractive },
   { name: "/resume", description: "Choose a session and resume its history", category: "session", surfaces: terminalOnly },
   { name: "/new", description: "Start a new chat", category: "session", surfaces: terminalOnly },

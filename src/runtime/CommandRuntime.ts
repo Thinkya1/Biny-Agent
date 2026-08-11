@@ -163,10 +163,9 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
       toolRegistry.registerSubagentTool(createSubagentTool(subagentOptions, subagentTaskManager!));
       subagentDefinitions = await loadAgentDefinitions();
     }
-    if (config.context.memory.enabled) {
-      // 记忆工具通过闭包延迟取 LocalMemory：注册发生在 AgentSession 创建前，调用发生在其后。
-      for (const tool of createMemoryTools(() => agent?.getLocalMemory())) toolRegistry.registerBuiltinTool(tool);
-    }
+    // 读取/写入 durable memory 与“当前聊天是否自动召回/贡献”是两组独立开关。
+    // 工具始终注册；显式 save_memory 不会因聊天策略关闭而丢失。
+    for (const tool of createMemoryTools(() => agent?.getLocalMemory())) toolRegistry.registerBuiltinTool(tool);
     // MCP/Plugin 仍由 Host 持有连接和执行权，但先把工具能力注册进统一 envelope，
     // 这样 Desktop/TUI 查询 capability projection 时能看到已加载的 Host-owned 能力。
     for (const entry of toolRegistry.listEntries()) {

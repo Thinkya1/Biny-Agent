@@ -13,6 +13,11 @@ import type { CommandRuntime } from "./CommandRuntime.js";
 import type { InteractiveRuntimeHandle } from "./InteractiveAgentRuntime.js";
 import type { CommandSurface } from "./commandRegistry.js";
 import type { TaskRunStatus } from "./TaskRunStore.js";
+import type {
+  AgentPersonalizationState,
+  ChatPersonalizationOverridePatch,
+  PersonalityPreset
+} from "../personalization/index.js";
 
 export interface RuntimeCommandResult {
   command: string;
@@ -115,6 +120,28 @@ export async function executeRuntimeCommand(
   }
   if (command === "/skills") return result(command, "[Skills]", services.extensionReport("skills").replace(/^Skills\n/, ""));
   if (command === "/plugins") return result(command, "Plugins", services.extensionReport("plugins").replace(/^Plugins\n/, ""));
+  if (command === "/personality") {
+    const patch = personalityPatch(args);
+    if (!patch) return result(command, "Personality", formatPersonalizationState(await services.agent.getPersonalizationState()));
+    const state = await services.agent.getPersonalizationState();
+    if (!state.catalogRevision) throw new Error("Chat personalization revision is unavailable.");
+    const updated = await runtime.runExclusiveOperation(
+      "personalization",
+      async () => await services.agent.updateChatPersonalization(patch, state.catalogRevision)
+    );
+    return result(command, "Personality", `${formatPersonalizationState(updated)}\n\nChanges apply from the next root turn.`);
+  }
+  if (command === "/memories") {
+    const patch = memoryPolicyPatch(args[0]);
+    if (!patch) return result(command, "Memories", formatPersonalizationState(await services.agent.getPersonalizationState()));
+    const state = await services.agent.getPersonalizationState();
+    if (!state.catalogRevision) throw new Error("Chat personalization revision is unavailable.");
+    const updated = await runtime.runExclusiveOperation(
+      "personalization",
+      async () => await services.agent.updateChatPersonalization(patch, state.catalogRevision)
+    );
+    return result(command, "Memories", `${formatPersonalizationState(updated)}\n\nChanges apply from the next root turn.`);
+  }
   if (command === "/memory") {
     return result(
       command,
@@ -155,6 +182,45 @@ export async function executeRuntimeCommand(
   return undefined;
 }
 
+function personalityPatch(args: string[]): ChatPersonalizationOverridePatch | undefined {
+  const action = args[0]?.toLowerCase();
+  if (!action) return undefined;
+  if (action === "inherit" || action === "none" || action === "friendly" || action === "pragmatic") {
+    return { personality: action as "inherit" | PersonalityPreset };
+  }
+  if (action === "instructions") {
+    const instructionAction = args[1]?.toLowerCase();
+    if (instructionAction === "inherit") return { customInstructions: { mode: "inherit" } };
+    if (instructionAction === "off" || instructionAction === "disabled" || instructionAction === "clear") {
+      return { customInstructions: { mode: "disabled" } };
+    }
+    if (instructionAction === "set") {
+      const value = args.slice(2).join(" ").trim();
+      if (value) return { customInstructions: { mode: "replace", value } };
+    }
+  }
+  throw new Error("Usage: /personality [inherit|none|friendly|pragmatic] | instructions [set <text>|inherit|off]");
+}
+
+function memoryPolicyPatch(action: string | undefined): ChatPersonalizationOverridePatch | undefined {
+  if (action === undefined) return undefined;
+  if (action === "inherit") return { useMemories: "inherit", contributeMemories: "inherit" };
+  if (action === "both") return { useMemories: true, contributeMemories: true };
+  if (action === "use") return { useMemories: true, contributeMemories: false };
+  if (action === "contribute") return { useMemories: false, contributeMemories: true };
+  if (action === "off") return { useMemories: false, contributeMemories: false };
+  throw new Error("Usage: /memories [inherit|both|use|contribute|off]");
+}
+
+function formatPersonalizationState(state: AgentPersonalizationState): string {
+  return [
+    `Personality: ${state.resolved.personality} (override: ${state.override.personality})`,
+    `Custom instructions: ${state.override.customInstructions.mode}; ${state.resolved.instructionsHash}`,
+    `Use memories: ${state.resolved.useMemories ? "yes" : "no"} (override: ${String(state.override.useMemories)})`,
+    `Contribute memories: ${state.resolved.contributeMemories ? "yes" : "no"} (override: ${String(state.override.contributeMemories)})`
+  ].join("\n");
+}
+
 async function executeSubagentCommand(
   runtime: InteractiveRuntimeHandle,
   services: CommandRuntime,
@@ -163,6 +229,12 @@ async function executeSubagentCommand(
   source: CommandSurface
 ): Promise<RuntimeCommandResult> {
   const action = args[0]?.toLowerCase();
+  // Inspector 这类结构化入口用分隔符声明“后续全是任务文本”，不能再把首词解释成控制动作。
+  if (action === "--") {
+    const task = args.slice(1).join(" ").trim();
+    if (!task) throw new Error("Usage: /subagent -- <read-only task>");
+    return result(command, "Subagent", await runForegroundSubagent(runtime, services, task) || "Subagent returned no text.");
+  }
   if (action === "agents") {
     return result(command, "Subagent", formatSubagentAgentList(await services.listSubagentAgents()));
   }

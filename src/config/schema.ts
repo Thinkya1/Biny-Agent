@@ -5,6 +5,13 @@
  * capabilities. Only the canonical multi-model format is accepted.
  */
 import { z } from "zod";
+import {
+  memoryPolicySchema,
+  personalizationSettingsSchema,
+  type MemoryPolicy,
+  type PersonalizationSettings
+} from "../personalization/index.js";
+import { GLOBAL_CONFIG_FORMAT, GLOBAL_CONFIG_VERSION } from "./migrations.js";
 
 const agentSchema = z.object({
   softStepLimit: z.number().int().min(1).max(1_024).default(32),
@@ -52,20 +59,19 @@ const contextSchema = z.object({
     keepRecentTokens: z.number().int().min(256).max(1_000_000).optional(),
     maxSummaryTokens: z.number().int().min(256).max(32_768).default(4_096)
   }).default({ enabled: true, reserveTokens: undefined, keepRecentTokens: undefined, maxSummaryTokens: 4_096 }),
-  memory: z.object({
-    enabled: z.boolean().default(false),
-    // 任务成功后是否自动抽取一条记忆；关闭后仍可检索与手动 save_memory。
-    autoRemember: z.boolean().default(false),
-    // 每回合自动注入上下文的最大记忆条数。
-    maxRecalled: z.number().int().min(1).max(20).default(3),
-    // 记忆抽取/整理使用的模型别名；缺省跟随会话模型。
-    model: z.string().min(1).optional()
-  }).default({ enabled: false, autoRemember: false, maxRecalled: 3, model: undefined })
+  memory: memoryPolicySchema
 }).default({
   maxTurnToolResultBytes: 128 * 1024,
   instructionsMaxBytes: 32 * 1024,
   compaction: { enabled: true, reserveTokens: undefined, keepRecentTokens: undefined, maxSummaryTokens: 4_096 },
-  memory: { enabled: false, autoRemember: false, maxRecalled: 3, model: undefined }
+  memory: {
+    useMemories: false,
+    generateMemories: false,
+    extractModel: undefined,
+    consolidationModel: undefined,
+    excludeExternalContext: true,
+    maxRecalled: 3
+  }
 });
 
 const extensionIdSchema = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
@@ -421,6 +427,8 @@ const modelAliasSchema = z.object({
 });
 
 const canonicalConfigSchema = z.object({
+  format: z.literal(GLOBAL_CONFIG_FORMAT),
+  configVersion: z.literal(GLOBAL_CONFIG_VERSION),
   defaultModel: z.string().min(1),
   providers: z.record(providerConfigSchema),
   models: z.record(modelAliasSchema),
@@ -430,6 +438,7 @@ const canonicalConfigSchema = z.object({
   workspace: z.object({
     ignore: z.array(z.string())
   }),
+  personalization: personalizationSettingsSchema,
   context: contextSchema,
   diagnostics: diagnosticsSchema,
   checkpoints: checkpointsSchema,
@@ -442,7 +451,7 @@ const canonicalConfigSchema = z.object({
     recordOutputs: z.boolean().default(false)
   }).default({ enabled: false, recordInputs: false, recordOutputs: false }),
   extensions: extensionsSchema
-}).superRefine((config, context) => {
+}).strict().superRefine((config, context) => {
   const activeModel = config.models[config.defaultModel];
   if (!activeModel) {
     context.addIssue({
@@ -495,13 +504,15 @@ const canonicalConfigSchema = z.object({
     });
   }
 
-  const memoryAlias = config.context.memory.model;
-  if (memoryAlias && !config.models[memoryAlias]) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["context", "memory", "model"],
-      message: `Unknown memory model alias: ${memoryAlias}`
-    });
+  for (const field of ["extractModel", "consolidationModel"] as const) {
+    const memoryAlias = config.context.memory[field];
+    if (memoryAlias && !config.models[memoryAlias]) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["context", "memory", field],
+        message: `Unknown memory model alias: ${memoryAlias}`
+      });
+    }
   }
 
   const subagentAlias = config.extensions.subagent.model;
@@ -566,6 +577,7 @@ export type WebFetchConfig = z.infer<typeof webFetchSchema>;
 export type WebSearchConfig = z.infer<typeof webSearchSchema>;
 export type WebCookiesConfig = z.infer<typeof webCookiesSchema>;
 export type WebConfig = z.infer<typeof webSchema>;
+export type { MemoryPolicy, PersonalizationSettings };
 
 const defaultWorkspaceIgnore = [
   "node_modules",
@@ -582,6 +594,8 @@ const defaultWorkspaceIgnore = [
 ];
 
 export const defaultConfig: AgentConfig = {
+  format: GLOBAL_CONFIG_FORMAT,
+  configVersion: GLOBAL_CONFIG_VERSION,
   defaultModel: "deepseek-v4-flash",
   providers: {
     deepseek: {
@@ -632,6 +646,7 @@ export const defaultConfig: AgentConfig = {
   workspace: {
     ignore: defaultWorkspaceIgnore
   },
+  personalization: { enabled: true, personality: "none", customInstructions: "" },
   checkpoints: { enabled: true },
   sandbox: { mode: "off", allowNetwork: true },
   hooks: { beforeTool: [], afterTool: [] },
@@ -646,7 +661,14 @@ export const defaultConfig: AgentConfig = {
     maxTurnToolResultBytes: 128 * 1024,
     instructionsMaxBytes: 32 * 1024,
     compaction: { enabled: true, reserveTokens: undefined, keepRecentTokens: undefined, maxSummaryTokens: 4_096 },
-    memory: { enabled: false, autoRemember: false, maxRecalled: 3, model: undefined }
+    memory: {
+      useMemories: false,
+      generateMemories: false,
+      extractModel: undefined,
+      consolidationModel: undefined,
+      excludeExternalContext: true,
+      maxRecalled: 3
+    }
   },
   web: {
     search: {

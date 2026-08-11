@@ -4,9 +4,15 @@
  * 这里故意不复用完整 AgentConfig schema：项目文件只能表达运行参数，不能借此引入 provider、
  * model alias、API key、OAuth 或其他全局凭据。解析后再和全局配置做深度合并。
  */
-import { promises as fs } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { constants, promises as fs } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import {
+  migrateProjectSettingsDocument,
+  PROJECT_SETTINGS_FORMAT,
+  PROJECT_SETTINGS_VERSION
+} from "./migrations.js";
 import { projectBinyDir, projectSettingsPath } from "./paths.js";
 import { reasoningEffortSchema } from "./schema.js";
 
@@ -35,13 +41,6 @@ const permissionOverrideSchema = z.object({
   criticalAlwaysAsk: z.boolean().optional()
 }).strict();
 
-const memoryOverrideSchema = z.object({
-  enabled: z.boolean().optional(),
-  autoRemember: z.boolean().optional(),
-  maxRecalled: z.number().int().min(1).max(20).optional(),
-  model: z.string().min(1).optional()
-}).strict();
-
 const compactionOverrideSchema = z.object({
   enabled: z.boolean().optional(),
   reserveTokens: z.number().int().min(256).max(262_144).optional(),
@@ -53,8 +52,7 @@ const contextOverrideSchema = z.object({
   maxInputTokens: z.number().int().min(2_048).max(2_000_000).optional(),
   maxTurnToolResultBytes: z.number().int().min(1_024).max(16 * 1024 * 1024).optional(),
   instructionsMaxBytes: z.number().int().min(1_024).max(131_072).optional(),
-  compaction: compactionOverrideSchema.optional(),
-  memory: memoryOverrideSchema.optional()
+  compaction: compactionOverrideSchema.optional()
 }).strict();
 
 const sandboxOverrideSchema = z.object({
@@ -89,6 +87,13 @@ export const projectSettingsSchema = z.object({
 
 export type ProjectSettings = z.infer<typeof projectSettingsSchema>;
 
+export const projectSettingsDocumentSchema = projectSettingsSchema.extend({
+  format: z.literal(PROJECT_SETTINGS_FORMAT),
+  configVersion: z.literal(PROJECT_SETTINGS_VERSION)
+}).strict();
+
+export type ProjectSettingsDocument = z.infer<typeof projectSettingsDocumentSchema>;
+
 export async function loadProjectSettings(workspaceRoot: string): Promise<ProjectSettings> {
   const canonicalWorkspace = await fs.realpath(path.resolve(workspaceRoot));
   const settingsPath = projectSettingsPath(canonicalWorkspace);
@@ -110,9 +115,95 @@ export async function loadProjectSettings(workspaceRoot: string): Promise<Projec
   }
 
   try {
-    return projectSettingsSchema.parse(JSON.parse(raw));
+    const migration = migrateProjectSettingsDocument(JSON.parse(raw));
+    const document = projectSettingsDocumentSchema.parse(migration.document);
+    if (migration.migrated) await writeProjectSettingsDocument(canonicalWorkspace, document);
+    return projectSettingsFromDocument(document);
   } catch (error) {
     throw new Error(`Invalid project .biny/settings.json: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** 保存稀疏的项目覆盖；format/configVersion 由这里统一维护，不参与全局配置 merge。 */
+export async function saveProjectSettings(
+  workspaceRoot: string,
+  settings: ProjectSettings
+): Promise<ProjectSettings> {
+  const canonicalWorkspace = await fs.realpath(path.resolve(workspaceRoot));
+  const parsed = projectSettingsSchema.parse(settings);
+  const document = projectSettingsDocumentSchema.parse({
+    ...parsed,
+    format: PROJECT_SETTINGS_FORMAT,
+    configVersion: PROJECT_SETTINGS_VERSION
+  });
+  await writeProjectSettingsDocument(canonicalWorkspace, document);
+  return projectSettingsFromDocument(document);
+}
+
+export async function updateProjectSettings(
+  workspaceRoot: string,
+  update: (current: ProjectSettings) => ProjectSettings | Promise<ProjectSettings>
+): Promise<ProjectSettings> {
+  const current = await loadProjectSettings(workspaceRoot);
+  return await saveProjectSettings(workspaceRoot, await update(structuredClone(current)));
+}
+
+function projectSettingsFromDocument(document: ProjectSettingsDocument): ProjectSettings {
+  const { format: _format, configVersion: _configVersion, ...settings } = document;
+  return projectSettingsSchema.parse(settings);
+}
+
+async function writeProjectSettingsDocument(
+  canonicalWorkspace: string,
+  document: ProjectSettingsDocument
+): Promise<void> {
+  const directory = projectBinyDir(canonicalWorkspace);
+  try {
+    const stat = await fs.lstat(directory);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || await fs.realpath(directory) !== directory) {
+      throw new Error("Project .biny must be a real directory.");
+    }
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    await fs.mkdir(directory, { recursive: false, mode: 0o700 });
+  }
+  await fs.chmod(directory, 0o700);
+  const target = projectSettingsPath(canonicalWorkspace);
+  await assertOptionalSettingsFile(target);
+  const temporaryPath = path.join(
+    directory,
+    `settings.json.${String(process.pid)}.${randomBytes(8).toString("hex")}.tmp`
+  );
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  let handle;
+  try {
+    handle = await fs.open(
+      temporaryPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollow,
+      0o600
+    );
+    await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, "utf8");
+    await handle.chmod(0o600);
+    await handle.sync();
+    await assertOptionalSettingsFile(target);
+    await fs.rename(temporaryPath, target);
+    await fs.chmod(target, 0o600);
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await fs.unlink(temporaryPath).catch((error: unknown) => {
+      if (!isNotFound(error)) throw error;
+    });
+  }
+}
+
+async function assertOptionalSettingsFile(filePath: string): Promise<void> {
+  try {
+    const stat = await fs.lstat(filePath);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || await fs.realpath(filePath) !== filePath) {
+      throw new Error("Project .biny/settings.json must be a single-link regular file.");
+    }
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
   }
 }
 
