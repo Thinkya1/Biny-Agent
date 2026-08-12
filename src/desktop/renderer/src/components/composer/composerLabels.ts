@@ -1,6 +1,6 @@
-/** Composer 菜单共享的标签与说明，不包含 React 状态。 */
-import type { ThinkingSelection } from "../../../../../llm/ModelManager.js";
+/** Composer 菜单共享的标签，不包含 React 状态。 */
 import type { PermissionMode } from "../../../../../permission/PermissionManager.js";
+export { thinkingLabel } from "../../../../../llm/modelThinking.js";
 
 export const permissionOptions: Array<{ mode: PermissionMode; label: string; description: string; risk?: string }> = [
   { mode: "ask", label: "每次询问", description: "写入、执行和其他敏感操作会请求确认" },
@@ -11,22 +11,4 @@ export const permissionOptions: Array<{ mode: PermissionMode; label: string; des
 
 export function permissionLabel(mode: PermissionMode): string {
   return permissionOptions.find((option) => option.mode === mode)?.label ?? mode;
-}
-
-const thinkingLabels: Record<ThinkingSelection, string> = {
-  off: "标准",
-  minimal: "极低",
-  low: "低",
-  medium: "中",
-  high: "高",
-  xhigh: "较高",
-  max: "最高"
-};
-
-export function thinkingLabel(value: ThinkingSelection): string {
-  return thinkingLabels[value] ?? value;
-}
-
-export function thinkingDescription(value: ThinkingSelection): string {
-  return value === "off" ? "不额外要求模型思考，回复最快" : "思考越多越慢，但复杂任务更稳";
 }

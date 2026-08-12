@@ -50,7 +50,7 @@ import type { AgentSessionInfo } from "../src/agent/AgentSession.js";
 import type { ContextStatus } from "../src/agent/context/types.js";
 import type { UsageSummary } from "../src/session/metadata.js";
 import { activitySummaryText } from "../src/runtime/activitySummary.js";
-import { modelThinkingOptions } from "../src/tui/modelOptions.js";
+import { modelThinkingOptions, selectedThinkingForModel } from "../src/tui/modelOptions.js";
 import {
   confirmedPermissionChoice,
   createPermissionPromptInteractionState,
@@ -205,12 +205,18 @@ function testAutocompleteEnterOnlyConfirmsSkillSelection(): void {
 }
 
 function testModelThinkingOptionsUseModelCapabilities(): void {
-  const proOptions = modelThinkingOptions({ efforts: ["low", "medium", "high"] });
-  assert.deepEqual(proOptions.map((option) => option.value), ["low", "medium", "high"]);
-  assert.equal(proOptions[1]?.label, "Medium");
-  const deepseekOptions = modelThinkingOptions({ efforts: ["high", "max"] });
-  assert.deepEqual(deepseekOptions.map((option) => option.label), ["High", "Max"]);
-  assert.deepEqual(modelThinkingOptions({ efforts: [] }), []);
+  const proOptions = modelThinkingOptions({ efforts: ["low", "medium", "high"], thinkingLevelMap: { off: "none" } });
+  assert.deepEqual(proOptions.map((option) => option.value), ["off", "low", "medium", "high"]);
+  assert.equal(proOptions[2]?.label, "中");
+  const lunaOptions = modelThinkingOptions({
+    efforts: ["low", "medium", "high", "xhigh", "max"],
+    thinkingLevelMap: { low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" }
+  });
+  assert.deepEqual(lunaOptions.map((option) => option.label), ["轻度", "中", "高", "极高", "最高"]);
+  assert.equal(lunaOptions.every((option) => Object.keys(option).length === 2), true);
+  assert.deepEqual(modelThinkingOptions({ efforts: [], thinkingLevelMap: {} }), []);
+  assert.equal(selectedThinkingForModel("deepseek", "off", { alias: "deepseek", defaultThinking: "high" }), "off");
+  assert.equal(selectedThinkingForModel("deepseek", "high", { alias: "other", defaultThinking: "max" }), "max");
 }
 
 function testPermissionConfirmationContract(): void {
@@ -674,7 +680,7 @@ function testMaintenanceDoesNotReuseTaskDuration(): void {
   state = reduce(state, {
     type: "run.completed",
     durationMs: 138,
-    stopReason: "completion_gate",
+    stopReason: "model_stop",
     steps: 1
   });
   assert.equal(state.lastWorkedMs !== undefined, true);
@@ -913,7 +919,7 @@ function testSessionReplayRestoresTurnStatuses(): void {
     {
       type: "turn_status",
       status: "completed",
-      stopReason: "completion_gate",
+      stopReason: "model_stop",
       steps: 1
     }
   ] as SessionEvent[]);

@@ -4,7 +4,8 @@
  * 配置模型是稳定来源，provider `/models` 是可刷新来源。两者在这里合并成同一份模型视图；
  * 注册表只保存模型元数据，不保存 API key，也不会把实时目录自动写回项目配置。
  */
-import { modelCapabilities, modelContextBudget, modelReasoningConfig, modelThinkingLevelMap, thinkingLevelMapForModel } from "../ai/capabilities.js";
+import { modelCapabilities, modelContextBudget, modelReasoningConfig, modelThinkingLevelMap } from "../ai/capabilities.js";
+import { thinkingLevelMapForProviderModel } from "../ai/modelMetadata.js";
 import type { ModelCatalogEntry } from "../ai/types.js";
 import type {
   AgentConfig,
@@ -216,10 +217,9 @@ export function hasUsableModelConfiguration(config: AgentConfig, alias: string, 
 }
 
 function catalogEntryToModel(entry: ModelCatalogEntry): ModelAliasConfig {
-  const levelMap = entry.thinkingLevelMap
-    ?? (entry.reasoningEfforts.length
-      ? thinkingLevelMapForModel(entry.id, true, entry.reasoningEfforts)
-      : undefined);
+  const levelMap = entry.reasoningEfforts.length
+    ? thinkingLevelMapForProviderModel(entry.provider, entry.id, entry.reasoningEfforts)
+    : entry.thinkingLevelMap;
   return {
     provider: entry.provider,
     model: entry.id,

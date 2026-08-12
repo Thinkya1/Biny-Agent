@@ -54,7 +54,7 @@ import { permissionChoiceToResult } from "./runtime/permissionChoice.js";
 import { readGitBranch } from "./runtime/gitBranch.js";
 import { openDesktopSession } from "./runtime/desktopHandoff.js";
 import { sessionEventsToTranscript } from "./sessionTranscript.js";
-import { modelThinkingOptions } from "./modelOptions.js";
+import { modelThinkingOptions, selectedThinkingForModel } from "./modelOptions.js";
 import { createInitialTuiState, tuiReducer } from "./reducer.js";
 import { editorTheme, theme } from "./theme/index.js";
 import { formatSessionAge } from "./transcriptText.js";
@@ -1113,18 +1113,15 @@ export class BinyTui {
     }
 
     const current = runtime.getSnapshot().info;
-    const currentThinking = current.modelAlias === alias && current.thinking !== "off"
-      ? current.thinking
-      : model.defaultThinking;
+    const currentThinking = selectedThinkingForModel(current.modelAlias, current.thinking, model);
     const options = modelThinkingOptions(model);
     this.showSelect({
-      title: `Select Reasoning Level for ${model.model}`,
+      title: "推理强度",
       hint: "↑↓ navigate · enter select · esc back",
       selectedIndex: Math.max(0, options.findIndex((option) => option.value === currentThinking)),
       items: options.map((option) => ({
         value: option.value,
-        label: option.value === currentThinking ? `${option.label} ← current` : option.label,
-        description: option.description
+        label: option.label
       })),
       onSelect: (item) => {
         void this.applyModel(alias, item.value as ThinkingSelection);

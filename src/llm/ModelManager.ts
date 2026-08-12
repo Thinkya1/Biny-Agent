@@ -2,8 +2,7 @@ import { createFileConfigStore, type AgentConfigStore } from "../config/store.js
 import {
   configSchema,
   type AgentConfig,
-  type ModelPricing,
-  type ReasoningEffort
+  type ModelPricing
 } from "../config/schema.js";
 import { isRemovedModelId } from "../config/schema.js";
 import {
@@ -20,8 +19,9 @@ import { ModelRuntime } from "./ModelRuntime.js";
 import type { NativeModelSettings } from "./ProviderRuntime.js";
 import { AiRegistry } from "./AiRegistry.js";
 import { FileModelsStore, restoreProviderCatalogs, type ModelsStore } from "./ModelsStore.js";
+import type { ThinkingSelection } from "./modelThinking.js";
 
-export type ThinkingSelection = "off" | ReasoningEffort;
+export { modelThinkingSelections, type ThinkingSelection } from "./modelThinking.js";
 export type { ModelChoice } from "./ModelRegistry.js";
 
 export interface ModelRuntimeInfo {

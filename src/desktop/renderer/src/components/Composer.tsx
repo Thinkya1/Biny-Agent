@@ -9,7 +9,8 @@ import { ChatComposer, ChatComposerDrawer, ChatComposerInput } from "@astryxdesi
 import type { ChatComposerInputHandle } from "@astryxdesign/core/Chat";
 import { memo, useEffect, useRef, useState } from "react";
 import type { AgentSessionInfo, InteractiveAgentRunMode } from "../../../../agent/AgentSession.js";
-import type { ModelChoice, ThinkingSelection } from "../../../../llm/ModelManager.js";
+import type { ModelChoice } from "../../../../llm/ModelManager.js";
+import { modelThinkingSelections, type ThinkingSelection } from "../../../../llm/modelThinking.js";
 import type { PermissionMode } from "../../../../permission/PermissionManager.js";
 import type { DesktopAttachment, DesktopProject, DesktopSlashCommand } from "../../../protocol.js";
 import { DESKTOP_SLASH_COMMANDS } from "../../../protocol.js";
@@ -251,12 +252,7 @@ export const Composer = memo(function Composer({
       selectedModel.baseUrl
     )
     : undefined;
-  const thinkingLevels: ThinkingSelection[] = selectedModel
-    ? [
-      ...(selectedModel.thinkingLevelMap.off !== undefined && selectedModel.thinkingLevelMap.off !== null ? ["off" as const] : []),
-      ...selectedModel.efforts
-    ]
-    : [];
+  const thinkingLevels: ThinkingSelection[] = selectedModel ? modelThinkingSelections(selectedModel) : [];
   const thinkingSelectable = thinkingLevels.length > 1 || thinkingLevels.some((level) => level !== "off");
   const modelName = selectedModel?.displayName ?? runtimeInfo?.modelLabel ?? "GPT-5.6-Luna";
   const usage = formatContextUsage(contextUsage);

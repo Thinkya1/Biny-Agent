@@ -106,6 +106,22 @@ const normalizedCodex = new ProviderRegistry(codexConfig).forModel("codex-sol").
 assert.equal(normalizedCodex.contextWindow, 372_000);
 assert.equal(modelCapabilities(normalizedCodex).reasoning, true);
 
+const codexLunaConfig = configSchema.parse({
+  ...defaultConfig,
+  defaultModel: "codex-luna",
+  providers: { "openai-codex": { type: "openai-codex" } },
+  models: { "codex-luna": { provider: "openai-codex", model: "gpt-5.6-luna" } }
+});
+const normalizedCodexLuna = new ProviderRegistry(codexLunaConfig).forModel("codex-luna").model;
+assert.deepEqual(modelReasoningConfig(normalizedCodexLuna)?.efforts, ["low", "medium", "high", "xhigh", "max"]);
+assert.deepEqual(modelThinkingLevelMap(normalizedCodexLuna), {
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max"
+});
+
 const unknownModelConfig = configSchema.parse({
   ...defaultConfig,
   defaultModel: "unknown",

@@ -9,6 +9,7 @@ import {
   GENERATED_MODELS_DEV_METADATA,
   GENERATED_MODELS_DEV_PROVIDER_ALIASES
 } from "./modelMetadata.generated.js";
+import { openAiCodexThinkingLevelMaps } from "./codexModels.js";
 import type { ModelCapabilities, ModelCatalogEntry } from "./types.js";
 import type { ModelPricing, ReasoningEffort, ThinkingLevelMap } from "../config/schema.js";
 
@@ -31,6 +32,17 @@ export interface ModelMetadata {
 }
 
 export const generatedModelProviderTypes = [...GENERATED_MODELS_DEV_CATALOG_PROVIDERS];
+
+/** 访问路径可以覆盖通用目录的档位能力；这里与 Desktop/TUI 使用同一份 Codex 模型事实。 */
+export function thinkingLevelMapForProviderModel(
+  providerType: string,
+  modelId: string,
+  efforts: readonly ReasoningEffort[]
+): ThinkingLevelMap {
+  return providerType === "openai-codex" && openAiCodexThinkingLevelMaps[modelId] !== undefined
+    ? { ...openAiCodexThinkingLevelMaps[modelId] }
+    : thinkingLevelMapForEfforts(efforts);
+}
 
 /**
  * Codex OAuth 与 OpenAI API 共用模型 ID，但订阅访问路径的有效上下文窗口更小。
@@ -82,12 +94,14 @@ function metadataToCatalogEntry(id: string, metadata: ModelMetadata, provider: s
     maxOutputTokens: metadata.maxOutputTokens,
     capabilities: { ...metadata.capabilities },
     reasoningEfforts: [...metadata.reasoningEfforts],
-    thinkingLevelMap: metadata.reasoningEfforts.length ? thinkingLevelMapForEfforts(metadata.reasoningEfforts) : undefined,
+    thinkingLevelMap: metadata.reasoningEfforts.length
+      ? thinkingLevelMapForProviderModel(provider, id, metadata.reasoningEfforts)
+      : undefined,
     pricing: metadata.pricing ? { ...metadata.pricing } : undefined
   };
 }
 
-function thinkingLevelMapForEfforts(efforts: ReasoningEffort[]): ThinkingLevelMap {
+function thinkingLevelMapForEfforts(efforts: readonly ReasoningEffort[]): ThinkingLevelMap {
   return {
     off: "none",
     ...Object.fromEntries(efforts.map((effort) => [effort, effort]))

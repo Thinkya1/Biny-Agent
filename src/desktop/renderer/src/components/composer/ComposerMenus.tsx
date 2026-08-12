@@ -5,7 +5,7 @@ import type { RefObject } from "react";
 import { useClosingPresence } from "../../useClosingPresence.js";
 import { ComposerPopover } from "./ComposerPopover.js";
 import { Icon } from "../Icon.js";
-import { permissionOptions, thinkingDescription, thinkingLabel } from "./composerLabels.js";
+import { permissionOptions, thinkingLabel } from "./composerLabels.js";
 
 export function PermissionMenu({ anchorRef, mode, open, onChange }: {
   anchorRef: RefObject<HTMLElement | null>;
@@ -44,11 +44,11 @@ export function ThinkingMenu({ anchorRef, current, levels, open, onChange }: {
   return (
     <ComposerPopover anchorRef={anchorRef} className={`t-dropdown composer-popover cindy-composer-popover thinking-level-menu ${presenceClass(presence.phase)}`} phase={presence.phase}>
       <div role="menu">
-        <div className="popover-heading">思考级别</div>
+        <div className="popover-heading">推理强度</div>
         {levels.map((level) => (
           <button aria-checked={level === current} className={`menu-option${level === current ? " is-selected" : ""}`} key={level} onClick={() => onChange(level)} role="menuitemradio" type="button">
             <span className="menu-check">{level === current ? <Icon name="check" size={14} /> : null}</span>
-            <span className="menu-option-copy"><strong>{thinkingLabel(level)}</strong><small>{thinkingDescription(level)}</small></span>
+            <span className="menu-option-copy"><strong>{thinkingLabel(level)}</strong></span>
           </button>
         ))}
       </div>

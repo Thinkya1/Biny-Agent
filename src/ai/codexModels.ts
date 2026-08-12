@@ -4,11 +4,24 @@
  * 账号接口返回的实时目录优先；这里的目录用于首次登录、接口暂时不可用或
  * 账号目录为空时的离线兜底。模型元数据仍由 modelMetadata.ts 统一补全。
  */
+import type { ThinkingLevelMap } from "../config/schema.js";
+
 export interface OpenAiCodexCatalogModel {
   id: string;
   displayName: string;
   contextWindow: number | undefined;
 }
+
+/** Codex 访问路径的模型能力；Luna 不提供关闭思考，只有 Desktop 展示的五档。 */
+export const openAiCodexThinkingLevelMaps: Readonly<Record<string, ThinkingLevelMap>> = {
+  "gpt-5.6-luna": {
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "xhigh",
+    max: "max"
+  }
+};
 
 export const openAiCodexCatalogModels: readonly OpenAiCodexCatalogModel[] = [
   { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", contextWindow: 372_000 },

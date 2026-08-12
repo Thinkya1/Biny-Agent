@@ -5,7 +5,7 @@
  * `/models` 结果和插件目录会在运行时补充缺失字段，用户配置的模型别名拥有最高优先级。
  */
 import { inferReasoningEfforts } from "./capabilities.js";
-import { openAiCodexCatalogModels } from "./codexModels.js";
+import { openAiCodexCatalogModels, openAiCodexThinkingLevelMaps } from "./codexModels.js";
 import { generatedModelProviderTypes, generatedProviderModels } from "./modelMetadata.js";
 import type { ModelCatalogEntry } from "./types.js";
 
@@ -49,6 +49,7 @@ const legacyBuiltinProviderModels: Record<string, ModelCatalogEntry[]> = {
   ],
   "openai-codex": openAiCodexCatalogModels.map((entry) => model(entry.id, entry.displayName, {
     contextWindow: entry.contextWindow,
+    thinkingLevelMap: openAiCodexThinkingLevelMaps[entry.id],
     capabilities: {
       tools: true,
       reasoning: true,
