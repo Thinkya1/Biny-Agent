@@ -8,6 +8,7 @@ import type { ModelProvider, ProviderConfig } from "../config/schema.js";
 import { builtinProviderModels } from "./builtinModels.js";
 import type { ModelCatalogEntry, ProviderDefinition, ProviderModelDefaults } from "./types.js";
 import { createRetryFetch } from "./retry.js";
+import { createProxyAwareFetch } from "../network/proxyFetch.js";
 
 export interface ProviderRegistration {
   definition: ProviderDefinition;
@@ -136,6 +137,7 @@ async function fetchGoogleModels(context: {
   providerAlias: string;
   config: ProviderConfig;
   signal?: AbortSignal;
+  fetcher?: typeof globalThis.fetch;
 }): Promise<ModelCatalogEntry[]> {
   const baseUrl = context.config.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta";
   const endpoint = context.config.modelsEndpoint ?? `${baseUrl.replace(/\/+$/u, "")}/models`;
@@ -144,7 +146,7 @@ async function fetchGoogleModels(context: {
   if (!apiKey) throw new Error(`No credentials available for provider ${context.providerAlias}.`);
   const timeout = AbortSignal.timeout(15_000);
   const retry = context.config.retry ?? { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
-  const response = await createRetryFetch(retry)(endpoint, {
+  const response = await createRetryFetch(retry, context.fetcher ?? createProxyAwareFetch())(endpoint, {
     headers: { "x-goog-api-key": apiKey, ...context.config.headers },
     signal: context.signal ? AbortSignal.any([context.signal, timeout]) : timeout
   });

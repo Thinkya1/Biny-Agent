@@ -11,6 +11,7 @@ import { ModelResolver } from "./ModelResolver.js";
 import { ProviderRegistry, type NativeModelSettings } from "./ProviderRuntime.js";
 import { AiRegistry } from "./AiRegistry.js";
 import type { ModelsStore } from "./ModelsStore.js";
+import { createProxyAwareFetch } from "../network/proxyFetch.js";
 
 export class ModelRuntime {
   private readonly providers: ProviderRegistry;
@@ -21,7 +22,7 @@ export class ModelRuntime {
     catalogs: readonly [string, ModelCatalogEntry[]][] = [],
     ai: AiRegistry = new AiRegistry(),
     modelsStore?: ModelsStore,
-    fetcher: typeof globalThis.fetch = globalThis.fetch
+    fetcher: typeof globalThis.fetch = createProxyAwareFetch()
   ) {
     this.providers = new ProviderRegistry(config, catalogs, ai, modelsStore, fetcher);
     this.models = new ModelRegistry(config, this.providers);

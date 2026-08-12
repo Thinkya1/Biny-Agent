@@ -1,5 +1,6 @@
 /** Claude/OpenAI 订阅登录与模型请求共用的协议常量和请求头。 */
 import { extractOpenAiAccountId } from "../ai/codexAuth.js";
+import { createProxyAwareFetch } from "../network/proxyFetch.js";
 
 export { extractOpenAiAccountId, openAiCodexHeaders } from "../ai/codexAuth.js";
 
@@ -25,7 +26,8 @@ export interface SubscriptionOAuthTokens {
 export async function refreshSubscriptionOAuthTokens(
   provider: SubscriptionOAuthProvider,
   tokens: SubscriptionOAuthTokens,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  fetcher: typeof globalThis.fetch = createProxyAwareFetch()
 ): Promise<SubscriptionOAuthTokens> {
   if (provider === "claude-code") {
     const response = await fetchSubscriptionEndpoint("Claude 刷新登录", CLAUDE_OAUTH_TOKEN_ENDPOINT, {
@@ -37,7 +39,7 @@ export async function refreshSubscriptionOAuthTokens(
         client_id: CLAUDE_OAUTH_CLIENT_ID
       }),
       signal
-    });
+    }, fetcher);
     if (!response.ok) throw new Error(`Claude 登录已过期（HTTP ${String(response.status)}），请重新登录。`);
     return mergeRefreshedSubscriptionOAuthTokens(tokens, await response.json(), "Claude");
   }
@@ -52,7 +54,7 @@ export async function refreshSubscriptionOAuthTokens(
     headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "biny-desktop/0.2.1" },
     body: body.toString(),
     signal
-  });
+  }, fetcher);
   if (!response.ok) throw new Error(`Codex 登录已过期（HTTP ${String(response.status)}），请重新登录。`);
   const refreshed = mergeRefreshedSubscriptionOAuthTokens(tokens, await response.json(), "Codex");
   return {
@@ -110,11 +112,11 @@ function mergeRefreshedSubscriptionOAuthTokens(
 }
 
 /** OAuth 刷新没有 HTTP 响应时补充阶段、域名和底层错误码，并统一限制等待时间。 */
-async function fetchSubscriptionEndpoint(label: string, url: string, init: RequestInit): Promise<Response> {
+async function fetchSubscriptionEndpoint(label: string, url: string, init: RequestInit, fetcher: typeof globalThis.fetch): Promise<Response> {
   try {
     const timeout = AbortSignal.timeout(15_000);
     const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
-    return await fetch(url, { ...init, signal });
+    return await fetcher(url, { ...init, signal });
   } catch (error) {
     if (init.signal?.aborted) throw error;
     const cause = error instanceof Error && "cause" in error

@@ -5,6 +5,7 @@
  */
 import type { AgentModel } from "../agent/core/types.js";
 import type { AgentConfig } from "../config/schema.js";
+import { createProxyAwareFetch } from "../network/proxyFetch.js";
 import { ProviderRegistry, type NativeModelSettings } from "./ProviderRuntime.js";
 
 export type { NativeModelSettings } from "./ProviderRuntime.js";
@@ -16,7 +17,7 @@ export function createNativeModelForConfig(config: AgentConfig, alias = config.d
 export function createNativeModelSettings(
   config: AgentConfig,
   alias = config.defaultModel,
-  fetcher: typeof globalThis.fetch = globalThis.fetch
+  fetcher: typeof globalThis.fetch = createProxyAwareFetch()
 ): NativeModelSettings {
   return new ProviderRegistry(config, [], undefined, undefined, fetcher).createModelSettings(alias);
 }

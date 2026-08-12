@@ -72,6 +72,7 @@ export interface ProviderDefinition {
     providerAlias: string;
     config: ProviderConfig;
     signal?: AbortSignal;
+    fetcher?: typeof globalThis.fetch;
   }) => Promise<readonly ModelCatalogEntry[]>;
   filterModels?: (
     models: readonly ModelCatalogEntry[],

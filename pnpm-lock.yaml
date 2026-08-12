@@ -59,6 +59,9 @@ importers:
       thinking-orbs:
         specifier: 0.2.0
         version: 0.2.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      undici:
+        specifier: 6.27.0
+        version: 6.27.0
       yaml:
         specifier: ^2.8.1
         version: 2.9.0

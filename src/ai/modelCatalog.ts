@@ -13,6 +13,7 @@ import { openAiCodexHeaders } from "./codexAuth.js";
 import { providerProtocol } from "./provider.js";
 import { createRetryFetch } from "./retry.js";
 import type { CatalogProviderRequest, ModelCapabilities, ModelCatalogEntry } from "./types.js";
+import { createProxyAwareFetch } from "../network/proxyFetch.js";
 
 const catalogTimeoutMs = 15_000;
 
@@ -37,7 +38,8 @@ export async function fetchModelCatalog(request: CatalogProviderRequest, signal?
 export async function fetchModelCatalogSnapshot(
   request: CatalogProviderRequest,
   signal?: AbortSignal,
-  validators: ModelCatalogValidators = {}
+  validators: ModelCatalogValidators = {},
+  fetcher: typeof globalThis.fetch = createProxyAwareFetch()
 ): Promise<ModelCatalogFetchResult> {
   const protocol = providerProtocol(request.config, request.definition);
   const endpoint = request.config.modelsEndpoint ?? defaultModelsEndpoint(request.config.baseUrl ?? request.definition.baseUrl, protocol);
@@ -70,7 +72,7 @@ export async function fetchModelCatalogSnapshot(
   if (validators.lastModified) headers["If-Modified-Since"] = new Date(validators.lastModified).toUTCString();
   const retry = request.config.retry ?? { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
   const timeoutSignal = AbortSignal.timeout(catalogTimeoutMs);
-  const response = await createRetryFetch(retry)(catalogEndpoint, {
+  const response = await createRetryFetch(retry, fetcher)(catalogEndpoint, {
     headers,
     signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
   });

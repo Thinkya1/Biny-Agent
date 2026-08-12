@@ -16,6 +16,7 @@ import type {
 } from "../agent/core/types.js";
 import type { ModelApiBackend } from "../config/schema.js";
 import { createRetryFetch, type RetryPolicy } from "../ai/retry.js";
+import { createProxyAwareFetch } from "../network/proxyFetch.js";
 import { ApiAdapterRegistry, type ApiAdapter, type ApiAdapterRequest } from "./ApiAdapterRegistry.js";
 import { anthropicMessagesAdapter } from "./apiAdapters/anthropicMessages.js";
 import { openAiChatAdapter } from "./apiAdapters/openAiChat.js";
@@ -63,7 +64,7 @@ export function isModelContextOverflowError(error: unknown): boolean {
 }
 
 export function createNativeModel(config: NativeModelConfig): AgentModel {
-  const baseFetch = config.fetch ?? globalThis.fetch;
+  const baseFetch = config.fetch ?? createProxyAwareFetch();
   if (typeof baseFetch !== "function") throw new Error("This runtime does not provide fetch().");
   const adapter = (config.apiAdapters ?? nativeApiAdapters).require(config.api);
   const previousPromptShapes = new Map<string, PromptShapeState>();

@@ -7,7 +7,7 @@
 import type { AgentModel, ModelStreamContext, ModelStreamEvent, ModelStreamOptions } from "../agent/core/types.js";
 import { modelCapabilities, modelReasoningConfig, modelThinkingLevelMap, nativeReasoningEffort, normalizeModelMetadata, reasoningBudgetTokens, thinkingLevelMapForModel } from "../ai/capabilities.js";
 import { fetchModelCatalogSnapshot } from "../ai/modelCatalog.js";
-import { lookupModelMetadata, type ModelMetadata } from "../ai/modelMetadata.js";
+import { lookupModelMetadata, thinkingLevelMapForProviderModel, type ModelMetadata } from "../ai/modelMetadata.js";
 import { providerDefinition, providerProtocol } from "../ai/provider.js";
 import type { ModelCatalogEntry, ProviderDefinition } from "../ai/types.js";
 import type { AgentConfig, ModelAliasConfig, ModelApiBackend, ModelCompatibility, ProviderConfig } from "../config/schema.js";
@@ -15,6 +15,7 @@ import { createNativeModel } from "./nativeModel.js";
 import { openAiCodexHeaders, refreshSubscriptionOAuthTokens } from "./subscriptionAuth.js";
 import { AiRegistry } from "./AiRegistry.js";
 import type { ModelsStore } from "./ModelsStore.js";
+import { createProxyAwareFetch } from "../network/proxyFetch.js";
 
 const oauthRefreshWindowMs = 5 * 60 * 1_000;
 
@@ -58,7 +59,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
     private readonly ai: AiRegistry,
     baselineModels: readonly ModelCatalogEntry[] = [],
     private readonly modelsStore?: ModelsStore,
-    private readonly fetcher: typeof globalThis.fetch = globalThis.fetch
+    private readonly fetcher: typeof globalThis.fetch = createProxyAwareFetch()
   ) {
     this.definition = providerDefinition(config.type, ai.providers);
     this.baselineModels = baselineModels.map((model) => ({ ...model, provider: id }));
@@ -91,14 +92,15 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
     let etag = cached?.etag;
     let lastModified = cached?.lastModified;
     if (this.definition.fetchModels) {
-      models = await this.definition.fetchModels({ providerAlias: this.id, config: this.config, signal });
+      models = await this.definition.fetchModels({ providerAlias: this.id, config: this.config, signal, fetcher: this.fetcher });
       etag = undefined;
       lastModified = undefined;
     } else {
       const result = await fetchModelCatalogSnapshot(
         { alias: this.id, config: this.config, definition: this.definition },
         signal,
-        { etag: cached?.etag, lastModified: cached?.lastModified }
+        { etag: cached?.etag, lastModified: cached?.lastModified },
+        this.fetcher
       );
       if (result.notModified && !cached) throw new Error(`Provider ${this.id} returned 304 without a stored model catalog.`);
       models = result.notModified ? cached!.models : result.models ?? [];
@@ -125,9 +127,9 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
 
   resolveModel(model: ModelAliasConfig): ModelAliasConfig {
     const catalog = this.mergedCatalog().find((entry) => entry.id === model.model);
-    const catalogModel = catalog ? catalogEntryToModel(catalog) : undefined;
+    const catalogModel = catalog ? catalogEntryToModel(catalog, this.config.type) : undefined;
     const generated = lookupModelMetadata(this.config.type, model.model);
-    const generatedModel = generated ? metadataToModel(this.id, model.model, generated) : undefined;
+    const generatedModel = generated ? metadataToModel(this.id, this.config.type, model.model, generated) : undefined;
     const catalogBase = catalogModel && generatedModel
       ? mergeModelMetadata(generatedModel, catalogModel)
       : catalogModel ?? generatedModel;
@@ -259,7 +261,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       refreshToken: oauth.refreshToken,
       expiresAt: oauth.expiresAt,
       accountId: oauth.accountId
-    }, signal);
+    }, signal, this.fetcher);
     return {
       ...this.config,
       apiKey: refreshed.accessToken,
@@ -279,7 +281,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
   }
 
   private normalizeCatalogEntry(entry: ModelCatalogEntry): ModelCatalogEntry {
-    const model = catalogEntryToModel(entry);
+    const model = catalogEntryToModel(entry, this.config.type);
     const normalized = normalizeModelMetadata(model, this.definition.modelDefaults);
     const reasoning = modelReasoningConfig(normalized);
     return {
@@ -321,7 +323,7 @@ export class ProviderRegistry {
     catalogs: readonly [string, ModelCatalogEntry[]][] = [],
     private readonly ai: AiRegistry = new AiRegistry(),
     modelsStore?: ModelsStore,
-    private readonly fetcher: typeof globalThis.fetch = globalThis.fetch
+    private readonly fetcher: typeof globalThis.fetch = createProxyAwareFetch()
   ) {
     for (const [id, provider] of Object.entries(config.providers)) {
       const registration = ai.providers.get(provider.type);
@@ -457,11 +459,12 @@ function resolveSimpleThinking(
   return { enabled: true, effort: requested };
 }
 
-function catalogEntryToModel(entry: ModelCatalogEntry): ModelAliasConfig {
-  const thinkingLevelMap = entry.thinkingLevelMap
-    ?? (entry.reasoningEfforts.length
-      ? thinkingLevelMapForModel(entry.id, true, entry.reasoningEfforts)
-      : undefined);
+function catalogEntryToModel(entry: ModelCatalogEntry, providerType?: string): ModelAliasConfig {
+  const thinkingLevelMap = entry.reasoningEfforts.length
+    ? providerType === undefined
+      ? entry.thinkingLevelMap ?? thinkingLevelMapForModel(entry.id, true, entry.reasoningEfforts)
+      : thinkingLevelMapForProviderModel(providerType, entry.id, entry.reasoningEfforts)
+    : entry.thinkingLevelMap;
   return {
     provider: entry.provider,
     model: entry.id,
@@ -481,9 +484,9 @@ function catalogEntryToModel(entry: ModelCatalogEntry): ModelAliasConfig {
   };
 }
 
-function metadataToModel(provider: string, modelId: string, metadata: ModelMetadata): ModelAliasConfig {
+function metadataToModel(provider: string, providerType: string, modelId: string, metadata: ModelMetadata): ModelAliasConfig {
   const thinkingLevelMap = metadata.reasoningEfforts.length
-    ? thinkingLevelMapForModel(modelId, true, metadata.reasoningEfforts)
+    ? thinkingLevelMapForProviderModel(providerType, modelId, metadata.reasoningEfforts)
     : undefined;
   return {
     provider,
