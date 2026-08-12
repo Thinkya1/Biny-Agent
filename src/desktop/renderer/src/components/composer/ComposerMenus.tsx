@@ -44,7 +44,7 @@ export function ThinkingMenu({ anchorRef, current, levels, open, onChange }: {
   return (
     <ComposerPopover anchorRef={anchorRef} className={`t-dropdown composer-popover cindy-composer-popover thinking-level-menu ${presenceClass(presence.phase)}`} phase={presence.phase}>
       <div role="menu">
-        <div className="popover-heading">推理强度</div>
+        <div className="popover-heading">Thinking Level</div>
         {levels.map((level) => (
           <button aria-checked={level === current} className={`menu-option${level === current ? " is-selected" : ""}`} key={level} onClick={() => onChange(level)} role="menuitemradio" type="button">
             <span className="menu-check">{level === current ? <Icon name="check" size={14} /> : null}</span>

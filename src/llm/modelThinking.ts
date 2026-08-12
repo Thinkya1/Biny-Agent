@@ -8,18 +8,9 @@ export interface ModelThinkingSelectionSource {
   thinkingLevelMap: ThinkingLevelMap;
 }
 
-const thinkingLabels: Record<ThinkingSelection, string> = {
-  off: "标准",
-  minimal: "极低",
-  low: "轻度",
-  medium: "中",
-  high: "高",
-  xhigh: "极高",
-  max: "最高"
-};
-
 export function thinkingLabel(value: ThinkingSelection): string {
-  return thinkingLabels[value] ?? value;
+  // 与 Pi Agent 一致，直接展示模型声明的 canonical 英文 token。
+  return value;
 }
 
 /**

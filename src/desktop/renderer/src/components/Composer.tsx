@@ -461,9 +461,9 @@ export const Composer = memo(function Composer({
                   active={menu === "thinking"}
                   aria-expanded={menu === "thinking"}
                   aria-haspopup="menu"
-                  label={`思考级别：${thinkingLabel(currentThinking)}`}
+                  label={`Thinking level: ${thinkingLabel(currentThinking)}`}
                   onClick={() => setMenu(menu === "thinking" ? null : "thinking")}
-                  tooltip={menu === "thinking" ? undefined : "调整当前模型的思考级别"}
+                  tooltip={menu === "thinking" ? undefined : "Adjust thinking level"}
                 >
                   <Icon name="brain" size={13} />
                   <span>{thinkingLabel(currentThinking)}</span>

@@ -207,12 +207,12 @@ function testAutocompleteEnterOnlyConfirmsSkillSelection(): void {
 function testModelThinkingOptionsUseModelCapabilities(): void {
   const proOptions = modelThinkingOptions({ efforts: ["low", "medium", "high"], thinkingLevelMap: { off: "none" } });
   assert.deepEqual(proOptions.map((option) => option.value), ["off", "low", "medium", "high"]);
-  assert.equal(proOptions[2]?.label, "中");
+  assert.deepEqual(proOptions.map((option) => option.label), ["off", "low", "medium", "high"]);
   const lunaOptions = modelThinkingOptions({
     efforts: ["low", "medium", "high", "xhigh", "max"],
     thinkingLevelMap: { low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" }
   });
-  assert.deepEqual(lunaOptions.map((option) => option.label), ["轻度", "中", "高", "极高", "最高"]);
+  assert.deepEqual(lunaOptions.map((option) => option.label), ["low", "medium", "high", "xhigh", "max"]);
   assert.equal(lunaOptions.every((option) => Object.keys(option).length === 2), true);
   assert.deepEqual(modelThinkingOptions({ efforts: [], thinkingLevelMap: {} }), []);
   assert.equal(selectedThinkingForModel("deepseek", "off", { alias: "deepseek", defaultThinking: "high" }), "off");

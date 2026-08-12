@@ -1116,7 +1116,7 @@ export class BinyTui {
     const currentThinking = selectedThinkingForModel(current.modelAlias, current.thinking, model);
     const options = modelThinkingOptions(model);
     this.showSelect({
-      title: "推理强度",
+      title: "Thinking Level",
       hint: "↑↓ navigate · enter select · esc back",
       selectedIndex: Math.max(0, options.findIndex((option) => option.value === currentThinking)),
       items: options.map((option) => ({
