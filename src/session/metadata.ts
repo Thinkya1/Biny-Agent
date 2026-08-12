@@ -5,6 +5,7 @@
  * 兼容性，因此除 `operation` 等必需项外都保持可选。
  */
 import type { AgentUsage } from "../agent/core/types.js";
+import type { PromptEpochReason } from "../llm/promptCache.js";
 import type { PersonalizationMetadata } from "../personalization/index.js";
 
 export type UsageOperation = "agent" | "plan" | "compaction" | "memory" | "subagent";
@@ -68,6 +69,13 @@ export interface SessionContextState {
   checkpoint?: SessionContextCheckpoint;
   /** 自定义指令正文不进入 JSONL；只保存不可逆 hash 与枚举/版本元数据。 */
   personalization?: PersonalizationMetadata;
+  /** 稳定 prompt 前缀的 session epoch；旧 session 没有该字段时从 0 开始。 */
+  promptEpoch?: number;
+  promptEpochReason?: PromptEpochReason;
+  promptEpochCreatedAt?: string;
+  promptProvider?: string;
+  promptModel?: string;
+  toolSchemaHash?: string;
 }
 
 export interface SessionUsage {
@@ -81,6 +89,10 @@ export interface SessionUsage {
   reasoningTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  cacheMissTokens?: number;
+  /** 产生这条实际用量的 prompt epoch；旧 session 或聚合跨 epoch 记录可能没有。 */
+  promptEpochId?: string;
+  stablePrefixHash?: string;
   /** 回合聚合记录中，最后一次 provider 请求的完整输入 token。 */
   latestRequestInputTokens?: number;
   /** 回合聚合记录中，最后一次 provider 请求命中的缓存 token。 */
@@ -98,12 +110,17 @@ export interface UsageSummary {
   reasoningTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  cacheMissTokens?: number;
   costUsd?: number;
   pricingKnown: boolean;
   pricedCalls: number;
   unpricedCalls: number;
   /** 最近一次模型请求的缓存命中率；provider 未提供缓存 token 时为空。 */
   latestCacheHitRate?: number;
+  /** 本会话按完整输入 token 加权的缓存命中率；任一输入记录缺少缓存读数时为空。 */
+  sessionCacheHitRate?: number;
+  /** 按 prompt epoch 分桶的加权命中率；null 表示该 epoch 缺少可靠 cache read 字段。 */
+  epochCacheHitRates?: Record<string, number | null>;
 }
 
 export function usageSnapshot(usage: AgentUsage): Omit<SessionUsage,
@@ -123,6 +140,7 @@ export function usageSnapshot(usage: AgentUsage): Omit<SessionUsage,
     totalTokens: usage.totalTokens,
     reasoningTokens: usage.reasoningTokens,
     cacheReadTokens: usage.cacheReadTokens,
-    cacheWriteTokens: usage.cacheWriteTokens
+    cacheWriteTokens: usage.cacheWriteTokens,
+    cacheMissTokens: usage.cacheMissTokens
   };
 }

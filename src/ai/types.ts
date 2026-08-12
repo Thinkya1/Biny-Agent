@@ -84,6 +84,8 @@ export interface ModelCatalogEntry {
   displayName: string;
   provider: string;
   description?: string;
+  /** 是否出现在普通模型选择器；未声明时由共享可见性策略决定。 */
+  showInPicker?: boolean;
   contextWindow: number | undefined;
   maxInputTokens?: number;
   maxOutputTokens: number | undefined;

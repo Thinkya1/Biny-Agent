@@ -28,6 +28,7 @@ const modelSchema = z.object({
   id: z.string().min(1),
   displayName: z.string().min(1),
   provider: z.string(),
+  showInPicker: z.boolean().optional(),
   contextWindow: z.number().int().positive().optional(),
   maxInputTokens: z.number().int().positive().optional(),
   maxOutputTokens: z.number().int().positive().optional(),

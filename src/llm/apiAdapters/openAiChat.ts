@@ -3,6 +3,7 @@
  */
 import type { AgentUsage, ModelStreamContext, ModelStreamEvent, ModelStreamOptions } from "../../agent/core/types.js";
 import type { ApiAdapter, ApiAdapterRequest } from "../ApiAdapterRegistry.js";
+import { promptCacheCapability, stableAgentTools } from "../promptCache.js";
 import {
   applyOpenAiReasoning,
   firstRecord,
@@ -15,6 +16,7 @@ import {
   parseToolArguments,
   parseToolArgumentsValue,
   providerHttpError,
+  providerNetworkError,
   randomToolCallId,
   readSse,
   readString,
@@ -45,20 +47,36 @@ export async function* streamOpenAi(
     stream_options: { include_usage: true }
   };
   if (context.tools.length) {
-    body.tools = context.tools.map(openAiTool);
+    body.tools = stableAgentTools(context.tools, config.promptProjectionCache).map(openAiTool);
     body.tool_choice = "auto";
   }
   if (options.maxOutputTokens !== undefined) {
     body[config.maxTokensField ?? "max_tokens"] = options.maxOutputTokens;
   }
   applyOpenAiReasoning(body, config, options);
-
-  const response = await fetcher(resolveEndpoint(config.baseUrl, "chat/completions"), {
-    method: "POST",
-    headers: requestHeaders(config, "openai"),
-    body: JSON.stringify(body),
-    signal
+  const cacheCapability = config.promptCache ?? promptCacheCapability({
+    provider: config.provider,
+    providerAlias: config.providerAlias,
+    modelId: config.modelId,
+    reasoningProtocol: config.reasoningProtocol,
+    api: "chat_completions"
   });
+  if (cacheCapability.supportsPromptCacheKey && options.requestContext?.sessionId !== undefined) {
+    body.prompt_cache_key = options.requestContext.sessionId;
+  }
+
+  const endpoint = resolveEndpoint(config.baseUrl, "chat/completions");
+  let response: Response;
+  try {
+    response = await fetcher(endpoint, {
+      method: "POST",
+      headers: requestHeaders(config, "openai"),
+      body: JSON.stringify(body),
+      signal
+    });
+  } catch (error) {
+    throw providerNetworkError(error, "OpenAI-compatible provider", endpoint);
+  }
   if (!response.ok) throw await providerHttpError(response, "OpenAI-compatible provider");
   if (!response.body) throw new Error("OpenAI-compatible provider returned an empty response body.");
 
@@ -79,7 +97,7 @@ export async function* streamOpenAi(
       const parsed = parseToolArgumentsValue(fn.arguments);
       yield { type: "tool-call", id: readString(raw.id) ?? randomToolCallId(), name: readString(fn.name) ?? "unknown", arguments: parsed.args, invalid: parsed.invalid };
     }
-    yield { type: "finish", reason: mapOpenAiStopReason(readString(choice?.finish_reason)), usage: isRecord(payload.usage) ? mapOpenAiUsage(payload.usage) : undefined };
+    yield { type: "finish", reason: mapOpenAiStopReason(readString(choice?.finish_reason)), usage: isRecord(payload.usage) ? mapOpenAiUsage(payload.usage, cacheCapability) : undefined };
     return;
   }
   const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
@@ -122,7 +140,7 @@ export async function* streamOpenAi(
         receivedTerminalEvent = true;
       }
     }
-    if (isRecord(payload.usage)) usage = mapOpenAiUsage(payload.usage);
+    if (isRecord(payload.usage)) usage = mapOpenAiUsage(payload.usage, cacheCapability);
   }
   if (!receivedTerminalEvent) {
     throw new Error("OpenAI-compatible stream ended before a finish reason or [DONE].");

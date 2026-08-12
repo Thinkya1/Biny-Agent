@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { inferReasoningEfforts, modelCapabilities, modelContextBudget, modelReasoningConfig, modelThinkingLevelMap, nativeReasoningEffort, reasoningBudgetTokens, thinkingLevelMapForModel } from "../src/ai/capabilities.js";
+import { builtinProviderModels } from "../src/ai/builtinModels.js";
+import { openAiCodexCatalogModels } from "../src/ai/codexModels.js";
 import { parseModelCatalog } from "../src/ai/modelCatalog.js";
 import { lookupModelMetadata } from "../src/ai/modelMetadata.js";
 import { createRetryFetch } from "../src/ai/retry.js";
@@ -89,6 +91,21 @@ assert.equal(typeof generatedChoice?.pricing?.inputPerMillionTokens, "number");
 assert.equal(generatedRuntime.resolve("deepseek/deepseek-v4-flash").model.baseUrl, undefined);
 assert.equal(typeof lookupModelMetadata("deepseek", "deepseek-v4-flash")?.contextWindow, "number");
 
+const codexModelIds = openAiCodexCatalogModels.map((entry) => entry.id);
+assert.deepEqual(builtinProviderModels["openai-codex"]?.map((entry) => entry.id), codexModelIds);
+assert.equal(lookupModelMetadata("openai-codex", "gpt-5.6-sol")?.contextWindow, 372_000);
+assert.notEqual(lookupModelMetadata("openai", "gpt-5.6-sol")?.contextWindow, 372_000);
+
+const codexConfig = configSchema.parse({
+  ...defaultConfig,
+  defaultModel: "codex-sol",
+  providers: { "openai-codex": { type: "openai-codex" } },
+  models: { "codex-sol": { provider: "openai-codex", model: "gpt-5.6-sol" } }
+});
+const normalizedCodex = new ProviderRegistry(codexConfig).forModel("codex-sol").model;
+assert.equal(normalizedCodex.contextWindow, 372_000);
+assert.equal(modelCapabilities(normalizedCodex).reasoning, true);
+
 const unknownModelConfig = configSchema.parse({
   ...defaultConfig,
   defaultModel: "unknown",
@@ -142,6 +159,14 @@ assert.deepEqual(catalog[0], {
   capabilities: { tools: true, reasoning: undefined, vision: true, audio: undefined, streaming: true },
   reasoningEfforts: ["low", "high"]
 });
+
+const codexCatalog = parseModelCatalog({
+  models: [
+    { slug: "gpt-5.6-sol" },
+    { slug: "hidden-model", visibility: "hidden" }
+  ]
+}, "openai-codex", "openai-compatible", true);
+assert.deepEqual(codexCatalog.map((entry) => entry.id), ["gpt-5.6-sol"]);
 
 const completeCatalog = parseModelCatalog({
   data: [{

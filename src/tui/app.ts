@@ -17,7 +17,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { formatPermissionModeChanged } from "../permission/commands.js";
 import type { PermissionMode } from "../permission/PermissionManager.js";
-import { parseThinkingSelection, type ThinkingSelection } from "../llm/ModelManager.js";
+import { filterPickerModelChoices, parseThinkingSelection, type ThinkingSelection } from "../llm/ModelManager.js";
 import { globalConfigDir } from "../config/paths.js";
 import { slashCommandsForSurface } from "../runtime/commandRegistry.js";
 import { withAttachmentReferences } from "../attachments/references.js";
@@ -136,6 +136,7 @@ export class BinyTui {
   private gitBranch: string | undefined;
   private contextUsage: { usedTokens?: number; maxTokens?: number; source?: "estimated" | "provider" } = {};
   private cacheHitRate: number | undefined;
+  private sessionCacheHitRate: number | undefined;
   private overlay: OverlayHandle | undefined;
   private permissionDialog: PermissionDialog | undefined;
   /** 与 pi 一致：空闲时 Ctrl+C 需要在短时间内连续按两次才退出。 */
@@ -439,7 +440,8 @@ export class BinyTui {
       contextUsedTokens: this.contextUsage.usedTokens,
       contextMaxTokens: this.contextUsage.maxTokens,
       contextSource: this.contextUsage.source,
-      cacheHitRate: this.cacheHitRate
+      cacheHitRate: this.cacheHitRate,
+      sessionCacheHitRate: this.sessionCacheHitRate
     };
   }
 
@@ -470,6 +472,7 @@ export class BinyTui {
         ? await this.commands.agent.usageSummary()
         : (await requireRemoteRuntime(runtime).usage()).summary;
       this.cacheHitRate = summary.latestCacheHitRate;
+      this.sessionCacheHitRate = summary.sessionCacheHitRate;
       this.refreshChrome();
     } catch {
       // Footer telemetry is best effort and must never interrupt the TUI.
@@ -919,11 +922,12 @@ export class BinyTui {
     const models = commands
       ? commands.agent.listModels()
       : await requireRemoteRuntime(runtime).listModels();
+    const pickerModels = filterPickerModelChoices(models);
     this.showSelect({
       title: "Select model",
       hint: "↑↓ navigate · enter select · esc cancel",
-      selectedIndex: Math.max(0, models.findIndex((model) => model.alias === info.modelAlias)),
-      items: models.map((model) => ({
+      selectedIndex: Math.max(0, pickerModels.findIndex((model) => model.alias === info.modelAlias)),
+      items: pickerModels.map((model) => ({
         value: model.alias,
         label: model.alias === info.modelAlias ? `${model.alias} ← current` : model.alias,
         description: `${model.provider}  ${model.description ?? model.model}`

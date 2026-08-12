@@ -176,6 +176,7 @@ export function Workspace({
                   <span>
                     {sessionUsage.calls ? formatUsageCost(sessionUsage) : "费用"}
                     {sessionUsage.latestCacheHitRate === undefined ? "" : ` · CH ${formatCacheHitRate(sessionUsage.latestCacheHitRate)}`}
+                    {sessionUsage.sessionCacheHitRate === undefined ? "" : ` · S-CH ${formatCacheHitRate(sessionUsage.sessionCacheHitRate)}`}
                   </span>
                 </button>
                 <UsageSummaryPopover anchorRef={usageControlRef} onClose={closeUsage} open={usageOpen} summary={sessionUsage} />

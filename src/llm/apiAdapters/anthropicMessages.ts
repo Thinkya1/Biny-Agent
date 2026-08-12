@@ -3,6 +3,7 @@
  */
 import type { AgentUsage, ModelStreamContext, ModelStreamEvent, ModelStreamOptions } from "../../agent/core/types.js";
 import type { ApiAdapter, ApiAdapterRequest } from "../ApiAdapterRegistry.js";
+import { stableAgentTools } from "../promptCache.js";
 import {
   anthropicMessages,
   anthropicReasoningMetadata,
@@ -14,6 +15,7 @@ import {
   parseJson,
   parseToolArguments,
   providerHttpError,
+  providerNetworkError,
   providerPayloadError,
   randomToolCallId,
   readNumber,
@@ -47,15 +49,21 @@ export async function* streamAnthropic(
     max_tokens: options.maxOutputTokens ?? 4_096,
     stream: true
   };
-  if (context.tools.length) body.tools = context.tools.map(anthropicTool);
+  if (context.tools.length) body.tools = stableAgentTools(context.tools, config.promptProjectionCache).map(anthropicTool);
   applyAnthropicThinking(body, config, options);
 
-  const response = await fetcher(resolveEndpoint(config.baseUrl, "v1/messages"), {
-    method: "POST",
-    headers: requestHeaders(config, "anthropic"),
-    body: JSON.stringify(removeUndefined(body)),
-    signal
-  });
+  const endpoint = resolveEndpoint(config.baseUrl, "v1/messages");
+  let response: Response;
+  try {
+    response = await fetcher(endpoint, {
+      method: "POST",
+      headers: requestHeaders(config, "anthropic"),
+      body: JSON.stringify(removeUndefined(body)),
+      signal
+    });
+  } catch (error) {
+    throw providerNetworkError(error, "Anthropic provider", endpoint);
+  }
   if (!response.ok) throw await providerHttpError(response, "Anthropic provider");
   if (!response.body) throw new Error("Anthropic provider returned an empty response body.");
 

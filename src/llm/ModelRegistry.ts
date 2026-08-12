@@ -15,6 +15,7 @@ import type {
   ReasoningEffort,
   ThinkingLevelMap
 } from "../config/schema.js";
+import { isRemovedModelId } from "../config/schema.js";
 import { providerDefinition } from "../ai/provider.js";
 import { ProviderRegistry } from "./ProviderRuntime.js";
 
@@ -43,6 +44,8 @@ export interface ModelChoice {
   baseUrl?: string;
   compatibility?: ModelCompatibility;
   pricing?: ModelAliasConfig["pricing"];
+  /** Codex 风格的普通模型选择器可见性；旧 Runtime Host 未返回时按默认策略处理。 */
+  showInPicker?: boolean;
   available: boolean;
   source: ModelSource;
 }
@@ -92,14 +95,19 @@ export class ModelRegistry {
       const normalized = this.providers.get(model.provider)?.resolveModel(model) ?? model;
       if (configuredKeys.has(modelKey(normalized.provider, normalized.model))) continue;
       configuredKeys.add(modelKey(normalized.provider, normalized.model));
-      choices.push(this.toChoice(alias, normalized, "configured"));
+      choices.push(this.toChoice(alias, normalized, "configured", true));
     }
 
     for (const [providerAlias, entries] of this.catalogs) {
       for (const entry of entries) {
         if (configuredKeys.has(modelKey(providerAlias, entry.id))) continue;
         const alias = catalogModelAlias(providerAlias, entry.id);
-        choices.push(this.toChoice(alias, catalogEntryToModel(entry), "catalog"));
+        choices.push(this.toChoice(
+          alias,
+          catalogEntryToModel(entry),
+          "catalog",
+          entry.showInPicker ?? !isRemovedModelId(entry.id)
+        ));
       }
     }
     return choices;
@@ -161,7 +169,7 @@ export class ModelRegistry {
     return undefined;
   }
 
-  private toChoice(alias: string, model: ModelAliasConfig, source: ModelSource): ModelChoice {
+  private toChoice(alias: string, model: ModelAliasConfig, source: ModelSource, showInPicker: boolean): ModelChoice {
     const provider = this.config.providers[model.provider];
     const providerRuntime = this.providers.get(model.provider);
     const normalized = providerRuntime?.resolveModel(model) ?? model;
@@ -190,6 +198,7 @@ export class ModelRegistry {
       baseUrl: normalized.baseUrl ?? provider?.baseUrl ?? providerRuntime?.definition.baseUrl ?? (provider ? providerDefinition(provider.type).baseUrl : undefined),
       compatibility: normalized.compatibility ?? provider?.compatibility,
       pricing: normalized.pricing,
+      showInPicker,
       available: providerRuntime?.isConfigured(normalized) ?? false,
       source
     };

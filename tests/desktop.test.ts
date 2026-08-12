@@ -16,8 +16,10 @@ import type { CredentialStore } from "../src/config/credentials.js";
 import { BINY_AGENT_DIR_ENV } from "../src/config/paths.js";
 import { createFileConfigStore } from "../src/config/store.js";
 import { defaultConfig } from "../src/config/schema.js";
+import { openAiCodexCatalogModels } from "../src/ai/codexModels.js";
 import { DesktopAgentManager } from "../src/desktop/electron/main/DesktopAgentManager.js";
 import { DesktopConfigStore } from "../src/desktop/electron/main/DesktopConfigStore.js";
+import { DesktopModelLoginService } from "../src/desktop/electron/main/DesktopModelLoginService.js";
 import { DesktopProjectService } from "../src/desktop/electron/main/DesktopProjectService.js";
 import { DesktopStateStore } from "../src/desktop/electron/main/DesktopStateStore.js";
 import { DesktopUserDataStore } from "../src/desktop/electron/main/DesktopUserDataStore.js";
@@ -50,7 +52,7 @@ import { highlightFencedCode, highlightWorkspaceFile } from "../src/desktop/rend
 import { splitAttachmentReferences, withAttachmentReferences } from "../src/desktop/attachmentReferences.js";
 import { tokenizeCommand } from "../src/desktop/renderer/src/commandHighlight.js";
 import { workspaceFileMarker } from "../src/desktop/renderer/src/workspaceFileMarker.js";
-import { listConfiguredModelChoices, listModelChoices, ModelManager } from "../src/llm/ModelManager.js";
+import { filterPickerModelChoices, listConfiguredModelChoices, listModelChoices, listPickerModelChoices, ModelManager } from "../src/llm/ModelManager.js";
 import { FileModelsStore } from "../src/llm/ModelsStore.js";
 import type { SessionEvent } from "../src/session/recorder.js";
 import type { SessionUsage } from "../src/session/metadata.js";
@@ -99,6 +101,8 @@ await testDesktopPersonalizationCasAndChatOverride();
 await testDesktopScopedMemoryCas();
 await testDesktopRequiresModelConfiguration();
 await testDesktopConnectionMetadata();
+await testDesktopCodexLoginCallbackLifecycle();
+await testDesktopOAuthCommitSurvivesCatalogFailure();
 await testWorkspaceSnapshotDoesNotReorderProjects();
 await testDesktopNavigationReadsDoNotPersistSelection();
 await testDesktopSidebarListsEveryProjectSession();
@@ -176,6 +180,7 @@ function testDesktopRendererStateProjection(): void {
     runtime: undefined,
     runtimeError: undefined,
     requiresModelConfiguration: false,
+    pickerModels: [],
     models: [],
     connections: []
   };
@@ -1681,6 +1686,128 @@ async function testDesktopConnectionMetadata(): Promise<void> {
   }
 }
 
+async function testDesktopCodexLoginCallbackLifecycle(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  let discoveredModels: Array<{ slug: string; visibility?: string }> = [{ slug: "gpt-5.3-codex" }];
+  globalThis.fetch = (async (input): Promise<Response> => {
+    const url = String(input);
+    if (url === "https://auth.openai.com/oauth/token") {
+      return new Response(JSON.stringify({ access_token: "access-token", refresh_token: "refresh-token", expires_in: 3_600 }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    if (url.startsWith("https://chatgpt.com/backend-api/codex/models")) {
+      return new Response(JSON.stringify({ models: discoveredModels }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    throw new Error(`unexpected fetch in login test: ${url}`);
+  }) as typeof fetch;
+
+  const openedUrls: string[] = [];
+  const service = new DesktopModelLoginService(async (url) => { openedUrls.push(url); });
+  try {
+    const started = await service.start("openai-codex");
+    const authorizationUrl = new URL(openedUrls[0]!);
+    const completing = service.complete("openai-codex", started.authRequestId);
+    const callbackResponse = await originalFetch(
+      `http://localhost:1455/auth/callback?code=authorization-code&state=${encodeURIComponent(authorizationUrl.searchParams.get("state") ?? "")}`
+    );
+    assert.equal(callbackResponse.status, 200);
+    const authenticated = await completing;
+    assert.equal(authenticated.models, undefined);
+    const discovered = await service.discoverModels("openai-codex", authenticated.accessToken);
+    assert.equal(discovered[0]?.id, "gpt-5.3-codex");
+    await assert.rejects(
+      service.complete("openai-codex", started.authRequestId),
+      /授权会话不存在/
+    );
+
+    const failedStart = await service.start("openai-codex");
+    const failedAuthorizationUrl = new URL(openedUrls[1]!);
+    discoveredModels = [];
+    const completedWithoutCatalog = service.complete("openai-codex", failedStart.authRequestId);
+    const failedCallbackResponse = await originalFetch(
+      `http://localhost:1455/auth/callback?code=authorization-code&state=${encodeURIComponent(failedAuthorizationUrl.searchParams.get("state") ?? "")}`
+    );
+    assert.equal(failedCallbackResponse.status, 200);
+    const authenticatedWithoutCatalog = await completedWithoutCatalog;
+    assert.equal((await service.discoverModels("openai-codex", authenticatedWithoutCatalog.accessToken)).length, 0);
+    await assert.rejects(
+      service.complete("openai-codex", failedStart.authRequestId),
+      /授权会话不存在/
+    );
+
+    const cancelledStart = await service.start("openai-codex");
+    service.cancel("openai-codex", cancelledStart.authRequestId);
+    await assert.rejects(
+      service.complete("openai-codex", cancelledStart.authRequestId),
+      /授权会话不存在/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    service.cancel("openai-codex", "cleanup");
+  }
+}
+
+async function testDesktopOAuthCommitSurvivesCatalogFailure(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-oauth-commit-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-oauth-commit-data-"));
+  const originalFetch = globalThis.fetch;
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const openedUrls: string[] = [];
+    const fetcher = (async (input): Promise<Response> => {
+      const url = String(input);
+      if (url === "https://auth.openai.com/oauth/token") {
+        return new Response(JSON.stringify({ access_token: "access-token", refresh_token: "refresh-token", expires_in: 3_600 }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (url.startsWith("https://chatgpt.com/backend-api/codex/models")) throw new Error("catalog temporarily unavailable");
+      throw new Error(`unexpected fetch in OAuth commit test: ${url}`);
+    }) as typeof fetch;
+    agents = new DesktopAgentManager(
+      state,
+      projects,
+      configStore,
+      () => undefined,
+      async (url) => { openedUrls.push(url); },
+      undefined,
+      fetcher
+    );
+
+    const started = await agents.startModelLogin(project.id, "openai-codex");
+    const authorizationUrl = new URL(openedUrls[0]!);
+    const completing = agents.completeModelLogin(project.id, "openai-codex", started.authRequestId);
+    const callbackResponse = await originalFetch(
+      `http://localhost:1455/auth/callback?code=authorization-code&state=${encodeURIComponent(authorizationUrl.searchParams.get("state") ?? "")}`
+    );
+    assert.equal(callbackResponse.status, 200);
+    const snapshot = await completing;
+    const configured = await configStore.load(project.path);
+    assert.equal(configured.providers["openai-codex"]?.type, "openai-codex");
+    assert.equal(snapshot.connections.find((connection) => connection.providerAlias === "openai-codex")?.authMode, "oauth-bearer");
+    assert.match(configured.defaultModel, /^openai-codex-/u);
+    assert.deepEqual(
+      Object.values(configured.models)
+        .filter((model) => model.provider === "openai-codex")
+        .map((model) => model.model),
+      openAiCodexCatalogModels.map((model) => model.id)
+    );
+  } finally {
+    await agents?.closeAll();
+    globalThis.fetch = originalFetch;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
 async function testWorkspaceSnapshotDoesNotReorderProjects(): Promise<void> {
   const firstRoot = await mkdtemp(path.join(os.tmpdir(), "biny-order-a-"));
   const secondRoot = await mkdtemp(path.join(os.tmpdir(), "biny-order-b-"));
@@ -1875,6 +2002,8 @@ function testProviderCatalogResolution(): void {
   // Known vendors still resolve, and the saved endpoint disambiguates two
   // catalog entries that share a hostname.
   assert.equal(catalogForConnection({ provider: "api-x-ai", providerType: "openai-compatible" })?.id, "xai");
+  const codex = catalogForConnection({ provider: "openai-codex", providerType: "openai-codex" });
+  assert.deepEqual(codex?.models.map((model) => model.id), openAiCodexCatalogModels.map((model) => model.id));
   assert.equal(
     catalogForConnection({ provider: "api-z-ai", providerType: "openai-compatible" }, "https://api.z.ai/api/coding/paas/v4")?.id,
     "zai-coding-plan"
@@ -1896,6 +2025,17 @@ function testModelChoicesDeduplicateEquivalentAliases(): void {
     "deepseek/deepseek-reasoner"
   ]);
   assert.deepEqual(listConfiguredModelChoices(config).map((model) => model.alias), [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro"
+  ]);
+  assert.equal(listModelChoices(config).find((model) => model.alias === "deepseek/deepseek-chat")?.showInPicker, false);
+  assert.equal(listModelChoices(config).find((model) => model.alias === "deepseek/deepseek-reasoner")?.showInPicker, false);
+  assert.deepEqual(listPickerModelChoices(config).map((model) => model.alias), [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro"
+  ]);
+  const legacyHostChoices = listModelChoices(config).map((model) => ({ ...model, showInPicker: undefined }));
+  assert.deepEqual(filterPickerModelChoices(legacyHostChoices).map((model) => model.alias), [
     "deepseek-v4-flash",
     "deepseek-v4-pro"
   ]);

@@ -108,6 +108,7 @@ function sanitizeUsage(value: AgentUsage | undefined): Record<string, unknown> |
     totalTokens: value.totalTokens,
     cacheReadTokens: value.cacheReadTokens,
     cacheWriteTokens: value.cacheWriteTokens,
+    cacheMissTokens: value.cacheMissTokens,
     reasoningTokens: value.reasoningTokens
   };
 }
@@ -126,6 +127,9 @@ function sanitizeRequestMetrics(metrics: ModelRequestMetrics): Record<string, un
     errorCode: metrics.errorCode,
     errorPhase: metrics.errorPhase,
     eventCount: metrics.eventCount,
+    promptShapeDurationMs: metrics.promptShapeDurationMs,
+    promptShapeStatus: metrics.promptShapeStatus,
+    promptShapeBudgetExceeded: metrics.promptShapeBudgetExceeded,
     requestContext: metrics.requestContext === undefined
       ? undefined
       : {

@@ -32,10 +32,24 @@ export interface ModelMetadata {
 
 export const generatedModelProviderTypes = [...GENERATED_MODELS_DEV_CATALOG_PROVIDERS];
 
+/**
+ * Codex OAuth 与 OpenAI API 共用模型 ID，但订阅访问路径的有效上下文窗口更小。
+ * 这是访问路径事实，不应覆盖普通 OpenAI provider 的模型元数据。
+ */
+const openAiCodexContextWindows: Record<string, number> = {
+  "gpt-5.6-sol": 372_000,
+  "gpt-5.5": 272_000,
+  "gpt-5.4": 272_000,
+  "gpt-5.4-mini": 272_000
+};
+
 /** 按 models.dev 快照的 access-path 别名查找模型事实。 */
 export function lookupModelMetadata(providerType: string, modelId: string): ModelMetadata | undefined {
   const provider = generatedProviderType(providerType);
-  return GENERATED_MODELS_DEV_METADATA[provider]?.[modelId.trim()];
+  const metadata = GENERATED_MODELS_DEV_METADATA[provider]?.[modelId.trim()];
+  if (!metadata || providerType !== "openai-codex") return metadata;
+  const contextWindow = openAiCodexContextWindows[modelId.trim()];
+  return contextWindow === undefined ? metadata : { ...metadata, contextWindow };
 }
 
 /** 返回适合 Biny tool agent 的离线模型目录；无 tool_call 声明的模型只保留为显式配置元数据。 */

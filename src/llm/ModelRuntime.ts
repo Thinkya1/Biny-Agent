@@ -20,9 +20,10 @@ export class ModelRuntime {
     private readonly config: AgentConfig,
     catalogs: readonly [string, ModelCatalogEntry[]][] = [],
     ai: AiRegistry = new AiRegistry(),
-    modelsStore?: ModelsStore
+    modelsStore?: ModelsStore,
+    fetcher: typeof globalThis.fetch = globalThis.fetch
   ) {
-    this.providers = new ProviderRegistry(config, catalogs, ai, modelsStore);
+    this.providers = new ProviderRegistry(config, catalogs, ai, modelsStore, fetcher);
     this.models = new ModelRegistry(config, this.providers);
     for (const [providerAlias] of Object.entries(config.providers)) {
       this.models.registerCatalog(providerAlias, this.providers.require(providerAlias).getModels());

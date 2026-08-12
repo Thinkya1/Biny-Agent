@@ -213,6 +213,8 @@ export interface DesktopWorkspaceSnapshot {
   runtime?: InteractiveRuntimeSnapshot;
   runtimeError?: string;
   requiresModelConfiguration: boolean;
+  /** 普通 Composer 选择器使用的统一目录；设置页的 `models` 仍表示已启用模型。 */
+  pickerModels: ModelChoice[];
   models: ModelChoice[];
   connections: DesktopModelConnection[];
   runtimeProjection?: DesktopRuntimeProjection;

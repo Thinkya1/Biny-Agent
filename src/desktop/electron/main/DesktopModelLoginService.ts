@@ -2,7 +2,7 @@
  * 订阅制模型的 OAuth 登录（Claude 订阅、OpenAI Codex）。
  *
  * 走 PKCE 授权码流程，两家的回调方式不同：Claude 由用户把授权码粘回来，Codex 需要在本地
- * 127.0.0.1:1455 起一个临时回调服务器接收重定向。
+ * localhost:1455 起一个临时回调服务器接收重定向。
  *
  * 安全约束：`state` 用常量时间比较，防止时序侧信道；待处理的授权有 10 分钟有效期；本地回调
  * 服务器只接受预期的 state，用完立即关闭。拿到的 token 由调用方交给 DesktopConfigStore
@@ -29,7 +29,9 @@ const CLAUDE_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
 const CLAUDE_SCOPE = "user:sessions:claude_code user:mcp_servers user:file_upload";
 const CODEX_AUTHORIZE_ENDPOINT = "https://auth.openai.com/oauth/authorize";
 const CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback";
-const CODEX_CALLBACK_HOST = "127.0.0.1";
+// 回调 URI 使用 localhost；在 macOS 上 localhost 可能优先解析到 ::1，监听同名主机
+// 才不会出现浏览器已经完成授权、但本地服务没有收到重定向的情况。
+const CODEX_CALLBACK_HOST = "localhost";
 const CODEX_CALLBACK_PORT = 1455;
 
 export interface AuthenticatedModelLogin {
@@ -38,7 +40,7 @@ export interface AuthenticatedModelLogin {
   refreshToken: string;
   expiresAt: number;
   accountId?: string;
-  models: AuthenticatedModel[];
+  models?: AuthenticatedModel[];
 }
 
 export interface AuthenticatedModel {
@@ -53,6 +55,9 @@ interface BasePendingAuthorization {
   state: string;
   createdAt: number;
   url: string;
+  abort: AbortController;
+  expiresTimer?: ReturnType<typeof setTimeout>;
+  completion?: Promise<AuthenticatedModelLogin>;
 }
 
 interface ClaudePendingAuthorization extends BasePendingAuthorization {
@@ -71,7 +76,10 @@ type PendingAuthorization = ClaudePendingAuthorization | CodexPendingAuthorizati
 export class DesktopModelLoginService {
   private readonly pending = new Map<string, PendingAuthorization>();
 
-  constructor(private readonly openExternal: (url: string) => Promise<void>) {}
+  constructor(
+    private readonly openExternal: (url: string) => Promise<void>,
+    private readonly fetcher: typeof globalThis.fetch = globalThis.fetch
+  ) {}
 
   async start(provider: DesktopModelLoginProvider): Promise<DesktopModelLoginStartResult> {
     this.pruneExpired();
@@ -86,8 +94,22 @@ export class DesktopModelLoginService {
       this.dispose(authRequestId);
       throw new Error("授权请求已过期，请重新点击登录。");
     }
-    if (pending.provider === "claude-code") return await this.completeClaudeAuthorization(authRequestId, pending, pastedAuthorization);
-    return await this.completeCodexAuthorization(authRequestId, pending);
+    if (pending.provider === "claude-code") {
+      const pasted = parseClaudePastedAuthorization(pastedAuthorization);
+      if (!pasted) throw new Error("授权码格式不正确，请粘贴完整的 code#state。");
+      if (!constantTimeEqual(pasted.state, pending.state)) throw new Error("授权码 state 校验失败，请重新登录。");
+    }
+    pending.completion ??= pending.provider === "claude-code"
+      ? this.completeClaudeAuthorization(authRequestId, pending, pastedAuthorization)
+      : this.completeCodexAuthorization(authRequestId, pending);
+    return await pending.completion;
+  }
+
+  /** OAuth 只负责换取并提交 token；模型目录是后续可重试的同步动作。 */
+  async discoverModels(provider: DesktopModelLoginProvider, accessToken: string, signal?: AbortSignal): Promise<AuthenticatedModel[]> {
+    return provider === "claude-code"
+      ? await discoverClaudeModels(accessToken, this.fetcher, signal)
+      : await discoverCodexModels(accessToken, this.fetcher, signal);
   }
 
   cancel(provider: DesktopModelLoginProvider, authRequestId: string): void {
@@ -114,7 +136,8 @@ export class DesktopModelLoginService {
       verifier,
       state,
       createdAt: Date.now(),
-      url: url.toString()
+      url: url.toString(),
+      abort: new AbortController()
     }, "paste-code");
   }
 
@@ -147,9 +170,10 @@ export class DesktopModelLoginService {
       url: url.toString(),
       callback: callback.promise,
       resolveCallback: callback.resolve,
-      server
+      server,
+      abort: new AbortController()
     };
-    this.pending.set(authRequestId, pending);
+    this.registerPending(authRequestId, pending);
     try {
       await this.openExternal(pending.url);
     } catch (error) {
@@ -161,11 +185,11 @@ export class DesktopModelLoginService {
 
   private async openAuthorization(pending: ClaudePendingAuthorization, method: DesktopModelLoginMethod): Promise<DesktopModelLoginStartResult> {
     const authRequestId = randomUUID();
-    this.pending.set(authRequestId, pending);
+    this.registerPending(authRequestId, pending);
     try {
       await this.openExternal(pending.url);
     } catch (error) {
-      this.pending.delete(authRequestId);
+      this.dispose(authRequestId);
       throw new Error(`无法打开浏览器：${safeMessage(error)}`);
     }
     return { authRequestId, stateHint: pending.state.slice(0, 8), method };
@@ -176,13 +200,11 @@ export class DesktopModelLoginService {
     if (!pasted) throw new Error("授权码格式不正确，请粘贴完整的 code#state。");
     if (!constantTimeEqual(pasted.state, pending.state)) throw new Error("授权码 state 校验失败，请重新登录。");
     try {
-      const tokens = await this.exchangeClaudeCode(pasted.code, pending.verifier, pasted.state);
-      const models = await discoverClaudeModels(tokens.accessToken);
-      if (!models.length) throw new Error("Claude 账号没有返回可用模型。");
-      return { provider: "claude-code", ...tokens, models };
+      const tokens = await this.exchangeClaudeCode(pasted.code, pending.verifier, pasted.state, pending.abort.signal);
+      return { provider: "claude-code", ...tokens };
     } finally {
       // 成功与否都要清掉待处理记录：授权码是一次性的，留着只会造成误用。
-      this.pending.delete(authRequestId);
+      this.dispose(authRequestId);
     }
   }
 
@@ -191,17 +213,15 @@ export class DesktopModelLoginService {
       const callback = await pending.callback;
       if (!callback) throw new Error("未收到浏览器授权回调，请重新登录。");
       if (!constantTimeEqual(callback.state, pending.state)) throw new Error("浏览器回调 state 校验失败，请重新登录。");
-      const tokens = await this.exchangeCodexCode(callback.code, pending.verifier);
-      const models = await discoverCodexModels(tokens.accessToken);
-      if (!models.length) throw new Error("ChatGPT 账号没有返回可用 Codex 模型。");
-      return { provider: "openai-codex", ...tokens, models };
+      const tokens = await this.exchangeCodexCode(callback.code, pending.verifier, pending.abort.signal);
+      return { provider: "openai-codex", ...tokens };
     } finally {
       this.dispose(authRequestId);
     }
   }
 
-  private async exchangeClaudeCode(code: string, verifier: string, state: string): Promise<SubscriptionOAuthTokens> {
-    const response = await fetch(CLAUDE_OAUTH_TOKEN_ENDPOINT, {
+  private async exchangeClaudeCode(code: string, verifier: string, state: string, signal: AbortSignal): Promise<SubscriptionOAuthTokens> {
+    const response = await fetchLoginEndpoint("Claude 授权码交换", CLAUDE_OAUTH_TOKEN_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json", "User-Agent": "claude-cli/2.1.153 (external, cli)" },
       body: JSON.stringify({
@@ -211,13 +231,14 @@ export class DesktopModelLoginService {
         client_id: CLAUDE_OAUTH_CLIENT_ID,
         redirect_uri: CLAUDE_REDIRECT_URI,
         code_verifier: verifier
-      })
-    });
+      }),
+      signal
+    }, this.fetcher);
     if (!response.ok) throw new Error(`Claude 授权码交换失败（HTTP ${String(response.status)}）：${await compactResponse(response)}`);
     return parseSubscriptionOAuthTokens(await response.json(), "Claude");
   }
 
-  private async exchangeCodexCode(code: string, verifier: string): Promise<SubscriptionOAuthTokens> {
+  private async exchangeCodexCode(code: string, verifier: string, signal: AbortSignal): Promise<SubscriptionOAuthTokens> {
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       client_id: CODEX_OAUTH_CLIENT_ID,
@@ -225,11 +246,12 @@ export class DesktopModelLoginService {
       code_verifier: verifier,
       redirect_uri: CODEX_REDIRECT_URI
     });
-    const response = await fetch(CODEX_OAUTH_TOKEN_ENDPOINT, {
+    const response = await fetchLoginEndpoint("Codex 授权码交换", CODEX_OAUTH_TOKEN_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "biny-desktop/0.2.1" },
-      body: body.toString()
-    });
+      body: body.toString(),
+      signal
+    }, this.fetcher);
     if (!response.ok) throw new Error(`Codex 授权码交换失败（HTTP ${String(response.status)}）：${await compactResponse(response)}`);
     const tokens = parseSubscriptionOAuthTokens(await response.json(), "Codex");
     return { ...tokens, accountId: extractOpenAiAccountId(tokens.accessToken) };
@@ -249,24 +271,32 @@ export class DesktopModelLoginService {
     const pending = this.pending.get(authRequestId);
     if (!pending) return;
     this.pending.delete(authRequestId);
+    if (pending.expiresTimer !== undefined) clearTimeout(pending.expiresTimer);
+    pending.abort.abort(new DOMException("OAuth authorization cancelled", "AbortError"));
     if (pending.provider === "openai-codex") {
       pending.resolveCallback(undefined);
       pending.server.closeAllConnections?.();
       pending.server.close();
     }
   }
+
+  private registerPending(authRequestId: string, pending: PendingAuthorization): void {
+    pending.expiresTimer = setTimeout(() => this.dispose(authRequestId), AUTHORIZATION_TTL_MS);
+    this.pending.set(authRequestId, pending);
+  }
 }
 
-async function discoverClaudeModels(accessToken: string): Promise<AuthenticatedModel[]> {
-  const response = await fetch("https://api.anthropic.com/v1/models", {
+async function discoverClaudeModels(accessToken: string, fetcher: typeof globalThis.fetch, signal?: AbortSignal): Promise<AuthenticatedModel[]> {
+  const response = await fetchLoginEndpoint("读取 Claude 模型目录", "https://api.anthropic.com/v1/models", {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "User-Agent": "claude-cli/2.1.153 (external, cli)",
       "anthropic-beta": CLAUDE_SUBSCRIPTION_BETA,
       "anthropic-dangerous-direct-browser-access": "true",
       "x-app": "cli"
-    }
-  });
+    },
+    signal
+  }, fetcher);
   if (!response.ok) throw new Error(`无法读取 Claude 可用模型（HTTP ${String(response.status)}）。`);
   const payload = await response.json() as { data?: Array<{ id?: unknown; display_name?: unknown }> };
   return (payload.data ?? []).flatMap((model) => typeof model.id === "string" && model.id.startsWith("claude-")
@@ -274,14 +304,15 @@ async function discoverClaudeModels(accessToken: string): Promise<AuthenticatedM
     : []);
 }
 
-async function discoverCodexModels(accessToken: string): Promise<AuthenticatedModel[]> {
-  const response = await fetch("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0", {
+async function discoverCodexModels(accessToken: string, fetcher: typeof globalThis.fetch, signal?: AbortSignal): Promise<AuthenticatedModel[]> {
+  const response = await fetchLoginEndpoint("读取 Codex 模型目录", "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0", {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       ...openAiCodexHeaders(accessToken),
       "content-type": "application/json"
-    }
-  });
+    },
+    signal
+  }, fetcher);
   if (!response.ok) throw new Error(`无法读取 Codex 可用模型（HTTP ${String(response.status)}）。`);
   const payload = await response.json() as { models?: Array<{ slug?: unknown; visibility?: unknown }> };
   return (payload.models ?? []).flatMap((model) => {
@@ -331,7 +362,7 @@ function deferredCallback(): { promise: Promise<{ code: string; state: string } 
 }
 
 /**
- * 起本地回调服务器接收授权重定向。只绑定 127.0.0.1，且路径、code、state 三者都必须对得上
+ * 起本地回调服务器接收授权重定向。只绑定 localhost，且路径、code、state 三者都必须对得上
  * 才认，任何不匹配的请求一律回 400，不透露任何信息。
  */
 async function startCodexCallbackServer(expectedState: string, resolveCallback: (value: { code: string; state: string } | undefined) => void): Promise<Server> {
@@ -366,4 +397,23 @@ async function compactResponse(response: Response): Promise<string> {
 
 function safeMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** fetch 失败没有 HTTP 响应，补上阶段、域名和 Node 底层错误码，避免只显示笼统的 fetch failed。 */
+async function fetchLoginEndpoint(label: string, url: string, init: RequestInit, fetcher: typeof globalThis.fetch): Promise<Response> {
+  try {
+    const timeout = AbortSignal.timeout(15_000);
+    const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    return await fetcher(url, { ...init, signal });
+  } catch (error) {
+    if (init.signal?.aborted) throw error;
+    const cause = error instanceof Error && "cause" in error
+      ? (error as Error & { cause?: unknown }).cause
+      : undefined;
+    const code = cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string"
+      ? cause.code
+      : undefined;
+    const detail = cause instanceof Error ? cause.message : safeMessage(error);
+    throw new Error(`${label}网络请求失败（${new URL(url).hostname}${code ? `，${code}` : ""}）：${detail}`, { cause: error });
+  }
 }

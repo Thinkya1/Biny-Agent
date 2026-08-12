@@ -710,6 +710,11 @@ export const defaultConfig: AgentConfig = {
 
 const removedModelIds = new Set(["deepseek-chat", "deepseek-reasoner"]);
 
+/** 目录仍可能返回已下线模型，但它们不应进入普通模型选择器。 */
+export function isRemovedModelId(modelId: string): boolean {
+  return removedModelIds.has(modelId.toLowerCase());
+}
+
 function rejectLegacyModelConfig(value: unknown): unknown {
   if (!isRecord(value)) return value;
 
@@ -725,7 +730,7 @@ function rejectLegacyModelConfig(value: unknown): unknown {
   const models = isRecord(value.models) ? value.models : {};
   for (const [alias, candidate] of Object.entries(models)) {
     if (!isRecord(candidate) || typeof candidate.model !== "string") continue;
-    if (removedModelIds.has(candidate.model.toLowerCase()) || removedModelIds.has(alias.toLowerCase())) {
+    if (isRemovedModelId(candidate.model) || isRemovedModelId(alias)) {
       throw new Error(formatRemovedModelConfigPrompt({
         alias,
         model: candidate.model,

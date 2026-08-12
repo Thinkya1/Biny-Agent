@@ -5,6 +5,7 @@ import {
   type ModelPricing,
   type ReasoningEffort
 } from "../config/schema.js";
+import { isRemovedModelId } from "../config/schema.js";
 import {
   resolveModelConfig
 } from "./modelConfig.js";
@@ -187,8 +188,23 @@ export class ModelManager {
   }
 }
 
-export function listModelChoices(config: AgentConfig): ModelChoice[] {
-  return new ModelRuntime(config).listModels();
+export function listModelChoices(
+  config: AgentConfig,
+  catalogs: readonly [string, ModelCatalogEntry[]][] = []
+): ModelChoice[] {
+  return new ModelRuntime(config, catalogs).listModels();
+}
+
+/** 普通模型选择器只消费可用且标记为 `showInPicker` 的统一目录项。 */
+export function filterPickerModelChoices(models: readonly ModelChoice[]): ModelChoice[] {
+  return models.filter((model) => model.available && (model.showInPicker ?? !isRemovedModelId(model.model)));
+}
+
+export function listPickerModelChoices(
+  config: AgentConfig,
+  catalogs: readonly [string, ModelCatalogEntry[]][] = []
+): ModelChoice[] {
+  return filterPickerModelChoices(listModelChoices(config, catalogs));
 }
 
 export function listConfiguredModelChoices(config: AgentConfig): ModelChoice[] {

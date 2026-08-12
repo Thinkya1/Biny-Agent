@@ -9,6 +9,7 @@
  * brand marks are keyed by `iconTone`, not by provider type.
  */
 import type { DesktopModelConfigurationInput, DesktopModelLoginProvider } from "../../protocol.js";
+import { openAiCodexCatalogModels } from "../../../ai/codexModels.js";
 import type { ModelLimits } from "../../../config/schema.js";
 import type { ModelChoice } from "../../../llm/ModelManager.js";
 
@@ -182,7 +183,13 @@ export const providerCatalog: ProviderCatalogItem[] = [
     baseUrl: "https://chatgpt.com/backend-api/codex",
     requiresApiKey: false,
     iconTone: "openai",
-    models: []
+    models: openAiCodexCatalogModels.map((model) => ({
+      id: model.id,
+      displayName: model.displayName,
+      supportsThinking: true,
+      supportsVision: true,
+      contextWindow: model.contextWindow
+    }))
   },
 ];
 

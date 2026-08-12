@@ -51,6 +51,7 @@ import {
   systemPromptForTelemetry,
   withActiveRunCompactionSummary
 } from "./prompts.js";
+import { selectPlanTools } from "./planMode.js";
 import type {
   AgentPermissionRequest,
   AgentPermissionResult,
@@ -736,6 +737,7 @@ export class AgentSession {
       return;
     }
     const mode = runOptions.mode ?? "chat";
+    const permissionMode = this.options.permissionManager.getStatus().mode;
     let systemPrompt: string | undefined;
     let messages: AgentMessage[];
     let messageReferences: Array<SessionMessageReference | undefined>;
@@ -758,9 +760,14 @@ export class AgentSession {
         turnPersonalization.useMemories
       );
       recordUserMessage();
-      const initialTools = this.options.toolRegistry.list().filter((tool) => mode !== "plan" || tool.risk === "read");
+      // Plan 的协作状态独立于权限模式：普通权限收窄为只读工具，full-access 才恢复
+      // 写入/执行工具；这与 Plan 提示词的分支必须使用同一份权限快照。
+      const initialTools = mode === "plan"
+        ? selectPlanTools(this.options.toolRegistry.list(), permissionMode)
+        : this.options.toolRegistry.list();
       const baseSystemPrompt = buildSystemPrompt({
         mode: mode === "plan" ? "plan" : "qa",
+        permissionMode,
         extensionPrompt: this.extensionPrompt(),
         tools: initialTools,
         personalization: turnPersonalization,
@@ -909,6 +916,8 @@ export class AgentSession {
       return;
     }
     let activeModelSettings = nativeSettings;
+    const permissionMode = this.options.permissionManager.getStatus().mode;
+    this.contextMemory.observePromptModel(activeModelSettings.model.provider, activeModelSettings.model.modelId);
     let relatedToolCallIds: string[] = [];
     const modelRequestContext = (step: number): ModelRequestContext => ({
       sessionId: this.recorder.sessionId,
@@ -916,6 +925,9 @@ export class AgentSession {
       turnId: args.runOptions.turnId,
       step,
       operation: mode === "plan" ? "plan" : "agent",
+      promptEpoch: this.contextMemory.getPromptEpoch(),
+      promptEpochReason: this.contextMemory.getPromptEpochReason(),
+      promptEpochCreatedAt: this.contextMemory.getPromptEpochCreatedAt(),
       relatedToolCallIds: [...relatedToolCallIds]
     });
 
@@ -940,7 +952,7 @@ export class AgentSession {
       captureWorkspaceBaseline
     );
     const allowedToolNames = mode === "plan"
-      ? new Set(this.options.toolRegistry.list().filter((tool) => tool.risk === "read").map((tool) => tool.name))
+      ? new Set(selectPlanTools(this.options.toolRegistry.list(), permissionMode).map((tool) => tool.name))
       : undefined;
     let stepAssistantContent = "";
     let stepReasoningOutput = "";
@@ -1077,6 +1089,7 @@ export class AgentSession {
           await this.options.modelManager?.preparePrompt(abortSignal);
           const settings = this.options.modelManager?.getModelSettings() ?? activeModelSettings;
           activeModelSettings = settings;
+          this.contextMemory.observePromptModel(activeModelSettings.model.provider, activeModelSettings.model.modelId);
           const tools = settings.model.supportsTools === false ? [] : coordinator.createAgentTools();
           context.systemPrompt = refreshRuntimeSystemPrompt(
             context.systemPrompt,
@@ -1477,6 +1490,7 @@ export class AgentSession {
       replacementRecorder = new SessionRecorder(this.persistenceRoot(), sessionIdFromFile(filePath), filePath, this.options.runtimeEventSink);
       replacementRecorder.repairTailForAppend();
       const replay = replaySessionEvents(parseSessionEvents(replacementRecorder.readText()), { sessionId: replacementRecorder.sessionId });
+      const catalogRecord = await readSessionCatalogRecord(this.persistenceRoot(), replacementRecorder.sessionId);
       replacementRecorder.restoreToolCallSequence(maxToolCallSequence(replay.events));
       replacementRecorder.restoreMessageParent(replay.messageTree.at(-1)?.id);
 
@@ -1507,6 +1521,7 @@ export class AgentSession {
       );
       this.contextMemory.restore(messages, replay.contextState ?? replay.contextUsage);
       if (replay.contextCheckpoint) this.contextMemory.setCheckpoint(replay.contextCheckpoint);
+      if (catalogRecord?.parentSessionId !== undefined) this.contextMemory.advancePromptEpoch("fork");
       this.contextMessageReferences = replay.messageReferences.map((reference) => ({ ...reference }));
       this.nextSessionMessageIndex = replay.totalMessageCount;
       await this.options.todoStore?.useSession(replacementRecorder.sessionId);
@@ -1549,7 +1564,13 @@ export class AgentSession {
     const runtime = this.recorder.runtimeContextSnapshot();
     return runtime === undefined
       ? undefined
-      : { runId: runtime.runId, turnId: runtime.turnId };
+      : {
+        runId: runtime.runId,
+        turnId: runtime.turnId,
+        promptEpoch: this.contextMemory.getPromptEpoch(),
+        promptEpochReason: this.contextMemory.getPromptEpochReason(),
+        promptEpochCreatedAt: this.contextMemory.getPromptEpochCreatedAt()
+      };
   }
 
   usageReport(): string {
@@ -1789,6 +1810,10 @@ export class AgentSession {
     const recordedMetrics: ModelRequestMetrics = {
       ...metrics,
       attempts: metrics.attempts.map((attempt) => ({ ...attempt })),
+      promptShape: metrics.promptShape === undefined ? undefined : {
+        ...metrics.promptShape,
+        epoch: { ...metrics.promptShape.epoch }
+      },
       requestContext
     };
     this.modelRequestRecords.push(recordedMetrics);
@@ -2015,7 +2040,7 @@ export class AgentSession {
       model: resolved?.model ?? (model ? modelIdentifier(model) : info.modelLabel),
       pricing: resolved?.pricing ?? catalogPricing ?? info.pricing
     };
-    const record = createSessionUsage(usage, operation, modelInfo);
+    const record = createSessionUsage(usage, operation, modelInfo, new Date().toISOString(), this.modelRequestRecords.at(-1)?.promptShape);
     this.usageRecords.push(record);
     if (operation === "subagent" || operation === "memory") this.unpersistedRelatedUsage.push(record);
     return record;

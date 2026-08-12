@@ -6,9 +6,11 @@
  */
 import type { ModelApiBackend } from "../config/schema.js";
 import type { ModelStreamContext, ModelStreamEvent, ModelStreamOptions } from "../agent/core/types.js";
+import type { LocalPromptProjectionCache, PromptCacheCapability } from "./promptCache.js";
 
 export interface ApiAdapterRequest {
   provider: string;
+  providerAlias?: string;
   modelId: string;
   baseUrl: string;
   apiKey?: string;
@@ -20,6 +22,8 @@ export interface ApiAdapterRequest {
   anthropicAuthMode?: "api-key" | "bearer";
   reasoningProtocol?: "deepseek" | "openai" | "google" | "anthropic" | "alibaba" | "moonshotai";
   providerOptions?: Record<string, unknown>;
+  promptCache?: PromptCacheCapability;
+  promptProjectionCache?: LocalPromptProjectionCache;
 }
 
 export interface ApiAdapter {

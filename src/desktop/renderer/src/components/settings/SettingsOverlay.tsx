@@ -3,9 +3,8 @@
  *
  * 每个设置分页持有自己的表单状态，保存动作通过 props 上抛；本模块不直接调用 preload API。
  */
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Dialog } from "@astryxdesign/core/Dialog";
-import { createPortal } from "react-dom";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type { DesktopChatPersonalizationOverride, DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEntryInput, DesktopMemoryKind, DesktopMemoryOverview, DesktopMemoryScope, DesktopMemorySearchMatch, DesktopMemorySettingsInput, DesktopMemorySettingsSnapshot, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopPersonalizationOverview, DesktopPersonalizationSettingsInput, DesktopThemePreference, DesktopWebSearchProvider, DesktopWebSearchSettings, DesktopWebSearchSettingsInput, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
@@ -204,6 +203,7 @@ export function SettingsOverlay({
             </div>
           </header>
           {tab === "模型" ? <SettingsModels
+            active={open}
             models={workspace?.models ?? []}
             connections={workspace?.connections ?? []}
             runtime={runtime?.info}
@@ -301,9 +301,9 @@ function connectionLabel(models: ModelChoice[]): Array<{ provider: string; provi
 
 /**
  * Candidate list for the "启用模型" editor: models already configured first (so
- * the user can always toggle one off), then whatever the provider's live
- * catalog returned, then the built-in static entries as a floor. Live entries
- * win over static ones on display name / capability metadata.
+ * the user can always toggle one off), then the provider's live catalog, or the
+ * built-in static fallback when the live catalog is empty. A non-empty live
+ * catalog is authoritative for the access path's account inventory.
  */
 function mergeAvailableModels(
   catalogModels: CatalogModel[],
@@ -334,7 +334,8 @@ function mergeAvailableModels(
       apiBackend: model.apiBackend ?? live?.apiBackend
     });
   }
-  for (const model of [...liveModels, ...catalogModels]) {
+  const remainingModels = liveModels.length ? liveModels : catalogModels;
+  for (const model of remainingModels) {
     if (seen.has(model.id)) continue;
     seen.add(model.id);
     merged.push(model);
@@ -422,7 +423,8 @@ function formatFetchedAt(timestamp: string): string {
   return new Date(parsed).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-function SettingsModels({ models, connections: connectionInfos, runtime, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onStartLogin, onCompleteLogin, onCancelLogin }: {
+function SettingsModels({ active, models, connections: connectionInfos, runtime, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onStartLogin, onCompleteLogin, onCancelLogin }: {
+  active: boolean;
   models: ModelChoice[];
   connections: DesktopModelConnection[];
   runtime?: { modelAlias: string; thinking: ThinkingSelection };
@@ -462,6 +464,42 @@ function SettingsModels({ models, connections: connectionInfos, runtime, onChang
   const [fetchingCatalog, setFetchingCatalog] = useState(false);
   const [liveCatalog, setLiveCatalog] = useState<Record<string, LiveCatalogState>>({});
   const [testResult, setTestResult] = useState<DesktopModelConnectionTestResult>();
+  const loginRequestRef = useRef<DesktopModelLoginStartResult | undefined>(undefined);
+  const loginProviderRef = useRef<DesktopModelLoginProvider | undefined>(undefined);
+  const loginActionRef = useRef(false);
+  const loginGenerationRef = useRef(0);
+  const onCancelLoginRef = useRef(onCancelLogin);
+
+  useEffect(() => {
+    loginRequestRef.current = loginRequest;
+  }, [loginRequest]);
+  useEffect(() => {
+    onCancelLoginRef.current = onCancelLogin;
+  }, [onCancelLogin]);
+  useEffect(() => {
+    if (active) return;
+    const request = loginRequestRef.current;
+    const provider = loginProviderRef.current;
+    loginGenerationRef.current += 1;
+    if (request && provider) void onCancelLoginRef.current(provider, request.authRequestId);
+    loginRequestRef.current = undefined;
+    loginProviderRef.current = undefined;
+    loginActionRef.current = false;
+    setLoginRequest(undefined);
+    setLoginStage("idle");
+    setLoginError(undefined);
+    setAuthorizationCode("");
+    setView({ kind: "list" });
+  }, [active]);
+  useEffect(() => () => {
+    const request = loginRequestRef.current;
+    const provider = loginProviderRef.current;
+    loginGenerationRef.current += 1;
+    if (request && provider) void onCancelLoginRef.current(provider, request.authRequestId);
+    loginRequestRef.current = undefined;
+    loginProviderRef.current = undefined;
+    loginActionRef.current = false;
+  }, []);
 
   const providerOrder = providerCatalogOrder[category];
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -486,6 +524,10 @@ function SettingsModels({ models, connections: connectionInfos, runtime, onChang
     setLoginRequest(undefined);
     setLoginError(undefined);
     setAuthorizationCode("");
+    loginRequestRef.current = undefined;
+    loginProviderRef.current = undefined;
+    loginActionRef.current = false;
+    loginGenerationRef.current += 1;
     setView({ kind: "connect", provider });
   };
 
@@ -608,15 +650,73 @@ function SettingsModels({ models, connections: connectionInfos, runtime, onChang
     }
   };
 
+  const completeLoginRequest = async (
+    provider: ProviderCatalogItem,
+    request: DesktopModelLoginStartResult,
+    pastedAuthorization?: string
+  ): Promise<void> => {
+    if (!provider.loginProvider) return;
+    const generation = loginGenerationRef.current;
+    setLoginStage("submitted");
+    setLoginError(undefined);
+    try {
+      await onCompleteLogin(
+        provider.loginProvider,
+        request.authRequestId,
+        request.method === "paste-code" ? pastedAuthorization : undefined
+      );
+      if (generation !== loginGenerationRef.current) return;
+      onNotify(`连接成功 · ${provider.label}`);
+      loginRequestRef.current = undefined;
+      loginProviderRef.current = undefined;
+      setLoginRequest(undefined);
+      setAuthorizationCode("");
+      setView({ kind: "list" });
+    } catch (error) {
+      if (generation !== loginGenerationRef.current) return;
+      // Codex 回调授权是一次性请求，换 token 或读取模型失败后主进程会清理
+      // authRequestId；继续保留旧请求只会让下一次点击稳定得到“授权会话不存在”。
+      const message = error instanceof Error ? error.message : String(error);
+      const canRetryPaste = request.method === "paste-code"
+        && (message.includes("授权码格式不正确") || message.includes("state 校验失败"));
+      setLoginStage(canRetryPaste ? "waiting" : "idle");
+      if (!canRetryPaste) {
+        loginRequestRef.current = undefined;
+        loginProviderRef.current = undefined;
+        setLoginRequest(undefined);
+        setAuthorizationCode("");
+      }
+      setLoginError(message);
+    } finally {
+      if (generation === loginGenerationRef.current) loginActionRef.current = false;
+    }
+  };
+
   const startLogin = async (provider: ProviderCatalogItem): Promise<void> => {
     if (!provider.loginProvider) return;
+    if (loginActionRef.current) return;
+    const generation = loginGenerationRef.current;
+    loginActionRef.current = true;
     setLoginStage("opening");
     setLoginError(undefined);
     try {
       const request = await onStartLogin(provider.loginProvider);
+      if (generation !== loginGenerationRef.current) {
+        void onCancelLoginRef.current(provider.loginProvider, request.authRequestId);
+        return;
+      }
+      loginProviderRef.current = provider.loginProvider;
+      loginRequestRef.current = request;
       setLoginRequest(request);
-      setLoginStage("waiting");
+      if (request.method === "browser-callback") {
+        // Codex 的本地回调由主进程等待；回调到达后自动换 token 和验证模型，
+        // 用户不需要再猜测是否应该点击“完成登录”。
+        void completeLoginRequest(provider, request);
+      } else {
+        setLoginStage("waiting");
+      }
     } catch (error) {
+      loginActionRef.current = false;
       setLoginStage("idle");
       setLoginError(error instanceof Error ? error.message : String(error));
     }
@@ -624,27 +724,19 @@ function SettingsModels({ models, connections: connectionInfos, runtime, onChang
 
   const submitLogin = async (provider: ProviderCatalogItem): Promise<void> => {
     if (!provider.loginProvider || !loginRequest) return;
-    setLoginStage("submitted");
-    setLoginError(undefined);
-    try {
-      await onCompleteLogin(
-        provider.loginProvider,
-        loginRequest.authRequestId,
-        loginRequest.method === "paste-code" ? authorizationCode : undefined
-      );
-      onNotify(`连接成功 · ${provider.label}`);
-      setLoginRequest(undefined);
-      setView({ kind: "list" });
-    } catch (error) {
-      setLoginStage("waiting");
-      setLoginError(error instanceof Error ? error.message : String(error));
-    }
+    await completeLoginRequest(provider, loginRequest, authorizationCode);
   };
 
   const cancelLogin = (provider: ProviderCatalogItem): void => {
-    if (provider.loginProvider && loginRequest) void onCancelLogin(provider.loginProvider, loginRequest.authRequestId);
+    loginGenerationRef.current += 1;
+    if (provider.loginProvider && loginRequestRef.current) void onCancelLogin(provider.loginProvider, loginRequestRef.current.authRequestId);
+    loginRequestRef.current = undefined;
+    loginProviderRef.current = undefined;
+    loginActionRef.current = false;
     setLoginRequest(undefined);
+    setLoginStage("idle");
     setLoginError(undefined);
+    setAuthorizationCode("");
     setView({ kind: "list" });
   };
 
@@ -894,7 +986,7 @@ function SettingsModels({ models, connections: connectionInfos, runtime, onChang
         </div>
       </section>
       </div>
-      {view.kind === "connect" ? createPortal(
+      {view.kind === "connect" ? (
         <ModelDialogBackdrop onClose={() => {
           if (view.provider.connectionMode === "login") cancelLogin(view.provider);
           else setView({ kind: "list" });
@@ -937,10 +1029,9 @@ function SettingsModels({ models, connections: connectionInfos, runtime, onChang
               onOpenExternal={onOpenExternal}
             />
           )}
-        </ModelDialogBackdrop>,
-        document.body
+        </ModelDialogBackdrop>
       ) : null}
-      {detailGroup && detailCatalog ? createPortal(
+      {detailGroup && detailCatalog ? (
         <ModelDialogBackdrop onClose={() => setView({ kind: "list" })}>
           <ConnectionDetailDialog
             group={detailGroup}
@@ -981,8 +1072,7 @@ function SettingsModels({ models, connections: connectionInfos, runtime, onChang
             onOpenExternal={onOpenExternal}
             onChange={onChange}
           />
-        </ModelDialogBackdrop>,
-        document.body
+        </ModelDialogBackdrop>
       ) : null}
     </>
   );
@@ -991,18 +1081,43 @@ function SettingsModels({ models, connections: connectionInfos, runtime, onChang
 type ConnectionGroup = ReturnType<typeof connectionLabel>[number];
 
 function ModelDialogBackdrop({ children, onClose }: { children: React.ReactNode; onClose(): void }): React.JSX.Element {
+  const backdropRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    const focusTarget = backdropRef.current?.querySelector<HTMLElement>(
+      "[data-model-dialog-autofocus], button, input, textarea, select, [tabindex]:not([tabindex='-1'])"
+    );
+    focusTarget?.focus();
+
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
+      // 当前模型层在外层设置 Dialog 之上，必须在捕获阶段消费 Escape，避免事件
+      // 继续落到外层并把整个设置页一起关闭。
+      event.preventDefault();
+      event.stopPropagation();
+      onCloseRef.current();
+    };
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      document.removeEventListener("keydown", closeOnEscape, true);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, []);
+
   return (
-    <Dialog
-      className="desktop-model-dialog"
-      isOpen
-      maxHeight="min(820px, calc(100vh - 48px))"
-      onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}
-      padding={0}
-      purpose="form"
-      width="min(560px, calc(100vw - 48px))"
+    <div
+      className="model-dialog-backdrop"
+      onClick={(event) => { if (event.target === event.currentTarget) onCloseRef.current(); }}
+      ref={backdropRef}
     >
       {children}
-    </Dialog>
+    </div>
   );
 }
 
@@ -1063,11 +1178,13 @@ function LoginProviderDialog({
           </div>
           <span className={`login-status${waiting ? " is-waiting" : ""}`}>{stage === "submitted" ? "正在验证..." : stage === "opening" ? "正在打开..." : waiting ? "等待登录..." : "未登录"}</span>
         </div>
-        {!waiting ? <p>使用订阅配额前需要先通过官方 OAuth 登录。</p> : <p>{usesPasteCode ? "请在浏览器完成登录后粘贴授权码。" : isCodex ? "请在弹出的浏览器窗口完成登录，浏览器会自动返回此应用。" : "正在准备登录。"}</p>}
+        {!waiting ? <p>使用订阅配额前需要先通过官方 OAuth 登录。</p> : <p>{usesPasteCode ? "请在浏览器完成登录后粘贴授权码。" : isCodex ? (stage === "submitted" ? "已收到浏览器回调，正在自动验证账号。" : "请在弹出的浏览器窗口完成登录，浏览器会自动返回此应用。") : "正在准备登录。"}</p>}
         {!waiting ? (
           <button className="login-primary-button" onClick={onStart} type="button">登录订阅</button>
+        ) : !usesPasteCode ? (
+          <button className="login-primary-button" disabled type="button">{stage === "submitted" ? "正在验证..." : "等待登录..."}</button>
         ) : (
-          <button className="login-primary-button" disabled={stage !== "waiting"} onClick={usesPasteCode ? undefined : onSubmit} type="button">{usesPasteCode ? "登录中..." : "完成登录"}</button>
+          <button className="login-primary-button" disabled type="button">登录中...</button>
         )}
         {usesPasteCode ? (
           <div className="login-code-panel">

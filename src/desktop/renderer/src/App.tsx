@@ -813,7 +813,7 @@ export function App(): React.JSX.Element {
       contextUsage={contextUsage}
       focusToken={focusToken}
       modelSetupRequired={Boolean(workspace?.requiresModelConfiguration)}
-      models={workspace?.models ?? []}
+      models={workspace?.pickerModels ?? workspace?.models ?? []}
       onPermissionMode={setPermissionMode}
       onConfigureModels={() => openSettings("模型")}
       onSaveAttachment={saveAttachment}

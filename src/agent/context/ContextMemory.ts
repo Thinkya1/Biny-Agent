@@ -11,6 +11,7 @@ import type { ModelContextBudget } from "../../ai/types.js";
 import type { AgentAttachment } from "../AgentSession.js";
 import type { PersonalizationMetadata } from "../../personalization/index.js";
 import type { MemoryRecallReport, MemoryScope } from "./memoryTypes.js";
+import { canonicalToolSchemaHash, type PromptEpochReason } from "../../llm/promptCache.js";
 
 const piReserveTokens = 16_384;
 const piKeepRecentTokens = 20_000;
@@ -51,6 +52,12 @@ export class ContextMemory {
   private memoryRecall: MemoryRecallReport = emptyMemoryRecallReport();
   private memoryUseEnabled = false;
   private personalization: PersonalizationMetadata | undefined;
+  private promptEpoch = 0;
+  private promptEpochReason: PromptEpochReason = "initial";
+  private promptEpochCreatedAt = new Date().toISOString();
+  private promptProvider: string | undefined;
+  private promptModel: string | undefined;
+  private toolSchemaHash: string | undefined;
   private readonly resolveBudget: () => ModelContextBudget;
 
   constructor(
@@ -240,13 +247,22 @@ export class ContextMemory {
       memoryTopics: [...this.memoryTopics],
       budget: cloneBudget(this.lastBudget),
       checkpoint: this.checkpoint === undefined ? undefined : { ...this.checkpoint },
-      personalization: this.personalization === undefined ? undefined : { ...this.personalization }
+      personalization: this.personalization === undefined ? undefined : { ...this.personalization },
+      promptEpoch: this.promptEpoch,
+      promptEpochReason: this.promptEpochReason,
+      promptEpochCreatedAt: this.promptEpochCreatedAt,
+      promptProvider: this.promptProvider,
+      promptModel: this.promptModel,
+      toolSchemaHash: this.toolSchemaHash
     };
   }
 
   persistedState(): SessionContextState | undefined {
     const state = this.snapshot();
-    return state.summary !== undefined || state.compactedMessages > 0 || state.personalization !== undefined
+    return state.summary !== undefined
+      || state.compactedMessages > 0
+      || state.personalization !== undefined
+      || (state.promptEpoch ?? 0) > 0
       ? state
       : undefined;
   }
@@ -263,6 +279,34 @@ export class ContextMemory {
     // checkpoint 之后，压缩前那次 provider usage 已经陈旧；改回当前摘要 + retained history 的估算，
     // 否则 resume 后会被旧高水位立即触发第二次压缩。
     this.refreshEstimatedBudget();
+  }
+
+  getPromptEpoch(): number {
+    return this.promptEpoch;
+  }
+
+  getPromptEpochReason(): PromptEpochReason {
+    return this.promptEpochReason;
+  }
+
+  getPromptEpochCreatedAt(): string {
+    return this.promptEpochCreatedAt;
+  }
+
+  /** 稳定前缀发生不可忽略的变化时开启新 epoch；旧 JSONL 消息仍保持 append-only。 */
+  advancePromptEpoch(reason: PromptEpochReason): void {
+    this.promptEpoch += 1;
+    this.promptEpochReason = reason;
+    this.promptEpochCreatedAt = new Date().toISOString();
+  }
+
+  observePromptModel(provider: string, modelId: string): void {
+    const providerChanged = this.promptProvider !== undefined && this.promptProvider !== provider;
+    const modelChanged = this.promptModel !== undefined && this.promptModel !== modelId;
+    if (providerChanged) this.advancePromptEpoch("provider_changed");
+    else if (modelChanged) this.advancePromptEpoch("model_changed");
+    this.promptProvider = provider;
+    this.promptModel = modelId;
   }
 
   observeToolResult(tool: string, args: unknown, result: unknown): void {
@@ -312,6 +356,12 @@ export class ContextMemory {
     this.personalization = contextState?.personalization === undefined
       ? undefined
       : { ...contextState.personalization };
+    this.promptEpoch = contextState?.promptEpoch ?? 0;
+    this.promptEpochReason = contextState?.promptEpochReason ?? "initial";
+    this.promptEpochCreatedAt = contextState?.promptEpochCreatedAt ?? new Date().toISOString();
+    this.promptProvider = contextState?.promptProvider;
+    this.promptModel = contextState?.promptModel;
+    this.toolSchemaHash = contextState?.toolSchemaHash;
     this.lastBudget = budget === undefined ? estimateRestoredBudget(this.history, this.currentBudget()) : normalizeRestoredBudget(budget, this.currentBudget());
     if (this.checkpoint) this.refreshEstimatedBudget();
     this.workspace.restoreFromHistory(messages);
@@ -371,6 +421,11 @@ export class ContextMemory {
 
   /** 记录当前模型步骤会额外携带的工具 schema；该部分由模型预算单独预留。 */
   recordToolSchema(tools: readonly AgentTool[]): void {
+    const nextToolSchemaHash = canonicalToolSchemaHash(tools);
+    if (this.toolSchemaHash !== undefined && this.toolSchemaHash !== nextToolSchemaHash) {
+      this.advancePromptEpoch("tool_schema_changed");
+    }
+    this.toolSchemaHash = nextToolSchemaHash;
     const requestedTokens = tools.length
       ? estimateTokens(JSON.stringify(tools.map((tool) => ({
         name: tool.name,
@@ -425,6 +480,7 @@ export class ContextMemory {
     this.compactedMessages += plan.compacted.length;
     this.lastCompactedAt = new Date().toISOString();
     this.replaceHistory(plan.retained);
+    this.advancePromptEpoch("compaction");
     this.refreshEstimatedBudget();
     return {
       compacted: true,

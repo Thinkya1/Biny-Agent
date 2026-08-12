@@ -808,7 +808,7 @@ export class InteractiveAgentRuntime {
 
     try {
       let turn: AgentTurnOutcome | undefined;
-      // Chat/Plan 只驱动一个 AgentSession 回合；Plan 的只读工具限制由 Session 负责。
+      // Chat/Plan 只驱动一个 AgentSession 回合；Plan 的权限感知工具面与提示词由 Session 负责。
       let terminalEvents = 0;
       let streamFailure: string | undefined;
       const runOptions = {

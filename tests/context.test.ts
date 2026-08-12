@@ -9,7 +9,8 @@ import { ContextMemory, estimateMessageTokens } from "../src/agent/context/Conte
 import { LocalMemory, redactSecrets } from "../src/agent/context/LocalMemory.js";
 import { WorkspaceContext } from "../src/agent/context/WorkspaceContext.js";
 import { cloneAgentMessages, messageReasoning, messageText } from "../src/agent/modelMessages.js";
-import { buildSystemPrompt, refreshRuntimeSystemPrompt, withActiveRunCompactionSummary } from "../src/agent/prompts.js";
+import { selectPlanTools } from "../src/agent/planMode.js";
+import { buildSystemPrompt, refreshRuntimeSystemPrompt, stableSystemPromptForCache, withActiveRunCompactionSummary } from "../src/agent/prompts.js";
 import { BINY_AGENT_DIR_ENV, projectMemoryDir, projectSessionsDir } from "../src/config/paths.js";
 import type { AgentConfig } from "../src/config/schema.js";
 import { defaultConfig } from "../src/config/schema.js";
@@ -29,6 +30,7 @@ import {
 } from "../src/session/store.js";
 import { listSessionSummaries, parseSessionEvents, readSessionEvents, readStoredSessionEvents, repairSessionTailForAppend } from "../src/session/events.js";
 import { ToolRegistry } from "../src/tools/registry.js";
+import type { Tool } from "../src/tools/types.js";
 import { createToolPermissionRequest } from "../src/tools/display/ToolDisplay.js";
 import { appendInputHistory, loadInputHistory } from "../src/tui/inputHistory.js";
 import { resolveWorkspacePath } from "../src/workspace/resolvePath.js";
@@ -115,6 +117,8 @@ async function main(): Promise<void> {
   process.env[BINY_AGENT_DIR_ENV] = globalRoot;
   try {
     testConversationBoundaryPrompt();
+    testPlanModePolicy();
+    await testPromptEpochAndCanonicalPrefix();
     await testInstructionHierarchyAndCap();
     await testInstructionLoadingUsesExplicitPaths();
     await testRepoMapExactCandidate();
@@ -182,6 +186,81 @@ function testConversationBoundaryPrompt(): void {
   assert.match(recoveredAgain, /Use run_command/u);
   assert.match(recoveredAgain, /second overflow summary/u);
   assert.doesNotMatch(recoveredAgain, /old dynamic capability|first overflow summary/u);
+}
+
+function testPlanModePolicy(): void {
+  const tool = (name: string, risk?: Tool["risk"], source?: Tool["source"]): Tool => ({ name, risk, source } as Tool);
+  const tools = [
+    tool("read_file", "read"),
+    tool("write_file", "write"),
+    tool("run_command", "execute"),
+    tool("delegate_task", "execute", "subagent"),
+    tool("custom_tool")
+  ];
+
+  assert.deepEqual(
+    selectPlanTools(tools, "ask").map((candidate) => candidate.name),
+    ["read_file"]
+  );
+  assert.deepEqual(
+    selectPlanTools(tools, "full-access").map((candidate) => candidate.name),
+    ["read_file", "write_file", "run_command", "custom_tool"]
+  );
+
+  const readPrompt = buildSystemPrompt({ mode: "plan", permissionMode: "ask", cwd: "/workspace" });
+  assert.match(readPrompt, /Plan mode is a collaboration workflow, not a permission mode/u);
+  assert.match(readPrompt, /only exposes read and inspection tools/u);
+  assert.doesNotMatch(readPrompt, /Full access is active/u);
+
+  const fullAccessPrompt = buildSystemPrompt({ mode: "plan", permissionMode: "full-access", cwd: "/workspace" });
+  assert.match(fullAccessPrompt, /Full access is active/u);
+  assert.match(fullAccessPrompt, /only when the current user request explicitly asks/u);
+  assert.doesNotMatch(fullAccessPrompt, /Never write or edit files/u);
+}
+
+async function testPromptEpochAndCanonicalPrefix(): Promise<void> {
+  const toolA = { name: "alpha", description: "Alpha", parameters: { type: "object" as const } };
+  const toolB = { name: "beta", description: "Beta", parameters: { type: "object" as const } };
+  const first = buildSystemPrompt({ mode: "qa", cwd: "/workspace", extensionPrompt: "project-a", tools: [toolB, toolA] });
+  const second = buildSystemPrompt({ mode: "qa", cwd: "/workspace", extensionPrompt: "project-b", tools: [toolA, toolB] });
+  assert.equal(stableSystemPromptForCache(first), stableSystemPromptForCache(second));
+
+  await withTempWorkspace(async (workspaceRoot) => {
+    const provider = new ContextTestModel();
+    const memory = new ContextMemory(
+      () => provider.model,
+      new WorkspaceContext(workspaceRoot, [], 32 * 1024),
+      undefined,
+      4_000,
+      32 * 1024,
+      undefined,
+      undefined,
+      { keepRecentTokens: 50, maxSummaryTokens: 512 }
+    );
+    memory.recordToolSchema([toolA]);
+    const initialEpoch = memory.getPromptEpoch();
+    memory.recordToolSchema([toolB]);
+    assert.equal(memory.getPromptEpoch(), initialEpoch + 1);
+    memory.replaceHistory([
+      { role: "user", content: "old request ".repeat(700) },
+      { role: "assistant", content: [{ type: "text", text: "old response ".repeat(700) }] },
+      { role: "user", content: "recent request" }
+    ]);
+    const beforeCompaction = memory.getPromptEpoch();
+    assert.equal((await memory.compact()).compacted, true);
+    assert.equal(memory.getPromptEpoch(), beforeCompaction + 1);
+    const state = memory.snapshot();
+    const restored = new ContextMemory(
+      () => provider.model,
+      new WorkspaceContext(workspaceRoot, [], 32 * 1024),
+      undefined,
+      4_000,
+      32 * 1024
+    );
+    restored.restore(memory.getHistory(), state);
+    assert.equal(restored.getPromptEpoch(), memory.getPromptEpoch());
+    assert.equal(restored.snapshot().promptEpochReason, "compaction");
+  });
 }
 
 async function testInstructionHierarchyAndCap(): Promise<void> {

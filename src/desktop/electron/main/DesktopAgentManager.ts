@@ -22,6 +22,7 @@ import type { ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { providerDefinition } from "../../../ai/provider.js";
+import { builtinProviderModels } from "../../../ai/builtinModels.js";
 import { loadProjectSettings } from "../../../config/projectSettings.js";
 import { globalConfigDir } from "../../../config/paths.js";
 import { configSchema, type AgentConfig, type ProviderConfig } from "../../../config/schema.js";
@@ -29,7 +30,7 @@ import type { AgentConfigStore } from "../../../config/store.js";
 import { createNativeModelSettings, validateModelConfiguration } from "../../../llm/nativeFactory.js";
 import { ModelRuntime } from "../../../llm/ModelRuntime.js";
 import { FileModelsStore, restoreProviderCatalogs, type ModelsStore } from "../../../llm/ModelsStore.js";
-import { hasUsableModelConfiguration, listConfiguredModelChoices, type ModelRuntimeInfo, type ThinkingSelection } from "../../../llm/ModelManager.js";
+import { hasUsableModelConfiguration, listConfiguredModelChoices, listPickerModelChoices, type ModelRuntimeInfo, type ThinkingSelection } from "../../../llm/ModelManager.js";
 import type { PermissionMode, PermissionResult } from "../../../permission/PermissionManager.js";
 import { webSearchKeyEnvNames } from "../../../tools/web/search.js";
 import { executeRuntimeCommand } from "../../../runtime/commands.js";
@@ -104,6 +105,7 @@ export class DesktopAgentManager {
   private readonly runtimeInitializations = new Map<string, Promise<ManagedRuntime>>();
   private readonly liveEvents = new Map<string, Map<string, AgentHostEvent[]>>();
   private readonly runtimeErrors = new Map<string, string>();
+  private readonly modelLoginOperations = new Map<string, AbortController>();
   private readonly modelLogin: DesktopModelLoginService;
   private closing = false;
 
@@ -113,11 +115,12 @@ export class DesktopAgentManager {
     private readonly configStore: AgentConfigStore,
     private readonly emit: (projectId: string, update: AgentRuntimeUpdate) => void,
     openExternal?: (url: string) => Promise<void>,
-    private readonly modelsStore: ModelsStore = new FileModelsStore()
+    private readonly modelsStore: ModelsStore = new FileModelsStore(),
+    private readonly fetcher: typeof globalThis.fetch = globalThis.fetch
   ) {
     this.modelLogin = new DesktopModelLoginService(openExternal ?? (async () => {
       throw new Error("当前环境无法打开浏览器。");
-    }));
+    }), this.fetcher);
   }
 
   async workspaceSnapshot(projectId: string): Promise<DesktopWorkspaceSnapshot> {
@@ -131,7 +134,9 @@ export class DesktopAgentManager {
       this.projects.listSessions(project, runtime?.getSnapshot(), this.projectEvents(projectId)),
       this.projects.listSessionTreePage(project, runtime?.getSnapshot(), this.projectEvents(projectId))
     ]);
+    const catalogs = config ? await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore) : [];
     const models = config ? listConfiguredModelChoices(config) : [];
+    const pickerModels = config ? listPickerModelChoices(config, catalogs) : [];
     const runtimeProjection = runtime === undefined ? undefined : await this.runtimeProjection(projectId);
     return {
       project,
@@ -141,6 +146,7 @@ export class DesktopAgentManager {
       runtime: runtime?.getSnapshot(),
       runtimeError: this.runtimeErrors.get(projectId),
       requiresModelConfiguration: !config || !hasUsableModelConfiguration(config),
+      pickerModels,
       models,
       connections: config ? describeModelConnections(config) : [],
       runtimeProjection
@@ -425,19 +431,37 @@ export class DesktopAgentManager {
       throw new Error("任务运行期间不能修改模型配置。");
     }
     this.projects.requireProject(projectId);
-    const authenticated = await this.modelLogin.complete(provider, authRequestId, pastedAuthorization);
-    const current = await this.loadProjectConfig(projectId);
-    const candidate = this.buildConfigWithAuthenticatedLogin(current, authenticated);
-    const test = await this.testCandidate(candidate, candidate.defaultModel);
-    if (!test.ok) throw new Error(`账号已授权，但模型验证失败：${test.message}`);
-    await this.saveProjectConfig(projectId, candidate);
-    this.runtimeErrors.delete(projectId);
-    if (managed) await this.rebuildManagedRuntime(projectId, managed);
-    return await this.workspaceSnapshot(projectId);
+    const operation = new AbortController();
+    this.modelLoginOperations.set(authRequestId, operation);
+    try {
+      const authenticated = await this.modelLogin.complete(provider, authRequestId, pastedAuthorization);
+      operation.signal.throwIfAborted();
+      const current = await this.loadProjectConfig(projectId);
+      let discoveredModels: AuthenticatedModelLogin["models"];
+      try {
+        discoveredModels = await this.modelLogin.discoverModels(provider, authenticated.accessToken, operation.signal);
+      } catch (error) {
+        if (operation.signal.aborted) throw error;
+        // OAuth 凭据已经完成授权；模型目录是可重试的后续同步，不应回滚登录结果。
+        discoveredModels = undefined;
+      }
+      operation.signal.throwIfAborted();
+      const candidate = this.buildConfigWithAuthenticatedLogin(current, {
+        ...authenticated,
+        models: discoveredModels
+      });
+      await this.saveProjectConfig(projectId, candidate);
+      this.runtimeErrors.delete(projectId);
+      if (managed) await this.rebuildManagedRuntime(projectId, managed);
+      return await this.workspaceSnapshot(projectId);
+    } finally {
+      this.modelLoginOperations.delete(authRequestId);
+    }
   }
 
   async cancelModelLogin(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string): Promise<void> {
     this.projects.requireProject(projectId);
+    this.modelLoginOperations.get(authRequestId)?.abort(new DOMException("OAuth authorization cancelled", "AbortError"));
     this.modelLogin.cancel(provider, authRequestId);
   }
 
@@ -708,7 +732,7 @@ export class DesktopAgentManager {
     if (!provider) throw new Error(`未找到服务商配置：${providerAlias}`);
     const fetchedAt = new Date().toISOString();
     const catalogs = await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore);
-    const runtime = new ModelRuntime(config, catalogs, undefined, this.modelsStore);
+    const runtime = new ModelRuntime(config, catalogs, undefined, this.modelsStore, this.fetcher);
     try {
       const models = await runtime.refreshModels(providerAlias);
       return { providerAlias, source: "fetched", fetchedAt, models };
@@ -740,7 +764,7 @@ export class DesktopAgentManager {
     }
     const started = Date.now();
     try {
-      const settings = createNativeModelSettings(candidate, alias);
+      const settings = createNativeModelSettings(candidate, alias, this.fetcher);
       let providerError: string | undefined;
       for await (const event of await settings.model.stream({
         messages: [{ role: "user", content: "ping" }],
@@ -1067,6 +1091,8 @@ export class DesktopAgentManager {
    */
   async closeAll(options: { terminateOwnedHosts?: boolean } = {}): Promise<void> {
     this.closing = true;
+    for (const operation of this.modelLoginOperations.values()) operation.abort(new DOMException("Desktop is shutting down", "AbortError"));
+    this.modelLoginOperations.clear();
     await Promise.allSettled(this.runtimeInitializations.values());
     const managedRuntimes = [...this.runtimes.values()];
     this.runtimes.clear();
@@ -1335,9 +1361,33 @@ export class DesktopAgentManager {
     const providerAlias = authenticated.provider;
     const providerType = authenticated.provider === "claude-code" ? "claude-subscription" : "openai-codex";
     const profile = providerDefinition(providerType);
+    const existingProvider = current.providers[providerAlias];
     const models = Object.fromEntries(Object.entries(current.models).filter(([, model]) => model.provider !== providerAlias));
-    const configuredModels = authenticated.models.map((model) => {
-      const alias = modelAliasForAuthenticatedModel(providerAlias, model.id);
+    const existingModels = Object.entries(current.models)
+      .filter(([, model]) => model.provider === providerAlias)
+      .map(([, model]) => ({
+        id: model.model,
+        displayName: model.displayName ?? model.model,
+        supportsThinking: model.capabilities?.reasoning === true
+      }));
+    const fallbackSource = providerType === "openai-codex"
+      ? builtinProviderModels["openai-codex"] ?? []
+      : builtinProviderModels.anthropic ?? [];
+    const fallbackModels = fallbackSource.map((model) => ({
+      id: model.id,
+      displayName: model.displayName,
+      supportsThinking: model.capabilities.reasoning === true
+    }));
+    const authenticatedModels = authenticated.models?.length
+      ? authenticated.models
+      : existingModels.length ? existingModels : fallbackModels;
+    const aliases = new Set<string>();
+    const configuredModels = authenticatedModels.map((model) => {
+      const baseAlias = modelAliasForAuthenticatedModel(providerAlias, model.id);
+      let alias = baseAlias;
+      let suffix = 2;
+      while (aliases.has(alias)) alias = `${baseAlias}-${String(suffix++)}`;
+      aliases.add(alias);
       return [alias, {
         provider: providerAlias,
         model: model.id,
@@ -1348,7 +1398,6 @@ export class DesktopAgentManager {
     });
     const defaultModel = configuredModels[0]?.[0];
     if (!defaultModel) throw new Error("账号没有返回可用模型。");
-    const existingProvider = current.providers[providerAlias];
     return configSchema.parse({
       ...current,
       defaultModel,

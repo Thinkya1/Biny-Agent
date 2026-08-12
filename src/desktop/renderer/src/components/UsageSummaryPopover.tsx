@@ -79,12 +79,20 @@ export function UsageSummaryPopover({ anchorRef, open, onClose, summary }: Usage
           <strong>{formatCacheHitRate(summary.latestCacheHitRate)}</strong>
         </div>
         <div className="cindy-usage-stat">
+          <span>会话加权命中</span>
+          <strong>{formatCacheHitRate(summary.sessionCacheHitRate)}</strong>
+        </div>
+        <div className="cindy-usage-stat">
           <span>缓存读取</span>
           <strong>{formatTokenCount(summary.cacheReadTokens)}</strong>
         </div>
         <div className="cindy-usage-stat">
           <span>缓存写入</span>
           <strong>{formatTokenCount(summary.cacheWriteTokens)}</strong>
+        </div>
+        <div className="cindy-usage-stat">
+          <span>未命中输入</span>
+          <strong>{formatTokenCount(summary.cacheMissTokens ?? 0)}</strong>
         </div>
       </div>
 

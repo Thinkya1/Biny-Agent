@@ -57,7 +57,8 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
     readonly config: ProviderConfig,
     private readonly ai: AiRegistry,
     baselineModels: readonly ModelCatalogEntry[] = [],
-    private readonly modelsStore?: ModelsStore
+    private readonly modelsStore?: ModelsStore,
+    private readonly fetcher: typeof globalThis.fetch = globalThis.fetch
   ) {
     this.definition = providerDefinition(config.type, ai.providers);
     this.baselineModels = baselineModels.map((model) => ({ ...model, provider: id }));
@@ -187,6 +188,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
 
     const transport = createNativeModel({
       provider: this.config.type,
+      providerAlias: this.id,
       modelId: normalizedModel.model,
       api,
       baseUrl,
@@ -196,6 +198,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
         ...this.config.headers,
         ...normalizedModel.headers
       },
+      fetch: this.fetcher,
       retry,
       maxTokensField: compatibility?.maxTokensField === "max_completion_tokens" ? "max_completion_tokens" : "max_tokens",
       supportsDeveloperRole: compatibility?.supportsDeveloperRole === true,
@@ -299,7 +302,9 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
   }
 
   private mergedCatalog(): ModelCatalogEntry[] {
-    const combined = new Map(this.baselineModels.map((model) => [model.id, model]));
+    const combined = new Map((this.config.type === "openai-codex" && this.liveModels.length
+      ? this.liveModels
+      : this.baselineModels).map((model) => [model.id, model]));
     for (const model of this.liveModels) {
       const existing = combined.get(model.id);
       combined.set(model.id, existing ? mergeCatalogMetadata(existing, model) : model);
@@ -315,11 +320,12 @@ export class ProviderRegistry {
     private readonly config: AgentConfig,
     catalogs: readonly [string, ModelCatalogEntry[]][] = [],
     private readonly ai: AiRegistry = new AiRegistry(),
-    modelsStore?: ModelsStore
+    modelsStore?: ModelsStore,
+    private readonly fetcher: typeof globalThis.fetch = globalThis.fetch
   ) {
     for (const [id, provider] of Object.entries(config.providers)) {
       const registration = ai.providers.get(provider.type);
-      this.providers.set(id, new ConfiguredProviderRuntime(id, provider, ai, registration?.models, modelsStore));
+      this.providers.set(id, new ConfiguredProviderRuntime(id, provider, ai, registration?.models, modelsStore, fetcher));
     }
     for (const [id, models] of catalogs) this.providers.get(id)?.restoreModels(models);
   }
@@ -499,6 +505,7 @@ function liveCatalogMetadata(entry: ModelCatalogEntry, provider: string): ModelC
     displayName: entry.displayName,
     provider,
     description: entry.description,
+    showInPicker: entry.showInPicker,
     contextWindow: entry.contextWindow,
     maxInputTokens: entry.maxInputTokens,
     maxOutputTokens: entry.maxOutputTokens,

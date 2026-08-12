@@ -7,6 +7,7 @@
 import type { AgentUsage } from "../agent/core/types.js";
 import type { ModelPricing } from "../config/schema.js";
 import type { SessionUsage, UsageOperation, UsageSummary } from "../session/metadata.js";
+import type { PromptShapeDiagnostic } from "../llm/promptCache.js";
 import { usageSnapshot } from "../session/metadata.js";
 
 export interface UsageModelInfo {
@@ -22,7 +23,8 @@ export function createSessionUsage(
   usage: AgentUsage,
   operation: UsageOperation,
   model: UsageModelInfo,
-  time = new Date().toISOString()
+  time = new Date().toISOString(),
+  promptShape?: Pick<PromptShapeDiagnostic, "epochId" | "stablePrefixHash">
 ): SessionUsage {
   const snapshot = usageSnapshot(usage);
   const cost = calculateUsageCost(snapshot, model.pricing);
@@ -37,6 +39,9 @@ export function createSessionUsage(
     reasoningTokens: snapshot.reasoningTokens,
     cacheReadTokens: snapshot.cacheReadTokens,
     cacheWriteTokens: snapshot.cacheWriteTokens,
+    cacheMissTokens: snapshot.cacheMissTokens,
+    promptEpochId: promptShape?.epochId,
+    stablePrefixHash: promptShape?.stablePrefixHash,
     latestRequestInputTokens: snapshot.inputTokens,
     latestRequestCacheReadTokens: snapshot.cacheReadTokens,
     costUsd: cost.costUsd,
@@ -109,6 +114,12 @@ export function summarizeUsage(records: SessionUsage[]): UsageSummary {
   let reasoningTokens = 0;
   let cacheReadTokens = 0;
   let cacheWriteTokens = 0;
+  let cacheMissTokens = 0;
+  let weightedInputTokens = 0;
+  let weightedCacheReadTokens = 0;
+  let weightedCacheMetricsComplete = true;
+  let hasWeightedInput = false;
+  const epochUsage = new Map<string, { inputTokens: number; cacheReadTokens: number; cacheReadKnown: boolean }>();
   let costUsd = 0;
   let pricedCalls = 0;
   let unpricedCalls = 0;
@@ -120,6 +131,20 @@ export function summarizeUsage(records: SessionUsage[]): UsageSummary {
     reasoningTokens += record.reasoningTokens ?? 0;
     cacheReadTokens += record.cacheReadTokens ?? 0;
     cacheWriteTokens += record.cacheWriteTokens ?? 0;
+    cacheMissTokens += record.cacheMissTokens ?? 0;
+    if (record.inputTokens !== undefined) {
+      hasWeightedInput = true;
+      weightedInputTokens += record.inputTokens;
+      if (record.cacheReadTokens === undefined) weightedCacheMetricsComplete = false;
+      else weightedCacheReadTokens += record.cacheReadTokens;
+    }
+    if (record.promptEpochId !== undefined) {
+      const epoch = epochUsage.get(record.promptEpochId) ?? { inputTokens: 0, cacheReadTokens: 0, cacheReadKnown: true };
+      if (record.inputTokens !== undefined) epoch.inputTokens += record.inputTokens;
+      if (record.cacheReadTokens === undefined) epoch.cacheReadKnown = false;
+      else epoch.cacheReadTokens += record.cacheReadTokens;
+      epochUsage.set(record.promptEpochId, epoch);
+    }
     if (record.pricingKnown && record.costUsd !== undefined) {
       costUsd += record.costUsd;
       pricedCalls += 1;
@@ -136,17 +161,34 @@ export function summarizeUsage(records: SessionUsage[]): UsageSummary {
     reasoningTokens,
     cacheReadTokens,
     cacheWriteTokens,
+    cacheMissTokens,
     // 只要有一次调用算不出价，总额就不展示：部分求和会明显低于真实开销。
     costUsd: unpricedCalls === 0 && records.length > 0 ? costUsd : undefined,
     pricingKnown: records.length > 0 && unpricedCalls === 0,
     pricedCalls,
     unpricedCalls,
-    latestCacheHitRate: calculateCacheHitRate(records.at(-1) ?? {})
+    latestCacheHitRate: calculateCacheHitRate(records.at(-1) ?? {}),
+    sessionCacheHitRate: hasWeightedInput && weightedCacheMetricsComplete && weightedInputTokens > 0
+      ? Math.min(1, Math.max(0, weightedCacheReadTokens / weightedInputTokens))
+      : undefined,
+    epochCacheHitRates: epochUsage.size
+      ? Object.fromEntries([...epochUsage.entries()].map(([epochId, epoch]) => [
+        epochId,
+        epoch.inputTokens > 0 && epoch.cacheReadKnown
+          ? Math.min(1, Math.max(0, epoch.cacheReadTokens / epoch.inputTokens))
+          : null
+      ]))
+      : undefined
   };
 }
 
 export function formatUsageSummary(summary: UsageSummary): string {
   if (!summary.calls) return "Usage\n\nNo model calls recorded in this session.";
+  const epochRates = summary.epochCacheHitRates === undefined
+    ? undefined
+    : Object.entries(summary.epochCacheHitRates)
+      .map(([epochId, rate]) => `${epochId}=${rate === null ? "unknown" : `${String(Math.round(rate * 100))}%`}`)
+      .join(", ");
   return [
     "Usage",
     "",
@@ -155,8 +197,10 @@ export function formatUsageSummary(summary: UsageSummary): string {
     `Output tokens: ${String(summary.outputTokens)}`,
     `Reasoning tokens: ${String(summary.reasoningTokens)}`,
     `Total tokens: ${String(summary.totalTokens)}`,
-    `Cache read/write: ${String(summary.cacheReadTokens)}/${String(summary.cacheWriteTokens)}`,
+    `Cache read/write/miss: ${String(summary.cacheReadTokens)}/${String(summary.cacheWriteTokens)}/${String(summary.cacheMissTokens ?? 0)}`,
     `Latest cache hit rate: ${summary.latestCacheHitRate === undefined ? "unknown" : `${String(Math.round(summary.latestCacheHitRate * 100))}%`}`,
+    `Session cache hit rate: ${summary.sessionCacheHitRate === undefined ? "unknown" : `${String(Math.round(summary.sessionCacheHitRate * 100))}%`}`,
+    ...(epochRates ? [`Epoch cache hit rates: ${epochRates}`] : []),
     `Cost: ${summary.pricingKnown && summary.costUsd !== undefined ? `$${summary.costUsd.toFixed(6)}` : "unknown (configure model pricing)"}`,
     `Priced calls: ${String(summary.pricedCalls)}; unpriced calls: ${String(summary.unpricedCalls)}`
   ].join("\n");
@@ -187,6 +231,9 @@ export function sumSessionUsage(records: readonly SessionUsage[]): SessionUsage 
     reasoningTokens: sumDefined(records, "reasoningTokens"),
     cacheReadTokens: sumDefined(records, "cacheReadTokens"),
     cacheWriteTokens: sumDefined(records, "cacheWriteTokens"),
+    cacheMissTokens: sumDefined(records, "cacheMissTokens"),
+    promptEpochId: records.every((record) => record.promptEpochId === last.promptEpochId) ? last.promptEpochId : undefined,
+    stablePrefixHash: records.every((record) => record.stablePrefixHash === last.stablePrefixHash) ? last.stablePrefixHash : undefined,
     latestRequestInputTokens: last.latestRequestInputTokens ?? last.inputTokens,
     latestRequestCacheReadTokens: last.latestRequestInputTokens !== undefined
       ? last.latestRequestCacheReadTokens
@@ -199,7 +246,7 @@ export function sumSessionUsage(records: readonly SessionUsage[]): SessionUsage 
 
 function sumDefined(
   records: readonly SessionUsage[],
-  field: "inputTokens" | "outputTokens" | "totalTokens" | "reasoningTokens" | "cacheReadTokens" | "cacheWriteTokens" | "costUsd"
+  field: "inputTokens" | "outputTokens" | "totalTokens" | "reasoningTokens" | "cacheReadTokens" | "cacheWriteTokens" | "cacheMissTokens" | "costUsd"
 ): number | undefined {
   const values = records.map((record) => record[field]).filter((value): value is number => value !== undefined);
   return values.length ? values.reduce((total, value) => total + value, 0) : undefined;

@@ -6,6 +6,7 @@
  */
 import type { JsonSchema } from "../../tools/schema.js";
 import type { ReasoningEffort } from "../../config/schema.js";
+import type { PromptEpochReason, PromptShapeDiagnostic, PromptShapeStatus } from "../../llm/promptCache.js";
 
 export type AgentTextContent = { type: "text"; text: string };
 export type AgentImageContent = { type: "image"; data: string; mimeType: string };
@@ -63,6 +64,7 @@ export interface AgentUsage {
   reasoningTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  cacheMissTokens?: number;
 }
 
 export type ModelRequestOperation = "agent" | "plan" | "compaction" | "memory" | "subagent";
@@ -85,6 +87,9 @@ export interface ModelRequestContext {
   turnId?: string;
   step?: number;
   operation?: ModelRequestOperation;
+  promptEpoch?: number;
+  promptEpochReason?: PromptEpochReason;
+  promptEpochCreatedAt?: string;
   relatedToolCallIds?: string[];
 }
 
@@ -114,6 +119,10 @@ export interface ModelRequestMetrics {
   errorPhase?: ModelRequestErrorPhase;
   eventCount: number;
   requestContext?: ModelRequestContext;
+  promptShape?: PromptShapeDiagnostic;
+  promptShapeDurationMs?: number;
+  promptShapeStatus?: PromptShapeStatus;
+  promptShapeBudgetExceeded?: boolean;
 }
 
 export type ModelRequestObserver = (metrics: ModelRequestMetrics) => Promise<void> | void;

@@ -36,6 +36,8 @@ async function main(): Promise<void> {
   await testFactoryProviderDefaults();
   await testAnthropicSubscriptionAndHistory();
   await testCompatibleReasoningPayloads();
+  await testKimiPromptCacheKey();
+  await testOpenAiPromptCacheKey();
   await testCompatibleEmptyAssistantHistory();
   await testNativeTimeout();
   await testOpenAiResponsesTransport();
@@ -140,8 +142,17 @@ async function main(): Promise<void> {
             runId?: string;
             turnId?: string;
             step?: number;
+            promptEpoch?: number;
             relatedToolCallIds?: string[];
           };
+          promptShape?: {
+            stablePrefixHash?: string;
+            requestShapeChangeReason?: string;
+            epoch?: { reason?: string; createdAt?: string };
+          };
+          promptShapeDurationMs?: number;
+          promptShapeStatus?: string;
+          promptShapeBudgetExceeded?: boolean;
         };
       });
     assert.equal(storedEvents.find((event) => event.type === "tool_call")?.reasoningContent, "先检查当前状态。");
@@ -152,6 +163,12 @@ async function main(): Promise<void> {
     assert.equal(requestEvents[0]?.metrics?.requestContext?.sessionId, recorder.sessionId);
     assert.equal(requestEvents[0]?.metrics?.requestContext?.runId, requestEvents[1]?.metrics?.requestContext?.runId);
     assert.deepEqual(requestEvents[1]?.metrics?.requestContext?.relatedToolCallIds, ["call-1"]);
+    assert.equal(requestEvents[0]?.metrics?.requestContext?.promptEpoch, 0);
+    assert.equal(requestEvents[0]?.metrics?.promptShape?.epoch?.reason, "initial");
+    assert.equal(typeof requestEvents[0]?.metrics?.promptShapeDurationMs, "number");
+    assert.equal(requestEvents[0]?.metrics?.promptShapeStatus, "full");
+    assert.equal(requestEvents[1]?.metrics?.promptShape?.stablePrefixHash, requestEvents[0]?.metrics?.promptShape?.stablePrefixHash);
+    assert.equal(requestEvents[1]?.metrics?.promptShape?.requestShapeChangeReason, "history_projection_changed");
     assert.equal((await replaySession(recorder.filePath)).modelRequests.length, 2);
   } finally {
     globalThis.fetch = originalFetch;
@@ -208,7 +225,7 @@ async function testGoogleGenerativeAiTransport(): Promise<void> {
       requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
       return new Response([
         `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "consider", thought: true }] } }] })}`,
-        `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ functionCall: { name: "lookup", args: { query: "value" } } }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2, totalTokenCount: 5 } })}`
+        `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ functionCall: { name: "lookup", args: { query: "value" } } }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2, totalTokenCount: 5, total_cached_tokens: 2 } })}`
       ].join("\n\n") + "\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
     }
   });
@@ -224,6 +241,8 @@ async function testGoogleGenerativeAiTransport(): Promise<void> {
   assert.equal(events.find((event) => event.type === "reasoning-delta")?.text, "consider");
   assert.equal(events.find((event) => event.type === "tool-call")?.name, "lookup");
   assert.equal(events.find((event) => event.type === "finish")?.usage?.totalTokens, 5);
+  assert.equal(events.find((event) => event.type === "finish")?.usage?.cacheReadTokens, 2);
+  assert.equal(events.find((event) => event.type === "finish")?.usage?.cacheMissTokens, 1);
 }
 
 async function testExtensibleProviderRuntime(): Promise<void> {
@@ -769,6 +788,7 @@ async function testFactoryProviderDefaults(): Promise<void> {
       // Drain the native stream.
     }
     assert.equal(requests[1]?.url, "https://codex.example/backend-api/codex/responses");
+    assert.equal(requests[1]?.body.store, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1007,6 +1027,78 @@ async function testCompatibleSystemRole(): Promise<void> {
   assert.equal(messages?.[0]?.role, "system");
 }
 
+async function testKimiPromptCacheKey(): Promise<void> {
+  const keys: string[] = [];
+  const model = createNativeModel({
+    provider: "openai-compatible",
+    providerAlias: "kimi",
+    modelId: "kimi-k2",
+    api: "chat_completions",
+    baseUrl: "https://example.test/v1",
+    apiKey: "token",
+    fetch: async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      keys.push(String(body.prompt_cache_key ?? ""));
+      return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+  });
+  for (const sessionId of ["session-1", "session-1", "session-2"]) {
+    for await (const _event of await model.stream({
+      systemPrompt: "Stable system",
+      messages: [{ role: "user", content: "hello" }],
+      tools: []
+    }, { requestContext: { sessionId } })) {
+      // Drain the response so the adapter records the request normally.
+    }
+  }
+  assert.equal(keys[0], "session-1");
+  assert.equal(keys[1], keys[0]);
+  assert.equal(keys[2], "session-2");
+}
+
+async function testOpenAiPromptCacheKey(): Promise<void> {
+  let officialKey: unknown;
+  const response = (): Response => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] }), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+  const official = createNativeModel({
+    provider: "openai",
+    modelId: "gpt-5",
+    api: "chat_completions",
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "token",
+    fetch: async (_input, init) => {
+      officialKey = (JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>).prompt_cache_key;
+      return response();
+    }
+  });
+  for await (const _event of await official.stream({ messages: [{ role: "user", content: "hello" }], tools: [] }, { requestContext: { sessionId: "openai-session" } })) {
+    // Drain the response.
+  }
+  assert.equal(officialKey, "openai-session");
+
+  let relayBody: Record<string, unknown> | undefined;
+  const relay = createNativeModel({
+    provider: "openai-compatible",
+    providerAlias: "relay",
+    modelId: "gpt-5",
+    api: "chat_completions",
+    baseUrl: "https://relay.example/v1",
+    fetch: async (_input, init) => {
+      relayBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return response();
+    }
+  });
+  for await (const _event of await relay.stream({ messages: [{ role: "user", content: "hello" }], tools: [] }, { requestContext: { sessionId: "relay-session" } })) {
+    // Unknown compatible services must not receive provider-specific cache parameters.
+  }
+  assert.equal(relayBody?.prompt_cache_key, undefined);
+}
+
 async function testOpenAiResponsesTransport(): Promise<void> {
   let requestUrl = "";
   let requestBody: Record<string, unknown> | undefined;
@@ -1035,8 +1127,10 @@ async function testOpenAiResponsesTransport(): Promise<void> {
     systemPrompt: "Follow the rules.",
     messages: [{ role: "user", content: "hello" }],
     tools: []
-  })) events.push(event);
+  }, { maxOutputTokens: 8_000 })) events.push(event);
   assert.equal(requestUrl, "https://example.test/backend-api/codex/responses");
+  assert.equal(requestBody?.store, false);
+  assert.equal(requestBody?.max_output_tokens, undefined);
   assert.deepEqual(requestBody?.input, [{ role: "user", content: [{ type: "input_text", text: "hello" }] }]);
   assert.equal(events.some((event) => event.type === "text-delta" && event.text === "responses ok"), true);
   assert.deepEqual(events.find((event) => event.type === "reasoning-delta")?.providerMetadata, { openai: { summary: true } });
@@ -1056,9 +1150,33 @@ async function testOpenAiResponsesTransport(): Promise<void> {
       totalTokens: 5,
       reasoningTokens: undefined,
       cacheReadTokens: undefined,
-      cacheWriteTokens: undefined
+      cacheWriteTokens: undefined,
+      cacheMissTokens: undefined
     }
   });
+
+  let officialRequestBody: Record<string, unknown> | undefined;
+  const officialModel = createNativeModel({
+    provider: "openai",
+    modelId: "gpt-test",
+    api: "responses",
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "token",
+    fetch: async (_input, init) => {
+      officialRequestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n',
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+    }
+  });
+  for await (const _event of await officialModel.stream(
+    { messages: [{ role: "user", content: "hello" }], tools: [] },
+    { maxOutputTokens: 1_024 }
+  )) {
+    // 保证官方 Responses 的输出上限契约仍然被保留。
+  }
+  assert.equal(officialRequestBody?.max_output_tokens, 1_024);
 }
 
 async function testStreamingProtocolsRequireTerminalEvents(): Promise<void> {

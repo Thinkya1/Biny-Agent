@@ -7,7 +7,7 @@
  * 单实例锁：第二个实例直接退出，因为多个进程同时读写同一份桌面状态和 session 会互相覆盖。
  */
 import path from "node:path";
-import { app, BrowserWindow, dialog, nativeImage, Notification, shell } from "electron";
+import { app, BrowserWindow, dialog, nativeImage, net, Notification, shell } from "electron";
 import type { DesktopBootstrap, DesktopSessionHandoff } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 import { DesktopAgentManager } from "./DesktopAgentManager.js";
@@ -77,7 +77,7 @@ async function startDesktopApplication(): Promise<void> {
         silent: true
       }).show();
     }
-  }, async (url) => await shell.openExternal(url));
+  }, async (url) => await shell.openExternal(url), undefined, net.fetch.bind(net) as unknown as typeof globalThis.fetch);
   const prepareHandoff = async (handoff: DesktopLaunchHandoff): Promise<DesktopSessionHandoff> => {
     const project = await projects.createProject(handoff.workspaceRoot);
     await state.setActiveProject(project.id);
@@ -129,14 +129,13 @@ async function startDesktopApplication(): Promise<void> {
       type: "question",
       title: "任务仍在运行",
       message: "Biny 仍有正在运行或等待权限的任务。",
-      detail: "你可以让任务留在后台、停止任务并关闭窗口，或取消关闭。",
-      buttons: ["保持后台运行", "中止并关闭", "取消"],
-      defaultId: 1,
-      cancelId: 2,
+      detail: "关闭 Biny 会中止当前任务；如果暂时不关闭，请取消此操作。",
+      buttons: ["中止并关闭", "取消"],
+      defaultId: 0,
+      cancelId: 1,
       noLink: true
     });
-    if (response.response === 0) return "hide";
-    if (response.response === 1) {
+    if (response.response === 0) {
       await agents.stopAllForExit();
       return "close";
     }
@@ -147,6 +146,9 @@ async function startDesktopApplication(): Promise<void> {
     mainWindow = createDesktopWindow(state, decideWindowClose);
     mainWindow.on("closed", () => {
       mainWindow = undefined;
+      // macOS 关闭最后一个窗口默认不会退出进程；这里显式退出，避免下次打开继续复用本次
+      // Desktop 进程和 Runtime Host 的运行态。菜单里的“隐藏 Biny”仍保留为显式后台操作。
+      if (process.platform === "darwin" && !preparingQuit) app.quit();
     });
     return mainWindow;
   };

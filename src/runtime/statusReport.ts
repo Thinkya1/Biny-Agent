@@ -68,6 +68,7 @@ export function formatStatusReport(
     `Session: ${info.sessionId}`,
     "",
     `Token usage: ${usageSummary}`,
+    `Cache hit rate: latest ${formatCacheRate(usage.latestCacheHitRate)}; session ${formatCacheRate(usage.sessionCacheHitRate)}`,
     `Provider requests: ${formatModelRequestSummary(modelRequests)}`,
     ...(modelRequests.totalDurationMs > 0 ? [`Provider time: ${formatDuration(modelRequests.totalDurationMs)} total`] : []),
     `Context window: ${formatCount(contextUsed)} used / ${formatCount(contextWindow)} (${String(contextRemainingPercent)}% remaining; ${source})`,
@@ -107,6 +108,10 @@ export function formatStatusReport(
 
 function formatCount(value: number): string {
   return numberFormatter.format(Math.max(0, Math.round(value)));
+}
+
+function formatCacheRate(value: number | undefined): string {
+  return value === undefined ? "unknown" : `${String(Math.round(Math.max(0, Math.min(1, value)) * 100))}%`;
 }
 
 function formatInputMeasurement(estimatedTokens: number | undefined, providerInputTokens: number | undefined): string | undefined {

@@ -1,4 +1,8 @@
 /** Claude/OpenAI 订阅登录与模型请求共用的协议常量和请求头。 */
+import { extractOpenAiAccountId } from "../ai/codexAuth.js";
+
+export { extractOpenAiAccountId, openAiCodexHeaders } from "../ai/codexAuth.js";
+
 export const CLAUDE_SUBSCRIPTION_BETA = "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,claude-code-20250219";
 export const CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 export const CLAUDE_OAUTH_TOKEN_ENDPOINT = "https://platform.claude.com/v1/oauth/token";
@@ -24,7 +28,7 @@ export async function refreshSubscriptionOAuthTokens(
   signal?: AbortSignal
 ): Promise<SubscriptionOAuthTokens> {
   if (provider === "claude-code") {
-    const response = await fetch(CLAUDE_OAUTH_TOKEN_ENDPOINT, {
+    const response = await fetchSubscriptionEndpoint("Claude 刷新登录", CLAUDE_OAUTH_TOKEN_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json", "User-Agent": "claude-cli/2.1.153 (external, cli)" },
       body: JSON.stringify({
@@ -43,7 +47,7 @@ export async function refreshSubscriptionOAuthTokens(
     refresh_token: tokens.refreshToken,
     client_id: CODEX_OAUTH_CLIENT_ID
   });
-  const response = await fetch(CODEX_OAUTH_TOKEN_ENDPOINT, {
+  const response = await fetchSubscriptionEndpoint("Codex 刷新登录", CODEX_OAUTH_TOKEN_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "biny-desktop/0.2.1" },
     body: body.toString(),
@@ -105,34 +109,21 @@ function mergeRefreshedSubscriptionOAuthTokens(
   };
 }
 
-export function openAiCodexHeaders(accessToken?: string): Record<string, string> {
-  const headers: Record<string, string> = {
-    "OpenAI-Beta": "responses=experimental",
-    originator: "codex_cli_rs",
-    "User-Agent": "codex_cli_rs/0.0.0 (Biny)"
-  };
-  const accountId = accessToken ? extractOpenAiAccountId(accessToken) : undefined;
-  if (accountId) headers["ChatGPT-Account-Id"] = accountId;
-  return headers;
-}
-
-/**
- * 只读取 JWT payload 中的账号 id，不在客户端做签名验证；真正的鉴权仍由服务端完成。
- */
-export function extractOpenAiAccountId(token: string): string | undefined {
-  const payload = token.split(".")[1];
-  if (!payload) return undefined;
+/** OAuth 刷新没有 HTTP 响应时补充阶段、域名和底层错误码，并统一限制等待时间。 */
+async function fetchSubscriptionEndpoint(label: string, url: string, init: RequestInit): Promise<Response> {
   try {
-    const padded = payload + "=".repeat((4 - (payload.length % 4)) % 4);
-    const parsed = JSON.parse(Buffer.from(padded.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")) as Record<string, unknown>;
-    const nested = parsed["https://api.openai.com/auth"];
-    if (nested && typeof nested === "object") {
-      const accountId = (nested as Record<string, unknown>).chatgpt_account_id;
-      if (typeof accountId === "string" && accountId) return accountId;
-    }
-    const accountId = parsed.chatgpt_account_id;
-    return typeof accountId === "string" && accountId ? accountId : undefined;
-  } catch {
-    return undefined;
+    const timeout = AbortSignal.timeout(15_000);
+    const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    return await fetch(url, { ...init, signal });
+  } catch (error) {
+    if (init.signal?.aborted) throw error;
+    const cause = error instanceof Error && "cause" in error
+      ? (error as Error & { cause?: unknown }).cause
+      : undefined;
+    const code = cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string"
+      ? cause.code
+      : undefined;
+    const detail = cause instanceof Error ? cause.message : error instanceof Error ? error.message : String(error);
+    throw new Error(`${label}网络请求失败（${new URL(url).hostname}${code ? `，${code}` : ""}）：${detail}`, { cause: error });
   }
 }

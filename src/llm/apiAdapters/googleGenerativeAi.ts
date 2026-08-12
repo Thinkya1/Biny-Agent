@@ -12,10 +12,12 @@ import type {
   ModelStreamOptions
 } from "../../agent/core/types.js";
 import type { ApiAdapter, ApiAdapterRequest } from "../ApiAdapterRegistry.js";
+import { stableAgentTools } from "../promptCache.js";
 import {
   isRecord,
   parseJson,
   providerHttpError,
+  providerNetworkError,
   randomToolCallId,
   readNumber,
   readSse,
@@ -36,7 +38,7 @@ async function* streamGoogle(
   const body: Record<string, unknown> = {
     systemInstruction: context.systemPrompt ? { parts: [{ text: context.systemPrompt }] } : undefined,
     contents: context.messages.map(googleMessage),
-    tools: context.tools.length ? [{ functionDeclarations: context.tools.map(googleTool) }] : undefined,
+    tools: context.tools.length ? [{ functionDeclarations: stableAgentTools(context.tools, request.promptProjectionCache).map(googleTool) }] : undefined,
     generationConfig: {
       maxOutputTokens: options.maxOutputTokens,
       thinkingConfig: googleThinking(options.reasoning, request.providerOptions)
@@ -44,17 +46,22 @@ async function* streamGoogle(
   };
   const baseUrl = request.baseUrl.replace(/\/+$/u, "");
   const endpoint = `${baseUrl}/models/${encodeURIComponent(request.modelId)}:streamGenerateContent?alt=sse`;
-  const response = await request.fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "text/event-stream",
-      ...(request.apiKey ? { "x-goog-api-key": request.apiKey } : {}),
-      ...request.headers
-    },
-    body: JSON.stringify(removeUndefined(body)),
-    signal: requestSignal(options)
-  });
+  let response: Response;
+  try {
+    response = await request.fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        ...(request.apiKey ? { "x-goog-api-key": request.apiKey } : {}),
+        ...request.headers
+      },
+      body: JSON.stringify(removeUndefined(body)),
+      signal: requestSignal(options)
+    });
+  } catch (error) {
+    throw providerNetworkError(error, "Google Generative AI provider", endpoint);
+  }
   if (!response.ok) throw await providerHttpError(response, "Google Generative AI provider");
   if (!response.body) throw new Error("Google Generative AI provider returned an empty response body.");
 
@@ -112,13 +119,27 @@ function* googlePayloadEvents(value: unknown, completeResponse: boolean): Genera
       type: "finish",
       reason: mapGoogleStopReason(finishReason),
       usage: usage ? {
-        inputTokens: readNumber(usage.promptTokenCount),
-        outputTokens: readNumber(usage.candidatesTokenCount),
-        totalTokens: readNumber(usage.totalTokenCount),
-        cacheReadTokens: readNumber(usage.cachedContentTokenCount)
+        inputTokens: readNumber(usage.promptTokenCount) ?? readNumber(usage.prompt_token_count) ?? readNumber(usage.prompt_tokens),
+        outputTokens: readNumber(usage.candidatesTokenCount) ?? readNumber(usage.candidates_token_count) ?? readNumber(usage.candidates_tokens),
+        totalTokens: readNumber(usage.totalTokenCount) ?? readNumber(usage.total_token_count) ?? readNumber(usage.total_tokens),
+        cacheReadTokens: googleCachedTokens(usage),
+        cacheMissTokens: googleCacheMissTokens(usage)
       } : undefined
     };
   }
+}
+
+function googleCacheMissTokens(usage: Record<string, unknown>): number | undefined {
+  const inputTokens = readNumber(usage.promptTokenCount) ?? readNumber(usage.prompt_token_count) ?? readNumber(usage.prompt_tokens);
+  const cachedTokens = googleCachedTokens(usage);
+  if (inputTokens === undefined || cachedTokens === undefined) return undefined;
+  return Math.max(0, inputTokens - cachedTokens);
+}
+
+function googleCachedTokens(usage: Record<string, unknown>): number | undefined {
+  return readNumber(usage.total_cached_tokens)
+    ?? readNumber(usage.cachedContentTokenCount)
+    ?? readNumber(usage.cached_content_token_count);
 }
 
 function googleMessage(message: AgentMessage): unknown {

@@ -11,6 +11,7 @@ import type {
   ModelStreamOptions
 } from "../../agent/core/types.js";
 import type { ApiAdapterRequest } from "../ApiAdapterRegistry.js";
+import type { PromptCacheCapability } from "../promptCache.js";
 import { CLAUDE_SUBSCRIPTION_BETA } from "../subscriptionAuth.js";
 
 export const contextOverflowMarker = "[context_overflow]";
@@ -285,6 +286,18 @@ export async function providerHttpError(response: Response, provider: string): P
     : detail);
 }
 
+/** 网络层没有 HTTP 响应时保留域名和底层错误码，方便区分代理、DNS、TLS 与服务端拒绝。 */
+export function providerNetworkError(error: unknown, provider: string, endpoint: string): Error {
+  const cause = error instanceof Error && "cause" in error
+    ? (error as Error & { cause?: unknown }).cause
+    : undefined;
+  const code = cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string"
+    ? cause.code
+    : undefined;
+  const detail = cause instanceof Error ? cause.message : error instanceof Error ? error.message : String(error);
+  return new Error(`${provider} network request failed (${new URL(endpoint).hostname}${code ? `, ${code}` : ""}): ${detail}`, { cause: error });
+}
+
 export async function* readSse(body: ReadableStream<Uint8Array>): AsyncGenerator<{ event?: string; data: string }, void, void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -379,43 +392,62 @@ export function mapResponsesStopReason(status: unknown, incompleteDetails: unkno
 
 export type AgentModelFinishReason = "stop" | "tool-calls" | "length" | "error" | "aborted" | "other";
 
-export function mapOpenAiUsage(value: Record<string, any>): AgentUsage {
+export function mapOpenAiUsage(value: Record<string, any>, cacheCapability?: PromptCacheCapability): AgentUsage {
   const promptDetails = isRecord(value.prompt_tokens_details) ? value.prompt_tokens_details : {};
+  const inputTokens = readNumber(value.prompt_tokens);
+  const cacheReadTokens = readNumber(promptDetails.cached_tokens)
+    ?? readNumber(promptDetails.cache_read_tokens)
+    ?? readNumber(value.cached_tokens)
+    ?? readNumber(value.prompt_cache_hit_tokens)
+    ?? readNumber(value.cache_read_input_tokens);
+  const cacheWriteTokens = readNumber(promptDetails.cache_write_tokens)
+    ?? readNumber(promptDetails.cache_creation_tokens)
+    ?? readNumber(value.prompt_cache_write_tokens)
+    ?? readNumber(value.cache_write_input_tokens);
+  const explicitCacheMissTokens = readNumber(promptDetails.cache_miss_tokens)
+    ?? readNumber(value.prompt_cache_miss_tokens)
+    ?? readNumber(value.cache_miss_input_tokens);
   return {
-    inputTokens: readNumber(value.prompt_tokens),
+    inputTokens,
     outputTokens: readNumber(value.completion_tokens),
     totalTokens: readNumber(value.total_tokens),
     reasoningTokens: isRecord(value.completion_tokens_details) ? readNumber(value.completion_tokens_details.reasoning_tokens) : undefined,
-    cacheReadTokens: readNumber(promptDetails.cached_tokens)
-      ?? readNumber(promptDetails.cache_read_tokens)
-      ?? readNumber(value.prompt_cache_hit_tokens)
-      ?? readNumber(value.cache_read_input_tokens),
-    cacheWriteTokens: readNumber(promptDetails.cache_write_tokens)
-      ?? readNumber(promptDetails.cache_creation_tokens)
-      ?? readNumber(value.prompt_cache_write_tokens)
-      ?? readNumber(value.cache_write_input_tokens)
+    cacheReadTokens,
+    cacheWriteTokens,
+    cacheMissTokens: explicitCacheMissTokens
+      ?? (cacheCapability?.fullInputIncludesCachedTokens === true
+        ? derivedCacheMissTokens(inputTokens, cacheReadTokens, cacheWriteTokens)
+        : undefined)
   };
 }
 
-export function mapResponsesUsage(value: Record<string, any>): AgentUsage {
+export function mapResponsesUsage(value: Record<string, any>, cacheCapability?: PromptCacheCapability): AgentUsage {
   const inputTokens = readNumber(value.input_tokens);
   const outputTokens = readNumber(value.output_tokens);
   const totalTokens = readNumber(value.total_tokens) ?? sumUsage({ inputTokens }, outputTokens);
   const outputDetails = isRecord(value.output_tokens_details) ? value.output_tokens_details : {};
   const inputDetails = isRecord(value.input_tokens_details) ? value.input_tokens_details : {};
+  const cacheReadTokens = readNumber(inputDetails.cached_tokens)
+    ?? readNumber(inputDetails.cache_read_tokens)
+    ?? readNumber(value.prompt_cache_hit_tokens)
+    ?? readNumber(value.cache_read_input_tokens);
+  const cacheWriteTokens = readNumber(inputDetails.cache_write_tokens)
+    ?? readNumber(inputDetails.cache_creation_tokens)
+    ?? readNumber(value.prompt_cache_write_tokens)
+    ?? readNumber(value.cache_write_input_tokens);
   return {
     inputTokens,
     outputTokens,
     totalTokens,
     reasoningTokens: readNumber(outputDetails.reasoning_tokens),
-    cacheReadTokens: readNumber(inputDetails.cached_tokens)
-      ?? readNumber(inputDetails.cache_read_tokens)
-      ?? readNumber(value.prompt_cache_hit_tokens)
-      ?? readNumber(value.cache_read_input_tokens),
-    cacheWriteTokens: readNumber(inputDetails.cache_write_tokens)
-      ?? readNumber(inputDetails.cache_creation_tokens)
-      ?? readNumber(value.prompt_cache_write_tokens)
-      ?? readNumber(value.cache_write_input_tokens)
+    cacheReadTokens,
+    cacheWriteTokens,
+    cacheMissTokens: readNumber(inputDetails.cache_miss_tokens)
+      ?? readNumber(value.prompt_cache_miss_tokens)
+      ?? readNumber(value.cache_miss_input_tokens)
+      ?? (cacheCapability?.fullInputIncludesCachedTokens === true
+        ? derivedCacheMissTokens(inputTokens, cacheReadTokens, cacheWriteTokens)
+        : undefined)
   };
 }
 
@@ -433,8 +465,18 @@ export function mapAnthropicUsage(value: Record<string, any>): AgentUsage {
     outputTokens,
     totalTokens: readNumber(value.total_tokens) ?? sumUsage({ inputTokens }, outputTokens),
     cacheReadTokens,
-    cacheWriteTokens
+    cacheWriteTokens,
+    cacheMissTokens: uncachedInputTokens
   };
+}
+
+function derivedCacheMissTokens(
+  inputTokens: number | undefined,
+  cacheReadTokens: number | undefined,
+  cacheWriteTokens: number | undefined
+): number | undefined {
+  if (inputTokens === undefined || cacheReadTokens === undefined) return undefined;
+  return Math.max(0, inputTokens - cacheReadTokens - (cacheWriteTokens ?? 0));
 }
 
 export function sumUsage(usage: AgentUsage | undefined, outputTokens: number | undefined): number | undefined {

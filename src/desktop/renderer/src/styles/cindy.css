@@ -2594,8 +2594,8 @@
 }
 
 .cindy-composer > div:not(.astryx-chat-composer-drawer):focus-within {
-  border-color: color-mix(in srgb, var(--cindy-focus) 65%, var(--cindy-border));
-  box-shadow: var(--cindy-composer-shadow-focus);
+  border-color: var(--cindy-border);
+  box-shadow: var(--cindy-composer-shadow-rest);
 }
 
 /* ChatComposer 的 status slot 参与正常布局，不再悬浮覆盖输入区。 */

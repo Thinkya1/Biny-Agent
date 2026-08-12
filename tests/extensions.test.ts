@@ -9,6 +9,9 @@ import { loadPlugins } from "../src/extensions/plugins.js";
 import { formatExtensionReport } from "../src/extensions/report.js";
 import { createSkillResourceTool, createSkillTool, expandSkillCommand, loadSkills } from "../src/extensions/skills.js";
 import { calculateUsageCost, sumSessionUsage, summarizeUsage } from "../src/observability/usage.js";
+import { buildSystemPrompt, stableSystemPromptForCache } from "../src/agent/prompts.js";
+import { canonicalToolSchemaHash, computePromptShapeDiagnostic, LocalPromptProjectionCache, promptCacheCapability } from "../src/llm/promptCache.js";
+import { mapOpenAiUsage } from "../src/llm/apiAdapters/shared.js";
 import { PermissionManager } from "../src/permission/PermissionManager.js";
 import { analyzePermissionRequest } from "../src/permission/policy.js";
 import { ToolRegistry } from "../src/tools/registry.js";
@@ -31,6 +34,7 @@ async function main(): Promise<void> {
     await testExtensionPathBoundary(workspaceRoot);
     await testMcpStdioTool(workspaceRoot);
     testUsageCostAccounting();
+    testPromptCacheAccounting();
     testShellPermissionBoundary();
     testScopedMemoryToolSchemas();
   } finally {
@@ -190,6 +194,101 @@ function testUsageCostAccounting(): void {
   assert.equal(summarizeUsage([turnUsage]).latestCacheHitRate, liveSummary.latestCacheHitRate);
   // 回合记录经过 JSONL 持久化和 replay 后，仍需保留最后一次请求而不是退化为回合平均值。
   assert.equal(summarizeUsage([JSON.parse(JSON.stringify(turnUsage))]).latestCacheHitRate, liveSummary.latestCacheHitRate);
+}
+
+function testPromptCacheAccounting(): void {
+  const deepseek = mapOpenAiUsage({
+    prompt_tokens: 120,
+    prompt_cache_hit_tokens: 80,
+    prompt_cache_miss_tokens: 40,
+    completion_tokens: 5,
+    total_tokens: 125
+  }, promptCacheCapability({ provider: "deepseek", modelId: "deepseek-chat", api: "chat_completions" }));
+  assert.equal(deepseek.cacheReadTokens, 80);
+  assert.equal(deepseek.cacheMissTokens, 40);
+
+  const glm = mapOpenAiUsage({
+    prompt_tokens: 100,
+    prompt_tokens_details: { cached_tokens: 60 },
+    completion_tokens: 4,
+    total_tokens: 104
+  }, promptCacheCapability({ provider: "zai", modelId: "glm-5", api: "chat_completions" }));
+  assert.equal(glm.cacheReadTokens, 60);
+  assert.equal(glm.cacheMissTokens, 40);
+
+  const kimi = mapOpenAiUsage({
+    prompt_tokens: 90,
+    cached_tokens: 50,
+    completion_tokens: 3,
+    total_tokens: 93
+  }, promptCacheCapability({ provider: "kimi", modelId: "kimi-k2", reasoningProtocol: "moonshotai", api: "chat_completions" }));
+  assert.equal(kimi.cacheReadTokens, 50);
+  assert.equal(kimi.cacheMissTokens, 40);
+
+  const weighted = summarizeUsage([
+    { operation: "agent", modelAlias: "test", provider: "deepseek", model: "deepseek", inputTokens: 100, cacheReadTokens: 25, cacheMissTokens: 75, promptEpochId: "epoch-0", pricingKnown: false },
+    { operation: "agent", modelAlias: "test", provider: "deepseek", model: "deepseek", inputTokens: 300, cacheReadTokens: 150, cacheMissTokens: 150, promptEpochId: "epoch-1", pricingKnown: false }
+  ]);
+  assert.equal(weighted.latestCacheHitRate, 0.5);
+  assert.equal(weighted.sessionCacheHitRate, 175 / 400);
+  assert.equal(weighted.cacheMissTokens, 225);
+  assert.deepEqual(weighted.epochCacheHitRates, { "epoch-0": 0.25, "epoch-1": 0.5 });
+
+  const unknown = summarizeUsage([{
+    operation: "agent",
+    modelAlias: "unknown",
+    provider: "unknown",
+    model: "unknown",
+    inputTokens: 100,
+    pricingKnown: false
+  }]);
+  assert.equal(unknown.latestCacheHitRate, undefined);
+  assert.equal(unknown.sessionCacheHitRate, undefined);
+
+  assert.equal(promptCacheCapability({ provider: "openai-compatible", providerAlias: "kimi", modelId: "kimi-k2" }).supportsPromptCacheKey, true);
+  assert.equal(promptCacheCapability({ provider: "deepseek", modelId: "deepseek-chat" }).supportsPromptCacheKey, false);
+  assert.equal(promptCacheCapability({ provider: "zhipu", modelId: "glm-4" }).cacheReadFields[0], "prompt_tokens_details.cached_tokens");
+  assert.equal(promptCacheCapability({ provider: "openai", modelId: "gpt-5", api: "responses" }).supportsPromptCacheKey, true);
+  assert.equal(promptCacheCapability({ provider: "openai-compatible", providerAlias: "relay", modelId: "gpt-5", api: "chat_completions" }).supportsPromptCacheKey, false);
+  assert.equal(promptCacheCapability({ provider: "google-native", modelId: "gemini-2.5-pro", api: "google_generative_ai" }).cacheReadFields[0], "usageMetadata.total_cached_tokens");
+
+  const unknownCacheUsage = mapOpenAiUsage({ prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 60 } });
+  assert.equal(unknownCacheUsage.cacheReadTokens, 60);
+  assert.equal(unknownCacheUsage.cacheMissTokens, undefined);
+
+  const toolA = { name: "alpha", description: "Alpha", parameters: { type: "object" as const } };
+  const toolB = { name: "beta", description: "Beta", parameters: { type: "object" as const } };
+  const localPromptCache = new LocalPromptProjectionCache({ maxEntries: 1 });
+  canonicalToolSchemaHash([toolA, toolB], localPromptCache);
+  canonicalToolSchemaHash([toolB, toolA], localPromptCache);
+  assert.deepEqual(localPromptCache.stats(), { entries: 1, hits: 1, misses: 1, evictions: 0 });
+  canonicalToolSchemaHash([toolA], localPromptCache);
+  assert.deepEqual(localPromptCache.stats(), { entries: 1, hits: 1, misses: 2, evictions: 1 });
+  const firstPrompt = buildSystemPrompt({ mode: "qa", cwd: "/workspace", extensionPrompt: "dynamic-a", tools: [toolB, toolA] });
+  const secondPrompt = buildSystemPrompt({ mode: "qa", cwd: "/workspace", extensionPrompt: "dynamic-b", tools: [toolA, toolB] });
+  assert.equal(stableSystemPromptForCache(firstPrompt), stableSystemPromptForCache(secondPrompt));
+  const firstShape = computePromptShapeDiagnostic({
+    provider: "openai-compatible",
+    providerAlias: "kimi",
+    modelId: "kimi-k2",
+    stableSystemPrompt: stableSystemPromptForCache(firstPrompt),
+    systemPrompt: firstPrompt,
+    tools: [toolB, toolA],
+    messages: [{ role: "user", content: "first" }]
+  });
+  const secondShape = computePromptShapeDiagnostic({
+    provider: "openai-compatible",
+    providerAlias: "kimi",
+    modelId: "kimi-k2",
+    stableSystemPrompt: stableSystemPromptForCache(secondPrompt),
+    systemPrompt: secondPrompt,
+    tools: [toolA, toolB],
+    messages: [{ role: "user", content: "second" }]
+  }, firstShape);
+  assert.equal(secondShape.stablePrefixHash, firstShape.stablePrefixHash);
+  assert.notEqual(secondShape.requestShapeHash, firstShape.requestShapeHash);
+  assert.equal(secondShape.requestShapeChangeReason, "history_projection_changed");
+  assert.equal(secondShape.toolSchemaHash, firstShape.toolSchemaHash);
 }
 
 async function testSkillsAndPlugins(workspaceRoot: string): Promise<void> {

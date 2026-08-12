@@ -3,6 +3,7 @@
  */
 import type { AgentUsage, ModelStreamContext, ModelStreamEvent, ModelStreamOptions } from "../../agent/core/types.js";
 import type { ApiAdapter, ApiAdapterRequest } from "../ApiAdapterRegistry.js";
+import { promptCacheCapability, stableAgentTools } from "../promptCache.js";
 import {
   applyResponsesReasoning,
   isRecord,
@@ -12,6 +13,7 @@ import {
   parseToolArguments,
   providerHttpError,
   providerPayloadError,
+  providerNetworkError,
   randomToolCallId,
   readSse,
   readString,
@@ -36,28 +38,51 @@ export async function* streamOpenAiResponses(
   options: ModelStreamOptions = {}
 ): AsyncGenerator<ModelStreamEvent, void, void> {
   const signal = requestSignal(options);
+  const cacheCapability = config.promptCache ?? promptCacheCapability({
+    provider: config.provider,
+    providerAlias: config.providerAlias,
+    modelId: config.modelId,
+    reasoningProtocol: config.reasoningProtocol,
+    api: "responses"
+  });
   const body: Record<string, unknown> = {
     model: config.modelId,
     instructions: context.systemPrompt,
     input: responsesInput(context),
     stream: true
   };
-  if (context.tools.length) body.tools = context.tools.map(responsesTool);
-  if (options.maxOutputTokens !== undefined) body.max_output_tokens = options.maxOutputTokens;
+  // 所有 Responses 请求都显式关闭服务端存储，保持本地 session 为唯一状态来源。
+  // ChatGPT/Codex 端点会直接拒绝缺少该字段的请求（400 Store must be set to false）。
+  body.store = false;
+  if (context.tools.length) body.tools = stableAgentTools(context.tools, config.promptProjectionCache).map(responsesTool);
+  if (cacheCapability.supportsPromptCacheKey && options.requestContext?.sessionId !== undefined) {
+    body.prompt_cache_key = options.requestContext.sessionId;
+  }
+  // Codex 的 ChatGPT 访问路径不接受该字段；模型输出上限仍保留在本地元数据和预算计算中。
+  // 官方 OpenAI Responses 端点继续发送它，避免把两个访问路径的契约混在一起。
+  if (config.provider !== "openai-codex" && options.maxOutputTokens !== undefined) {
+    body.max_output_tokens = options.maxOutputTokens;
+  }
   applyResponsesReasoning(body, config, options);
 
-  const response = await fetcher(resolveEndpoint(config.baseUrl, "responses"), {
-    method: "POST",
-    headers: requestHeaders(config, "responses"),
-    body: JSON.stringify(removeUndefined(body)),
-    signal
-  });
+  const endpoint = resolveEndpoint(config.baseUrl, "responses");
+  let response: Response;
+  try {
+    response = await fetcher(endpoint, {
+      method: "POST",
+      headers: requestHeaders(config, "responses"),
+      body: JSON.stringify(removeUndefined(body)),
+      signal
+    });
+  } catch (error) {
+    throw providerNetworkError(error, "OpenAI Responses provider", endpoint);
+  }
   if (!response.ok) throw await providerHttpError(response, "OpenAI Responses provider");
   if (!response.body) throw new Error("OpenAI Responses provider returned an empty response body.");
 
   yield { type: "start" };
   if (!response.headers.get("content-type")?.includes("text/event-stream")) {
-    yield* responsesPayloadEvents(await response.json() as Record<string, unknown>);
+    yield* responsesPayloadEvents(await response.json() as Record<string, unknown>, cacheCapability);
     return;
   }
 
@@ -114,7 +139,7 @@ export async function* streamOpenAiResponses(
     } else if (eventType === "response.completed" || eventType === "response.done" || eventType === "response.incomplete") {
       const result = isRecord(payload.response) ? payload.response : payload;
       finishReason = mapResponsesStopReason(result.status, result.incomplete_details);
-      usage = isRecord(result.usage) ? mapResponsesUsage(result.usage) : usage;
+      usage = isRecord(result.usage) ? mapResponsesUsage(result.usage, cacheCapability) : usage;
       receivedTerminalEvent = true;
     } else if (eventType === "response.failed") {
       const result = isRecord(payload.response) ? payload.response : payload;
@@ -160,7 +185,10 @@ function responsesToolCallEvent(call: ResponsesToolCall): ModelStreamEvent | und
   return { type: "tool-call", id: call.id, name: call.name || "unknown", arguments: parsed.args, invalid: parsed.invalid };
 }
 
-function* responsesPayloadEvents(payload: Record<string, unknown>): Generator<ModelStreamEvent, void, void> {
+function* responsesPayloadEvents(
+  payload: Record<string, unknown>,
+  cacheCapability: ReturnType<typeof promptCacheCapability>
+): Generator<ModelStreamEvent, void, void> {
   if (payload.error !== undefined) {
     yield { type: "error", error: providerPayloadError(payload, "OpenAI Responses provider") };
     return;
@@ -190,5 +218,5 @@ function* responsesPayloadEvents(payload: Record<string, unknown>): Generator<Mo
       }
     }
   }
-  yield { type: "finish", reason: mapResponsesStopReason(readString(payload.status), payload.incomplete_details), usage: isRecord(payload.usage) ? mapResponsesUsage(payload.usage) : undefined };
+  yield { type: "finish", reason: mapResponsesStopReason(readString(payload.status), payload.incomplete_details), usage: isRecord(payload.usage) ? mapResponsesUsage(payload.usage, cacheCapability) : undefined };
 }

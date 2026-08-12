@@ -12,7 +12,7 @@ export function installApplicationMenu(getWindow: () => BrowserWindow | undefine
   const send = (action: DesktopMenuAction): void => {
     const window = getWindow();
     if (!window) return;
-    // 窗口被隐藏时（关闭按钮只是隐藏）先显示出来，否则用户点了菜单看不到任何反应。
+    // 窗口被显式隐藏时先显示出来，否则用户点了菜单看不到任何反应。
     if (!window.isVisible()) window.show();
     window.webContents.send(desktopIpc.menuAction, action);
   };

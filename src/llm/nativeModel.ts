@@ -5,6 +5,7 @@
  * 位于 apiAdapters 目录，Provider 行为由上层运行时准备。
  */
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type {
   AgentModel,
   ModelRequestErrorCode,
@@ -21,10 +22,25 @@ import { openAiChatAdapter } from "./apiAdapters/openAiChat.js";
 import { openAiResponsesAdapter } from "./apiAdapters/openAiResponses.js";
 import { googleGenerativeAiAdapter } from "./apiAdapters/googleGenerativeAi.js";
 import { contextOverflowMarker, contextOverflowPattern } from "./apiAdapters/shared.js";
+import {
+  computePromptShapeDiagnostic,
+  LocalPromptProjectionCache,
+  promptCacheCapability,
+  promptShapeBudgetMs,
+  type PromptCacheCapability,
+  type PromptShapeDiagnostic
+} from "./promptCache.js";
+import { stableSystemPromptForCache } from "../agent/prompts.js";
 import { redactSecrets } from "../utils/secrets.js";
+
+// ProviderRuntime 的 streamSimple 会为每次请求生成轻量 transport；按 session 保存诊断前一条
+// shape，才能跨 transport 比较同一会话的前缀。匿名直连模型仍使用实例内 map，避免测试/调用方互相污染。
+const sessionPromptShapes = new Map<string, PromptShapeState>();
+const maxSessionPromptShapeStates = 2048;
 
 export interface NativeModelConfig {
   provider: string;
+  providerAlias?: string;
   modelId: string;
   api: ModelApiBackend;
   baseUrl: string;
@@ -50,11 +66,29 @@ export function createNativeModel(config: NativeModelConfig): AgentModel {
   const baseFetch = config.fetch ?? globalThis.fetch;
   if (typeof baseFetch !== "function") throw new Error("This runtime does not provide fetch().");
   const adapter = (config.apiAdapters ?? nativeApiAdapters).require(config.api);
+  const previousPromptShapes = new Map<string, PromptShapeState>();
+  const promptProjectionCache = new LocalPromptProjectionCache();
+  const promptCache = promptCacheCapability({
+    provider: config.provider,
+    providerAlias: config.providerAlias,
+    modelId: config.modelId,
+    reasoningProtocol: config.reasoningProtocol,
+    api: config.api
+  });
   return {
     provider: config.provider,
     modelId: config.modelId,
     supportsTools: config.supportsTools !== false,
-    stream: async (context, options) => observedNativeStream(adapter, config, baseFetch, context, options)
+    stream: async (context, options) => observedNativeStream(
+      adapter,
+      config,
+      baseFetch,
+      context,
+      options,
+      previousPromptShapes,
+      promptCache,
+      promptProjectionCache
+    )
   };
 }
 
@@ -63,7 +97,10 @@ async function* observedNativeStream(
   config: NativeModelConfig,
   baseFetch: typeof globalThis.fetch,
   context: ModelStreamContext,
-  options?: ModelStreamOptions
+  options: ModelStreamOptions | undefined,
+  previousPromptShapes: Map<string, PromptShapeState>,
+  promptCache: PromptCacheCapability,
+  promptProjectionCache: LocalPromptProjectionCache
 ): AsyncGenerator<ModelStreamEvent, void, void> {
   const startedAtMs = Date.now();
   const metrics: ModelRequestMetrics = {
@@ -83,6 +120,46 @@ async function* observedNativeStream(
           : [...options.requestContext.relatedToolCallIds]
       }
   };
+  const sessionId = options?.requestContext?.sessionId;
+  const shapeKey = sessionId ?? "__anonymous__";
+  const shapeHistory = sessionId === undefined ? previousPromptShapes : sessionPromptShapes;
+  const previousShapeState = shapeHistory.get(shapeKey);
+  const promptEpoch = options?.requestContext?.promptEpoch;
+  const shouldSkipPromptShape = previousShapeState?.skipDiagnostic === true
+    && previousShapeState.slowEpoch === promptEpoch;
+  if (shouldSkipPromptShape) {
+    // 这里只跳过诊断 hash；adapter 仍然按正常路径构造并发送本次请求。
+    metrics.promptShapeDurationMs = 0;
+    metrics.promptShapeStatus = "skipped_due_to_budget";
+    metrics.promptShapeBudgetExceeded = true;
+  } else {
+    const promptShapeStartedAt = performance.now();
+    const promptShape = computePromptShapeDiagnostic({
+      provider: config.provider,
+      providerAlias: config.providerAlias,
+      modelId: config.modelId,
+      stableSystemPrompt: stableSystemPromptForCache(context.systemPrompt),
+      systemPrompt: context.systemPrompt,
+      tools: context.tools,
+      messages: context.messages,
+      providerOptions: options?.providerOptions ?? config.providerOptions,
+      promptEpoch,
+      promptEpochReason: options?.requestContext?.promptEpochReason,
+      promptEpochCreatedAt: options?.requestContext?.promptEpochCreatedAt,
+      localPromptCache: promptProjectionCache
+    }, previousShapeState?.promptShape);
+    const promptShapeDurationMs = Math.max(0, performance.now() - promptShapeStartedAt);
+    const promptShapeBudgetExceeded = promptShapeDurationMs > promptShapeBudgetMs;
+    metrics.promptShape = promptShape;
+    metrics.promptShapeDurationMs = promptShapeDurationMs;
+    metrics.promptShapeStatus = "full";
+    metrics.promptShapeBudgetExceeded = promptShapeBudgetExceeded;
+    rememberPromptShapeState(shapeHistory, shapeKey, {
+      promptShape,
+      skipDiagnostic: promptShapeBudgetExceeded,
+      slowEpoch: promptShapeBudgetExceeded ? promptEpoch : undefined
+    });
+  }
   const report = async (error?: unknown): Promise<void> => {
     metrics.durationMs = Math.max(0, Date.now() - startedAtMs);
     if (error !== undefined) {
@@ -123,7 +200,12 @@ async function* observedNativeStream(
     });
     if (attempt.status !== undefined) metrics.status = attempt.status;
   });
-  const request: ApiAdapterRequest = { ...config, fetch: fetcher };
+  const request: ApiAdapterRequest = {
+    ...config,
+    fetch: fetcher,
+    promptCache,
+    promptProjectionCache
+  };
   try {
     const stream = adapter.stream(request, context, options);
     for await (const event of stream) {
@@ -151,6 +233,23 @@ async function* observedNativeStream(
     await reportOnce(error);
     throw error;
   }
+}
+
+interface PromptShapeState {
+  promptShape?: PromptShapeDiagnostic;
+  skipDiagnostic: boolean;
+  slowEpoch?: number;
+}
+
+function rememberPromptShapeState(
+  shapeHistory: Map<string, PromptShapeState>,
+  shapeKey: string,
+  state: PromptShapeState
+): void {
+  shapeHistory.set(shapeKey, state);
+  if (shapeHistory !== sessionPromptShapes || shapeHistory.size <= maxSessionPromptShapeStates) return;
+  const oldestKey = shapeHistory.keys().next().value;
+  if (oldestKey !== undefined) shapeHistory.delete(oldestKey);
 }
 
 function safeErrorMessage(error: unknown): string {

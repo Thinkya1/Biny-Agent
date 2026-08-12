@@ -1,7 +1,7 @@
 /**
  * 主窗口创建。
  *
- * 负责窗口尺寸的恢复与持久化、主题背景色同步、关闭行为（默认隐藏而不是退出）以及导航限制。
+ * 负责窗口尺寸的恢复与持久化、主题背景色同步、关闭前确认以及导航限制。
  *
  * 安全相关的三项配置是刻意的：contextIsolation + sandbox 打开、nodeIntegration 关闭，渲染
  * 进程只能通过 preload 暴露的接口访问系统能力；同时禁止开新窗口、禁止导航到本地页面之外的
@@ -13,7 +13,7 @@ import { BrowserWindow, nativeTheme, screen } from "electron";
 import type { DesktopThemePreference } from "../../protocol.js";
 import { DesktopStateStore } from "./DesktopStateStore.js";
 
-export type WindowCloseDecision = "hide" | "close" | "cancel";
+export type WindowCloseDecision = "close" | "cancel";
 
 /** 窗口底色要和渲染层主题一致，否则加载过程中会闪一下白底。 */
 function themeBackgroundColor(preference: DesktopThemePreference = "system"): string {
@@ -72,7 +72,7 @@ export function createDesktopWindow(
   };
   window.on("move", saveBounds);
   window.on("resize", saveBounds);
-  // 关闭要先问过上层（可能有任务在跑）：默认拦住，等决策回来再决定隐藏还是真的关。
+  // 关闭要先问过上层（可能有任务在跑）：默认拦住，等决策回来再真正关闭或取消。
   // `allowClose` 用来放行决策后自己调的那次 close，`closePromptOpen` 防止反复弹询问。
   window.on("close", (event) => {
     if (allowClose) return;
@@ -85,7 +85,6 @@ export function createDesktopWindow(
     void decideClose().then((decision) => {
       closePromptOpen = false;
       if (window.isDestroyed()) return;
-      if (decision === "hide") window.hide();
       if (decision === "close") {
         allowClose = true;
         window.close();

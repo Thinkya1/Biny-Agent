@@ -13,8 +13,12 @@ export function createNativeModelForConfig(config: AgentConfig, alias = config.d
   return createNativeModelSettings(config, alias).model;
 }
 
-export function createNativeModelSettings(config: AgentConfig, alias = config.defaultModel): NativeModelSettings {
-  return new ProviderRegistry(config).createModelSettings(alias);
+export function createNativeModelSettings(
+  config: AgentConfig,
+  alias = config.defaultModel,
+  fetcher: typeof globalThis.fetch = globalThis.fetch
+): NativeModelSettings {
+  return new ProviderRegistry(config, [], undefined, undefined, fetcher).createModelSettings(alias);
 }
 
 export function validateModelConfiguration(config: AgentConfig, alias = config.defaultModel): void {

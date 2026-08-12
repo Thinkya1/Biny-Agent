@@ -5,6 +5,7 @@
  * `/models` 结果和插件目录会在运行时补充缺失字段，用户配置的模型别名拥有最高优先级。
  */
 import { inferReasoningEfforts } from "./capabilities.js";
+import { openAiCodexCatalogModels } from "./codexModels.js";
 import { generatedModelProviderTypes, generatedProviderModels } from "./modelMetadata.js";
 import type { ModelCatalogEntry } from "./types.js";
 
@@ -46,6 +47,16 @@ const legacyBuiltinProviderModels: Record<string, ModelCatalogEntry[]> = {
     model("gpt-5-mini", "GPT-5 Mini", { capabilities: { tools: true, reasoning: true, vision: true } }),
     model("gpt-4.1", "GPT-4.1", { capabilities: { tools: true, vision: true } })
   ],
+  "openai-codex": openAiCodexCatalogModels.map((entry) => model(entry.id, entry.displayName, {
+    contextWindow: entry.contextWindow,
+    capabilities: {
+      tools: true,
+      reasoning: true,
+      reasoningStream: true,
+      reasoningSummary: true,
+      vision: true
+    }
+  })),
   anthropic: [
     model("claude-opus-4-6", "Claude Opus 4.6", { capabilities: { tools: true, reasoning: true, vision: true } }),
     model("claude-sonnet-4-5", "Claude Sonnet 4.5", { capabilities: { tools: true, reasoning: true, vision: true } }),

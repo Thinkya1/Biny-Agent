@@ -46,6 +46,9 @@ const modelRequestContextSchema = z.object({
   turnId: z.string().optional(),
   step: z.number().int().nonnegative().optional(),
   operation: z.enum(["agent", "plan", "compaction", "memory", "subagent"]).optional(),
+  promptEpoch: z.number().int().nonnegative().optional(),
+  promptEpochReason: z.enum(["initial", "compaction", "rewind", "fork", "provider_changed", "model_changed", "tool_schema_changed"]).optional(),
+  promptEpochCreatedAt: z.string().optional(),
   relatedToolCallIds: z.array(z.string()).optional()
 }).passthrough();
 const modelRequestMetricsSchema = z.object({
@@ -73,7 +76,10 @@ const modelRequestMetricsSchema = z.object({
   ]).optional(),
   errorPhase: z.enum(["request", "stream"]).optional(),
   eventCount: z.number().int().nonnegative(),
-  requestContext: modelRequestContextSchema.optional()
+  requestContext: modelRequestContextSchema.optional(),
+  promptShapeDurationMs: z.number().finite().nonnegative().optional(),
+  promptShapeStatus: z.enum(["full", "skipped_due_to_budget"]).optional(),
+  promptShapeBudgetExceeded: z.boolean().optional()
 }).passthrough();
 const agentTextContentSchema = z.object({ type: z.literal("text"), text: z.string() }).passthrough();
 const agentImageContentSchema = z.object({ type: z.literal("image"), data: z.string(), mimeType: z.string() }).passthrough();

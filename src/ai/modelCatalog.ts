@@ -9,6 +9,7 @@
  */
 import type { ModelLimits, ReasoningEffort, ThinkingLevelMap } from "../config/schema.js";
 import { inferReasoningEfforts } from "./capabilities.js";
+import { openAiCodexHeaders } from "./codexAuth.js";
 import { providerProtocol } from "./provider.js";
 import { createRetryFetch } from "./retry.js";
 import type { CatalogProviderRequest, ModelCapabilities, ModelCatalogEntry } from "./types.js";
@@ -41,6 +42,10 @@ export async function fetchModelCatalogSnapshot(
   const protocol = providerProtocol(request.config, request.definition);
   const endpoint = request.config.modelsEndpoint ?? defaultModelsEndpoint(request.config.baseUrl ?? request.definition.baseUrl, protocol);
   if (!endpoint) throw new Error(`No model catalog endpoint configured for provider ${request.alias}.`);
+  const codex = request.config.type === "openai-codex";
+  const catalogEndpoint = codex && !/[?&]client_version=/u.test(endpoint)
+    ? `${endpoint}${endpoint.includes("?") ? "&" : "?"}client_version=1.0.0`
+    : endpoint;
   // key 的取值顺序：配置里的明文 → 配置指定的环境变量 → provider 定义的默认环境变量。
   const apiKey = request.config.apiKey
     ?? (request.config.apiKeyEnv ? process.env[request.config.apiKeyEnv] : undefined)
@@ -50,7 +55,13 @@ export async function fetchModelCatalogSnapshot(
   }
   // Anthropic 原生协议用 x-api-key，OAuth 场景和 OpenAI 兼容端点用 Bearer。
   const authMode = request.config.authMode ?? request.definition.authModes[0];
-  const headers: Record<string, string> = protocol === "anthropic" && authMode !== "oauth-bearer"
+  const headers: Record<string, string> = codex
+    ? {
+      Authorization: apiKey ? `Bearer ${apiKey}` : "",
+      ...openAiCodexHeaders(apiKey),
+      "content-type": "application/json"
+    }
+    : protocol === "anthropic" && authMode !== "oauth-bearer"
     ? { "x-api-key": apiKey ?? "", "anthropic-version": "2023-06-01" }
     : { Authorization: apiKey ? `Bearer ${apiKey}` : "" };
   if (protocol === "anthropic" && authMode === "oauth-bearer") headers["anthropic-version"] = "2023-06-01";
@@ -59,7 +70,7 @@ export async function fetchModelCatalogSnapshot(
   if (validators.lastModified) headers["If-Modified-Since"] = new Date(validators.lastModified).toUTCString();
   const retry = request.config.retry ?? { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
   const timeoutSignal = AbortSignal.timeout(catalogTimeoutMs);
-  const response = await createRetryFetch(retry)(endpoint, {
+  const response = await createRetryFetch(retry)(catalogEndpoint, {
     headers,
     signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
   });
@@ -97,7 +108,10 @@ export function parseModelCatalog(
   // 用 flatMap 而不是 map+filter：无效条目直接返回空数组丢弃。
   return items.flatMap((item) => {
     if (!isRecord(item)) return [];
-    const id = stringValue(item.id) ?? stringValue(item.model) ?? stringValue(item.name);
+    const visibility = stringValue(item.visibility)?.toLowerCase();
+    if (visibility === "hide" || visibility === "hidden") return [];
+    const slug = stringValue(item.slug);
+    const id = stringValue(item.id) ?? stringValue(item.model) ?? stringValue(item.name) ?? slug;
     if (!id) return [];
     const contextWindow = numberValue(item.context_window)
       ?? numberValue(item.contextWindow)
@@ -154,7 +168,7 @@ export function parseModelCatalog(
     if (reasoningSummary !== undefined) capabilities.reasoningSummary = reasoningSummary;
     const entry: ModelCatalogEntry = {
       id,
-      displayName: stringValue(item.display_name) ?? stringValue(item.displayName) ?? stringValue(item.name) ?? id,
+      displayName: stringValue(item.display_name) ?? stringValue(item.displayName) ?? stringValue(item.name) ?? (slug ? formatCodexModelName(id) : id),
       provider,
       contextWindow,
       maxOutputTokens,
@@ -186,6 +200,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function formatCodexModelName(modelId: string): string {
+  if (/^gpt-/iu.test(modelId)) return `GPT-${modelId.slice(4)}`;
+  return modelId.replace(/(^|[-_])([a-z0-9])/giu, (_match, separator: string, character: string) => `${separator ? " " : ""}${character.toUpperCase()}`);
 }
 
 function numberValue(value: unknown): number | undefined {
