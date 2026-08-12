@@ -17,7 +17,6 @@ const agentSchema = z.object({
   softStepLimit: z.number().int().min(1).max(1_024).default(32),
   hardStepLimit: z.number().int().min(1).max(1_024).default(96),
   maxToolCalls: z.number().int().min(1).max(65_536).optional(),
-  maxCompletionContinuations: z.number().int().min(0).max(32).optional(),
   maxRepeatedActions: z.number().int().min(1).max(32).default(3),
   maxConcurrentTools: z.number().int().min(1).max(32).default(4),
   maxQueuedToolCalls: z.number().int().min(1).max(1_024).default(64)
@@ -25,7 +24,6 @@ const agentSchema = z.object({
   softStepLimit: 32,
   hardStepLimit: 96,
   maxToolCalls: undefined,
-  maxCompletionContinuations: undefined,
   maxRepeatedActions: 3,
   maxConcurrentTools: 4,
   maxQueuedToolCalls: 64
@@ -631,7 +629,6 @@ export const defaultConfig: AgentConfig = {
     softStepLimit: 32,
     hardStepLimit: 96,
     maxToolCalls: undefined,
-    maxCompletionContinuations: 3,
     maxRepeatedActions: 3,
     maxConcurrentTools: 4,
     maxQueuedToolCalls: 64

@@ -1,5 +1,5 @@
 /**
- * Completion Gate 使用的确定性验收类型。
+ * 独立验收 harness 使用的确定性条件类型。
  *
  * 这里只描述可由代码独立观测的条件与证据，不包含任务契约、Attempt 或 Durable Task 状态。
  */

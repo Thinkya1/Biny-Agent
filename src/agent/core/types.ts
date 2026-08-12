@@ -211,7 +211,7 @@ export type AgentEvent =
   | { type: "tool_execution_update"; toolCallId: string; toolName: string; update: AgentToolResult }
   | { type: "tool_execution_end"; toolCallId: string; toolName: string; result: AgentToolResult }
   | { type: "model_retry"; reason: string; attempt: number; compactedMessages: number }
-  | { type: "error"; error: string; fatal: boolean };
+  | { type: "error"; error: string; fatal: boolean; reason?: "step_limit" };
 
 export interface AgentLoopTurnContext {
   message: AgentAssistantMessage;

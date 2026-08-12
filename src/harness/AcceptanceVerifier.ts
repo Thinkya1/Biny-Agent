@@ -71,8 +71,8 @@ export class AcceptanceVerifier {
   }
 
   /**
-   * 只验证可执行条件，不依赖 Agent 是否已经被上层标成 completed。普通 Agent Loop 在
-   * `model_yielded` 后调用；最终 completed / continue 仍由 Completion Gate 决定。
+   * 只验证可执行条件，不依赖 Agent 是否已经被上层标成 completed。
+   * 该 verifier 只返回检查证据，不改变 AgentSession 的终态。
    */
   async verifyCriteria(
     criteria: readonly AcceptanceCriterion[],

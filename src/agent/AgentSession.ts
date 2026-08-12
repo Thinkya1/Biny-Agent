@@ -43,7 +43,7 @@ import type {
   ModelRequestContext,
   ModelRequestMetrics
 } from "./core/types.js";
-import { ToolExecutionCoordinator } from "./toolExecutionCoordinator.js";
+import { ToolExecutionCoordinator, type ToolExecutionBudgetSnapshot } from "./toolExecutionCoordinator.js";
 import {
   buildSystemPrompt,
   personalizationRuntimePolicyFromSystemPrompt,
@@ -76,34 +76,7 @@ import { isModelContextOverflowError } from "../llm/nativeModel.js";
 import { readAttachment, type AgentAttachment } from "../attachments/store.js";
 import type { AttachmentReference } from "../attachments/store.js";
 import { TodoStore } from "../session/todoStore.js";
-import { CompletionStateStore } from "./completionState.js";
-import {
-  CompletionGate,
-  RunFactsCollector,
-  type CompletionDecision,
-  type CompletionGateVerifier,
-  type CompletionVerification,
-  type ProcessFact,
-  type RunFacts,
-  type StructuredVerificationCheck,
-  type VerificationFact
-} from "./completionGate.js";
 import { resolveRunBudget, type RunBudget } from "./runBudget.js";
-import {
-  deriveAgentVerificationPlan,
-  type AgentVerificationFacts,
-  type AgentVerificationPlan
-} from "./verification.js";
-import { AcceptanceVerifier, type ManagedProcessInspector } from "../harness/AcceptanceVerifier.js";
-import {
-  createControlledAcceptanceCommandExecutor,
-  type AcceptanceCommandExecutor
-} from "../harness/AcceptanceCommandExecutor.js";
-import {
-  captureWorkspaceState,
-  diffWorkspaceStates,
-  type WorkspaceStateSnapshot
-} from "../harness/WorkspaceState.js";
 import {
   chatPersonalizationOverrideSchema,
   cloneChatPersonalizationOverride,
@@ -138,12 +111,8 @@ export interface AgentSessionOptions {
   mcpPrompt?: () => string;
   /** 模型自己维护的计划清单；每回合实时读取，历史压缩不会让它丢失。 */
   todoPrompt?: () => string | undefined;
-  /** Todo 真值源；Completion Gate 与 session resume 共用同一个实例。 */
+  /** Todo 真值源；session resume 与模型计划工具共用同一个实例。 */
   todoStore?: TodoStore;
-  /** 模型声明的 blocked / verification 状态，只在当前根回合内有效。 */
-  completionState?: CompletionStateStore;
-  /** Completion Gate 检查本回合启动的受管进程。 */
-  managedProcesses?: ManagedProcessInspector;
   /** 回合内首次改动工作区前建快照，供 /undo 回退；不在 git 仓库时省略。 */
   createCheckpoint?: (label: string) => Promise<unknown>;
   /** 会话恢复时按虚拟路径重新读取项目级附件。 */
@@ -169,10 +138,6 @@ export interface AgentRunOptions {
   continueSystemPrompt?: string;
   /** 续跑同一 Turn 时不重复追加公开用户消息。 */
   recordSessionUserMessage?: boolean;
-  /** 宿主显式要求 Completion Gate 执行确定性验证；不从用户文本关键词推断。 */
-  verificationRequired?: boolean;
-  /** 宿主提供的结构化验证条件，会与模型通过 request_verification 声明的条件合并。 */
-  verificationChecks?: StructuredVerificationCheck[];
   attachments?: AgentAttachment[];
   /** Runtime host 为本次执行分配的 invocation identity。 */
   runId?: string;
@@ -182,7 +147,7 @@ export interface AgentRunOptions {
 
 export type AgentPromptOptions = Pick<
   AgentRunOptions,
-  "abortSignal" | "confirmPermission" | "mode" | "verificationRequired" | "verificationChecks" | "attachments" | "runId" | "turnId"
+  "abortSignal" | "confirmPermission" | "mode" | "attachments" | "runId" | "turnId"
 >;
 
 export type { AgentAttachment } from "../attachments/store.js";
@@ -217,15 +182,13 @@ interface NativeTurnArgs {
   messages: AgentMessage[];
   messageReferences: Array<SessionMessageReference | undefined>;
   runOptions: AgentRunOptions & {
-    initialRunFacts?: RunFacts;
+    initialToolBudget?: ToolExecutionBudgetSnapshot;
     previousTerminals?: InterruptedTurnTerminal[];
   };
   abortSignal: AbortSignal;
   mode: AgentRunMode;
   runBudget: RunBudget;
   completedStepsBeforeRun: number;
-  workspaceBaseline: Promise<WorkspaceStateSnapshot> | undefined;
-  captureWorkspaceBaseline: () => Promise<void>;
   messageQueues: ActiveRunMessageQueues;
   personalization: ResolvedChatPersonalization;
 }
@@ -447,7 +410,6 @@ export class AgentSession {
           + "Send a new user message to start another turn."
         );
       }
-      if (turn.terminal?.status === "blocked") this.options.completionState?.clearBlocked();
       const replayMessages = await this.rehydrateSessionAttachments(
         replay.messages,
         replay.events,
@@ -481,7 +443,7 @@ export class AgentSession {
         continueSystemPrompt: turn.systemPrompt,
         recordSessionUserMessage: false,
         completedStepsBeforeRun: turn.completedSteps,
-        initialRunFacts: restartRunFactsBudget(readRunFacts(turn.facts), turn.completedSteps === 0),
+        initialToolBudget: restartToolBudget(readToolBudget(turn.facts), turn.completedSteps === 0),
         previousTerminals
       });
     } finally {
@@ -622,7 +584,7 @@ export class AgentSession {
     input: string,
     runOptions: AgentRunOptions & {
       completedStepsBeforeRun?: number;
-      initialRunFacts?: RunFacts;
+      initialToolBudget?: ToolExecutionBudgetSnapshot;
       previousTerminals?: InterruptedTurnTerminal[];
       continueMessageReferences?: Array<SessionMessageReference | undefined>;
     } = {}
@@ -661,24 +623,9 @@ export class AgentSession {
     runOptions = { ...runOptions, runId: runtimeRunId, turnId: runtimeTurnId };
     this.recorder.setRuntimeContext({ runId: runtimeRunId, turnId: runtimeTurnId });
     const completedStepsBeforeRun = continuing ? runOptions.completedStepsBeforeRun ?? 0 : 0;
-    if (!continuing) this.options.completionState?.reset();
     if (!Number.isSafeInteger(completedStepsBeforeRun) || completedStepsBeforeRun < 0) {
       throw new RangeError("Completed turn steps must be a non-negative safe integer.");
     }
-    let workspaceBaseline: Promise<WorkspaceStateSnapshot> | undefined;
-    const captureWorkspaceBaseline = async (): Promise<void> => {
-      const baseline = workspaceBaseline ??= captureWorkspaceState(
-        this.options.workspaceRoot,
-        this.options.config.workspace.ignore
-      );
-      try {
-        await baseline;
-      } catch {
-        // 已知文件工具仍会直接记录 changedFiles；快照不可用时不要留下一个稍后必然 reject
-        // 的 Promise，把本来成功的工具调用变成回合级 provider_error。
-        if (workspaceBaseline === baseline) workspaceBaseline = undefined;
-      }
-    };
     const usageBeforePreparation = this.usageRecords.length;
     let userMessageRecorded = false;
     let userMessageReference: SessionMessageReference | undefined;
@@ -867,8 +814,6 @@ export class AgentSession {
       mode,
       runBudget,
       completedStepsBeforeRun,
-      workspaceBaseline,
-      captureWorkspaceBaseline,
       messageQueues,
       personalization: turnPersonalization
     });
@@ -898,8 +843,6 @@ export class AgentSession {
       mode,
       runBudget,
       completedStepsBeforeRun,
-      workspaceBaseline,
-      captureWorkspaceBaseline,
       messageQueues,
       personalization
     } = args;
@@ -932,25 +875,8 @@ export class AgentSession {
     });
 
     const permissionManager = this.options.permissionManager;
-    const facts = new RunFactsCollector(runOptions.initialRunFacts);
-    if (runOptions.verificationRequired === true) facts.setUserRequestedVerification(true);
-    let pendingApprovalCount = 0;
-    const confirmPermission = runOptions.confirmPermission === undefined
-      ? undefined
-      : async (request: AgentPermissionRequest): Promise<AgentPermissionResult> => {
-        pendingApprovalCount += 1;
-        facts.setPendingApprovals(pendingApprovalCount);
-        try {
-          return await runOptions.confirmPermission!(request);
-        } finally {
-          pendingApprovalCount = Math.max(0, pendingApprovalCount - 1);
-          facts.setPendingApprovals(pendingApprovalCount);
-        }
-      };
-    const runtime = this.runtimeContext(
-      { ...runOptions, abortSignal, confirmPermission },
-      captureWorkspaceBaseline
-    );
+    const confirmPermission = runOptions.confirmPermission;
+    const runtime = this.runtimeContext({ ...runOptions, abortSignal, confirmPermission });
     const allowedToolNames = mode === "plan"
       ? new Set(selectPlanTools(this.options.toolRegistry.list(), permissionMode).map((tool) => tool.name))
       : undefined;
@@ -959,12 +885,6 @@ export class AgentSession {
     let stepReasoningBlocks: ReasoningBlock[] | undefined;
     const pendingEvents: AgentSessionEvent[] = [];
     const emitUpdate = (event: AgentSessionEvent): void => {
-      if (
-        event.type === "tool.started"
-        || event.type === "tool.progress"
-        || event.type === "tool.completed"
-        || event.type === "tool.failed"
-      ) facts.observeToolEvent(event);
       pendingEvents.push(event);
     };
     let observedSteps = 0;
@@ -985,7 +905,7 @@ export class AgentSession {
           systemPrompt,
           replay.messages,
           completedStepsBeforeRun + observedSteps + 1,
-          facts.snapshot(false),
+          coordinator.getExecutionBudgetSnapshot(),
           undefined,
           runOptions.previousTerminals,
           coordinator.getExecutionCheckpoints(),
@@ -1010,45 +930,16 @@ export class AgentSession {
       {
         maxToolCalls: runBudget.maxToolCalls,
         maxRepeatedActions: runBudget.maxRepeatedActions,
-        initialToolCallCount: runOptions.initialRunFacts?.actualToolCallCount,
-        initialMaxRepeatedActionCount: runOptions.initialRunFacts?.maxRepeatedActionCount
+        initialToolCallCount: runOptions.initialToolBudget?.accountedToolCalls,
+        initialMaxRepeatedActionCount: runOptions.initialToolBudget?.maxRepeatedActionCount
       },
       persistToolResultCheckpoint
     );
     coordinatorRef.current = coordinator;
 
-    const verificationCommandExecutor = createControlledAcceptanceCommandExecutor({
-      workspaceRoot: this.options.workspaceRoot,
-      ignore: this.options.config.workspace.ignore,
-      sandbox: this.options.config.sandbox,
-      permissionManager,
-      sessionId: this.recorder.sessionId,
-      confirmPermission,
-      maxConcurrency: this.options.config.agent.maxConcurrentTools,
-      maxQueuedCommands: this.options.config.agent.maxQueuedToolCalls,
-      beforeCommandExecution: async () => await captureWorkspaceBaseline()
-    });
-    const completionGate = new CompletionGate({
-      verifier: createCompletionGateVerifier({
-        workspaceRoot: this.options.workspaceRoot,
-        ignore: this.options.config.workspace.ignore,
-        managedProcesses: this.options.managedProcesses,
-        commandExecutor: verificationCommandExecutor
-      }),
-      listTodos: () => this.options.todoStore?.list() ?? [],
-      listRequestedChecks: () => [
-        ...(runOptions.verificationChecks ?? []).map((check) => ({ ...check })),
-        ...(this.options.completionState?.listChecks() ?? [])
-      ],
-      blockedState: () => this.options.completionState?.getBlocked(),
-      onVerification: (verification) => facts.recordVerification(verification)
-    });
-
     const nativeContext: AgentContext = { systemPrompt, messages: [...messages], tools: [] };
     nativeContext.tools = activeModelSettings.model.supportsTools === false ? [] : coordinator.createAgentTools();
     this.contextMemory.recordToolSchema(nativeContext.tools);
-    let completionDecision: CompletionDecision | undefined;
-    let pendingSteering: AgentMessage[] = [];
     let lastAssistant: AgentAssistantMessage | undefined;
     let newMessages: AgentMessage[] = [];
     let finalContextMessages: AgentMessage[] = [...messages];
@@ -1062,6 +953,7 @@ export class AgentSession {
     const stepUsageRecords: SessionUsage[] = [];
     let streamFailure: string | undefined;
     let streamFailureReported = false;
+    let hardStepLimitReached = false;
     let softLimitWarningInjected = completedStepsBeforeRun >= runBudget.softStepLimit;
     let contextRecoveryAttempts = 0;
 
@@ -1141,51 +1033,19 @@ export class AgentSession {
               ...prunedMessages,
               {
                 role: "user",
-                content: "## Biny run budget\n\nThe soft limit of provider steps has been reached. Review unfinished work, avoid repeated actions, run the necessary checks, and converge without claiming completion early."
+                content: "## Biny run budget\n\nThe soft provider-step limit has been reached. Continue only if more work is needed for the user's request, and avoid repeating completed actions."
               }
             ];
           }
           return prunedMessages;
         },
         getSteeringMessages: async () => {
-          const next = [
-            ...pendingSteering,
-            ...this.takeQueuedRunMessages(messageQueues, "steer", lastAssistant, referenceByMessage)
-          ];
-          pendingSteering = [];
-          return next;
+          return this.takeQueuedRunMessages(messageQueues, "steer", lastAssistant, referenceByMessage);
         },
         getFollowUpMessages: async () => {
           const next = this.takeQueuedRunMessages(messageQueues, "followUp", lastAssistant, referenceByMessage);
           if (!next.length) messageQueues.accepting = false;
           return next;
-        },
-        shouldStopAfterTurn: async (turn) => {
-          // 含工具调用的 assistant 后必须继续一步，让模型消费结构化结果并形成答复。
-          if (turn.message.content.some((part) => part.type === "toolCall")) return false;
-          await coordinator.waitForIdle();
-          await refreshRunFacts(
-            facts,
-            workspaceBaseline,
-            this.options.workspaceRoot,
-            this.options.config.workspace.ignore,
-            this.options.managedProcesses
-          );
-          const decision = await completionGate.decide(facts.snapshot(abortSignal.aborted), {
-            steps: completedStepsBeforeRun + observedSteps,
-            softStepLimit: runBudget.softStepLimit,
-            hardStepLimit: runBudget.hardStepLimit,
-            maxToolCalls: runBudget.maxToolCalls,
-            maxCompletionContinuations: runBudget.maxCompletionContinuations,
-            maxRepeatedActions: runBudget.maxRepeatedActions
-          }, abortSignal);
-          if (decision.kind === "continue") {
-            pendingSteering.push(decision.feedback);
-            return false;
-          }
-          completionDecision = decision;
-          // Loop 自然退出前还要检查 follow-up 队列；没有排队消息时才真正结束。
-          return false;
         }
       }, abortSignal);
 
@@ -1278,7 +1138,7 @@ export class AgentSession {
                 systemPrompt,
                 event.messages,
                 completedStepsBeforeRun + observedSteps,
-                facts.snapshot(false),
+                coordinator.getExecutionBudgetSnapshot(),
                 undefined,
                 runOptions.previousTerminals,
                 coordinator.getExecutionCheckpoints(),
@@ -1303,6 +1163,9 @@ export class AgentSession {
             streamFailure ??= event.error;
             streamFailureReported = true;
             yield { type: "error", message: event.error, fatal: true };
+          } else if (event.reason === "step_limit") {
+            hardStepLimitReached = true;
+            yield { type: "error", message: event.error };
           } else {
             yield { type: "error", message: event.error };
           }
@@ -1315,17 +1178,6 @@ export class AgentSession {
       await coordinator.waitForIdle();
       if (reasoningActive) yield { type: "reasoning.completed" };
       if (streamFailure) throw new Error(streamFailure);
-      if (!completionDecision) {
-        completionDecision = {
-          kind: "incomplete",
-          reason: "hard_step_limit",
-          summary: `The run reached its hard limit of ${String(runBudget.hardStepLimit)} provider steps.`,
-          resumable: true
-        };
-      }
-      const finalDecision = completionDecision;
-      if (!finalDecision || finalDecision.kind === "continue") throw new Error("Native completion gate returned an unconsumed continuation.");
-
       const currentUserMessage = messages.at(-1);
       const finalMessages = runOptions.continueFrom?.length || contextRecoveryAttempts > 0
         ? finalContextMessages
@@ -1363,8 +1215,8 @@ export class AgentSession {
         relatedUsage: this.takeRelatedUsage(),
         contextState: this.contextMemory.snapshot()
       });
-      let outcome = completionOutcome(
-        finalDecision,
+      let outcome = nativeTurnOutcome(
+        hardStepLimitReached,
         content,
         lastAssistant?.stopReason,
         completedStepsBeforeRun + observedSteps,
@@ -1381,7 +1233,7 @@ export class AgentSession {
             systemPrompt,
             finalMessages,
             0,
-            facts.snapshot(false),
+            coordinator.getExecutionBudgetSnapshot(),
             {
               status: outcome.status,
               stopReason: outcome.stopReason,
@@ -1525,7 +1377,6 @@ export class AgentSession {
       this.contextMessageReferences = replay.messageReferences.map((reference) => ({ ...reference }));
       this.nextSessionMessageIndex = replay.totalMessageCount;
       await this.options.todoStore?.useSession(replacementRecorder.sessionId);
-      restoreCompletionState(this.options.completionState, replay.events);
       this.recorder = replacementRecorder;
       this.turnStore = new TurnStore(this.persistenceRoot(), replacementRecorder.sessionId);
       return { ...replay, messages, filePath, sessionId: replacementRecorder.sessionId };
@@ -2051,10 +1902,7 @@ export class AgentSession {
     return this.unpersistedRelatedUsage.splice(0, this.unpersistedRelatedUsage.length);
   }
 
-  private runtimeContext(
-    runOptions: AgentRunOptions,
-    beforeWorkspaceMutation?: () => Promise<void>
-  ): AgentRuntimeContext {
+  private runtimeContext(runOptions: AgentRunOptions): AgentRuntimeContext {
     const model = this.options.modelManager?.getModel() ?? this.options.model;
     if (!model) throw new Error("Native model runtime is not configured.");
     return {
@@ -2067,7 +1915,6 @@ export class AgentSession {
       permissionManager: this.options.permissionManager,
       confirmPermission: runOptions.confirmPermission,
       createCheckpoint: this.options.createCheckpoint,
-      beforeWorkspaceMutation,
       quarantineExternalTool: (tool, toolCallId, settlement) => {
         if (this.lingeringExternalTools.has(settlement)) return;
         this.lingeringExternalTools.set(settlement, { tool, toolCallId });
@@ -2232,52 +2079,38 @@ function doneEvent(outcome: AgentTurnOutcome): Extract<AgentSessionEvent, { type
   };
 }
 
-function completionOutcome(
-  decision: Exclude<CompletionDecision, { kind: "continue" }>,
+function nativeTurnOutcome(
+  hardStepLimitReached: boolean,
   output: string,
   finishReason: string | undefined,
   steps: number,
   usage?: SessionUsage
 ): AgentTurnOutcome {
-  if (decision.kind === "complete") {
-    return { status: "completed", stopReason: "completion_gate", finishReason, steps, output, usage };
-  }
-  if (decision.kind === "blocked") {
-    return {
-      status: "blocked",
-      stopReason: "blocked",
-      finishReason,
-      steps,
-      output,
-      usage,
-      error: decision.summary,
-      resumable: decision.reason !== "missing_user_input" && decision.reason !== "unsafe_action_required",
-      blockedReason: decision.reason,
-      requiredAction: decision.requiredAction,
-      affectedTodoIds: decision.affectedTodoIds
-    };
-  }
-  if (decision.kind === "incomplete") {
+  if (hardStepLimitReached) {
     return {
       status: "incomplete",
-      stopReason: decision.reason === "model_output_limit" ? "model_length" : decision.reason,
+      stopReason: "hard_step_limit",
       finishReason,
       steps,
       output,
       usage,
-      error: decision.summary,
-      resumable: decision.resumable
+      error: "The run reached its configured hard provider-step limit.",
+      resumable: true
     };
   }
-  return {
-    status: "cancelled",
-    stopReason: "cancelled",
-    finishReason,
-    steps,
-    output,
-    usage,
-    error: "Current turn was cancelled."
-  };
+  if (finishReason === "length") {
+    return {
+      status: "incomplete",
+      stopReason: "model_length",
+      finishReason,
+      steps,
+      output,
+      usage,
+      error: "The model reached its output limit before finishing the response.",
+      resumable: true
+    };
+  }
+  return { status: "completed", stopReason: "model_stop", finishReason, steps, output, usage };
 }
 
 function failedTurn(
@@ -2308,206 +2141,6 @@ function cancelledTurn(message: string, steps: number): AgentTurnOutcome {
   };
 }
 
-function createCompletionGateVerifier(options: {
-  workspaceRoot: string;
-  ignore?: string[];
-  managedProcesses?: ManagedProcessInspector;
-  commandExecutor: AcceptanceCommandExecutor;
-}): CompletionGateVerifier {
-  const verifier = new AcceptanceVerifier({
-    workspaceRoot: options.workspaceRoot,
-    ignore: options.ignore,
-    managedProcesses: options.managedProcesses,
-    commandExecutor: options.commandExecutor
-  });
-  let plan: AgentVerificationPlan = { required: false, criteria: [], reasons: [] };
-  return {
-    derive: async (
-      facts: RunFacts,
-      requestedChecks: readonly StructuredVerificationCheck[]
-    ): Promise<CompletionVerification> => {
-      const checks: NonNullable<AgentVerificationFacts["checks"]> = requestedChecks.flatMap((check) => {
-        if (check.kind !== "command" || !check.command) return [];
-        return [{
-          id: check.id,
-          command: check.command,
-          cwd: check.cwd,
-          timeoutMs: undefined,
-          description: check.description
-        }];
-      });
-      const processes = new Map<string, NonNullable<AgentVerificationFacts["startedProcesses"]>[number]>();
-      for (const processId of facts.startedProcessIds) {
-        const process = facts.activeProcesses.find((candidate) => candidate.processId === processId);
-        const readinessType = processReadinessType(process?.readiness);
-        processes.set(processId, {
-          processId,
-          cwd: process?.cwd,
-          url: process?.url,
-          readinessType,
-          requireHttpReadiness: readinessType === "http" ? true : undefined,
-          description: process?.command
-        });
-      }
-      for (const check of requestedChecks) {
-        if (check.kind !== "managed_process" || !check.processId) continue;
-        processes.set(check.processId, {
-          processId: check.processId,
-          cwd: check.cwd,
-          url: undefined,
-          readinessType: undefined,
-          requireHttpReadiness: undefined,
-          description: check.description
-        });
-      }
-      plan = await deriveAgentVerificationPlan(
-        options.workspaceRoot,
-        {
-          changedFiles: facts.changedFiles,
-          workspaceMutationObserved: facts.workspaceMutationObserved,
-          userRequestedVerification: facts.userRequestedVerification,
-          checks,
-          startedProcesses: [...processes.values()]
-        },
-        options.ignore
-      );
-      return {
-        required: plan.required,
-        checks: requestedChecks.map((check) => ({ ...check }))
-      };
-    },
-    verify: async (
-      _requirement: CompletionVerification,
-      signal?: AbortSignal
-    ): Promise<VerificationFact> => {
-      const result = await verifier.verifyCriteria(plan.criteria, {
-        signal,
-        requireCriteria: true
-      });
-      return {
-        passed: result.passed,
-        summary: result.summary,
-        evidence: result.evidence.map((evidence) => ({
-          id: evidence.criterionId,
-          passed: evidence.passed,
-          summary: evidence.summary,
-          details: evidence.details
-        }))
-      };
-    }
-  };
-}
-
-async function refreshRunFacts(
-  facts: RunFactsCollector,
-  workspaceBaseline: Promise<WorkspaceStateSnapshot> | undefined,
-  workspaceRoot: string,
-  ignore: string[],
-  managedProcesses?: ManagedProcessInspector
-): Promise<void> {
-  if (workspaceBaseline) {
-    try {
-      const [before, after] = await Promise.all([
-        workspaceBaseline,
-        captureWorkspaceState(workspaceRoot, ignore)
-      ]);
-      facts.setChangedFiles(diffWorkspaceStates(before, after).changedFiles);
-    } catch {
-      // 已知文件工具的路径已经由 RunFactsCollector 记录；快照失败时保留这些事实。
-    }
-  }
-  if (!managedProcesses) return;
-  let processes: Awaited<ReturnType<ManagedProcessInspector["listProcesses"]>>;
-  try {
-    processes = await managedProcesses.listProcesses();
-  } catch {
-    return;
-  }
-  facts.setActiveProcesses(processes.map((process): ProcessFact => ({
-    processId: process.processId,
-    state: process.state,
-    command: process.command,
-    cwd: process.cwd,
-    url: process.url,
-    readiness: process.readiness
-  })));
-}
-
-function processReadinessType(value: unknown): "http" | "tcp" | "log" | undefined {
-  if (typeof value !== "object" || value === null || !("type" in value)) return undefined;
-  const type = value.type;
-  return type === "http" || type === "tcp" || type === "log" ? type : undefined;
-}
-
-function restoreCompletionState(
-  store: CompletionStateStore | undefined,
-  events: SessionReplay["events"]
-): void {
-  if (!store) return;
-  store.reset();
-  for (const event of events) {
-    if (event.type === "user_message" && !event.auditOnly) {
-      store.reset();
-      continue;
-    }
-    if (event.type !== "tool_result") continue;
-    if (event.tool === "report_blocked") {
-      const blocked = readBlockedState(event.result);
-      if (blocked) store.reportBlocked(blocked);
-    } else if (event.tool === "request_verification") {
-      const checks = readVerificationChecks(event.result);
-      if (checks) store.replaceChecks(checks);
-    }
-  }
-}
-
-function readBlockedState(value: unknown): ReturnType<CompletionStateStore["getBlocked"]> {
-  if (!isRecord(value)) return undefined;
-  const reason = value.reason;
-  if (
-    reason !== "missing_user_input"
-    && reason !== "waiting_for_approval"
-    && reason !== "permission_denied"
-    && reason !== "missing_dependency"
-    && reason !== "environment_unavailable"
-    && reason !== "external_service_failure"
-    && reason !== "unsafe_action_required"
-  ) return undefined;
-  if (typeof value.summary !== "string" || !value.summary) return undefined;
-  const requiredAction = typeof value.requiredAction === "string" ? value.requiredAction : undefined;
-  const affectedTodoIds = Array.isArray(value.affectedTodoIds)
-    ? value.affectedTodoIds.filter((item): item is string => typeof item === "string")
-    : undefined;
-  return {
-    reason,
-    summary: value.summary,
-    requiredAction,
-    affectedTodoIds
-  };
-}
-
-function readVerificationChecks(value: unknown): StructuredVerificationCheck[] | undefined {
-  if (!isRecord(value) || !Array.isArray(value.checks)) return undefined;
-  const checks = value.checks.flatMap((item): StructuredVerificationCheck[] => {
-    if (
-      !isRecord(item)
-      || item.kind !== "command"
-      || typeof item.id !== "string"
-      || typeof item.description !== "string"
-      || typeof item.command !== "string"
-    ) return [];
-    return [{
-      id: item.id,
-      kind: "command",
-      description: item.description,
-      command: item.command,
-      cwd: typeof item.cwd === "string" ? item.cwd : undefined,
-      processId: undefined
-    }];
-  });
-  return checks.length ? checks : undefined;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -2532,37 +2165,29 @@ function boundedCandidateText(value: string, maxCharacters: number): string {
     : `${characters.slice(0, Math.max(0, maxCharacters - 1)).join("")}…`;
 }
 
-function readRunFacts(value: unknown): RunFacts | undefined {
+function readToolBudget(value: unknown): ToolExecutionBudgetSnapshot | undefined {
   if (!isRecord(value)) return undefined;
   if (
-    !Number.isSafeInteger(value.actualToolCallCount)
-    || typeof value.actualToolCallCount !== "number"
-    || value.actualToolCallCount < 0
-    || !Array.isArray(value.changedFiles)
-    || !Array.isArray(value.executedCommands)
-    || !Array.isArray(value.failedToolCalls)
-    || !Number.isSafeInteger(value.pendingApprovals)
-    || typeof value.pendingApprovals !== "number"
-    || !Number.isSafeInteger(value.activeToolCalls)
-    || typeof value.activeToolCalls !== "number"
-    || !Array.isArray(value.activeProcesses)
-    || !Array.isArray(value.startedProcessIds)
-    || !Array.isArray(value.verificationResults)
-    || typeof value.userCancelled !== "boolean"
+    !Number.isSafeInteger(value.accountedToolCalls)
+    || typeof value.accountedToolCalls !== "number"
+    || value.accountedToolCalls < 0
     || !Number.isSafeInteger(value.maxRepeatedActionCount)
     || typeof value.maxRepeatedActionCount !== "number"
+    || value.maxRepeatedActionCount < 0
   ) return undefined;
-  return structuredClone(value) as unknown as RunFacts;
+  return {
+    accountedToolCalls: value.accountedToolCalls,
+    maxRepeatedActionCount: value.maxRepeatedActionCount
+  };
 }
 
-function restartRunFactsBudget(facts: RunFacts | undefined, restartBudget: boolean): RunFacts | undefined {
-  if (!facts || !restartBudget) return facts;
+function restartToolBudget(
+  budget: ToolExecutionBudgetSnapshot | undefined,
+  restartBudget: boolean
+): ToolExecutionBudgetSnapshot | undefined {
+  if (!budget || !restartBudget) return budget;
   return {
-    ...facts,
-    actualToolCallCount: 0,
-    pendingApprovals: 0,
-    activeToolCalls: 0,
-    userCancelled: false,
+    accountedToolCalls: 0,
     maxRepeatedActionCount: 0
   };
 }

@@ -31,7 +31,7 @@ async function testChatUsesOrdinaryAgentLoop(): Promise<void> {
       modes.push(options.mode);
       yield done({
         status: "completed",
-        stopReason: "completion_gate",
+        stopReason: "model_stop",
         finishReason: "stop",
         steps: 1,
         output: "direct answer"
@@ -71,7 +71,7 @@ async function testNaturalLanguageNeverSelectsAnotherExecutionFramework(): Promi
       };
       yield done({
         status: "completed",
-        stopReason: "completion_gate",
+        stopReason: "model_stop",
         finishReason: "stop",
         steps: 2,
         output: "ordinary agent loop completed"
@@ -109,7 +109,7 @@ async function testExecutionBridgesCliPermission(): Promise<void> {
       assert.equal(result?.approved, true);
       yield done({
         status: "completed",
-        stopReason: "completion_gate",
+        stopReason: "model_stop",
         steps: 1,
         output: "permission accepted"
       });
@@ -149,7 +149,7 @@ async function testExecutionCleansPermissionListenerWhenSubmitFails(): Promise<v
       }
       yield done({
         status: "completed",
-        stopReason: "completion_gate",
+        stopReason: "model_stop",
         steps: 1,
         output: input
       });
@@ -195,7 +195,7 @@ async function testExecutionUsesPromptBoundary(): Promise<void> {
       promptCalls += 1;
       yield done({
         status: "completed",
-        stopReason: "completion_gate",
+        stopReason: "model_stop",
         steps: 1,
         output: "prompt boundary"
       });

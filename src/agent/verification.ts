@@ -1,8 +1,8 @@
 /**
- * 普通 Agent Loop 的确定性验证基础层。
+ * 独立验收 harness 的确定性验证规划层。
  *
- * 这里只消费结构化运行事实：实际变更的文件、调用方声明的检查和本回合启动的受管进程。
- * 用户自然语言不参与判断，因此中文、英文或隐含表达不会改变是否进入验证。
+ * 这里只消费结构化运行事实：实际变更的文件、调用方声明的检查和受管进程。
+ * 它不接入普通 AgentSession 的自然停止路径；只有显式调用该 harness 时才会运行。
  */
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
@@ -58,7 +58,7 @@ export interface StartedProcessVerificationFact {
 
 export interface AgentVerificationFacts {
   changedFiles: readonly string[];
-  /** 可写工具已获准执行但精确 diff 尚不可用时，仍必须发现并运行项目检查。 */
+  /** 本回合是否观察到可写工具执行；仅作为运行事实保留，不会单独触发验证。 */
   workspaceMutationObserved?: boolean;
   /** 由宿主/API 显式提供，不从用户文本关键词推断。 */
   userRequestedVerification?: boolean;
@@ -89,9 +89,12 @@ export interface AgentRunVerificationResult {
 
 /**
  * 从运行事实派生检查：
- * - 有 changedFiles 时，运行工作区实际声明的 package/Maven 检查；
  * - 结构化 checks 始终执行；
+ * - 只有宿主显式要求确定性验证时，才自动发现项目检查并检查本回合启动的进程；
  * - 本回合启动的进程按精确 processId 检查，不能由旧进程冒充。
+ *
+ * 普通工作区变更本身不会自动触发 typecheck/test/lint/build。调用方只有在明确需要
+ * 独立验收时，才应传入显式验证事实或结构化 checks。
  */
 export async function deriveAgentVerificationPlan(
   workspaceRoot: string,
@@ -107,21 +110,17 @@ export async function deriveAgentVerificationPlan(
     criteria.push(...checks.map(commandCriterion));
   }
 
-  if (
-    facts.workspaceMutationObserved === true
-    || facts.changedFiles.some((filePath) => filePath.trim())
-  ) {
+  if (facts.userRequestedVerification === true) {
     const discovered = await discoverProjectChecks(workspaceRoot, ignore);
     if (discovered.length) {
-      reasons.push("workspace_changed_with_discovered_checks");
+      reasons.push("explicit_verification_with_discovered_checks");
       criteria.push(...discovered.map(commandCriterion));
     }
-  }
-
-  const startedProcesses = facts.startedProcesses ?? [];
-  if (startedProcesses.length) {
-    reasons.push("started_managed_process");
-    criteria.push(...startedProcesses.map(processCriterion));
+    const startedProcesses = facts.startedProcesses ?? [];
+    if (startedProcesses.length) {
+      reasons.push("started_managed_process");
+      criteria.push(...startedProcesses.map(processCriterion));
+    }
   }
 
   const deduplicated = deduplicateCriteria(criteria);

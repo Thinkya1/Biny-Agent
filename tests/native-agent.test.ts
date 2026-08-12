@@ -118,6 +118,7 @@ async function main(): Promise<void> {
     const done = events.find((event): event is Extract<AgentSessionEvent, { type: "done" }> => event.type === "done");
     assert.equal(requestCount, 2);
     assert.equal(done?.outcome.status, "completed");
+    assert.equal(done?.outcome.stopReason, "model_stop");
     assert.equal(done?.content, "native answer");
     assert.equal(events.some((event) => event.type === "assistant.delta" && event.content === "native answer"), true);
     assert.equal(events.some((event) => event.type === "tool.completed" && event.tool === "echo"), true);
@@ -575,6 +576,9 @@ async function testModelSwitchRecalculatesBudget(): Promise<void> {
 
   await manager.switchModel("large", "off");
   assert.equal(manager.getContextBudget().contextWindow, 1_000_000);
+  const reloadedManager = new ModelManager("/tmp/biny-model-switch-test", stored, configStore);
+  assert.equal(reloadedManager.getInfo().modelAlias, "large");
+  assert.equal(reloadedManager.getInfo().thinking, "off");
 }
 
 async function testModelSwitchDoesNotPersistInferredMetadata(): Promise<void> {

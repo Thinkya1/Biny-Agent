@@ -22,6 +22,14 @@ Do not modify files unless the user asks for a change.
   plan: renderPlanModePrompt("read-only")
 } as const;
 
+const AUTONOMY_AND_BOUNDARIES_PROMPT = `
+For every request, first identify the user's desired outcome, constraints, and explicit success criteria.
+Use those criteria to choose the smallest useful set of actions, then stop when the requested outcome is addressed and report what the available evidence confirms.
+Do not invent extra acceptance requirements or run broad project validation merely because files changed; run checks when the user asks for them, the task explicitly requires them, or a tool workflow requires them.
+Treat the current permission mode as the approval boundary: in-scope local actions may proceed according to that mode, while external side effects, destructive or costly actions, and scope-expanding work require approval or clarification. The runtime permission policy remains authoritative even when a tool appears available.
+If the outcome, success criteria, or approval boundary is ambiguous, ask the user instead of guessing.
+`;
+
 export type PromptMode = keyof typeof MODE_PROMPTS;
 
 export interface PromptTool {
@@ -55,6 +63,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
     (options.mode === "plan"
       ? renderPlanModePrompt(options.permissionMode ?? "read-only")
       : MODE_PROMPTS[options.mode]).trim(),
+    [
+      AUTONOMY_AND_BOUNDARIES_PROMPT.trim(),
+      `Current permission mode: ${options.permissionMode ?? "runtime-managed"}.`
+    ].join("\n"),
     options.personalization ? personalizationPrompt(options.personalization) : "",
     `Current working directory: ${normalizePath(options.cwd)}`,
     stableRuntimePrompt(options.tools ?? []),

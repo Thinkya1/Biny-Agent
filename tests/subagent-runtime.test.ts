@@ -933,7 +933,7 @@ async function testIncompleteTurnDoesNotEmitRunCompleted(): Promise<void> {
 async function testCliRejectsIncompleteAndFailedOutcomes(): Promise<void> {
   assert.doesNotThrow(() => assertCompletedCliRun({
     status: "completed",
-    stopReason: "completion_gate",
+    stopReason: "model_stop",
     finishReason: "stop",
     steps: 1,
     output: "done"
@@ -1369,7 +1369,7 @@ function completed(content: string): Extract<AgentSessionEvent, { type: "done" }
     content,
     outcome: {
       status: "completed",
-      stopReason: "completion_gate",
+      stopReason: "model_stop",
       finishReason: "stop",
       steps: 1,
       output: content

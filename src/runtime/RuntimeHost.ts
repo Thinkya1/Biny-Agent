@@ -1099,12 +1099,22 @@ export class RuntimeHostServer {
         return this.commands.agent.listModels();
       case "agent.refresh-model":
         this.assertRevision(payload);
-        return await this.runtime.runExclusiveOperation("refresh_model", async () => await this.commands.agent.refreshModelFromDisk());
+        return await this.runtime.runExclusiveOperation("refresh_model", async () => {
+          const info = await this.commands.agent.refreshModelFromDisk();
+          this.publishSnapshot();
+          return info;
+        });
       case "agent.switch-model":
         this.assertRevision(payload);
         return await this.runtime.runExclusiveOperation(
           "switch_model",
-          async () => await this.commands.agent.switchModel(requiredString(payload.alias, "alias"), readThinking(payload.thinking))
+          async () => {
+            const info = await this.commands.agent.switchModel(requiredString(payload.alias, "alias"), readThinking(payload.thinking));
+            // 模型信息不一定伴随回合事件变化；主动广播才能让已连接的 App/TUI
+            // 共享同一份当前模型和思考深度，而不是只有发起请求的一侧拿到新值。
+            this.publishSnapshot();
+            return info;
+          }
         );
       case "agent.permission-mode":
         this.assertRevision(payload);
@@ -1320,6 +1330,10 @@ export class RuntimeHostServer {
     for (const connection of this.connections) {
       if (connection.authenticated && connection.subscribed) this.sendEvent(connection, sequence, update);
     }
+  }
+
+  private publishSnapshot(): void {
+    this.publish({ snapshot: this.runtime.getSnapshot() });
   }
 
   private sendEvent(connection: HostConnection, sequence: number, update: AgentRuntimeUpdate): void {
@@ -2787,16 +2801,11 @@ function isTransientHostError(error: unknown): boolean {
 function readRecoveryStopReason(value: unknown): AgentRunOutcome["stopReason"] {
   if (
     value === "model_stop"
-    || value === "completion_gate"
     || value === "step_limit"
     || value === "hard_step_limit"
     || value === "tool_call_limit"
-    || value === "completion_continuation_limit"
-    || value === "no_progress_after_continuation"
     || value === "repeated_action_limit"
-    || value === "tool_pending"
     || value === "timeout"
-    || value === "verification_failed"
     || value === "model_length"
     || value === "content_filter"
     || value === "provider_error"

@@ -530,9 +530,6 @@ export class ToolExecutionCoordinator {
                 : undefined;
               const blocked = await this.runBeforeToolHooks(call.name, prepared.args, signal);
               if (blocked) return blocked;
-              if (hasWritableAccess(prepared.execution.accesses ?? ToolAccesses.all())) {
-                await this.context.beforeWorkspaceMutation?.().catch(() => undefined);
-              }
               await this.ensureCheckpoint(toolDefinition.risk, call.name);
               return await this.executeResolvedTool(
                 call,
@@ -1192,14 +1189,6 @@ function exposeExecutionMetadata(
     };
   }
   return { result, executionStatus: status, operationId, evidence };
-}
-
-function hasWritableAccess(accesses: RunnableToolExecution["accesses"]): boolean {
-  return accesses?.some((access) =>
-    access.kind === "all"
-    || access.operation === "write"
-    || access.operation === "readwrite"
-  ) ?? false;
 }
 
 function formatToolError(toolName: string, error: unknown): string {

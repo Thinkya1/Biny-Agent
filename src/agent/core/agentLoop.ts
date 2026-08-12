@@ -2,8 +2,8 @@
  * Biny 自有的 Agent Loop。
  *
  * Provider 只负责输出归一化的 ModelStreamEvent；工具由 Loop 显式校验和执行，
- * 不再把多步控制权交给模型 SDK。这样权限、预算、审计和 Completion Gate 都有
- * 明确的介入点。
+ * 不再把多步控制权交给模型 SDK。这样权限、预算和审计都有明确的介入点，
+ * 普通回合在模型自然停止且没有 follow-up 时直接结束。
  */
 import { AsyncEventQueue } from "../../runtime/AsyncEventQueue.js";
 import { validateJsonSchema } from "../../tools/schema.js";
@@ -72,7 +72,12 @@ async function* runLoop(
     while (hasMoreToolCalls || pendingMessages.length > 0) {
       signal?.throwIfAborted();
       if (steps >= config.maxSteps) {
-        yield { type: "error", error: `Agent reached its ${String(config.maxSteps)}-step limit.`, fatal: false };
+        yield {
+          type: "error",
+          error: `Agent reached its ${String(config.maxSteps)}-step limit.`,
+          fatal: false,
+          reason: "step_limit"
+        };
         return;
       }
       yield { type: "turn_start" };

@@ -1,6 +1,5 @@
 import type { AgentRunMode, AgentSessionInfo } from "../agent/AgentSession.js";
-import type { BlockedReason } from "../agent/completionGate.js";
-import type { AgentSessionUpdate, AgentTurnStopReason } from "../agent/types.js";
+import type { AgentSessionUpdate, AgentTurnStopReason, BlockedReason } from "../agent/types.js";
 import type { ContextStatus } from "../agent/context/types.js";
 import type { PermissionGrantScope, PermissionMode } from "../permission/PermissionManager.js";
 import type { SessionUsage } from "../session/metadata.js";

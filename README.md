@@ -46,6 +46,8 @@ pnpm dev
 
 桌面端在 **设置 → 模型** 中管理模型。CLI、TUI 和 Desktop 共用全局 `~/.biny/config.json`；项目运行参数可在 `<project>/.biny/settings.json` 中覆盖。API key 不写入 README、代码或示例快照：macOS 使用 Keychain，其他平台使用 `apiKeyEnv` 环境变量。
 
+CLI/TUI 的模型请求会自动读取 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`；在 macOS 未设置这些环境变量时，会继续读取系统 HTTP/HTTPS 代理设置。没有代理时保持直连，不需要用户为终端额外导出代理变量。
+
 最小配置示例：
 
 ```json
@@ -74,6 +76,8 @@ pnpm dev
   }
 }
 ```
+
+普通 Agent 回合在模型自然停止后直接结束；工具调用完成、权限审批和取消分别由各自的运行层处理。工作区发生修改不会自动触发 `typecheck`、`test`、`lint` 或 `build`，独立验收只在调用方明确使用 harness 时运行。运行时提示词会要求模型先识别任务目标、约束和足够完成的标准：范围内的本地操作按当前权限模式执行，外部副作用、破坏性或高成本操作，以及超出请求范围的动作需要审批或澄清。工具调用次数、重复动作和 provider step 仍由运行时预算保护。
 
 ## 开发
 

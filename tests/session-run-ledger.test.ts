@@ -44,7 +44,7 @@ try {
   const terminalEvent = await recorder.recordAndFlush({
     type: "turn_status",
     status: "completed",
-    stopReason: "completion_gate",
+    stopReason: "model_stop",
     finishReason: "stop",
     steps: 2,
     summary: "done"
@@ -66,7 +66,7 @@ try {
   assert.equal(
     (await ledger.finish(canonicalRunId, {
       status: "completed",
-      stopReason: "completion_gate",
+      stopReason: "model_stop",
       finishReason: "stop",
       steps: 2,
       terminal: terminalEvent.runtime

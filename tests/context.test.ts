@@ -160,6 +160,9 @@ function testConversationBoundaryPrompt(): void {
   assert.match(prompt, /expert coding assistant operating inside Biny/u);
   assert.match(prompt, /Available tools:\n\(none\)/u);
   assert.match(prompt, /only the latest user message as the active task/u);
+  assert.match(prompt, /desired outcome, constraints, and explicit success criteria/u);
+  assert.match(prompt, /external side effects, destructive or costly actions/u);
+  assert.match(prompt, /Current permission mode: runtime-managed/u);
   assert.match(prompt, /Current working directory: \/workspace/u);
   assert.doesNotMatch(prompt, /Search the public web/u);
   const webTool = {

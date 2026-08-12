@@ -88,7 +88,7 @@ async function testSessionTerminalProjectionRecovery(): Promise<void> {
     const terminal = await recorder.recordAndFlush({
       type: "turn_status",
       status: "completed",
-      stopReason: "completion_gate",
+      stopReason: "model_stop",
       steps: 2
     });
     await recorder.close();
@@ -238,7 +238,7 @@ async function testTerminalCommitOrdering(): Promise<void> {
       assert.equal(options.runId, "run-terminal");
       assert.equal(typeof options.turnId, "string");
       yield { type: "status", status: "completed" };
-      yield done({ status: "completed", stopReason: "completion_gate", finishReason: "stop", steps: 1, output: "done" });
+      yield done({ status: "completed", stopReason: "model_stop", finishReason: "stop", steps: 1, output: "done" });
     }, log), { runLedger });
     const hostEvents: string[] = [];
     runtime.subscribe((update) => {
@@ -330,7 +330,7 @@ async function testDuplicateRunRetryDoesNotExecute(): Promise<void> {
   try {
     const commandRuntime = createFakeCommandRuntime(root, async function* (_input, _options) {
       executions += 1;
-      yield done({ status: "completed", stopReason: "completion_gate", steps: 1, output: "once" });
+      yield done({ status: "completed", stopReason: "model_stop", steps: 1, output: "once" });
     }, []);
     const firstRuntime = new InteractiveAgentRuntime(commandRuntime, { runtimeAuthority: authority });
     const first = await firstRuntime.submitPrompt("once", "chat", [], { runId: "duplicate-run", messageId: "first-message" }).completion;

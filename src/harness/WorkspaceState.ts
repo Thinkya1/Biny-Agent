@@ -43,7 +43,7 @@ export async function workspaceStateDigest(workspaceRoot: string, ignore: string
 /**
  * 捕获可比较的工作区文件快照。
  *
- * 路径、大小和内容摘要同时保留，Completion Gate 因此既能判断“工作区是否变化”，也能拿到
+ * 路径、大小和内容摘要同时保留，独立验收 harness 因此既能判断“工作区是否变化”，也能拿到
  * 具体 changedFiles。内容总量超过预算后沿用旧指纹行为：继续记录路径和大小，但不再读取内容。
  */
 export async function captureWorkspaceState(

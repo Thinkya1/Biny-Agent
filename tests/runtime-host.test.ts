@@ -83,7 +83,7 @@ async function main(): Promise<void> {
         runId,
         timestamp: new Date().toISOString(),
         durationMs: 1,
-        stopReason: "completion_gate",
+        stopReason: "model_stop",
         steps: 1
       };
       runtime.publish({ event, snapshot: completedSnapshot });
@@ -93,7 +93,7 @@ async function main(): Promise<void> {
         completion: Promise.resolve({
           runId,
           status: "completed",
-          stopReason: "completion_gate",
+          stopReason: "model_stop",
           steps: 1,
           output: `done: ${input} (${mode})`,
           durationMs: 1
@@ -133,12 +133,22 @@ async function main(): Promise<void> {
     agent: {
       switchModel: async (_alias: string, thinking?: string) => {
         switchedThinking = thinking;
+        const nextThinking = thinking ?? "off";
+        currentSnapshot = {
+          ...currentSnapshot,
+          revision: currentSnapshot.revision + 1,
+          info: {
+            ...currentSnapshot.info,
+            thinking: nextThinking,
+            reasoningLabel: nextThinking === "max" ? "Max" : "Off"
+          }
+        };
         return {
           modelAlias: "test-model",
           provider: "test",
           modelLabel: "Test Model",
-          reasoningLabel: thinking === "max" ? "Max" : "Off",
-          thinking: thinking ?? "off"
+          reasoningLabel: nextThinking === "max" ? "Max" : "Off",
+          thinking: nextThinking
         };
       },
       getPersonalizationState: async () => personalizationState(),
@@ -223,9 +233,19 @@ async function main(): Promise<void> {
   assert.equal(submitted.runId.length > 0, true);
   assert.equal((await submitted.completion).status, "completed");
 
+  const modelUpdate = new Promise<AgentRuntimeUpdate>((resolve) => {
+    const unsubscribe = client.subscribe((update) => {
+      if (update.snapshot.info.thinking === "max") {
+        unsubscribe();
+        resolve(update);
+      }
+    });
+  });
   const switched = await client.switchModel("test-model", "max");
   assert.equal(switched.thinking, "max");
   assert.equal(switchedThinking, "max");
+  assert.equal((await modelUpdate).snapshot.info.thinking, "max", "模型切换必须广播给已连接的 TUI/App");
+  assert.equal(client.getSnapshot().info.thinking, "max");
 
   assert.equal((await client.getPersonalizationState()).catalogRevision, "catalog-revision-1");
   await client.updateChatPersonalization({ personality: "friendly" }, "catalog-revision-1");

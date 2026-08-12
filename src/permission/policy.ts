@@ -147,25 +147,6 @@ export function analyzePermissionRequest(input: AnalyzePermissionInput): Permiss
     };
   }
 
-  if (input.toolName === "report_blocked") {
-    return {
-      ...base(input),
-      actionType: "read",
-      riskLevel: "low",
-      reason: "records a structured blocker in the current agent turn"
-    };
-  }
-
-  if (input.toolName === "request_verification") {
-    // 此工具只登记命令文本；命令真正重跑时仍由 run_command 权限策略独立审批。
-    return {
-      ...base(input),
-      actionType: "read",
-      riskLevel: "low",
-      reason: "records deterministic checks for the current agent turn"
-    };
-  }
-
   if (input.toolName === "web_fetch") {
     // 目标地址已过私网/环回/云元数据校验，与 web_search 同级：只读、不改本地状态。
     return {

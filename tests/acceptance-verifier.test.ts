@@ -32,6 +32,7 @@ await testVerifierSelectsReadyManagedProcess();
 await testVerifierExecutesCommandsIndependently();
 await testCommandCriterionRequiresControlledExecutor();
 await testAutoDiscoveredCheckCannotBypassDefaultAsk();
+await testWorkspaceChangeDoesNotAutoVerify();
 await testControlledExecutorUsesApprovalSandboxAndAudit();
 await testLongCommandOutputKeepsBoundedSummaryAndFullAudit();
 
@@ -149,16 +150,12 @@ async function testVerificationPlanUsesFactsInsteadOfInputKeywords(): Promise<vo
     );
     assert.equal(plan.required, true);
     assert.equal(commands.includes("node explicit-check.js"), true);
-    assert.equal(commands.includes("pnpm run build"), true);
-    assert.equal(commands.includes("pnpm run test"), true);
-    assert.equal(commands.includes("pnpm run typecheck"), true);
-    assert.equal(commands.includes("pnpm run lint"), true);
-    assert.equal(commands.includes("./mvnw test"), true);
-    assert.equal(plan.criteria.some((criterion) =>
-      criterion.kind === "managed_process"
-      && criterion.processId === "process-123"
-      && criterion.requireHttpReadiness === true
-    ), true);
+    assert.equal(commands.includes("pnpm run build"), false);
+    assert.equal(commands.includes("pnpm run test"), false);
+    assert.equal(commands.includes("pnpm run typecheck"), false);
+    assert.equal(commands.includes("pnpm run lint"), false);
+    assert.equal(commands.includes("./mvnw test"), false);
+    assert.equal(plan.criteria.some((criterion) => criterion.kind === "managed_process"), false);
 
     const noFacts = await deriveAgentVerificationPlan(root, {
       changedFiles: [],
@@ -168,20 +165,15 @@ async function testVerificationPlanUsesFactsInsteadOfInputKeywords(): Promise<vo
     assert.equal(noFacts.required, false);
     assert.deepEqual(noFacts.criteria, []);
 
-    const explicitlyRequired = await verifyAgentRun({
-      workspaceRoot: root,
-      commandExecutor: trustedCommandExecutor(root),
-      facts: {
-        changedFiles: [],
-        userRequestedVerification: true,
-        checks: [],
-        startedProcesses: []
-      }
+    const explicitlyRequired = await deriveAgentVerificationPlan(root, {
+      changedFiles: [],
+      userRequestedVerification: true,
+      checks: [],
+      startedProcesses: []
     });
-    assert.equal(explicitlyRequired.plan.required, true);
-    assert.equal(explicitlyRequired.plan.reasons.includes("user_requested_verification"), true);
-    assert.equal(explicitlyRequired.verification?.passed, false);
-    assert.match(explicitlyRequired.verification?.summary ?? "", /no executable acceptance criteria/u);
+    assert.equal(explicitlyRequired.required, true);
+    assert.equal(explicitlyRequired.reasons.includes("user_requested_verification"), true);
+    assert.equal(explicitlyRequired.criteria.length > 0, true);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -196,6 +188,7 @@ async function testAgentRunVerificationExecutesStructuredChecksAndProcesses(): P
       commandExecutor: trustedCommandExecutor(root),
       facts: {
         changedFiles: [],
+        userRequestedVerification: true,
         checks: [{
           id: "structured-command",
           command: "node -e \"process.exit(0)\""
@@ -278,6 +271,7 @@ async function testAutoDiscoveredCheckCannotBypassDefaultAsk(): Promise<void> {
       workspaceRoot: root,
       facts: {
         changedFiles: ["src/changed.ts"],
+        userRequestedVerification: true,
         checks: [],
         startedProcesses: []
       },
@@ -303,6 +297,31 @@ async function testAutoDiscoveredCheckCannotBypassDefaultAsk(): Promise<void> {
       audit.find((event) => event.type === "command.failed")?.failureKind,
       "permission_required"
     );
+    await assert.rejects(fs.stat(marker), { code: "ENOENT" });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testWorkspaceChangeDoesNotAutoVerify(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-verifier-no-auto-"));
+  try {
+    const marker = path.join(root, "must-not-run.txt");
+    await fs.writeFile(path.join(root, "package.json"), JSON.stringify({
+      scripts: {
+        test: `node -e ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`)}`
+      }
+    }));
+    const result = await verifyAgentRun({
+      workspaceRoot: root,
+      facts: {
+        changedFiles: ["src/changed.ts"],
+        checks: [],
+        startedProcesses: []
+      }
+    });
+    assert.equal(result.plan.required, false);
+    assert.equal(result.verification, undefined);
     await assert.rejects(fs.stat(marker), { code: "ENOENT" });
   } finally {
     await fs.rm(root, { recursive: true, force: true });

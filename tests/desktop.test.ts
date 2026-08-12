@@ -2539,7 +2539,7 @@ function fakeCommandRuntime(requireFullYes = false, statusGate?: Promise<void>):
           content: "done",
           outcome: {
             status: "completed",
-            stopReason: "completion_gate",
+            stopReason: "model_stop",
             finishReason: "stop",
             steps: 1,
             output: "done"
@@ -2639,7 +2639,7 @@ function fakeCommandRuntime(requireFullYes = false, statusGate?: Promise<void>):
         content,
         outcome: {
           status: "completed",
-          stopReason: "completion_gate",
+          stopReason: "model_stop",
           finishReason: "stop",
           steps: 1,
           output: content

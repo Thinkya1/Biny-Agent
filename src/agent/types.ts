@@ -15,23 +15,23 @@ export type AgentPermissionResult = PermissionResult;
 
 export type AgentTurnStatus = "completed" | "incomplete" | "blocked" | "cancelled" | "failed" | "aborted";
 
-/**
- * AgentSession 的终止原因。新普通 Loop 用 completion_gate / hard_step_limit /
- * no_progress_after_continuation 等结构化原因；step_limit、tool_pending、model_stop 和
- * aborted 仅保留给旧宿主与历史 Session 事件兼容。
- */
+export type BlockedReason =
+  | "missing_user_input"
+  | "waiting_for_approval"
+  | "permission_denied"
+  | "missing_dependency"
+  | "environment_unavailable"
+  | "external_service_failure"
+  | "unsafe_action_required";
+
+/** AgentSession 的终止原因；正常回合直接使用模型自然停止结果。 */
 export type AgentTurnStopReason =
   | "model_stop"
-  | "completion_gate"
   | "step_limit"
   | "hard_step_limit"
   | "tool_call_limit"
-  | "completion_continuation_limit"
-  | "no_progress_after_continuation"
   | "repeated_action_limit"
-  | "tool_pending"
   | "timeout"
-  | "verification_failed"
   | "model_length"
   | "content_filter"
   | "provider_error"
@@ -40,7 +40,7 @@ export type AgentTurnStopReason =
   | "aborted"
   | "budget_exhausted";
 
-/** 一个统一模型/工具回合的结构化终态；只有 Completion Gate 能产生 completed。 */
+/** 一个统一模型/工具回合的结构化终态。 */
 export interface AgentTurnOutcome {
   status: AgentTurnStatus;
   stopReason: AgentTurnStopReason;
@@ -90,8 +90,6 @@ export interface AgentRuntimeContext {
   confirmPermission?: (request: AgentPermissionRequest) => Promise<AgentPermissionResult>;
   /** 回合内首次改动工作区前建快照；未提供或抛错时工具照常执行。 */
   createCheckpoint?: (label: string) => Promise<unknown>;
-  /** 工具第一次获得可写资源后、真正执行前捕获 Completion Gate 的事实基线。 */
-  beforeWorkspaceMutation?: () => Promise<void>;
   quarantineExternalTool?: (tool: string, toolCallId: string, settlement: Promise<unknown>) => void;
   abortSignal?: AbortSignal;
   /** Host-owned MCP/Plugin invocation 的统一 authority envelope。 */

@@ -14,8 +14,6 @@ import { ensureAgentDirs } from "../session/store.js";
 import { createToolRegistry } from "../tools/registry.js";
 import { createTodoTool } from "../tools/todo.js";
 import { TodoStore } from "../session/todoStore.js";
-import { CompletionStateStore } from "../agent/completionState.js";
-import { createCompletionStateTools } from "../tools/completion.js";
 import { CheckpointStore } from "../session/checkpointStore.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
 import { createSkillResourceTool, createSkillTool, expandSkillCommand as expandSkillCommandText, loadSkills, type SkillBundle, type SkillDefinition } from "../extensions/skills.js";
@@ -107,10 +105,6 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
   const todos = new TodoStore(persistenceRoot, recorder.sessionId);
   await todos.initialize();
   toolRegistry.registerBuiltinTool(createTodoTool(todos));
-  const completionState = new CompletionStateStore();
-  for (const tool of createCompletionStateTools(completionState)) {
-    toolRegistry.registerBuiltinTool(tool);
-  }
   const permissionManager = new PermissionManager({ ...config.permission, source: "global config.json + project .biny/settings.json" });
   const mcpHost = new McpToolHost();
   let skills: SkillBundle | undefined;
@@ -191,8 +185,6 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
       skillPaths: () => requireSkillBundle(skills).paths,
       mcpPrompt: () => mcpHost.instructionsPrompt(),
       todoStore: todos,
-      completionState,
-      managedProcesses,
       createCheckpoint: checkpoints ? async (label) => await checkpoints.create(label) : undefined,
       attachmentRoot: projectAttachmentRoot,
       runtimeEventSink: runtimeAuthority.asSink(),

@@ -30,7 +30,7 @@ export interface InterruptedTurn {
   systemPrompt?: string;
   messages: AgentMessage[];
   completedSteps: number;
-  /** Completion Gate 的结构化事实。 */
+  /** 工具执行预算快照；仅用于在途回合恢复时继续计算工具额度。 */
   facts?: unknown;
   /** blocked / incomplete 终态的恢复边界；普通工具步断点没有该字段。 */
   terminal?: InterruptedTurnTerminal;

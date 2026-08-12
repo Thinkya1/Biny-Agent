@@ -44,7 +44,6 @@ function testRunBudget(): void {
     softStepLimit: 32,
     hardStepLimit: 96,
     maxToolCalls: 512,
-    maxCompletionContinuations: 3,
     maxRepeatedActions: 3
   });
 
@@ -55,7 +54,6 @@ function testRunBudget(): void {
       softStepLimit: 12,
       hardStepLimit: 48,
       maxToolCalls: 200,
-      maxCompletionContinuations: 4,
       maxRepeatedActions: 5
     }
   });
@@ -63,7 +61,6 @@ function testRunBudget(): void {
     softStepLimit: 12,
     hardStepLimit: 48,
     maxToolCalls: 200,
-    maxCompletionContinuations: 4,
     maxRepeatedActions: 5
   });
   assert.throws(() => configSchema.parse({
@@ -154,7 +151,8 @@ async function testRemovedProjectBudgetFieldsAreRejected(): Promise<void> {
       agent: {
         maxSteps: 2,
         maxTaskSteps: 10,
-        maxAttempts: 7
+        maxAttempts: 7,
+        maxCompletionContinuations: 3
       }
     }));
     await assert.rejects(

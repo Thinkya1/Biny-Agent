@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentAttachment, AgentRunMode, AgentSessionInfo, ResumedAgentSession } from "../agent/AgentSession.js";
-import type { BlockedReason } from "../agent/completionGate.js";
-import type { AgentPermissionResult, AgentSessionEvent, AgentTurnOutcome, AgentTurnStatus, AgentTurnStopReason } from "../agent/types.js";
+import type { AgentPermissionResult, AgentSessionEvent, AgentTurnOutcome, AgentTurnStatus, AgentTurnStopReason, BlockedReason } from "../agent/types.js";
 import { isFullYesConfirmation } from "../permission/confirmation.js";
 import type { PermissionResult } from "../permission/PermissionManager.js";
 import type { ToolInputDisplay } from "../tools/types.js";
@@ -841,11 +840,11 @@ export class InteractiveAgentRuntime {
       const context = await agent.contextStatus();
       this.emit({ ...this.eventBase(run), type: "context.updated", context });
       if (turn.status === "completed") {
-        if (turn.stopReason !== "completion_gate") {
+        if (turn.stopReason !== "model_stop") {
           return this.failRun(
             run,
             durationMs,
-            `Completed outcome bypassed the Completion Gate (${turn.stopReason}).`,
+            `Completed outcome has a non-natural stop reason (${turn.stopReason}).`,
             turn
           );
         }
@@ -857,7 +856,7 @@ export class InteractiveAgentRuntime {
         return this.cancelledRun(run, durationMs, turn.error ?? "Current turn cancelled.", turn);
       }
       if (turn.status === "aborted") return this.abortRun(run, durationMs, turn.error ?? "Current turn interrupted.", turn);
-      return this.failRun(run, durationMs, turn.error ?? "Task verification failed.", turn);
+      return this.failRun(run, durationMs, turn.error ?? "Agent run failed.", turn);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const durationMs = Date.now() - startedAtMs;
@@ -1357,16 +1356,11 @@ function readAgentTurnStatus(value: unknown): AgentTurnStatus | undefined {
 function readAgentTurnStopReason(value: unknown, status: AgentTurnStatus): AgentTurnStopReason {
   if (
     value === "model_stop"
-    || value === "completion_gate"
     || value === "step_limit"
     || value === "hard_step_limit"
     || value === "tool_call_limit"
-    || value === "completion_continuation_limit"
-    || value === "no_progress_after_continuation"
     || value === "repeated_action_limit"
-    || value === "tool_pending"
     || value === "timeout"
-    || value === "verification_failed"
     || value === "model_length"
     || value === "content_filter"
     || value === "provider_error"
@@ -1499,7 +1493,6 @@ function incompleteReason(outcome: AgentTurnOutcome): string {
   if (outcome.stopReason === "step_limit") {
     return `Agent attempt reached its ${String(outcome.steps)}-step limit while the model still requested tools.`;
   }
-  if (outcome.stopReason === "tool_pending") return "Agent attempt ended with pending tool work.";
   if (outcome.stopReason === "model_length") return "Agent attempt reached the model output limit before completion.";
   if (outcome.stopReason === "budget_exhausted") return "Task budget was exhausted before completion.";
   return `Agent attempt is incomplete (${outcome.stopReason}).`;
