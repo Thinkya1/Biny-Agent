@@ -1,19 +1,22 @@
 /**
- * 单个工具调用的展示卡片：状态、参数摘要、diff/输出，以及权限询问的交互。
+ * 单个工具调用的展示卡片：DSH 风格折叠行（变体图标 + 标题 + 摘要 + 状态点 + 扫光），
+ * 展开体保留权限询问、命令日志、文件变更、diff、网页搜索等卡片。
  *
  * 展开状态是「自动 + 手动覆盖」的组合：等待权限、失败、被拒时默认展开，其余（包括运行中）
- * 保持折叠，运行状态由行首的 spinner 表达；用户手动切换后 `override` 记住该选择，
+ * 保持折叠，运行状态由行首扫光表达；用户手动切换后 `override` 记住该选择，
  * 直到工具状态发生变化再回到自动策略。
  */
 import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { isFullYesConfirmation } from "../../../../permission/confirmation.js";
 import type { PermissionResult } from "../../../../permission/PermissionManager.js";
 import { tokenizeCommand } from "../commandHighlight.js";
+import { classifyTool, firstLine, toolRowState, VARIANT_TITLES } from "../chatDshModel.js";
 import type { TimelineCommand, TimelineTool } from "../sessionTimeline.js";
 import { projectWebSearchView, type WebSearchResultView, type WebSearchView } from "../webSearchPresentation.js";
 import { CopyButton } from "./CopyButton.js";
 import { Icon } from "./Icon.js";
-import { ThinkingGlyph } from "./ThinkingGlyph.js";
+import { ToolRow } from "./chat-dsh/ToolRow.js";
+import { IoCard } from "./chat-dsh/IoCard.js";
 
 interface ToolActivityProps {
   projectId: string;
@@ -35,9 +38,13 @@ export const ToolActivity = memo(function ToolActivity({ projectId, tool, onPrev
   const diff = useMemo(() => tool.diff ? analyzeDiff(tool.diff) : undefined, [tool.diff]);
   const fileChange = useMemo(() => fileChangeDetails(tool), [tool]);
   const webSearch = useMemo(() => tool.tool === "web_search" ? projectWebSearchView(tool.args, tool.result) : undefined, [tool.args, tool.result, tool.tool]);
+  const variant = classifyTool(tool.tool);
+  const rowState = toolRowState(tool);
   const summary = toolSummary(tool, command, diff, webSearch);
   const durationMs = useLiveDuration(tool);
   const errorText = meaningfulError(tool, command);
+  const pathSummary = tool.display?.kind === "file_io"
+    && (tool.display.operation === "read" || tool.display.operation === "write" || tool.display.operation === "edit");
 
   const resolve = async (result: PermissionResult): Promise<void> => {
     if (!tool.permission || resolving) return;
@@ -51,42 +58,42 @@ export const ToolActivity = memo(function ToolActivity({ projectId, tool, onPrev
 
   return (
     <article className={`execution-step tool-activity is-${tool.status}`} data-project-id={projectId}>
-      <div className="tool-heading-row">
-        <button aria-controls={detailsId} aria-expanded={expanded} className="tool-heading" onClick={() => setOverride({ status: tool.status, expanded: !expanded })} type="button">
-          <ToolStatusGlyph status={tool.status} />
-          <span className="tool-name">{toolLabel(tool.tool)}</span>
-          <span className="tool-summary">{summary}</span>
-          {durationMs !== undefined ? <span className="tool-duration">{formatDuration(durationMs)}</span> : null}
-          <span className={`tool-disclosure${expanded ? " is-expanded" : ""}`}><Icon name="chevron" size={13} /></span>
-        </button>
-      </div>
-      <div aria-hidden={!expanded} className={`timeline-reveal t-resize${expanded ? " is-open" : ""}`} id={detailsId} inert={!expanded}>
-        <div className="timeline-reveal-inner">
-          <div className="tool-details">
-            {tool.permission ? (
-              <PermissionCard disabled={resolving} permission={tool.permission} onResolve={resolve} />
-            ) : null}
-            {command ? <CommandLog command={command} running={tool.status === "running"} /> : null}
-            {fileChange ? <FileChangeView change={fileChange} onPreviewFile={onPreviewFile} /> : null}
-            {diff && tool.diff ? <DiffView diff={tool.diff} info={diff} onPreviewFile={onPreviewFile} /> : null}
-            {webSearch ? <WebSearchLog onOpenExternal={onOpenExternal} tool={tool} view={webSearch} /> : null}
-            {tool.path && !diff && !fileChange ? (
-              <button className="file-path-row" onClick={() => onPreviewFile(tool.path ?? "")} title="在右侧预览" type="button"><Icon name="file" size={13} /><span>{tool.path}</span></button>
-            ) : null}
-            {!command && !diff && !webSearch && !fileChange ? <ToolPayload tool={tool} /> : null}
-            {errorText ? (
-              <section className="tool-section">
-                <h4 className="tool-section-label">错误</h4>
-                <div className="copyable-code-block is-error">
-                  <CopyButton className="copy-button" label="复制错误" value={errorText} />
-                  <pre className="tool-error-output"><code>{errorText}</code></pre>
-                </div>
-              </section>
-            ) : null}
-            {durationMs !== undefined ? <footer className="tool-call-meta">时长 {formatDuration(durationMs)}</footer> : null}
+      <ToolRow
+        durationLabel={durationMs !== undefined ? formatDuration(durationMs) : undefined}
+        errorSummary={errorText ? firstLine(errorText) : null}
+        expandable
+        expanded={expanded}
+        highlightSummary={pathSummary}
+        onToggle={() => setOverride({ status: tool.status, expanded: !expanded })}
+        state={rowState}
+        summary={summary}
+        title={VARIANT_TITLES[variant]}
+        variant={variant}
+      >
+        <div aria-hidden={!expanded} className={`timeline-reveal t-resize${expanded ? " is-open" : ""}`} id={detailsId} inert={!expanded}>
+          <div className="timeline-reveal-inner">
+            <div className="tool-details">
+              {tool.permission ? (
+                <PermissionCard disabled={resolving} permission={tool.permission} onResolve={resolve} />
+              ) : null}
+              {command ? <CommandLog command={command} running={tool.status === "running"} /> : null}
+              {fileChange ? <FileChangeView change={fileChange} onPreviewFile={onPreviewFile} /> : null}
+              {diff && tool.diff ? <DiffView diff={tool.diff} info={diff} onPreviewFile={onPreviewFile} /> : null}
+              {webSearch ? <WebSearchLog onOpenExternal={onOpenExternal} tool={tool} view={webSearch} /> : null}
+              {!command && !diff && !webSearch && !fileChange ? <ToolPayload tool={tool} /> : null}
+              {errorText ? (
+                <section className="tool-section">
+                  <h4 className="tool-section-label">错误</h4>
+                  <div className="copyable-code-block is-error">
+                    <CopyButton className="copy-button" label="复制错误" value={errorText} />
+                    <pre className="tool-error-output"><code>{errorText}</code></pre>
+                  </div>
+                </section>
+              ) : null}
+            </div>
           </div>
         </div>
-      </div>
+      </ToolRow>
     </article>
   );
 });
@@ -123,30 +130,37 @@ function PermissionCard({
   }
   return (
     <section className="permission-card">
-      <div className="permission-title"><Icon name="warning" size={16} /><strong>{request.title}</strong><span className={`risk-badge is-${request.riskLevel}`}>{riskLabel(request.riskLevel)}</span></div>
-      <p>{request.details}</p>
-      {request.command ? <pre className="permission-preview command-text"><code><CommandText command={request.command} /></code></pre> : null}
-      {request.targetPath ? <div className="permission-target"><Icon name="file" size={13} /><span>{request.targetPath}</span></div> : null}
-      {request.preview && !request.command ? <pre className="permission-preview"><code>{request.preview}</code></pre> : null}
-      {request.reason ? <p className="permission-reason">{request.reason}</p> : null}
-      {request.requireFullYes ? (
-        <label className="permission-confirmation">
-          <span>高风险操作：输入完整的 <strong>yes</strong> 后才能允许</span>
-          <input
-            autoCapitalize="none"
-            autoComplete="off"
-            disabled={disabled}
-            onChange={(event) => setConfirmationState({ requestId: permission.requestId, value: event.target.value.slice(0, 16) })}
-            spellCheck={false}
-            type="text"
-            value={confirmation}
-          />
-        </label>
-      ) : null}
-      <div className="permission-actions">
-        <button disabled={disabled} onClick={() => void onResolve({ approved: false, scope: "once", message: "Denied in Biny desktop." })} type="button">拒绝</button>
-        <button disabled={disabled || (request.requireFullYes && !fullYesProvided)} onClick={() => void onResolve({ approved: true, scope: alwaysScope, confirmation: request.requireFullYes ? confirmation : undefined })} type="button">始终允许同类操作</button>
-        <button className="is-primary" disabled={disabled || (request.requireFullYes && !fullYesProvided)} onClick={() => void onResolve({ approved: true, scope: "once", confirmation: request.requireFullYes ? confirmation : undefined })} type="button">允许一次</button>
+      <header className="permission-strip">
+        <span aria-hidden="true" className="permission-strip-dot" />
+        <span className="permission-strip-title">需要授权</span>
+        <span className={`risk-badge is-${request.riskLevel}`}>{riskLabel(request.riskLevel)}</span>
+      </header>
+      <div className="permission-body">
+        <h4 className="permission-headline">{request.title}</h4>
+        <p>{request.details}</p>
+        {request.command ? <pre className="permission-preview command-text"><code><CommandText command={request.command} /></code></pre> : null}
+        {request.targetPath ? <div className="permission-target"><Icon name="file" size={13} /><span>{request.targetPath}</span></div> : null}
+        {request.preview && !request.command ? <pre className="permission-preview"><code>{request.preview}</code></pre> : null}
+        {request.reason ? <p className="permission-reason">{request.reason}</p> : null}
+        {request.requireFullYes ? (
+          <label className="permission-confirmation">
+            <span>高风险操作：输入完整的 <strong>yes</strong> 后才能允许</span>
+            <input
+              autoCapitalize="none"
+              autoComplete="off"
+              disabled={disabled}
+              onChange={(event) => setConfirmationState({ requestId: permission.requestId, value: event.target.value.slice(0, 16) })}
+              spellCheck={false}
+              type="text"
+              value={confirmation}
+            />
+          </label>
+        ) : null}
+        <div className="permission-actions">
+          <button disabled={disabled} onClick={() => void onResolve({ approved: false, scope: "once", message: "Denied in Biny desktop." })} type="button">拒绝</button>
+          <button disabled={disabled || (request.requireFullYes && !fullYesProvided)} onClick={() => void onResolve({ approved: true, scope: alwaysScope, confirmation: request.requireFullYes ? confirmation : undefined })} type="button">始终允许同类操作</button>
+          <button className="is-primary" disabled={disabled || (request.requireFullYes && !fullYesProvided)} onClick={() => void onResolve({ approved: true, scope: "once", confirmation: request.requireFullYes ? confirmation : undefined })} type="button">允许一次</button>
+        </div>
       </div>
     </section>
   );
@@ -385,30 +399,17 @@ function ToolPayload({ tool }: { tool: TimelineTool }): React.JSX.Element {
       </section>
     );
   }
-  const argsValue = friendlyResult(tool.args);
-  const resultValue = friendlyResult(tool.result) ?? (progress || undefined);
-  // 有结果时参数只是重复信息，只在还没有结果时展示参数。
-  if (hasPayloadValue(resultValue)) {
-    return (
-      <section className="tool-section">
-        <h4 className="tool-section-label">结果</h4>
-        <CopyableCodeBlock label="复制结果" value={resultValue ?? ""} />
-      </section>
-    );
-  }
-  if (hasPayloadValue(argsValue)) {
-    return (
-      <section className="tool-section">
-        <h4 className="tool-section-label">参数</h4>
-        <CopyableCodeBlock label="复制参数" value={argsValue ?? ""} />
-      </section>
-    );
-  }
-  return <></>;
-}
-
-function hasPayloadValue(value: string | undefined): boolean {
-  return Boolean(value && value !== "{}" && value !== "null");
+  // 通用工具按 DSH 的 IN/OUT 卡片展示：IN = pretty 参数、OUT = 结果（或运行中的进度）。
+  const input = friendlyResult(tool.args);
+  const output = friendlyResult(tool.result) ?? (progress || undefined);
+  if (input === undefined && output === undefined) return <></>;
+  return (
+    <IoCard
+      input={input ?? null}
+      output={output ?? null}
+      outputError={tool.status === "failed" || tool.status === "denied" || tool.status === "unknown" || tool.status === "cancelled"}
+    />
+  );
 }
 
 function CopyableCodeBlock({ value, label }: { value: string; label: string }): React.JSX.Element {
@@ -436,18 +437,7 @@ function useLiveDuration(tool: TimelineTool): number | undefined {
   return Number.isNaN(startedAt) ? undefined : Math.max(0, now - startedAt);
 }
 
-// 行首状态字形（Alma 风格）：类型信息交给工具名，行首只表达执行状态。
-function ToolStatusGlyph({ status }: { status: TimelineTool["status"] }): React.JSX.Element {
-  if (status === "running" || status === "waiting") return <span className="tool-status-glyph is-running"><ThinkingGlyph animated={status === "running"} /></span>;
-  if (status === "success") return <span className="tool-status-glyph is-success"><Icon name="check" size={13} /></span>;
-  if (status === "failed") return <span className="tool-status-glyph is-error"><Icon name="close" size={13} /></span>;
-  if (status === "denied") return <span className="tool-status-glyph is-error"><Icon name="shield" size={12} /></span>;
-  if (status === "unknown") return <span className="tool-status-glyph is-error"><Icon name="warning" size={12} /></span>;
-  if (status === "cancelled") return <span className="tool-status-glyph"><Icon name="stop" size={12} /></span>;
-  if (status === "skipped") return <span className="tool-status-glyph"><Icon name="stop" size={12} /></span>;
-  if (status === "aborted") return <span className="tool-status-glyph"><Icon name="stop" size={12} /></span>;
-  return <span className="tool-status-glyph is-waiting"><span className="tool-waiting-dot" /></span>;
-}
+// 行首状态字形已由 DSH 风格 ToolRow 的状态点与扫光取代，这里只保留摘要派生。
 
 function toolSummary(tool: TimelineTool, command: TimelineCommand | undefined, diff: DiffInfo | undefined, webSearch: WebSearchView | undefined): string {
   if (command?.command) return command.command;
@@ -550,22 +540,6 @@ function friendlyResult(value: unknown): string | undefined {
   } catch {
     return "无法展示工具结果";
   }
-}
-
-function toolLabel(tool: string): string {
-  const labels: Record<string, string> = {
-    read_file: "读取文件",
-    write_file: "写入文件",
-    edit_file: "修改文件",
-    list_files: "列出文件",
-    search_files: "搜索文件",
-    grep_search: "搜索内容",
-    run_command: "Bash",
-    git_diff: "查看 Diff",
-    git_status: "检查 Git",
-    web_search: "联网搜索"
-  };
-  return labels[tool] ?? tool;
 }
 
 function riskLabel(risk: string): string {

@@ -121,7 +121,8 @@
   --cindy-light-warning-bg: rgb(166 111 0 / 13%);
   --cindy-light-code: #f3f5f8;
   --cindy-light-placeholder: #92969e;
-  --cindy-light-selection-surface: #e8f4ff;
+  /* 会话列表选中底色对齐 DSH：用中性 hover 级底色，不再用蓝色高亮。 */
+  --cindy-light-selection-surface: rgba(38, 49, 72, 0.06);
   --cindy-light-selection-text: #ffffff;
   --cindy-light-selection-muted: #1a1c1f;
   --cindy-light-shadow-color: rgb(26 28 31 / 8%);
@@ -140,7 +141,7 @@
   --cindy-dark-warning-bg: rgb(224 177 93 / 14%);
   --cindy-dark-code: #202020;
   --cindy-dark-placeholder: #737373;
-  --cindy-dark-selection-surface: color-mix(in srgb, #339cff 16%, #181818);
+  --cindy-dark-selection-surface: rgba(255, 255, 255, 0.08);
   --cindy-dark-selection-text: #ffffff;
   --cindy-dark-selection-muted: rgb(255 255 255 / 78%);
   --cindy-dark-shadow-color: rgb(0 0 0 / 34%);
@@ -1872,11 +1873,25 @@
   padding-left: 28px;
 }
 
+/* 整行高亮（参考 DSH 会话列表）：选中/悬停底色覆盖到展开箭头的整行宽度，
+   而不是只盖在标题 pill 上，避免选中区域看起来短一截。 */
 .cindy-sidebar-session-tree-row {
+  position: relative;
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 0;
+  border-radius: 8px;
+  transition: background var(--cindy-sidebar-row-duration) var(--cindy-sidebar-hover-ease), color var(--cindy-sidebar-hover-duration) var(--cindy-sidebar-hover-ease);
+}
+
+.cindy-sidebar-session-tree-row:hover,
+.cindy-sidebar-session-tree-row:has(.cindy-sidebar-session-entry:focus-within) {
+  background: var(--cindy-surface-hover);
+}
+
+.cindy-sidebar-session-tree-row.is-selected {
+  background: var(--cindy-selection-surface);
 }
 
 .cindy-sidebar-session-entry {
@@ -1888,16 +1903,6 @@
   align-items: center;
   overflow: hidden;
   border-radius: 8px;
-  transition: background var(--cindy-sidebar-row-duration) var(--cindy-sidebar-hover-ease), color var(--cindy-sidebar-hover-duration) var(--cindy-sidebar-hover-ease);
-}
-
-.cindy-sidebar-session-entry:hover,
-.cindy-sidebar-session-entry:focus-within {
-  background: var(--cindy-surface-hover);
-}
-
-.cindy-sidebar-session-entry.is-selected {
-  background: var(--cindy-selection-surface);
 }
 
 .cindy-sidebar-session-entry.is-archived {
@@ -2022,7 +2027,7 @@
   opacity: 0;
   pointer-events: none;
   transform: translateX(4px);
-  transition: opacity var(--cindy-sidebar-hover-duration) var(--cindy-sidebar-hover-ease), transform var(--cindy-sidebar-row-duration) var(--cindy-sidebar-hover-ease);
+  transition: opacity var(--cindy-sidebar-hover-duration) var(--cindy-sidebar-hover-ease), transform var(--cindy-sidebar-row-duration) var(--cindy-sidebar-hover-ease), background var(--cindy-sidebar-hover-duration) var(--cindy-sidebar-hover-ease);
 }
 
 .cindy-sidebar-session-actions > button {
@@ -2031,15 +2036,18 @@
   app-region: no-drag;
 }
 
-.cindy-sidebar-session-entry.is-selected .cindy-sidebar-session-actions {
-  background: var(--cindy-selection-surface);
-}
-
+/* 行尾操作浮在标题上方；悬停时补一块与行背景同色的底，把下方穿过的文字遮住，
+   避免标题文字从按钮下面透出来（对应 DSH：悬停时标题在操作前收缩截断）。 */
 .cindy-sidebar-session-entry:hover .cindy-sidebar-session-actions,
 .cindy-sidebar-session-entry:focus-within .cindy-sidebar-session-actions {
+  background: var(--cindy-surface-hover);
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);
+}
+
+.cindy-sidebar-session-entry.is-selected .cindy-sidebar-session-actions {
+  background: var(--cindy-selection-surface);
 }
 
 .cindy-sidebar-session-entry:hover .cindy-sidebar-session-actions > button,
@@ -2051,6 +2059,11 @@
 .cindy-sidebar-session-entry:focus-within .cindy-sidebar-session-meta {
   opacity: 0;
   transform: translateX(4px);
+}
+
+/* 选中行不需要再展示时间，直接让位给标题与行尾操作。 */
+.cindy-sidebar-session-entry.is-selected .cindy-sidebar-session-meta {
+  display: none;
 }
 
 .cindy-sidebar-session-pin,
@@ -2079,6 +2092,11 @@
 .cindy-sidebar-session-pin:active,
 .cindy-sidebar-session-more:active {
   transform: translateY(1px);
+}
+
+/* 已置顶的会话：图钉换主题强调色，和普通灰区分开。 */
+.cindy-sidebar-session-pin.is-active {
+  color: var(--cindy-focus);
 }
 
 .cindy-sidebar-session-expand {
@@ -2757,7 +2775,8 @@
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  --cindy-chat-content-width: min(820px, calc(100% - 32px));
+  /* DSH 内容列 748px；两侧留白随视口收缩，最小 32px（16px 清除区 + 16px 内边距）。 */
+  --cindy-chat-content-width: min(748px, calc(100% - 64px));
 }
 
 /* 固定窗口 chrome 占用顶部 46px；聊天信息行从它下面开始，避免被 chrome 背景盖住。 */
@@ -3370,12 +3389,18 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 思考状态行：作为消息流内部的一行（对齐消息列宽度），不横跨整个聊天面板。 */
 .cindy-thinking-status {
-  display: inline-flex;
+  display: flex;
+  width: min(840px, calc(100% - 72px));
   min-width: 0;
-  height: 24px;
+  height: 32px;
+  flex: none;
   align-items: center;
+  justify-content: flex-start;
   gap: 6px;
+  margin: 0 auto;
+  padding: 10px 0 0;
   color: var(--cindy-text-secondary);
 }
 
@@ -3573,6 +3598,7 @@
   .cindy-project-row-wrap,
   .cindy-project-row-actions,
   .cindy-project-row-action,
+  .cindy-sidebar-session-tree-row,
   .cindy-sidebar-session-entry,
   .cindy-sidebar-session-title,
   .cindy-sidebar-session-meta,
@@ -3616,6 +3642,13 @@
 }
 
 /* 本地扩展页：保留 Cindy 的轻量卡片和分栏密度，但所有操作仍落到 Biny 的 IPC 边界。 */
+/* 展开/rail 模式下固定窗口 chrome 占顶部 46px（聊天页在 .cindy-workspace-chat 上让位），
+   扩展页同样要让出，否则页头（插件/技能标签、搜索、刷新）会被不透明顶栏盖住。 */
+.cindy-root:not([data-sidebar-mode="collapsed"]):not([data-sidebar-mode="peek"]) .cindy-extension-page {
+  box-sizing: border-box;
+  padding-top: 46px;
+}
+
 .cindy-extension-page {
   display: flex;
   width: 100%;

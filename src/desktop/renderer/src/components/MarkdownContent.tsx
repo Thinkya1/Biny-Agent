@@ -7,7 +7,7 @@
  * 渲染的是模型输出，一切外部内容都当不可信处理：只有经 highlight.js 转义过的高亮结果会用
  * `dangerouslySetInnerHTML`，其余节点都交给 React 转义。
  */
-import { isValidElement, memo, useMemo, useState } from "react";
+import React, { isValidElement, memo, useMemo, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useInlineImage } from "../inlineImage.js";
@@ -52,9 +52,8 @@ export const MarkdownContent = memo(function MarkdownContent({
           code({ className, children }) {
             // 围栏代码块由下面的 pre 接管，这里只剩行内代码。
             if (className) return <code className={className}>{children}</code>;
-            const text = String(children).replace(/\n$/, "");
-            const isPath = looksLikePath(text);
-            return <code className={isPath ? "inline-path" : undefined} onClick={() => { if (isPath) onPreviewFile(stripLineSuffix(text)); }} title={isPath ? "在右侧预览" : undefined}>{children}</code>;
+            // Codex 风格的行内路径只是灰色代码标记；不根据文本外观暗中添加文件跳转。
+            return <code>{children}</code>;
           },
           img({ alt, src, title }) {
             const source = typeof src === "string" ? src : undefined;

@@ -4,7 +4,7 @@
  * 数据由 `buildSessionTimeline` 算好，这里只做渲染和局部交互（展开思考、复制、编辑重发、
  * 回滚文件等）。整体用 memo 包住，因为流式输出期间父组件会高频重渲染。
  */
-import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { ChatMessage, ChatMessageBubble } from "@astryxdesign/core/Chat";
 import type { PermissionResult } from "../../../../permission/PermissionManager.js";
 import { splitAttachmentReferences, type AttachmentReference } from "../../../attachmentReferences.js";
@@ -12,13 +12,15 @@ import { copyToClipboard } from "../copyToClipboard.js";
 import { useInlineImage } from "../inlineImage.js";
 import { listChangedFiles, type TimelineReasoningStep, type TimelineStep, type TimelineTurn } from "../sessionTimeline.js";
 import { reasoningDetailText } from "../reasoningPresentation.js";
-import { formatTurnCost } from "../usagePresentation.js";
+import { turnMetrics } from "../chatDshModel.js";
 import { speak, speechSupported } from "../speech.js";
 import { CopyButton } from "./CopyButton.js";
 import { Icon } from "./Icon.js";
 import { MarkdownContent } from "./MarkdownContent.js";
-import { ThinkingGlyph } from "./ThinkingGlyph.js";
 import { ToolActivity } from "./ToolActivity.js";
+import { ThinkRow } from "./chat-dsh/ThinkRow.js";
+import { CompactionRow, RunErrorRow } from "./chat-dsh/NoticeRow.js";
+import { MessageClock } from "./chat-dsh/MessageClock.js";
 
 interface MessageTimelineProps {
   projectId: string;
@@ -110,8 +112,6 @@ const Turn = memo(function Turn({
   onDeleteUserMessage(turnId: string): void;
 }): React.JSX.Element {
   const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(() => new Set());
-  const [errorOpen, setErrorOpen] = useState(false);
-  const summary = useMemo(() => turnSummary(turn), [turn]);
   const running = turn.status === "running" || turn.status === "waiting_permission";
   const executionSteps = turn.steps.length ? turn.steps : fallbackExecutionSteps(turn);
   const toggleReasoning = (stepId: string): void => {
@@ -140,6 +140,7 @@ const Turn = memo(function Turn({
           onRollbackFiles={() => onRollbackFiles(turn)}
           onSubmitEdit={onSubmitEdit}
           projectId={projectId}
+          time={turn.timestamp}
         />
       ) : null}
       <ChatMessage className="desktop-assistant-message" sender="assistant">
@@ -156,47 +157,40 @@ const Turn = memo(function Turn({
             steps={executionSteps}
             skills={turn.skills}
           />
-        ) : running && !turn.assistant ? (
-          <div className="reasoning-row is-static"><ThinkingGlyph animated /><span>正在处理</span></div>
         ) : null}
         {!executionSteps.some((step) => step.kind === "assistant") && turn.assistant ? <MarkdownContent content={turn.assistant} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} /> : null}
 
         {turn.assistant ? (
           <AssistantActions
             content={turn.assistant}
+            metrics={turnMetrics(turn)}
             onCreateBranch={onCreateBranch}
             onRegenerate={turn.user ? () => onRetry(turn.user) : undefined}
+            runMs={turn.durationMs}
             timestamp={turn.timestamp}
           />
         ) : null}
 
-        {!running && turn.status !== "idle" && (turn.status !== "completed" || summary || turn.model) ? (
-          <footer className={`run-result is-${turn.status}`}>
-            {turn.status !== "completed" ? <>
-              <span className="run-result-icon"><Icon name={turn.status === "failed" || turn.status === "blocked" || turn.status === "incomplete" ? "warning" : "stop"} size={13} /></span>
-              <span className="run-result-label">{runStatusLabel(turn.status)}</span>
-            </> : null}
-            {summary ? <span className="run-result-summary">{summary}</span> : null}
-            {turn.model ? <span className="run-model">{turn.model.label}</span> : null}
-          </footer>
-        ) : null}
+        {/* 底部不再展示统计与模型行；运行信息只保留在 hover 揭示的时钟里。 */}
+        {turn.error && turn.status === "failed" ? <RunErrorRow message={turn.error} /> : null}
 
         {turn.error && (
-          turn.status === "failed"
-          || turn.status === "blocked"
+          turn.status === "blocked"
           || turn.status === "incomplete"
           || turn.status === "cancelled"
           || turn.status === "aborted"
         ) ? (
-          <section className="run-error">
-            <button className="run-error-heading" onClick={() => setErrorOpen(!errorOpen)} type="button"><span>{runErrorHeading(turn.status)}</span><Icon name="chevron" size={12} /></button>
-            {errorOpen ? <pre><code>{turn.error}</code></pre> : null}
-            <div className="run-error-actions">
-            {turn.status === "failed" && turn.user ? <button onClick={() => onRetry(turn.user)} type="button">重试</button> : null}
-              {turn.resumable ? <button onClick={() => void onResume()} type="button">继续运行</button> : null}
-              <button onClick={() => void copyToClipboard(turn.error ?? "")} type="button">复制错误</button>
-            </div>
-          </section>
+          <div className="run-error">
+            {/* blocked 是「运行被阻塞」而非失败：琥珀点 + 阻塞文案（DSH max-tokens 同款语义）。 */}
+            <RunErrorRow
+              message={turn.error}
+              title={turn.status === "blocked" ? "任务被阻塞" : "本轮运行失败"}
+              variant={turn.status === "blocked" ? "warning" : "error"}
+            />
+            {turn.resumable ? (
+              <button className="run-error-resume" onClick={() => void onResume()} type="button">继续运行</button>
+            ) : null}
+          </div>
         ) : null}
         </div>
       </ChatMessage>
@@ -248,14 +242,19 @@ function ExecutionTimeline({
       ) : null}
       {steps.map((step) => {
         if (step.kind === "reasoning") {
+          // 上下文压缩标记渲染为独立的压缩通知行（DSH CompactionItem 形态）。
+          if (step.notice === "compaction") {
+            return (
+              <section className="execution-step" key={step.id}>
+                <CompactionRow summary={step.status ?? ""} title="上下文已压缩" />
+              </section>
+            );
+          }
           return (
             <ReasoningStepView
               key={step.id}
               expanded={expandedReasoning.has(step.id)}
-              onOpenExternal={onOpenExternal}
-              onPreviewFile={onPreviewFile}
               onToggle={() => onToggleReasoning(step.id)}
-              projectId={projectId}
               running={running}
               step={step}
             />
@@ -301,36 +300,24 @@ function ActivitySummaryStep({ content, onOpenExternal, onPreviewFile, projectId
   );
 }
 
-function ReasoningStepView({ expanded, onOpenExternal, onPreviewFile, onToggle, projectId, running, step }: {
+function ReasoningStepView({ expanded, onToggle, running, step }: {
   expanded: boolean;
-  onOpenExternal(url: string): void;
-  onPreviewFile(path: string): void;
   onToggle(): void;
-  projectId: string;
   running: boolean;
   step: TimelineReasoningStep;
 }): React.JSX.Element {
   // The status is a label for the disclosure row, not the model's reasoning
   // content. Providers that do not return reasoning deltas must not make
   // statuses such as “分析完成” look like generated content.
-  const detailId = useId();
   const text = reasoningDetailText(step);
   return (
     <section className={`execution-step execution-reasoning${expanded ? " is-open" : ""}`}>
-      <button aria-controls={detailId} aria-expanded={expanded} className="execution-reasoning-button" onClick={onToggle} type="button">
-        <ThinkingGlyph animated={running && !step.completed} />
-        <span className="reasoning-label">Thinking</span>
-        <span className={`reasoning-chevron${expanded ? " is-expanded" : ""}`}><Icon name="chevron" size={12} /></span>
-      </button>
-      <div aria-hidden={!expanded} className={`timeline-reveal t-resize${expanded ? " is-open" : ""}`} id={detailId} inert={!expanded}>
-        <div className="timeline-reveal-inner">
-          <div className="reasoning-detail">
-            <div className="reasoning-detail-copy">
-              <MarkdownContent content={text} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} variant="is-compact" />
-            </div>
-          </div>
-        </div>
-      </div>
+      <ThinkRow
+        expanded={expanded}
+        onToggle={onToggle}
+        running={running && !step.completed}
+        text={text}
+      />
     </section>
   );
 }
@@ -349,7 +336,8 @@ function UserMessage({
   onRegenerate,
   onRollbackFiles,
   onSubmitEdit,
-  projectId
+  projectId,
+  time
 }: {
   content: string;
   hasChangedFiles: boolean;
@@ -365,6 +353,8 @@ function UserMessage({
   onRollbackFiles(): void;
   onSubmitEdit(): Promise<void>;
   projectId: string;
+  /** 消息时间（ISO 字符串）；存在时操作行前置 hover 揭示的日期感知时钟。 */
+  time?: string;
 }): React.JSX.Element {
   const { open: menuOpen, setOpen: setMenuOpen, containerRef: actionsRef } = useDismissableMenu();
   // 发送时追加给模型的附件清单不该原样显示，拆出来渲染成附件卡片。
@@ -386,17 +376,19 @@ function UserMessage({
   }
 
   const closeMenu = (): void => setMenuOpen(false);
+  const clock = time ? <MessageClock time={Date.parse(time)} /> : null;
   return (
     <ChatMessage className="user-message" sender="user">
       <ChatMessageBubble className="user-bubble">
         {message.text ? <MarkdownContent content={message.text} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} /> : null}
         {message.attachments.length ? <MessageAttachments attachments={message.attachments} projectId={projectId} /> : null}
       </ChatMessageBubble>
-      <div className={`user-message-actions${menuOpen ? " is-open" : ""}`} ref={actionsRef}>
-        <button aria-label="复制消息" className="user-message-action" onClick={() => copyText(message.text)} title="复制消息" type="button"><Icon name="copy" size={13} /></button>
-        <button aria-label="重新生成" className="user-message-action" onClick={onRegenerate} title="重新生成" type="button"><Icon name="refresh" size={13} /></button>
-        <button aria-label="编辑消息" className="user-message-action" onClick={onEdit} title="编辑消息" type="button"><Icon name="edit" size={13} /></button>
-        <button aria-expanded={menuOpen} aria-haspopup="menu" aria-label="更多消息操作" className="user-message-action" onClick={() => setMenuOpen(!menuOpen)} title="更多" type="button"><Icon name="more" size={13} /></button>
+      <div className={`user-message-actions${menuOpen ? " is-open" : ""}`} data-time-hover-root ref={actionsRef}>
+        {clock}
+        <button aria-label="复制消息" className="user-message-action" onClick={() => copyText(message.text)} title="复制消息" type="button"><Icon name="copy" size={16} /></button>
+        <button aria-label="重新生成" className="user-message-action" onClick={onRegenerate} title="重新生成" type="button"><Icon name="refresh" size={16} /></button>
+        <button aria-label="编辑消息" className="user-message-action" onClick={onEdit} title="编辑消息" type="button"><Icon name="edit" size={16} /></button>
+        <button aria-expanded={menuOpen} aria-haspopup="menu" aria-label="更多消息操作" className="user-message-action" onClick={() => setMenuOpen(!menuOpen)} title="更多" type="button"><Icon name="more" size={16} /></button>
         {menuOpen ? (
           <div className="user-message-menu" role="menu">
             <button className="message-menu-item" onClick={() => { copyText(message.text); closeMenu(); }} role="menuitem" type="button"><Icon name="copy" size={14} /><span>复制为 Markdown</span></button>
@@ -482,10 +474,13 @@ function plainTextFromMarkdown(content: string): string {
     .trim();
 }
 
-/** 助手回复下方的操作条：复制、朗读、重新生成，以及放次要操作的更多菜单。 */
-function AssistantActions({ content, timestamp, onCreateBranch, onRegenerate }: {
+/** 助手回复下方的操作条：复制、朗读、重新生成，以及放次要操作的更多菜单；
+ *  操作条尾部是日期感知时钟 + 运行指标（用时 / 首 token / 解码吞吐），hover 揭示。 */
+function AssistantActions({ content, timestamp, metrics, runMs, onCreateBranch, onRegenerate }: {
   content: string;
   timestamp?: string;
+  metrics?: { ttftMs?: number; tokensPerSecond?: number; llmMs?: number };
+  runMs?: number;
   onCreateBranch(): void;
   onRegenerate?(): void;
 }): React.JSX.Element {
@@ -506,16 +501,25 @@ function AssistantActions({ content, timestamp, onCreateBranch, onRegenerate }: 
   };
 
   const closeMenu = (): void => setMenuOpen(false);
+  const clock = timestamp ? (
+    <MessageClock
+      llmMs={metrics?.llmMs}
+      runMs={runMs}
+      time={Date.parse(timestamp)}
+      tokensPerSecond={metrics?.tokensPerSecond}
+      ttftMs={metrics?.ttftMs}
+    />
+  ) : null;
   return (
-    <div className={`assistant-actions${menuOpen ? " is-open" : ""}`} ref={actionsRef}>
-      <CopyButton className="assistant-action" label="复制回复" size={13} value={content} />
+    <div className={`assistant-actions${menuOpen ? " is-open" : ""}`} data-time-hover-root ref={actionsRef}>
+      <CopyButton className="assistant-action" label="复制回复" size={16} value={content} />
       {speechSupported() ? (
-        <button aria-label={speaking ? "停止朗读" : "朗读回复"} className={`assistant-action${speaking ? " is-active" : ""}`} onClick={toggleSpeech} title={speaking ? "停止朗读" : "朗读回复"} type="button"><Icon name={speaking ? "volume-off" : "volume"} size={13} /></button>
+        <button aria-label={speaking ? "停止朗读" : "朗读回复"} className={`assistant-action${speaking ? " is-active" : ""}`} onClick={toggleSpeech} title={speaking ? "停止朗读" : "朗读回复"} type="button"><Icon name={speaking ? "volume-off" : "volume"} size={16} /></button>
       ) : null}
       {onRegenerate ? (
-        <button aria-label="重新生成" className="assistant-action" onClick={onRegenerate} title="重新生成" type="button"><Icon name="refresh" size={13} /></button>
+        <button aria-label="重新生成" className="assistant-action" onClick={onRegenerate} title="重新生成" type="button"><Icon name="refresh" size={16} /></button>
       ) : null}
-      <button aria-expanded={menuOpen} aria-haspopup="menu" aria-label="更多回复操作" className="assistant-action" onClick={() => setMenuOpen(!menuOpen)} title="更多" type="button"><Icon name="more" size={13} /></button>
+      <button aria-expanded={menuOpen} aria-haspopup="menu" aria-label="更多回复操作" className="assistant-action" onClick={() => setMenuOpen(!menuOpen)} title="更多" type="button"><Icon name="more" size={16} /></button>
       {menuOpen ? (
         <div className="assistant-message-menu" role="menu">
           <button className="message-menu-item" onClick={() => { copyText(content); closeMenu(); }} role="menuitem" type="button"><Icon name="copy" size={14} /><span>复制为 Markdown</span></button>
@@ -523,7 +527,7 @@ function AssistantActions({ content, timestamp, onCreateBranch, onRegenerate }: 
           <button className="message-menu-item" onClick={() => { onCreateBranch(); closeMenu(); }} role="menuitem" type="button"><Icon name="branch" size={14} /><span>创建分支</span></button>
         </div>
       ) : null}
-      {timestamp ? <time className="assistant-time" dateTime={timestamp}>{formatMessageTime(timestamp)}</time> : null}
+      {clock}
     </div>
   );
 }
@@ -579,48 +583,4 @@ function useDismissableMenu(): {
     };
   }, [open]);
   return { open, setOpen, containerRef };
-}
-
-function turnSummary(turn: TimelineTurn): string {
-  const changedFiles = listChangedFiles(turn);
-  const commands = turn.tools.filter((tool) => tool.command || tool.display?.kind === "command").length;
-  const parts: string[] = [];
-  if (turn.durationMs !== undefined) parts.push(formatDuration(turn.durationMs));
-  if (turn.usage?.totalTokens !== undefined) parts.push(`${turn.usage.totalTokens.toLocaleString()} tokens`);
-  const cost = formatTurnCost(turn.usage);
-  if (cost) parts.push(cost);
-  if (changedFiles.length) parts.push(`${String(changedFiles.length)} 个文件`);
-  if (commands) parts.push(`${String(commands)} 条命令`);
-  return parts.join(" · ");
-}
-
-function runStatusLabel(status: TimelineTurn["status"]): string {
-  if (status === "completed") return "已完成";
-  if (status === "blocked") return "等待处理";
-  if (status === "incomplete") return "未完成";
-  if (status === "cancelled") return "已取消";
-  if (status === "aborted") return "已中止";
-  if (status === "failed") return "执行失败";
-  return "部分完成";
-}
-
-function runErrorHeading(status: TimelineTurn["status"]): string {
-  if (status === "failed") return "执行失败";
-  if (status === "blocked") return "任务被阻塞";
-  if (status === "incomplete") return "任务未完成";
-  if (status === "cancelled") return "任务已取消";
-  return "任务已中止";
-}
-
-function formatDuration(durationMs: number): string {
-  if (durationMs < 1_000) return `${String(durationMs)}ms`;
-  const seconds = durationMs / 1_000;
-  if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 0 : 1)}s`;
-  return `${String(Math.floor(seconds / 60))}m ${String(Math.round(seconds % 60))}s`;
-}
-
-function formatMessageTime(timestamp: string): string {
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
 }

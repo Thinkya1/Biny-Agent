@@ -676,7 +676,7 @@ function SessionList({ flat = false, projectId, sessions, selectedSessionId, onS
     const meta = sidebarSessionMeta(session, running);
     const metaTitle = meta ? sidebarSessionUpdatedAt(session.updatedAt) : undefined;
     return [
-      <div className="cindy-sidebar-session-tree-row" key={`${session.projectId}:${session.id}`}>
+      <div className={`cindy-sidebar-session-tree-row${session.id === selectedSessionId ? " is-selected" : ""}`} key={`${session.projectId}:${session.id}`}>
         <button
           aria-expanded={expandable ? expanded : undefined}
           aria-label={expandable ? (expanded ? "收起子会话" : "展开子会话") : undefined}
@@ -707,12 +707,12 @@ function SessionList({ flat = false, projectId, sessions, selectedSessionId, onS
           <div className="cindy-sidebar-session-actions">
             <button
               aria-label={session.pinned ? "取消置顶任务" : "置顶任务"}
-              className="cindy-sidebar-session-pin"
+              className={`cindy-sidebar-session-pin${session.pinned ? " is-active" : ""}`}
               onClick={() => onSessionPin(session)}
               title={session.pinned ? "取消置顶任务" : "置顶任务"}
               type="button"
             >
-              <Icon name="pin" size={14} />
+              <Icon name="pin" size={16} />
             </button>
             <button
               aria-label={`${title} 的更多操作`}
@@ -833,7 +833,7 @@ const ProjectRow = memo(function ProjectRow({
 function ProjectMenu({ anchorRef, project, open, onPin, onRefresh, onReveal, onOpenTerminal, onRename, onRemove }: { anchorRef: FloatingMenuAnchor; project: DesktopProject; open: boolean; onPin(): void; onRefresh(): void; onReveal(): void; onOpenTerminal(): void; onRename(): void; onRemove(): void }): React.JSX.Element {
   return (
     <FloatingSidebarMenu anchorRef={anchorRef} ariaLabel="项目操作菜单" open={open}>
-      <button onClick={onPin} role="menuitem" type="button"><Icon name="pin" size={15} /><span>{project.pinned ? "取消置顶项目" : "置顶项目"}</span></button>
+      <button onClick={onPin} role="menuitem" type="button"><Icon name="pin" size={16} /><span>{project.pinned ? "取消置顶项目" : "置顶项目"}</span></button>
       <button onClick={onRefresh} role="menuitem" type="button"><Icon name="refresh" size={15} /><span>刷新项目状态</span></button>
       <button onClick={onReveal} role="menuitem" type="button"><Icon name="external" size={15} /><span>在 Finder 中显示</span></button>
       <button onClick={onOpenTerminal} role="menuitem" type="button"><Icon name="terminal" size={15} /><span>在终端中打开</span></button>

@@ -1,0 +1,2469 @@
+/*
+ * DSH 风格聊天展示（1:1 复刻 deepseek-harness ui-conversation / ui-tool / ui-primitives）。
+ *
+ * 取值的唯一来源是运行中 GUI 的产物：
+ *   - 字体 token：design-platform.css 的 --dsw-font-*（markdown 16px/28px、代码块 13px/22px …）；
+ *   - 颜色 token：--dsw-static-* / --dsw-alias-*（深色 #151517 底、#f9fafb 主文字 …）；
+ *   - 布局度量：ChatView 模块（748px 内容列、16px 节奏、22px 气泡圆角、12px 代码块圆角 …）。
+ * 聊天区内把 Biny 通用 token 重映射到 DSH 值，旧规则无需逐个改写；深浅主题自动生效。
+ * 所有动画尊重 prefers-reduced-motion。
+ */
+
+/* ---------- DSH 静态调色板（复刻 design-platform.css，深浅两套） ---------- */
+
+:root {
+  /* 应用自身表面色：聊天区背景跟随全局表面，避免左右留白与周边 chrome 出现色差。 */
+  --dsh-static-app-surface: #ffffff;
+  --dsh-static-bg: #ffffff; /* neutral-bluish-00 */
+  --dsh-static-layer-3: #ffffff; /* bg-layer-3（菜单/浮层） */
+  --dsh-static-text: #0f1115; /* label-primary */
+  --dsh-static-text-secondary: #61666b; /* label-secondary */
+  --dsh-static-text-tertiary: #81858c; /* label-tertiary */
+  --dsh-static-caption: #adb2b8; /* label-caption */
+  --dsh-static-dimmed: #e1e5ee; /* label-dimmed */
+  --dsh-static-hover: rgba(38, 49, 72, 0.06); /* interactive-bg-hover */
+  --dsh-static-hover-accent: rgba(38, 49, 72, 0.14);
+  --dsh-static-hover-solid: #f1f3f5; /* bluish-75 */
+  --dsh-static-code-block: #f9fafb; /* bluish-50 */
+  --dsh-static-code-banner: #f9fafb;
+  --dsh-static-inline-code: #ebeef2; /* bluish-100 */
+  --dsh-static-bubble: #edf3fe; /* deepseek-50 */
+  --dsh-static-bubble-highlight: #d3e2ff; /* deepseek-200 */
+  --dsh-static-input-major: #ffffff;
+  --dsh-static-business: #4176e6; /* deepseek-500 */
+  --dsh-static-error: #ec1313; /* red-600 */
+  --dsh-static-error-hover: rgba(236, 19, 19, 0.05);
+  --dsh-static-warn: #f59e0b; /* amber-500 */
+  --dsh-static-warn-label: #dd8629; /* amber-600 */
+  --dsh-static-warn-tertiary: #fef5e7; /* amber-100 */
+  --dsh-static-success: #22c55e; /* green-500 */
+  --dsh-static-success-tertiary: #e6faed; /* green-100 */
+  --dsh-static-ongoing: #5686fe; /* deepseek-450（两主题同值） */
+  --dsh-static-scrollbar: #e5e5e5; /* neutral-200 */
+  --dsh-static-scrollbar-hover: #d4d4d4; /* neutral-300 */
+  --dsh-static-border-l1: rgba(0, 0, 0, 0.04);
+  --dsh-static-border-l2: rgba(0, 0, 0, 0.1);
+  --dsh-static-border-l2-thin: rgba(0, 0, 0, 0.1);
+  --dsh-static-border-l3: rgba(0, 0, 0, 0.12);
+  --dsh-static-border-l4: rgba(0, 0, 0, 0.16);
+  /* 代码高亮（shiki token 配色，跟随主题） */
+  --dsh-static-shiki-constant: #1c7ed6;
+  --dsh-static-shiki-string: #2f9e44;
+  --dsh-static-shiki-comment: #868e96;
+  --dsh-static-shiki-keyword: #d6336c;
+  --dsh-static-shiki-parameter: #e8590c;
+  --dsh-static-shiki-function: #6741d9;
+  --dsh-static-shiki-punctuation: #495057;
+  --dsh-static-shiki-link: #1971c2;
+}
+
+:root[data-theme="dark"] {
+  --dsh-static-app-surface: #181818;
+  --dsh-static-bg: #151517; /* neutral-bluish-950 */
+  --dsh-static-layer-3: #353638; /* bluish-800 */
+  --dsh-static-text: #f9fafb; /* bluish-50 */
+  --dsh-static-text-secondary: #cfd3d6; /* bluish-300 */
+  --dsh-static-text-tertiary: #adb2b8; /* bluish-400 */
+  --dsh-static-caption: #81858c; /* bluish-600 */
+  --dsh-static-dimmed: #43454a; /* bluish-750 */
+  --dsh-static-hover: rgba(255, 255, 255, 0.08);
+  --dsh-static-hover-accent: rgba(255, 255, 255, 0.24);
+  --dsh-static-hover-solid: #353638;
+  --dsh-static-code-block: #1b1b1c; /* bluish-900 */
+  --dsh-static-code-banner: #2c2c2e; /* bluish-850 */
+  --dsh-static-inline-code: #2c2c2e;
+  --dsh-static-bubble: #2c2c2e;
+  --dsh-static-bubble-highlight: #43454a;
+  --dsh-static-input-major: #2c2c2e;
+  --dsh-static-business: #679efe; /* deepseek-400 */
+  --dsh-static-error: #f25a5a; /* red-400 */
+  --dsh-static-error-hover: rgba(242, 90, 90, 0.15);
+  --dsh-static-warn: #f59e0b;
+  --dsh-static-warn-label: #dd8629;
+  --dsh-static-warn-tertiary: #27241f; /* amber-900 */
+  --dsh-static-success: #22c55e;
+  --dsh-static-success-tertiary: #233c2c; /* green-900 */
+  --dsh-static-scrollbar: #545456; /* neutral-600 */
+  --dsh-static-scrollbar-hover: #65676b; /* neutral-550 */
+  --dsh-static-border-l1: rgba(255, 255, 255, 0.06);
+  --dsh-static-border-l2: rgba(255, 255, 255, 0.12);
+  --dsh-static-border-l2-thin: rgba(255, 255, 255, 0.06);
+  --dsh-static-border-l3: rgba(255, 255, 255, 0.16);
+  --dsh-static-border-l4: rgba(255, 255, 255, 0.2);
+  --dsh-static-shiki-constant: #4dabf7;
+  --dsh-static-shiki-string: #69db7c;
+  --dsh-static-shiki-comment: #adb5bd;
+  --dsh-static-shiki-keyword: #faa2c1;
+  --dsh-static-shiki-parameter: #ffa94d;
+  --dsh-static-shiki-function: #b197fc;
+  --dsh-static-shiki-punctuation: #ced4da;
+  --dsh-static-shiki-link: #74c0fc;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --dsh-static-app-surface: #181818;
+    --dsh-static-bg: #151517;
+    --dsh-static-layer-3: #353638;
+    --dsh-static-text: #f9fafb;
+    --dsh-static-text-secondary: #cfd3d6;
+    --dsh-static-text-tertiary: #adb2b8;
+    --dsh-static-caption: #81858c;
+    --dsh-static-dimmed: #43454a;
+    --dsh-static-hover: rgba(255, 255, 255, 0.08);
+    --dsh-static-hover-accent: rgba(255, 255, 255, 0.24);
+    --dsh-static-hover-solid: #353638;
+    --dsh-static-code-block: #1b1b1c;
+    --dsh-static-code-banner: #2c2c2e;
+    --dsh-static-inline-code: #2c2c2e;
+    --dsh-static-bubble: #2c2c2e;
+    --dsh-static-bubble-highlight: #43454a;
+    --dsh-static-input-major: #2c2c2e;
+    --dsh-static-business: #679efe;
+    --dsh-static-error: #f25a5a;
+    --dsh-static-error-hover: rgba(242, 90, 90, 0.15);
+    --dsh-static-warn: #f59e0b;
+    --dsh-static-warn-label: #dd8629;
+    --dsh-static-warn-tertiary: #27241f;
+    --dsh-static-success: #22c55e;
+    --dsh-static-success-tertiary: #233c2c;
+    --dsh-static-scrollbar: #545456;
+    --dsh-static-scrollbar-hover: #65676b;
+    --dsh-static-border-l1: rgba(255, 255, 255, 0.06);
+    --dsh-static-border-l2: rgba(255, 255, 255, 0.12);
+    --dsh-static-border-l2-thin: rgba(255, 255, 255, 0.06);
+    --dsh-static-border-l3: rgba(255, 255, 255, 0.16);
+    --dsh-static-border-l4: rgba(255, 255, 255, 0.2);
+    --dsh-static-shiki-constant: #4dabf7;
+    --dsh-static-shiki-string: #69db7c;
+    --dsh-static-shiki-comment: #adb5bd;
+    --dsh-static-shiki-keyword: #faa2c1;
+    --dsh-static-shiki-parameter: #ffa94d;
+    --dsh-static-shiki-function: #b197fc;
+    --dsh-static-shiki-punctuation: #ced4da;
+    --dsh-static-shiki-link: #74c0fc;
+  }
+}
+
+/* ---------- 聊天区语义 token（作用域：消息滚动区 + 输入框区） ---------- */
+
+.cindy-chat-scroll,
+.cindy-chat-composer {
+  /* 字体：与 DSH --dsw-font-family / --ds-font-family-code 完全一致 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier, "PingFang SC", "Microsoft YaHei";
+  --dsh-bg: var(--dsh-static-app-surface);
+  --dsh-menu: var(--dsh-static-layer-3);
+  --dsh-text: var(--dsh-static-text);
+  --dsh-text-secondary: var(--dsh-static-text-secondary);
+  --dsh-text-tertiary: var(--dsh-static-text-tertiary);
+  --dsh-caption: var(--dsh-static-caption);
+  --dsh-dimmed: var(--dsh-static-dimmed);
+  --dsh-hover: var(--dsh-static-hover);
+  --dsh-hover-accent: var(--dsh-static-hover-accent);
+  --dsh-hover-solid: var(--dsh-static-hover-solid);
+  --dsh-code-block: var(--dsh-static-code-block);
+  --dsh-code-banner: var(--dsh-static-code-banner);
+  --dsh-inline-code: var(--dsh-static-inline-code);
+  --dsh-bubble: var(--dsh-static-bubble);
+  --dsh-bubble-highlight: var(--dsh-static-bubble-highlight);
+  --dsh-input-major: var(--dsh-static-input-major);
+  --dsh-business: var(--dsh-static-business);
+  --dsh-error: var(--dsh-static-error);
+  --dsh-error-hover: var(--dsh-static-error-hover);
+  --dsh-warn: var(--dsh-static-warn);
+  --dsh-warn-label: var(--dsh-static-warn-label);
+  --dsh-warn-tertiary: var(--dsh-static-warn-tertiary);
+  --dsh-success: var(--dsh-static-success);
+  --dsh-success-tertiary: var(--dsh-static-success-tertiary);
+  --dsh-scrollbar: var(--dsh-static-scrollbar);
+  --dsh-scrollbar-hover: var(--dsh-static-scrollbar-hover);
+  --dsh-ongoing: var(--dsh-static-ongoing);
+  --dsh-border-l1: var(--dsh-static-border-l1);
+  --dsh-border-l2: var(--dsh-static-border-l2);
+  --dsh-border-l2-thin: var(--dsh-static-border-l2-thin);
+  --dsh-border-l3: var(--dsh-static-border-l3);
+  --dsh-border-l4: var(--dsh-static-border-l4);
+  --dsh-shadow-lv2: 0 4px 12px 0 rgba(0, 0, 0, 0.02), 0 2px 8px 0 rgba(0, 0, 0, 0.04);
+  --dsh-shadow-lv3: 0 0 1px 0 rgba(0, 0, 0, 0.2), 0 0 4px 0 rgba(0, 0, 0, 0.02), 0 12px 32px 0 rgba(0, 0, 0, 0.08);
+  /* Biny 通用 token 重映射：聊天区内的旧规则自动落到 DSH 取值 */
+  --bg: var(--dsh-bg);
+  --surface: var(--dsh-bg);
+  --surface-raised: var(--dsh-menu);
+  --surface-soft: var(--dsh-code-banner);
+  --surface-hover: var(--dsh-hover-solid);
+  --surface-selected: color-mix(in srgb, var(--dsh-business) 16%, var(--dsh-bg));
+  --user-bubble: var(--dsh-bubble);
+  --composer-surface: var(--dsh-input-major);
+  --text: var(--dsh-text);
+  --text-secondary: var(--dsh-text-secondary);
+  --text-tertiary: var(--dsh-text-tertiary);
+  --border: var(--dsh-border-l2);
+  --border-strong: var(--dsh-border-l3);
+  --accent: var(--dsh-business);
+  --blue: var(--dsh-business);
+  --green: var(--dsh-success);
+  --green-bg: var(--dsh-success-tertiary);
+  --red: var(--dsh-error);
+  --red-bg: var(--dsh-error-hover);
+  --amber: var(--dsh-warn);
+  --amber-bg: var(--dsh-warn-tertiary);
+  --code: var(--dsh-code-block);
+  --cindy-surface: var(--dsh-bg);
+  --cindy-surface-elevated: var(--dsh-menu);
+  --cindy-surface-soft: var(--dsh-code-banner);
+  --cindy-surface-hover: var(--dsh-hover-solid);
+  --cindy-surface-selected: color-mix(in srgb, var(--dsh-business) 16%, var(--dsh-bg));
+  --cindy-border: var(--dsh-border-l2);
+  --cindy-border-real: var(--dsh-border-l2);
+  --cindy-border-strong: var(--dsh-border-l3);
+  --cindy-text: var(--dsh-text);
+  --cindy-text-secondary: var(--dsh-text-secondary);
+  --cindy-text-tertiary: var(--dsh-text-tertiary);
+  --cindy-code: var(--dsh-code-block);
+  --cindy-focus: var(--dsh-business);
+  --cindy-danger: var(--dsh-error);
+  --cindy-success: var(--dsh-success);
+  --cindy-warning: var(--dsh-warn);
+  --cindy-send-bg: var(--dsh-business);
+  --cindy-send-icon: #ffffff;
+  --cindy-pill: var(--dsh-inline-code);
+  --cindy-placeholder: var(--dsh-caption);
+}
+
+/* ---------- 聊天区几何与节奏（ChatView：748px 内容列，16px 统一间距） ---------- */
+
+/* 滚动区：DSH 16px 顶部/底部留白；消息列两侧由列宽公式保证 ≥32px。 */
+.cindy-chat-scroll {
+  padding: 16px 0;
+}
+
+.cindy-chat-scroll .message-timeline {
+  padding: 0;
+}
+
+/* 轮次级间距：DSH 所有 flow item 之间固定 16px。 */
+.cindy-chat-scroll .timeline-turn {
+  padding: 0 0 16px;
+}
+
+.cindy-chat-scroll .timeline-turn:last-child {
+  padding-bottom: 0;
+}
+
+.cindy-chat-scroll .user-message {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px; /* DSH gdEzaW_userRow */
+  margin: 0 0 16px;
+}
+
+.cindy-chat-scroll .execution-user-step.user-message {
+  margin: 0; /* 消息流内的用户步骤由 16px 节奏统一控制 */
+}
+
+.cindy-chat-scroll .execution-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 0 0 16px;
+}
+
+.cindy-chat-scroll .execution-assistant-step {
+  padding: 0;
+}
+
+.cindy-chat-scroll .execution-skills {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--text-tertiary);
+  font-size: calc(14px * var(--font-scale));
+  line-height: 24px;
+}
+
+.cindy-chat-scroll .execution-skills-list {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cindy-chat-scroll .tool-activity {
+  max-width: none; /* DSH 工具行占满整条内容列 */
+}
+
+/* 工具展开体与 DSH 一致：贴行首 4px，不再缩进到摘要下方。 */
+.cindy-chat-scroll .tool-details {
+  padding: 2px 0 12px 4px;
+}
+
+/* ---------- 用户消息气泡（DSH gdEzaW_userStack / bubble） ---------- */
+
+.cindy-chat-scroll .user-bubble {
+  max-width: min(525px, 82%);
+  padding: 10px 16px;
+  border-radius: 22px;
+  color: var(--text);
+  background: var(--user-bubble);
+  font-size: calc(16px * var(--font-scale));
+  line-height: 24px;
+}
+
+/* 消息操作行：DSH 28px 圆形触发钮 + hover 揭示时钟。 */
+.cindy-chat-scroll .user-message-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 28px;
+  margin-top: 0;
+  padding: 0;
+  color: var(--text-tertiary);
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.cindy-chat-scroll .timeline-turn:hover .user-message-actions,
+.cindy-chat-scroll .user-message-actions:focus-within,
+.cindy-chat-scroll .user-message-actions.is-open {
+  opacity: 1;
+}
+
+.cindy-chat-scroll .user-message-action {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border-radius: 999px;
+  color: var(--text-secondary);
+}
+
+.cindy-chat-scroll .user-message-action:hover {
+  color: var(--text);
+  background: var(--dsh-hover);
+}
+
+/* 助手回复操作行：与用户消息同一套 28px 圆形触发钮。 */
+.cindy-chat-scroll .assistant-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 28px;
+  margin-top: 7px;
+  color: var(--text-tertiary);
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.cindy-chat-scroll .timeline-turn:hover .assistant-actions,
+.cindy-chat-scroll .assistant-actions:focus-within,
+.cindy-chat-scroll .assistant-actions.is-open {
+  opacity: 1;
+}
+
+/* 朗读中要一直看得见按钮，否则鼠标移开后没法停下来。 */
+.cindy-chat-scroll .assistant-actions:has(.is-active) {
+  opacity: 1;
+}
+
+.cindy-chat-scroll .assistant-action {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border-radius: 999px;
+  color: var(--text-secondary);
+}
+
+.cindy-chat-scroll .assistant-action:hover {
+  color: var(--text);
+  background: var(--dsh-hover);
+}
+
+.cindy-chat-scroll .assistant-action.is-active {
+  color: var(--dsh-business);
+  background: var(--dsh-hover);
+}
+
+/* ---------- Markdown 排版（DSH markdown 模块，16px/28px 基调） ---------- */
+
+.cindy-chat-scroll .markdown-body {
+  min-width: 0;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: calc(16px * var(--font-scale));
+  line-height: 28px;
+  overflow-wrap: anywhere;
+}
+
+.cindy-chat-scroll .markdown-body strong {
+  font-weight: 600;
+}
+
+.cindy-chat-scroll .markdown-body h1,
+.cindy-chat-scroll .markdown-body h2,
+.cindy-chat-scroll .markdown-body h3 {
+  margin: 32px 0 16px;
+}
+
+.cindy-chat-scroll .markdown-body h1 {
+  font-size: calc(24px * var(--font-scale));
+  font-weight: 700;
+  line-height: 34px;
+}
+
+.cindy-chat-scroll .markdown-body h2 {
+  font-size: calc(22px * var(--font-scale));
+  font-weight: 700;
+  line-height: 32px;
+}
+
+.cindy-chat-scroll .markdown-body h3 {
+  font-size: calc(20px * var(--font-scale));
+  font-weight: 700;
+  line-height: 30px;
+}
+
+.cindy-chat-scroll .markdown-body h4,
+.cindy-chat-scroll .markdown-body h5,
+.cindy-chat-scroll .markdown-body h6 {
+  margin: 16px 0;
+  font-size: calc(16px * var(--font-scale));
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.cindy-chat-scroll .markdown-body :where(h1, h2, h3, h4, h5, h6) strong {
+  font-weight: inherit;
+}
+
+.cindy-chat-scroll .markdown-body p {
+  margin: 16px 0;
+}
+
+/* 标题后直接跟列表时收紧标题下边距。 */
+.cindy-chat-scroll .markdown-body :where(h4, h5, h6) + :where(ul, ol) {
+  margin-top: 8px;
+}
+
+.cindy-chat-scroll .markdown-body :where(h4, h5, h6):has(+ :where(ul, ol)) {
+  margin-bottom: 8px;
+}
+
+.cindy-chat-scroll .markdown-body a {
+  color: var(--dsh-business);
+  text-decoration: none;
+}
+
+.cindy-chat-scroll .markdown-body a:hover,
+.cindy-chat-scroll .markdown-body a:focus {
+  outline: none;
+  text-decoration: underline var(--dsh-business);
+}
+
+.cindy-chat-scroll .markdown-body a:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsh-business);
+}
+
+.cindy-chat-scroll .markdown-body ul,
+.cindy-chat-scroll .markdown-body ol {
+  margin: 16px 0;
+  padding-left: 18px;
+}
+
+.cindy-chat-scroll .markdown-body li:not(:first-child) {
+  margin-top: 6px;
+}
+
+.cindy-chat-scroll .markdown-body li > :where(ul, ol) {
+  margin-top: 4px;
+}
+
+.cindy-chat-scroll .markdown-body li::marker {
+  color: var(--text-secondary);
+  line-height: 28px;
+}
+
+.cindy-chat-scroll .markdown-body :where(ul, ol) ol {
+  padding-left: 0;
+  list-style-position: inside;
+}
+
+.cindy-chat-scroll .markdown-body :where(ul, ol) ol li p {
+  display: inline;
+}
+
+.cindy-chat-scroll .markdown-body li > p {
+  margin: 8px 0;
+}
+
+.cindy-chat-scroll .markdown-body li > *:first-child {
+  margin-top: 0;
+}
+
+.cindy-chat-scroll .markdown-body li > *:last-child:not(.markdown-code-block) {
+  margin-bottom: 0;
+}
+
+.cindy-chat-scroll .markdown-body hr {
+  height: 1px;
+  margin: 32px 0;
+  border: 0;
+  background: var(--dsh-border-l2);
+}
+
+.cindy-chat-scroll .markdown-body blockquote {
+  margin: 16px 0 0;
+  padding-left: 14px;
+  border-left: 2px solid var(--dsh-caption);
+}
+
+.cindy-chat-scroll .markdown-body pre {
+  margin: 16px 0;
+  font-family: var(--font-mono);
+  overflow: auto;
+}
+
+.cindy-chat-scroll .markdown-body :not(pre) > code {
+  display: inline-flex;
+  box-sizing: border-box;
+  align-items: center;
+  padding: 0 5px;
+  border-radius: 6px;
+  background-color: var(--dsh-inline-code);
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  line-height: 22px;
+}
+
+.cindy-chat-scroll .markdown-body :where(h1, h2, h3, h4, h5, h6) code {
+  font: inherit;
+  font-family: var(--font-mono);
+}
+
+.cindy-chat-scroll .markdown-body input[type="checkbox"] {
+  margin: 0 8px 0 0;
+  accent-color: var(--text-secondary);
+}
+
+.cindy-chat-scroll .markdown-body > *:first-child,
+.cindy-chat-scroll .markdown-body p:first-child {
+  margin-top: 0 !important;
+}
+
+.cindy-chat-scroll .markdown-body > *:last-child,
+.cindy-chat-scroll .markdown-body p:last-child {
+  margin-bottom: 0 !important;
+}
+
+/* 思考等次要内容的紧凑变体：DSH markdown-small 14px/24px。 */
+.cindy-chat-scroll .markdown-body.is-compact {
+  font-size: calc(14px * var(--font-scale));
+  line-height: 24px;
+  color: inherit;
+}
+
+.cindy-chat-scroll .markdown-body.is-compact p,
+.cindy-chat-scroll .markdown-body.is-compact ul,
+.cindy-chat-scroll .markdown-body.is-compact ol,
+.cindy-chat-scroll .markdown-body.is-compact blockquote {
+  margin: 0 0 8px;
+}
+
+.cindy-chat-scroll .markdown-body.is-compact h1,
+.cindy-chat-scroll .markdown-body.is-compact h2,
+.cindy-chat-scroll .markdown-body.is-compact h3,
+.cindy-chat-scroll .markdown-body.is-compact h4 {
+  margin: 12px 0 5px;
+  font-size: calc(14px * var(--font-scale));
+}
+
+/* ---------- 代码块（DSH md-code-block：12px 圆角无边框 + banner） ---------- */
+
+.cindy-chat-scroll .markdown-code-block {
+  margin: 16px 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 12px;
+  background: var(--dsh-code-block);
+}
+
+/* 相邻两个代码块收紧为 11px（DSH :not(:last-child) 行为）。 */
+.cindy-chat-scroll .markdown-code-block + .markdown-code-block {
+  margin-top: 11px;
+}
+
+.cindy-chat-scroll .markdown-code-header {
+  display: flex;
+  height: auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  border: 0;
+  border-radius: 12px 12px 0 0;
+  background: var(--dsh-code-banner);
+  font-size: calc(13px * var(--font-scale));
+  line-height: 20px;
+}
+
+.cindy-chat-scroll .markdown-code-language {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: calc(12px * var(--font-scale));
+  line-height: 18px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.cindy-chat-scroll .markdown-code-copy {
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: calc(13px * var(--font-scale));
+  line-height: 20px;
+  opacity: 1;
+}
+
+.cindy-chat-scroll .markdown-code-block:hover .markdown-code-copy,
+.cindy-chat-scroll .markdown-code-copy:focus-visible {
+  opacity: 1;
+}
+
+.cindy-chat-scroll .markdown-code-copy:hover {
+  color: var(--text);
+  background: transparent;
+  opacity: 1;
+}
+
+.cindy-chat-scroll .markdown-code-block pre {
+  margin: 0;
+  padding: 16px;
+  border-radius: 0 0 12px 12px;
+  background: var(--dsh-code-block);
+  font: calc(13px * var(--font-scale)) / 22px var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+  max-height: none;
+}
+
+/* ---------- 表格（DSH tableScroll：15px/25px，无边框容器） ---------- */
+
+.cindy-chat-scroll .markdown-table {
+  margin: 16px 0;
+  border: 0;
+  border-radius: 0;
+  overflow-x: auto;
+}
+
+.cindy-chat-scroll .markdown-table table {
+  width: max-content;
+  max-width: max-content;
+  border-collapse: collapse;
+  font-size: calc(15px * var(--font-scale));
+  line-height: 25px;
+}
+
+.cindy-chat-scroll .markdown-table th,
+.cindy-chat-scroll .markdown-table td {
+  max-width: min(30vw, 320px);
+  min-width: 100px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--dsh-border-l3);
+  text-align: start;
+  vertical-align: top;
+}
+
+.cindy-chat-scroll .markdown-table th {
+  color: var(--text);
+  background: transparent;
+  border-top: none;
+  font-weight: 500;
+  white-space: normal;
+}
+
+.cindy-chat-scroll .markdown-table td {
+  border-bottom-color: var(--dsh-border-l2);
+}
+
+.cindy-chat-scroll .markdown-table th:first-child,
+.cindy-chat-scroll .markdown-table td:first-child {
+  padding-left: 0;
+}
+
+.cindy-chat-scroll .markdown-table td:last-child {
+  padding-right: 0;
+}
+
+.cindy-chat-scroll .markdown-table tr:last-child td {
+  border-bottom: 1px solid var(--dsh-border-l2);
+}
+
+.cindy-chat-scroll .markdown-table table code {
+  font-size: calc(13px * var(--font-scale));
+}
+
+/* ---------- 图片（DSH：8px 圆角无边框；保留尺寸约束与点击放大） ---------- */
+
+.cindy-chat-scroll .markdown-image {
+  max-width: 100%;
+  max-height: 300px;
+  margin: 0;
+  border: 0;
+  border-radius: 8px;
+  cursor: zoom-in;
+}
+
+/* ---------- 代码高亮（hljs 类名 → DSH shiki token 配色） ---------- */
+
+.cindy-chat-scroll .hljs {
+  color: var(--dsh-text);
+  background: transparent;
+}
+
+.cindy-chat-scroll .hljs-comment,
+.cindy-chat-scroll .hljs-quote,
+.cindy-chat-scroll .hljs-doctag {
+  color: var(--dsh-static-shiki-comment);
+}
+
+.cindy-chat-scroll .hljs-keyword,
+.cindy-chat-scroll .hljs-selector-tag,
+.cindy-chat-scroll .hljs-literal {
+  color: var(--dsh-static-shiki-keyword);
+}
+
+.cindy-chat-scroll .hljs-string,
+.cindy-chat-scroll .hljs-attribute,
+.cindy-chat-scroll .hljs-symbol,
+.cindy-chat-scroll .hljs-bullet,
+.cindy-chat-scroll .hljs-addition {
+  color: var(--dsh-static-shiki-string);
+}
+
+.cindy-chat-scroll .hljs-title,
+.cindy-chat-scroll .hljs-section,
+.cindy-chat-scroll .hljs-name {
+  color: var(--dsh-static-shiki-function);
+}
+
+.cindy-chat-scroll .hljs-number,
+.cindy-chat-scroll .hljs-regexp {
+  color: var(--dsh-static-shiki-constant);
+}
+
+.cindy-chat-scroll .hljs-link {
+  color: var(--dsh-static-shiki-link);
+}
+
+.cindy-chat-scroll .hljs-built_in,
+.cindy-chat-scroll .hljs-type,
+.cindy-chat-scroll .hljs-variable,
+.cindy-chat-scroll .hljs-template-variable,
+.cindy-chat-scroll .hljs-selector-class,
+.cindy-chat-scroll .hljs-selector-id {
+  color: var(--dsh-static-shiki-parameter);
+}
+
+.cindy-chat-scroll .hljs-meta,
+.cindy-chat-scroll .hljs-tag {
+  color: var(--dsh-static-shiki-punctuation);
+}
+
+.cindy-chat-scroll .hljs-deletion {
+  color: var(--dsh-error);
+}
+
+/* ---------- 工具展开体表面（DSH 代码/终端/IO 卡片的同一套表面） ---------- */
+
+.cindy-chat-scroll .tool-payload,
+.cindy-chat-scroll .tool-error-output {
+  max-height: 260px;
+  margin: 0;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--dsh-code-block);
+  font: calc(12px * var(--font-scale)) / 18px var(--font-mono);
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.cindy-chat-scroll .copyable-code-block {
+  margin: 5px 0 0;
+  border: 0;
+  border-radius: 12px;
+  background: var(--dsh-code-block);
+}
+
+.cindy-chat-scroll .copyable-code-block.is-error {
+  background: var(--dsh-error-hover);
+}
+
+.cindy-chat-scroll .code-card,
+.cindy-chat-scroll .command-card {
+  border: 0;
+  border-radius: 12px;
+  background: var(--dsh-code-block);
+}
+
+.cindy-chat-scroll .code-card-header {
+  padding: 9px 14px;
+  border: 0;
+  background: var(--dsh-code-banner);
+  color: var(--text-secondary);
+  font: calc(12px * var(--font-scale)) / 18px var(--font-mono);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.cindy-chat-scroll .code-card-header:hover {
+  color: var(--text);
+  background: var(--dsh-code-banner);
+}
+
+/* ---------- 状态点（DSH StateDot：10px 光环 + 6px 实心核 / 像素追逐） ---------- */
+
+.dsh-state-dot {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.dsh-state-dot::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.1;
+}
+
+.dsh-state-dot::after {
+  content: "";
+  position: absolute;
+  inset: 20%;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.dsh-state-dot.is-error {
+  color: var(--red);
+}
+
+.dsh-state-dot.is-warning {
+  color: var(--amber);
+}
+
+.dsh-state-dot.is-done {
+  color: var(--green);
+}
+
+/* 像素追逐：3×3 矩阵外圈 8 格顺时针点亮，阶梯亮度（1 → 0.6 → 0.35 → 0.15）。 */
+.dsh-state-dot.is-ongoing {
+  color: var(--dsh-ongoing);
+}
+
+.dsh-state-cell {
+  fill: currentColor;
+  opacity: 0.15;
+  animation: dsh-state-chase 1s infinite;
+}
+
+@keyframes dsh-state-chase {
+  0%, 12.4% { opacity: 1; }
+  12.5%, 24.9% { opacity: 0.6; }
+  25%, 37.4% { opacity: 0.35; }
+  37.5%, 100% { opacity: 0.15; }
+}
+
+/* ---------- 折叠行外壳（DSH DisclosureRow：24px 单行） ---------- */
+
+.dsh-disclosure {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+
+.dsh-disclosure-row {
+  position: relative; /* 扫光 overlay 锚点 */
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  height: 24px;
+  min-width: 0;
+}
+
+.dsh-disclosure-row[data-expandable] {
+  cursor: pointer;
+}
+
+.dsh-disclosure-leading {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.dsh-disclosure-icon-idle {
+  display: inline-flex;
+  opacity: 1;
+  transition: opacity 100ms ease;
+}
+
+.dsh-disclosure-chevron-hover {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.dsh-disclosure-row:hover .dsh-disclosure-icon-idle {
+  opacity: 0;
+}
+
+.dsh-disclosure-row:hover .dsh-disclosure-chevron-hover {
+  opacity: 1;
+}
+
+.dsh-disclosure-title {
+  flex: none;
+  font-size: 14px;
+  line-height: 24px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+/* 2×2 分隔点（标题与摘要之间）。 */
+.dsh-row-sep {
+  flex: none;
+  width: 2px;
+  height: 2px;
+  margin: 0 8px;
+  border-radius: 1px;
+  background: var(--dsh-caption);
+}
+
+/* ---------- 运行扫光（DSH running sweep：300px 眩光带 2.6s 滑过） ---------- */
+
+.dsh-think-row[data-state="running"] .dsh-disclosure-row::after,
+.dsh-tool-row[data-state="running"] .dsh-disclosure-row::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 300px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--dsh-bg) 60%, transparent) 55%,
+    transparent 100%
+  );
+  animation: dsh-row-sweep 2.6s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes dsh-row-sweep {
+  0% { left: -300px; }
+  90%, 100% { left: 100%; }
+}
+
+/* ---------- 思考行（DSH ReasoningRow） ---------- */
+
+.dsh-think-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 运行中摘要跟随末尾：贴尾滚动，截断方式改为 clip。 */
+.dsh-think-summary[data-follow-end] {
+  text-overflow: clip;
+}
+
+.dsh-think-body {
+  padding: 4px 0 4px 22px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 24px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- 工具行（DSH ToolRow） ---------- */
+
+.dsh-tool-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 错误行的折叠摘要 = 失败首行，错误色。 */
+.dsh-tool-summary.is-error {
+  color: var(--red);
+}
+
+.dsh-tool-summary.is-target {
+  color: var(--text-secondary);
+}
+
+/* 折叠态的时长标签（DSH summarySuffix：摘要之后 4px，14px 行高对齐）。 */
+.dsh-tool-duration {
+  flex: none;
+  margin-left: 4px;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--text-tertiary);
+}
+
+/* ---------- IN/OUT 卡片（DSH ioCard） ---------- */
+
+.dsh-io-card {
+  display: flex;
+  flex-direction: column;
+  margin: 4px 0 4px 4px;
+  border: 1px solid var(--dsh-border-l1);
+  border-radius: 12px;
+  background: var(--dsh-code-block);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-io-section {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 14px;
+  align-items: baseline;
+  padding: 12px 16px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+/* 卡片内滚动条：thumb 内缩 2px，避免贴住圆角。 */
+.dsh-io-section::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+
+.dsh-io-section::-webkit-scrollbar-track {
+  margin: 6px 0;
+}
+
+.dsh-io-label {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  color: var(--dsh-caption);
+  user-select: none;
+}
+
+.dsh-io-divider {
+  flex: none;
+  height: 1px;
+  background: var(--dsh-border-l2);
+}
+
+.dsh-io-text {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+}
+
+.dsh-io-text[data-error] {
+  color: var(--red);
+}
+
+/* ---------- 压缩标记行（DSH CompactionItem） ---------- */
+
+.dsh-compaction-row {
+  padding: 2px 0;
+}
+
+.dsh-compaction-button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 24px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.dsh-compaction-button:not(:disabled) {
+  cursor: pointer;
+}
+
+.dsh-compaction-button:not(:disabled):hover {
+  background: var(--dsh-hover);
+}
+
+.dsh-compaction-leading {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  color: var(--text-secondary);
+}
+
+.dsh-compaction-icon,
+.dsh-compaction-chevron {
+  display: inline-flex;
+  grid-area: 1 / 1;
+  align-items: center;
+  justify-content: center;
+}
+
+.dsh-compaction-chevron {
+  opacity: 0;
+}
+
+.dsh-compaction-button:not(:disabled):hover .dsh-compaction-icon,
+.dsh-compaction-button:not(:disabled):focus-visible .dsh-compaction-icon {
+  opacity: 0;
+}
+
+.dsh-compaction-button:not(:disabled):hover .dsh-compaction-chevron,
+.dsh-compaction-button:not(:disabled):focus-visible .dsh-compaction-chevron {
+  opacity: 1;
+}
+
+.dsh-compaction-title {
+  flex: none;
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--text);
+}
+
+.dsh-compaction-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-compaction-body {
+  padding: 4px 0 4px 22px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 24px;
+}
+
+/* ---------- 轮次级错误（DSH turn error：13px/20px 紧凑行） ---------- */
+
+.dsh-run-error-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 0;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dsh-run-error-leading {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  margin-right: 8px;
+}
+
+.dsh-run-error-title {
+  flex: none;
+  color: var(--red);
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.dsh-run-error-row[data-variant="warning"] .dsh-run-error-title {
+  color: var(--amber);
+}
+
+.dsh-run-error-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 思考状态 shimmer（聊天上方的运行状态行） ---------- */
+
+/* 品牌色渐变扫光：文案在运行期间持续流动（DSH turnStatus 同款）。 */
+.dsh-thinking-shimmer {
+  color: transparent;
+  background:
+    linear-gradient(
+      90deg,
+      var(--dsh-business) 0%,
+      color-mix(in srgb, var(--dsh-business) 45%, var(--dsh-text)) 50%,
+      var(--dsh-business) 100%
+    );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: dsh-turn-status-shimmer 1.8s linear infinite;
+}
+
+@keyframes dsh-turn-status-shimmer {
+  from { background-position: 200% 50%; }
+  to { background-position: 0 50%; }
+}
+
+/* 思考状态行：DSH turnStatus 26px 高、500 14px/22px，时钟 13px/20px。 */
+.cindy-thinking-status {
+  width: var(--cindy-chat-content-width);
+  height: 26px;
+  gap: 8px;
+  margin: 0 auto;
+  padding: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.cindy-thinking-status-duration {
+  flex: 0 0 auto;
+  color: var(--dsh-caption);
+  font-size: 13px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
+}
+
+/* ---------- 消息时钟（DSH MessageIconActions：hover 揭示） ---------- */
+
+.dsh-message-clock {
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsh-caption);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dsh-clock-dot {
+  color: var(--dsh-caption);
+  opacity: 0.8;
+}
+
+@media (hover: hover) {
+  [data-time-hover-root] .dsh-message-clock {
+    opacity: 0;
+    transition: opacity 80ms ease;
+  }
+
+  [data-time-hover-root]:hover .dsh-message-clock,
+  [data-time-hover-root]:focus-within .dsh-message-clock {
+    opacity: 1;
+  }
+}
+
+/* ---------- 输入框（DSH composer：780px 卡片、22px 圆角、16px/24px 输入） ---------- */
+
+.cindy-chat-composer {
+  width: min(780px, calc(100% - 32px));
+  padding: 0 0 8px;
+}
+
+/* 输入卡片：DSH uV2eYG_card（l2-darkmode-thin 边框 + lv2 阴影 + 22px 圆角）。 */
+.cindy-chat-composer .cindy-composer > div:not(.astryx-chat-composer-drawer) {
+  border: 1px solid var(--dsh-border-l2-thin);
+  border-radius: 22px;
+  background: var(--dsh-input-major);
+  box-shadow: var(--dsh-shadow-lv2);
+}
+
+.cindy-chat-composer .cindy-composer > div:not(.astryx-chat-composer-drawer):focus-within {
+  border-color: var(--dsh-border-l3);
+  box-shadow: var(--dsh-shadow-lv2);
+}
+
+.cindy-chat-composer .cindy-composer-input > [contenteditable="true"],
+.cindy-chat-composer .cindy-composer-input > [aria-hidden="true"] {
+  font-size: 16px;
+  line-height: 24px;
+}
+
+/* 发送按钮：DSH primary 34px 圆钮，品牌色底白图标。 */
+.cindy-chat-composer .cindy-send-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--cindy-send-bg);
+  color: var(--cindy-send-icon);
+  transform: translateY(-2px);
+}
+
+.cindy-chat-composer .cindy-send-button:not(:disabled):hover {
+  background: color-mix(in srgb, var(--dsh-business) 85%, var(--dsh-bg));
+  transform: translateY(-2px);
+}
+
+.cindy-chat-composer .cindy-send-button:not(:disabled):active {
+  transform: translateY(-1px);
+}
+
+.cindy-chat-composer .cindy-send-button.is-stop {
+  background: var(--dsh-hover);
+  color: var(--text);
+}
+
+.cindy-chat-composer .cindy-send-button:disabled {
+  opacity: 0.4;
+}
+
+/* 状态行（费用/后台运行）：DSH xxs-12 caption。 */
+.cindy-chat-composer .cindy-composer-status {
+  min-height: 20px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.cindy-chat-composer .cindy-composer-status-button {
+  font-size: 12px;
+}
+
+/* ---------- 滚动条（DSH：8px、4px 圆角、常显 thumb） ---------- */
+
+.cindy-chat-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--dsh-scrollbar) transparent;
+}
+
+.cindy-chat-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.cindy-chat-scroll::-webkit-scrollbar-thumb {
+  border: 0;
+  border-radius: 4px;
+  background: var(--dsh-scrollbar);
+  background-clip: padding-box;
+  transition: background-color 160ms ease;
+}
+
+.cindy-chat-scroll.is-scroll-active::-webkit-scrollbar-thumb,
+.cindy-chat-scroll:hover::-webkit-scrollbar-thumb,
+.cindy-chat-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--dsh-scrollbar-hover);
+  background-clip: padding-box;
+}
+
+/* ---------- 搬迁：旧默认聊天样式仅保留的基础规则（原 styles.css） ---------- */
+
+/* 用户消息附件卡片。 */
+.cindy-chat-scroll .message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cindy-chat-scroll .message-attachment {
+  display: flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.cindy-chat-scroll .message-attachment span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cindy-chat-scroll .message-attachment-image {
+  max-width: 190px;
+  max-height: 130px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+/* 用户输入里的换行是手打的，Markdown 会把段内单个换行折叠掉，靠 pre-wrap 保住原来的分行。 */
+.cindy-chat-scroll .user-bubble .markdown-body p {
+  white-space: pre-wrap;
+}
+
+/* 消息操作菜单：定位基础；尺寸与表面由 cindy 层覆盖。 */
+.cindy-chat-scroll .user-message-menu,
+.cindy-chat-scroll .assistant-message-menu {
+  position: absolute;
+  z-index: 14;
+}
+
+.cindy-chat-scroll .user-message-menu {
+  right: 0;
+  bottom: calc(100% + 4px);
+}
+
+.cindy-chat-scroll .assistant-message-menu {
+  left: 0;
+  bottom: calc(100% + 4px);
+}
+
+.cindy-chat-scroll .message-menu-item {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 8px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  text-align: left;
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.cindy-chat-scroll .message-menu-item:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.cindy-chat-scroll .message-menu-item svg {
+  flex: 0 0 auto;
+}
+
+.cindy-chat-scroll .message-menu-item.is-danger {
+  color: var(--red);
+}
+
+.cindy-chat-scroll .message-menu-item.is-danger:hover {
+  color: var(--red);
+  background: var(--red-bg);
+}
+
+.cindy-chat-scroll .message-menu-separator {
+  height: 1px;
+  margin: 5px 2px;
+  background: var(--border);
+}
+
+/* 消息内联编辑。 */
+.cindy-chat-scroll .user-message-editor {
+  width: min(620px, 86%);
+  padding: 10px 12px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  box-shadow: 0 6px 18px var(--shadow);
+}
+
+.cindy-chat-scroll .user-message-editor textarea {
+  display: block;
+  width: 100%;
+  min-height: 58px;
+  max-height: 240px;
+  padding: 2px 1px;
+  border: 0;
+  outline: 0;
+  resize: vertical;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  font-size: calc(14px * var(--font-scale));
+  line-height: 1.55;
+}
+
+.cindy-chat-scroll .user-message-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.cindy-chat-scroll .user-message-editor-actions button {
+  min-width: 38px;
+  height: 27px;
+  padding: 0 9px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.cindy-chat-scroll .user-message-editor-actions button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.cindy-chat-scroll .user-message-editor-actions button.is-primary {
+  color: var(--text);
+  background: var(--surface-selected);
+}
+
+.cindy-chat-scroll .user-message-editor-actions button.is-primary:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.cindy-chat-scroll .user-message-editor-actions button:disabled {
+  opacity: 0.45;
+}
+
+.cindy-chat-scroll .user-message-editor-error {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  color: var(--red);
+  font-size: calc(10px * var(--font-scale));
+}
+
+/* Markdown 补充（任务列表 / 图片展开 / 图片回退 / 紧凑变体）。 */
+.cindy-chat-scroll .markdown-body .contains-task-list {
+  padding-left: 3px;
+}
+
+.cindy-chat-scroll .markdown-body .task-list-item {
+  list-style: none;
+}
+
+.cindy-chat-scroll .markdown-image.is-expanded {
+  max-height: none;
+  cursor: zoom-out;
+}
+
+.cindy-chat-scroll .markdown-image-fallback {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-tertiary);
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.cindy-chat-scroll .markdown-body.is-compact p {
+  white-space: pre-wrap;
+}
+
+.cindy-chat-scroll .markdown-body.is-compact .markdown-code-block {
+  margin: 8px 0;
+}
+
+.cindy-chat-scroll .markdown-body.is-compact .markdown-code-block pre {
+  max-height: 220px;
+}
+
+/* 可复制代码块：悬浮复制钮与内层输出贴边。 */
+.cindy-chat-scroll .copyable-code-block > .copy-button {
+  position: absolute;
+  z-index: 2;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  margin: 0;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  opacity: 0.55;
+  transition: opacity 150ms ease, color 150ms ease, background 150ms ease;
+}
+
+.cindy-chat-scroll .copyable-code-block:hover > .copy-button,
+.cindy-chat-scroll .copyable-code-block:focus-within > .copy-button,
+.cindy-chat-scroll .copyable-code-block > .copy-button:hover {
+  opacity: 1;
+}
+
+.cindy-chat-scroll .copyable-code-block > .copy-button:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+/* 卡片内的输出文本：由外层卡片提供表面，内容贴边留出复制钮空间。 */
+.cindy-chat-scroll .copyable-code-block .tool-payload,
+.cindy-chat-scroll .copyable-code-block .tool-error-output {
+  margin: 0;
+  max-height: 260px;
+  padding-right: 40px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.cindy-chat-scroll .copyable-code-block.is-error .tool-error-output {
+  color: var(--red);
+}
+
+/* 工具/思考区摘要步骤。 */
+.cindy-chat-scroll .execution-summary-step {
+  color: var(--text);
+}
+
+/* 命令输出面板（DSH terminal 同款表面：banner + 等宽输出）。 */
+.cindy-chat-scroll .tool-output-surface {
+  display: grid;
+  min-width: 0;
+  margin-top: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--code);
+}
+
+.cindy-chat-scroll .tool-output-surface.is-error {
+  border-color: color-mix(in srgb, var(--red) 38%, var(--border));
+}
+
+.cindy-chat-scroll .tool-output-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 9px 6px 11px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-soft);
+}
+
+.cindy-chat-scroll .tool-output-command {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+  color: var(--text);
+  font: calc(11.5px * var(--font-scale)) / 1.45 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cindy-chat-scroll .tool-output-header > .copy-button {
+  flex: 0 0 24px;
+  opacity: 0.6;
+}
+
+.cindy-chat-scroll .tool-output-header > .copy-button:hover,
+.cindy-chat-scroll .tool-output-header > .copy-button:focus-visible {
+  opacity: 1;
+}
+
+.cindy-chat-scroll .tool-output-body-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.cindy-chat-scroll .tool-output-body {
+  max-height: 256px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 38px 11px 12px;
+  color: var(--text-secondary);
+  font: calc(11px * var(--font-scale)) / 1.5 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  transition: max-height var(--motion-base) var(--motion-ease-move);
+}
+
+.cindy-chat-scroll .tool-output-body.is-expanded {
+  max-height: var(--terminal-output-expanded-height, 256px);
+}
+
+.cindy-chat-scroll .tool-output-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0;
+}
+
+.cindy-chat-scroll .tool-output-body-wrap:hover .tool-output-copy,
+.cindy-chat-scroll .tool-output-copy:focus-visible {
+  opacity: 1;
+}
+
+.cindy-chat-scroll .tool-output-empty {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 12px;
+  color: var(--text-tertiary);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.cindy-chat-scroll .tool-output-error-meta {
+  margin: 0;
+  padding: 7px 12px 9px;
+  border-top: 1px solid color-mix(in srgb, var(--red) 22%, transparent);
+  color: var(--red);
+  font: calc(10.5px * var(--font-scale)) / 1.4 var(--font-mono);
+}
+
+.cindy-chat-scroll .stderr-output {
+  display: block;
+  color: var(--red);
+}
+
+/* diff 面板（与命令输出共用工具表面）。 */
+.cindy-chat-scroll .diff-surface {
+  background: var(--code);
+}
+
+.cindy-chat-scroll .diff-header {
+  gap: 8px;
+}
+
+.cindy-chat-scroll .diff-paths {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+  color: var(--text-secondary);
+  font: calc(11px * var(--font-scale)) / 1.4 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cindy-chat-scroll .diff-path {
+  display: inline;
+}
+
+.cindy-chat-scroll .diff-path button {
+  max-width: 100%;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.cindy-chat-scroll .diff-path button:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.cindy-chat-scroll .diff-stats {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  font: calc(10.5px * var(--font-scale)) / 1.3 var(--font-mono);
+}
+
+.cindy-chat-scroll .diff-code {
+  max-height: 320px;
+  padding: 7px 0;
+  font: calc(10.5px * var(--font-scale)) / 1.5 var(--font-mono);
+}
+
+.cindy-chat-scroll .diff-code code > .diff-line {
+  display: block;
+  min-width: max-content;
+  padding: 0 10px;
+  white-space: pre;
+}
+
+.cindy-chat-scroll .diff-line[data-line="add"] {
+  color: var(--green);
+  background: var(--green-bg);
+}
+
+.cindy-chat-scroll .diff-line[data-line="del"] {
+  color: var(--red);
+  background: var(--red-bg);
+}
+
+.cindy-chat-scroll .diff-line[data-line="hunk"] {
+  color: var(--blue);
+  background: var(--surface-soft);
+}
+
+.cindy-chat-scroll .diff-line[data-line="meta"] {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.cindy-chat-scroll .diff-line[data-line="ctx"] {
+  color: var(--text-secondary);
+}
+
+.cindy-chat-scroll .diff-add {
+  color: var(--green);
+}
+
+.cindy-chat-scroll .diff-delete {
+  color: var(--red);
+}
+
+/* 展开全部输出按钮。 */
+.cindy-chat-scroll .expand-output {
+  display: block;
+  width: 100%;
+  height: 30px;
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.cindy-chat-scroll .expand-output:hover {
+  background: var(--surface-hover);
+}
+
+.cindy-chat-scroll .expand-output:active {
+  transform: scale(0.99);
+}
+
+/* 空输出占位。 */
+.cindy-chat-scroll .empty-output {
+  padding: 12px;
+  color: var(--text-tertiary);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.cindy-chat-scroll .web-search-log .empty-output {
+  padding: 10px 12px;
+}
+
+/* 权限卡片（琥珀语义，token 已映射到 DSH 语义色）。 */
+.cindy-chat-scroll .permission-card {
+  margin: 5px 0 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--amber) 38%, transparent);
+  border-radius: 9px;
+  background: var(--amber-bg);
+}
+
+.cindy-chat-scroll .permission-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+
+.cindy-chat-scroll .permission-strip-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.cindy-chat-scroll .permission-strip-title {
+  color: var(--amber);
+  font-size: calc(11.5px * var(--font-scale));
+  font-weight: 600;
+}
+
+.cindy-chat-scroll .permission-body {
+  padding: 9px 13px 13px;
+}
+
+.cindy-chat-scroll .permission-headline {
+  margin: 0;
+  color: var(--text);
+  font-size: calc(13px * var(--font-scale));
+  font-weight: 600;
+}
+
+.cindy-chat-scroll .permission-card .permission-title {
+  display: none;
+}
+
+.cindy-chat-scroll .risk-badge {
+  margin-left: auto;
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: var(--amber);
+  background: var(--surface);
+  font-size: calc(9px * var(--font-scale));
+}
+
+.cindy-chat-scroll .risk-badge.is-high,
+.cindy-chat-scroll .risk-badge.is-critical {
+  color: var(--red);
+}
+
+.cindy-chat-scroll .permission-card p {
+  margin: 8px 0;
+  color: var(--text-secondary);
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.cindy-chat-scroll .permission-preview {
+  max-height: 150px;
+  margin: 9px 0;
+  overflow: auto;
+  padding: 9px 10px;
+  border-radius: 6px;
+  background: var(--code);
+  font: calc(11px * var(--font-scale)) / 1.45 var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.cindy-chat-scroll .permission-target {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 0;
+  color: var(--text-secondary);
+  font: 11px var(--font-mono);
+}
+
+.cindy-chat-scroll .permission-confirmation {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.cindy-chat-scroll .permission-confirmation input {
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--amber);
+  border-radius: 7px;
+  color: var(--text-primary);
+  background: var(--surface);
+  font: inherit;
+}
+
+.cindy-chat-scroll .permission-confirmation input:focus {
+  outline: 2px solid color-mix(in srgb, var(--amber) 32%, transparent);
+  outline-offset: 1px;
+}
+
+.cindy-chat-scroll .permission-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.cindy-chat-scroll .permission-actions button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.cindy-chat-scroll .permission-actions button:hover {
+  background: var(--surface-hover);
+}
+
+.cindy-chat-scroll .permission-actions button.is-primary {
+  color: var(--cindy-selection-text);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.cindy-chat-scroll .permission-card.is-resolved {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  color: var(--text-secondary);
+  border-color: var(--border);
+  background: var(--surface-soft);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.cindy-chat-scroll .permission-card.is-approved svg {
+  color: var(--green);
+}
+
+.cindy-chat-scroll .permission-card.is-denied svg {
+  color: var(--red);
+}
+
+/* 工具展开体的分区标签与元信息。 */
+.cindy-chat-scroll .tool-section {
+  margin-top: 12px;
+}
+
+.cindy-chat-scroll .tool-details > .tool-section:first-child,
+.cindy-chat-scroll .tool-details > .permission-card + .tool-section {
+  margin-top: 4px;
+}
+
+.cindy-chat-scroll .tool-section-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 5px;
+  color: var(--text-tertiary);
+  font-size: calc(9.5px * var(--font-scale));
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.cindy-chat-scroll .tool-section-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font: 10px var(--font-mono);
+  font-weight: 400;
+  letter-spacing: normal;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.cindy-chat-scroll .tool-section-meta.is-error {
+  color: var(--red);
+}
+
+.cindy-chat-scroll .tool-section-label .running-label {
+  color: var(--text-secondary);
+  font-size: calc(10px * var(--font-scale));
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+/* 代码卡片 / 命令卡片。 */
+.cindy-chat-scroll .code-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code);
+}
+
+.cindy-chat-scroll .code-card.is-dashed {
+  border-style: dashed;
+  background: var(--surface-soft);
+}
+
+.cindy-chat-scroll .code-card.is-empty {
+  padding: 10px 12px;
+  border-style: dashed;
+  background: var(--surface-soft);
+  color: var(--text-tertiary);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.cindy-chat-scroll .command-card pre {
+  margin: 0;
+  overflow: auto;
+  max-height: 180px;
+  padding: 12px 16px;
+  font: calc(12px * var(--font-scale)) / 18px var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cindy-chat-scroll .command-card > .copy-button {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 1;
+  opacity: 0;
+}
+
+.cindy-chat-scroll .command-card:hover > .copy-button,
+.cindy-chat-scroll .command-card > .copy-button:focus-visible {
+  opacity: 1;
+}
+
+/* 命令的颜色主次：程序名 > 子命令/路径 > 参数 > 管道与重定向；配色沿用代码高亮的同一批 token。 */
+.cindy-chat-scroll .command-text {
+  color: var(--text-secondary);
+}
+
+.cindy-chat-scroll .command-text .cmd-program {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.cindy-chat-scroll .command-text .cmd-subcommand,
+.cindy-chat-scroll .command-text .cmd-path {
+  color: var(--text);
+}
+
+.cindy-chat-scroll .command-text .cmd-flag {
+  color: var(--blue);
+}
+
+.cindy-chat-scroll .command-text .cmd-string {
+  color: var(--green);
+}
+
+.cindy-chat-scroll .command-text .cmd-operator {
+  color: var(--amber);
+}
+
+.cindy-chat-scroll .command-text .cmd-variable {
+  color: var(--file-purple);
+}
+
+.cindy-chat-scroll .command-text .cmd-comment {
+  color: var(--text-tertiary);
+}
+
+/* 带行号的代码行。 */
+.cindy-chat-scroll .code-lines {
+  max-height: 420px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px 0;
+  font: calc(12px * var(--font-scale)) / 18px var(--font-mono);
+}
+
+.cindy-chat-scroll .code-line {
+  display: block;
+  min-width: max-content;
+  padding-right: 14px;
+  white-space: pre;
+}
+
+.cindy-chat-scroll .code-line.is-add {
+  background: var(--green-bg);
+}
+
+.cindy-chat-scroll .code-line.is-del {
+  background: var(--red-bg);
+}
+
+.cindy-chat-scroll .code-line-number {
+  display: inline-block;
+  width: 34px;
+  padding-right: 8px;
+  color: var(--text-tertiary);
+  text-align: right;
+  user-select: none;
+}
+
+.cindy-chat-scroll .code-line-sign {
+  display: inline-block;
+  width: 18px;
+  color: var(--green);
+  text-align: center;
+  user-select: none;
+}
+
+.cindy-chat-scroll .code-line.is-del .code-line-sign {
+  color: var(--red);
+}
+
+/* 网络搜索日志卡片。 */
+.cindy-chat-scroll .web-search-log {
+  overflow: hidden;
+  margin-top: 0;
+  border: 0;
+  border-radius: 12px;
+  background: var(--dsh-code-block);
+}
+
+.cindy-chat-scroll .web-search-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cindy-chat-scroll .web-search-meta .running-label {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.cindy-chat-scroll .web-search-query {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.cindy-chat-scroll .web-search-query svg {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+}
+
+.cindy-chat-scroll .web-search-query > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cindy-chat-scroll .web-search-provider {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-size: calc(9.5px * var(--font-scale));
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.cindy-chat-scroll .web-search-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.cindy-chat-scroll .web-search-results {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 5px;
+  list-style: none;
+}
+
+.cindy-chat-scroll .web-search-result {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 9px;
+  border-radius: 7px;
+  text-align: left;
+}
+
+.cindy-chat-scroll .web-search-result:hover {
+  background: var(--surface-hover);
+}
+
+.cindy-chat-scroll .web-search-favicon {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  margin-top: 1px;
+  place-items: center;
+  border-radius: 5px;
+  background: var(--surface);
+  object-fit: contain;
+}
+
+.cindy-chat-scroll .web-search-favicon.is-fallback {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  font-size: calc(10px * var(--font-scale));
+  font-weight: 650;
+}
+
+.cindy-chat-scroll .web-search-result-main {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.cindy-chat-scroll .web-search-result-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.cindy-chat-scroll .web-search-result-title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: calc(12px * var(--font-scale));
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cindy-chat-scroll .web-search-result:hover .web-search-result-title {
+  color: var(--accent);
+}
+
+.cindy-chat-scroll .web-search-result-domain {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.cindy-chat-scroll .web-search-result-snippet {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.cindy-chat-scroll .web-search-result-open {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.cindy-chat-scroll .web-search-result:hover .web-search-result-open {
+  opacity: 1;
+}
+
+/* 轮次级错误容器与恢复按钮。 */
+.cindy-chat-scroll .run-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.cindy-chat-scroll .run-error-resume {
+  padding: 2px 8px;
+  border: none;
+  border-radius: 6px;
+  color: var(--blue);
+  background: transparent;
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+}
+
+.cindy-chat-scroll .run-error-resume:hover {
+  background: var(--surface-hover);
+}
+
+/* 工具展开的渐进披露：grid 轨道负责高度，opacity 负责层级。 */
+.cindy-chat-scroll .timeline-reveal.t-resize {
+  display: grid;
+  grid-template-rows: 0fr;
+  min-height: 0;
+  opacity: 0;
+  transition:
+    grid-template-rows 160ms ease,
+    opacity 120ms ease;
+}
+
+.cindy-chat-scroll .timeline-reveal.t-resize.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.cindy-chat-scroll .timeline-reveal-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cindy-chat-scroll .execution-timeline > .execution-step {
+  animation: chat-step-enter var(--motion-fast) var(--motion-ease-out) both;
+}
+
+@keyframes chat-step-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 恢复会话等状态行的思考球。 */
+.thinking-orb {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+}
+
+/* 输入框外壳与菜单锚点（宽度/表面由 DSH 与 cindy 层负责）。 */
+.cindy-chat-composer .composer-container {
+  position: relative;
+  z-index: 2;
+  margin: 0 auto;
+}
+
+.cindy-chat-composer .composer-menu-anchor {
+  position: relative;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+/* ---------- 无障碍 ---------- */
+
+.dsh-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dsh-think-row[data-state="running"] .dsh-disclosure-row::after,
+  .dsh-tool-row[data-state="running"] .dsh-disclosure-row::after {
+    animation: none;
+  }
+
+  .dsh-state-cell {
+    animation: none;
+  }
+
+  .dsh-thinking-shimmer {
+    animation: none;
+    color: var(--text-secondary);
+  }
+}

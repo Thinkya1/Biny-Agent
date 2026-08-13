@@ -80,6 +80,8 @@ export interface TimelineReasoningStep {
   startedAt?: string;
   durationMs?: number;
   completed?: boolean;
+  /** 上下文压缩标记：渲染为独立的压缩通知行而非思考行。 */
+  notice?: "compaction";
 }
 
 export interface TimelineAssistantStep {
@@ -152,6 +154,16 @@ export interface TimelineTurn {
   usage?: SessionUsage;
   timestamp?: string;
   resumable?: boolean;
+  /** 本轮首个模型输出增量（reasoning/assistant delta）的时间戳；用于首 token 延迟。 */
+  firstTokenAt?: string;
+  /** 本轮开始时间（run.started）；终态事件会覆盖 `timestamp`，TTFT 必须锚定它。 */
+  startedAt?: string;
+  /** 首 token 延迟（firstTokenAt − startedAt），实时轮次在终态时计算。 */
+  ttftMs?: number;
+  /** 解码耗时（durationMs − ttftMs），实时轮次在终态时计算。 */
+  decodeMs?: number;
+  /** 解码 token 数（usage.outputTokens），实时轮次在终态时计算。 */
+  decodeTokens?: number;
 }
 
 export interface TimelineChangedFile {
@@ -397,6 +409,24 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
     activeReasoning.delete(runId);
   };
 
+  /** 记录本轮首个输出增量时间（首个 reasoning/assistant delta），TTFT 的分子。 */
+  const noteFirstToken = (turn: TimelineTurn, timestamp: string): void => {
+    if (!turn.firstTokenAt) turn.firstTokenAt = timestamp;
+  };
+
+  /** 终态结算：从已记录的时间戳与 usage 派生 TTFT / 解码耗时 / 解码 token。 */
+  const settleMetrics = (turn: TimelineTurn): void => {
+    const start = Date.parse(turn.startedAt ?? turn.timestamp ?? "");
+    const firstToken = turn.firstTokenAt ? Date.parse(turn.firstTokenAt) : Number.NaN;
+    if (!Number.isNaN(start) && !Number.isNaN(firstToken) && firstToken >= start) {
+      turn.ttftMs = firstToken - start;
+    }
+    if (turn.durationMs !== undefined && turn.ttftMs !== undefined && turn.durationMs > turn.ttftMs) {
+      turn.decodeMs = turn.durationMs - turn.ttftMs;
+    }
+    turn.decodeTokens = turn.usage?.outputTokens;
+  };
+
   const startReasoning = (event: Extract<AgentHostEvent, { type: "reasoning.started" }>): TimelineReasoningStep => {
     finishReasoning(event.runId, event.timestamp);
     const turn = turnFor(event);
@@ -473,16 +503,19 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
     } else if (event.type === "run.started") {
       turn.status = "running";
       turn.model = event.model;
+      turn.startedAt = event.timestamp;
     } else if (event.type === "context.retrying") {
       turn.steps.push({
         kind: "reasoning",
         id: `${event.runId}:context-retry:${String(event.attempt)}`,
         content: "",
-        status: `上下文已压缩 ${String(event.compactedMessages)} 条消息，正在恢复请求`,
-        completed: true
+        status: `已压缩 ${String(event.compactedMessages)} 条消息，正在恢复请求`,
+        completed: true,
+        notice: "compaction"
       });
     } else if (event.type === "assistant.delta") {
       finishReasoning(event.runId, event.timestamp);
+      noteFirstToken(turn, event.timestamp);
       appendAssistant(turn, event.content);
     } else if (event.type === "assistant.completed") {
       finishReasoning(event.runId, event.timestamp);
@@ -499,6 +532,7 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       startReasoning(event);
     } else if (event.type === "reasoning.delta") {
       const step = reasoningStepFor(event);
+      noteFirstToken(turn, event.timestamp);
       step.content = appendLiveReasoning(step.content, event.content);
       turn.reasoning = appendLiveReasoning(turn.reasoning, event.content);
     } else if (event.type === "reasoning.completed") {
@@ -571,6 +605,7 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
       turn.usage = event.usage;
+      settleMetrics(turn);
     } else if (event.type === "run.blocked") {
       turn.status = "blocked";
       turn.resumable = event.resumable;
@@ -592,6 +627,7 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
       turn.usage = event.usage;
+      settleMetrics(turn);
       for (const tool of turn.tools) {
         if (tool.status === "running" || tool.status === "waiting") tool.status = "unknown";
       }
@@ -603,6 +639,7 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
       turn.usage = event.usage;
+      settleMetrics(turn);
       for (const tool of turn.tools) {
         if (tool.status === "running" || tool.status === "waiting") tool.status = "unknown";
       }
@@ -623,6 +660,7 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       turn.error = event.error;
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
+      settleMetrics(turn);
       for (const tool of turn.tools) {
         if (tool.status === "running" || tool.status === "waiting") tool.status = "failed";
       }

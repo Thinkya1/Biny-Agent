@@ -84,7 +84,7 @@ export function Workspace({
   const usageControlRef = useRef<HTMLDivElement>(null);
   const closeUsage = useCallback(() => setUsageOpen(false), []);
   const streaming = turns.some((turn) => turn.status === "running" || turn.status === "waiting_permission");
-  const isHome = !loading && !runtimeError && turns.length === 0;
+  const isHome = !loading && !runtimeError && !projectId;
 
   if (isHome) {
     return (
@@ -137,7 +137,7 @@ export function Workspace({
           projection={runtimeProjection}
         />
         <div className="cindy-chat-body">
-          {loading ? <LoadingState /> : runtimeError ? <RuntimeError error={runtimeError} onOpenProject={onOpenProject} /> : turns.length > 0 && projectId ? (
+          {loading ? <LoadingState /> : runtimeError ? <RuntimeError error={runtimeError} onOpenProject={onOpenProject} /> : (turns.length > 0 || thinking) && projectId ? (
             <ChatScroll>
               <MessageTimeline
                 onCreateBranch={onCreateBranch}
@@ -153,6 +153,8 @@ export function Workspace({
                 sessionId={sessionId}
                 turns={turns}
               />
+              {/* 运行状态行：消息流末尾，与 DSH 的 TurnStatus 同位置。 */}
+              {thinking ? <ThinkingStatus key={thinkingStartedAt ?? "thinking"} startedAt={thinkingStartedAt} /> : null}
             </ChatScroll>
           ) : (
             <div className="cindy-chat-empty"><Icon name="message" size={20} /><span>开始一段新的对话</span></div>
@@ -161,7 +163,6 @@ export function Workspace({
         <div className="cindy-chat-composer">
           {children}
           <div aria-label="会话状态" aria-live="polite" className="cindy-composer-status">
-            {thinking ? <ThinkingStatus key={thinkingStartedAt ?? "thinking"} startedAt={thinkingStartedAt} /> : null}
             <div className="cindy-composer-status-actions">
               <div className="cindy-usage-control" ref={usageControlRef}>
                 <button
@@ -216,7 +217,7 @@ function ThinkingStatus({ startedAt }: { startedAt?: string }): React.JSX.Elemen
   return (
     <div className="cindy-thinking-status" role="status">
       <ThinkingOrb aria-label={thinkingMessage} className="cindy-thinking-status-orb" size={20} state="connecting" theme="auto" />
-      <span className="cindy-thinking-status-label">{thinkingMessage}…</span>
+      <span className="cindy-thinking-status-label dsh-thinking-shimmer">{thinkingMessage}…</span>
       <span className="cindy-thinking-status-duration">{elapsedSeconds}s</span>
     </div>
   );
