@@ -4,7 +4,6 @@ import {
   type AgentConfig,
   type ModelPricing
 } from "../config/schema.js";
-import { isRemovedModelId } from "../config/schema.js";
 import {
   resolveModelConfig
 } from "./modelConfig.js";
@@ -195,9 +194,14 @@ export function listModelChoices(
   return new ModelRuntime(config, catalogs).listModels();
 }
 
-/** 普通模型选择器只消费可用且标记为 `showInPicker` 的统一目录项。 */
+/**
+ * 普通模型选择器只展示「模型配置列表」里勾选启用的模型，同时只保留当前凭据可用的条目。
+ *
+ * 与 Codex 的 picker 可见性一致（`show_in_picker` / `filter_by_auth`）：provider `/models`
+ * 目录里未经用户勾选的模型一律不进入选择器，目录只作为设置页“启用模型”的候选来源。
+ */
 export function filterPickerModelChoices(models: readonly ModelChoice[]): ModelChoice[] {
-  return models.filter((model) => model.available && (model.showInPicker ?? !isRemovedModelId(model.model)));
+  return models.filter((model) => model.source === "configured" && model.available);
 }
 
 export function listPickerModelChoices(
