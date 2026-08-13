@@ -12,7 +12,7 @@ export interface OpenAiCodexCatalogModel {
   contextWindow: number | undefined;
 }
 
-/** Codex 访问路径的模型能力；Luna 不提供关闭思考，只有 Desktop 展示的五档。 */
+/** Codex 访问路径的能力覆盖；通用 OpenAI 元数据不能替代订阅入口的真实档位。 */
 export const openAiCodexThinkingLevelMaps: Readonly<Record<string, ThinkingLevelMap>> = {
   "gpt-5.6-luna": {
     low: "low",

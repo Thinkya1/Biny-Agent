@@ -58,7 +58,7 @@ const deepseekUnknownAliasConfig = configSchema.parse({
 const deepseekRuntime = new ProviderRegistry(deepseekUnknownAliasConfig);
 const normalizedFlash = deepseekRuntime.forModel("flash-alias").model;
 assert.deepEqual(modelReasoningConfig(normalizedFlash)?.efforts, ["low", "high", "max"]);
-assert.deepEqual(modelThinkingLevelMap(normalizedFlash), { off: "none", low: "low", high: "high", max: "max" });
+assert.deepEqual(modelThinkingLevelMap(normalizedFlash), { low: "low", high: "high", max: "max" });
 assert.equal(modelCapabilities(normalizedFlash).reasoningStream, true);
 assert.equal(normalizedFlash.contextWindow, 1_000_000);
 
@@ -122,6 +122,35 @@ assert.deepEqual(modelThinkingLevelMap(normalizedCodexLuna), {
   max: "max"
 });
 
+const userReasoningOverride = configSchema.parse({
+  ...codexLunaConfig,
+  models: {
+    "codex-luna": {
+      provider: "openai-codex",
+      model: "gpt-5.6-luna",
+      reasoning: { efforts: ["low"], defaultEffort: "low", mapping: { low: "provider-low" } }
+    }
+  }
+});
+assert.deepEqual(modelThinkingLevelMap(new ProviderRegistry(userReasoningOverride).forModel("codex-luna").model), { low: "provider-low" });
+
+const inferredCodexLuna = parseModelCatalog({ models: [{ slug: "gpt-5.6-luna" }] }, "openai-codex", "openai-compatible", true)[0]!;
+assert.equal(inferredCodexLuna.reasoningEffortsSource, "inferred");
+const inferredCodexRuntime = new ModelRuntime(codexConfig, [["openai-codex", [inferredCodexLuna]]]);
+assert.deepEqual(
+  modelReasoningConfig(inferredCodexRuntime.resolve("openai-codex/gpt-5.6-luna").model)?.efforts,
+  ["low", "medium", "high", "xhigh", "max"]
+);
+
+const declaredCodexLuna = parseModelCatalog({
+  models: [{ slug: "gpt-5.6-luna", reasoning_efforts: ["high", "max"] }]
+}, "openai-codex", "openai-compatible", true)[0]!;
+assert.equal(declaredCodexLuna.reasoningEffortsSource, "declared");
+assert.deepEqual(
+  modelReasoningConfig(new ProviderRegistry(codexLunaConfig, [["openai-codex", [declaredCodexLuna]]]).forModel("codex-luna").model)?.efforts,
+  ["high", "max"]
+);
+
 const unknownModelConfig = configSchema.parse({
   ...defaultConfig,
   defaultModel: "unknown",
@@ -173,7 +202,8 @@ assert.deepEqual(catalog[0], {
   contextWindow: 131_072,
   maxOutputTokens: 16_384,
   capabilities: { tools: true, reasoning: undefined, vision: true, audio: undefined, streaming: true },
-  reasoningEfforts: ["low", "high"]
+  reasoningEfforts: ["low", "high"],
+  reasoningEffortsSource: "declared"
 });
 
 const codexCatalog = parseModelCatalog({
@@ -246,9 +276,10 @@ const relayCatalog = parseModelCatalog({
 }, "relay", "openai-compatible");
 assert.deepEqual(relayCatalog[0]?.reasoningEfforts, ["high", "max"]);
 const relayCatalogNonReasoning = parseModelCatalog({
-  data: [{ id: "llama-3.3-70b-instruct" }]
+  data: [{ id: "gpt-5.4", supports_reasoning: false }]
 }, "relay", "openai-compatible");
 assert.deepEqual(relayCatalogNonReasoning[0]?.reasoningEfforts, []);
+assert.equal(relayCatalogNonReasoning[0]?.reasoningEffortsSource, "declared");
 
 const alternateCatalogShape = parseModelCatalog({
   models: [{ model: "hosted-model", displayName: "Hosted Model", contextLength: 65_536 }]
@@ -260,5 +291,6 @@ assert.deepEqual(alternateCatalogShape[0], {
   contextWindow: 65_536,
   maxOutputTokens: undefined,
   capabilities: { tools: undefined, reasoning: undefined, vision: undefined, audio: undefined, streaming: true },
-  reasoningEfforts: []
+  reasoningEfforts: [],
+  reasoningEffortsSource: undefined
 });

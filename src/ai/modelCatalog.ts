@@ -133,7 +133,7 @@ export function parseModelCatalog(
       ?? numberValue(item.max_completion_tokens)
       ?? numberValue(item.maxCompletionTokens);
     const declaredThinkingLevelMap = parseThinkingLevelMap(item.thinkingLevelMap ?? item.thinking_level_map);
-    const reasoningEfforts = declaredThinkingLevelMap
+    const declaredReasoningEfforts = declaredThinkingLevelMap
       ? Object.keys(declaredThinkingLevelMap)
         .filter((level) => level !== "off" && declaredThinkingLevelMap[level] !== null)
         .filter(isReasoningEffort)
@@ -141,14 +141,18 @@ export function parseModelCatalog(
       ? item.reasoning_efforts.filter(isReasoningEffort)
       : Array.isArray(item.reasoningEfforts)
         ? item.reasoningEfforts.filter(isReasoningEffort)
-      : inferReasoningFromId ? inferReasoningEfforts(id) : [];
+        : undefined;
+    const supportsReasoning = booleanValue(item.supports_reasoning) ?? booleanValue(item.supportsReasoning);
+    const reasoningEfforts = supportsReasoning === false
+      ? []
+      : declaredReasoningEfforts ?? (inferReasoningFromId ? inferReasoningEfforts(id) : []);
     const modalities = Array.isArray(item.modalities) ? item.modalities : [];
     const supportsThinking = booleanValue(item.thinking)
       ?? booleanValue(item.supports_thinking)
       ?? booleanValue(item.supportsThinking);
     const capabilities: Partial<ModelCapabilities> = {
       tools: booleanValue(item.supports_tools) ?? booleanValue(item.supportsTools),
-      reasoning: booleanValue(item.supports_reasoning) ?? booleanValue(item.supportsReasoning) ?? supportsThinking,
+      reasoning: supportsReasoning ?? supportsThinking,
       vision: booleanValue(item.supports_vision) ?? booleanValue(item.supportsVision) ?? modalityCapability(modalities, "image"),
       audio: booleanValue(item.supports_audio) ?? booleanValue(item.supportsAudio) ?? modalityCapability(modalities, "audio"),
       streaming: booleanValue(item.supports_streaming) ?? booleanValue(item.supportsStreaming) ?? true
@@ -175,7 +179,10 @@ export function parseModelCatalog(
       contextWindow,
       maxOutputTokens,
       capabilities,
-      reasoningEfforts
+      reasoningEfforts,
+      reasoningEffortsSource: supportsReasoning === false || declaredReasoningEfforts !== undefined
+        ? "declared"
+        : reasoningEfforts.length ? "inferred" : undefined
     };
     if (maxInputTokens !== undefined) entry.maxInputTokens = maxInputTokens;
     const limits = parseLimits(item);

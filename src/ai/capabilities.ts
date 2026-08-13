@@ -51,6 +51,21 @@ export function modelReasoningConfig(model: ModelAliasConfig): ModelThinkingConf
 }
 
 /**
+ * 把跨模型保存的思考偏好投影成当前模型真正可执行的档位。
+ * 不支持关闭的模型遇到旧的 `enabled: false` 配置时使用默认档位，避免状态与请求分裂。
+ */
+export function effectiveThinkingSelection(
+  model: ModelAliasConfig,
+  thinking: { enabled: boolean; effort: ReasoningEffort }
+): "off" | ReasoningEffort {
+  const reasoning = modelReasoningConfig(model);
+  if (!reasoning) return "off";
+  if (thinking.enabled && reasoning.efforts.includes(thinking.effort)) return thinking.effort;
+  const off = modelThinkingLevelMap(model).off;
+  return off !== undefined && off !== null ? "off" : reasoning.defaultEffort;
+}
+
+/**
  * 已知具备可调推理档位的模型家族。
  *
  * OpenAI 兼容端点（尤其是中转站和自建网关）几乎都不返回 `reasoning_efforts`，

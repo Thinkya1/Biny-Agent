@@ -21,6 +21,7 @@ export interface ModelMetadata {
   maxOutputTokens: number;
   capabilities: Partial<ModelCapabilities>;
   reasoningEfforts: ReasoningEffort[];
+  thinkingLevelMap?: ThinkingLevelMap;
   knowledgeCutoff?: string;
   structuredOutput?: boolean;
   lastUpdated?: string;
@@ -33,15 +34,10 @@ export interface ModelMetadata {
 
 export const generatedModelProviderTypes = [...GENERATED_MODELS_DEV_CATALOG_PROVIDERS];
 
-/** 访问路径可以覆盖通用目录的档位能力；这里与 Desktop/TUI 使用同一份 Codex 模型事实。 */
-export function thinkingLevelMapForProviderModel(
-  providerType: string,
-  modelId: string,
-  efforts: readonly ReasoningEffort[]
-): ThinkingLevelMap {
-  return providerType === "openai-codex" && openAiCodexThinkingLevelMaps[modelId] !== undefined
-    ? { ...openAiCodexThinkingLevelMaps[modelId] }
-    : thinkingLevelMapForEfforts(efforts);
+/** Access-path 覆盖只补充已核实事实，优先级低于动态目录和用户显式配置。 */
+export function accessPathThinkingLevelMap(providerType: string, modelId: string): ThinkingLevelMap | undefined {
+  const map = providerType === "openai-codex" ? openAiCodexThinkingLevelMaps[modelId] : undefined;
+  return map ? { ...map } : undefined;
 }
 
 /**
@@ -94,16 +90,15 @@ function metadataToCatalogEntry(id: string, metadata: ModelMetadata, provider: s
     maxOutputTokens: metadata.maxOutputTokens,
     capabilities: { ...metadata.capabilities },
     reasoningEfforts: [...metadata.reasoningEfforts],
-    thinkingLevelMap: metadata.reasoningEfforts.length
-      ? thinkingLevelMapForProviderModel(provider, id, metadata.reasoningEfforts)
-      : undefined,
+    reasoningEffortsSource: metadata.reasoningEfforts.length ? "declared" : undefined,
+    thinkingLevelMap: metadata.thinkingLevelMap
+      ? { ...metadata.thinkingLevelMap }
+      : metadata.reasoningEfforts.length ? thinkingLevelMapForEfforts(metadata.reasoningEfforts) : undefined,
     pricing: metadata.pricing ? { ...metadata.pricing } : undefined
   };
 }
 
-function thinkingLevelMapForEfforts(efforts: readonly ReasoningEffort[]): ThinkingLevelMap {
-  return {
-    off: "none",
-    ...Object.fromEntries(efforts.map((effort) => [effort, effort]))
-  };
+/** 只把模型明确声明的 efforts 转成 canonical map，不凭空增加关闭思考档位。 */
+export function thinkingLevelMapForEfforts(efforts: readonly ReasoningEffort[]): ThinkingLevelMap {
+  return Object.fromEntries(efforts.map((effort) => [effort, effort]));
 }

@@ -8,7 +8,7 @@ import { isRemovedModelId } from "../config/schema.js";
 import {
   resolveModelConfig
 } from "./modelConfig.js";
-import { modelContextBudget, modelReasoningConfig, modelThinkingLevelMap } from "../ai/capabilities.js";
+import { effectiveThinkingSelection, modelContextBudget, modelReasoningConfig, modelThinkingLevelMap } from "../ai/capabilities.js";
 import type { ModelCatalogEntry } from "../ai/types.js";
 import {
   hasUsableModelConfiguration as hasUsableRegisteredModel,
@@ -83,7 +83,7 @@ export class ModelManager {
 
   getContextBudget(): ReturnType<typeof modelContextBudget> {
     const resolved = this.runtime.resolve(this.config.defaultModel);
-    const thinking = effectiveThinkingSelection(this.config, resolved.model);
+    const thinking = effectiveThinkingSelection(resolved.model, this.config.thinking);
     return modelContextBudget(
       resolved.model,
       this.config.context.maxInputTokens,
@@ -208,7 +208,9 @@ export function listPickerModelChoices(
 }
 
 export function listConfiguredModelChoices(config: AgentConfig): ModelChoice[] {
-  return listModelChoices(config).filter((model) => model.source === "configured" && model.available);
+  // 设置页需要展示所有已保存的模型，即使凭据暂时缺失或 provider 当前不可用。
+  // “是否可用”只影响模型选择器和发送任务，不应让用户看不到自己的配置。
+  return listModelChoices(config).filter((model) => model.source === "configured");
 }
 
 export function hasUsableModelConfiguration(config: AgentConfig, alias = config.defaultModel): boolean {
@@ -221,7 +223,7 @@ export function modelRuntimeInfo(config: AgentConfig): ModelRuntimeInfo {
 
 function modelRuntimeInfoFromRuntime(config: AgentConfig, runtime: ModelRuntime): ModelRuntimeInfo {
   const resolved = runtime.resolve(config.defaultModel);
-  const thinking = effectiveThinkingSelection(config, resolved.model);
+  const thinking = effectiveThinkingSelection(resolved.model, config.thinking);
   const providerType = config.providers[resolved.providerAlias]?.type ?? resolved.providerAlias;
   return {
     modelAlias: resolved.alias,
@@ -238,16 +240,6 @@ function modelRuntimeInfoFromRuntime(config: AgentConfig, runtime: ModelRuntime)
       { reasoning: thinking }
     ).maxInputTokens
   };
-}
-
-function effectiveThinkingSelection(config: AgentConfig, model: AgentConfig["models"][string]): ThinkingSelection {
-  const reasoning = modelReasoningConfig(model);
-  if (!reasoning) return "off";
-  const levelMap = modelThinkingLevelMap(model);
-  if (levelMap.off === undefined || levelMap.off === null) return reasoning.defaultEffort;
-  return config.thinking.enabled && reasoning.efforts.includes(config.thinking.effort)
-    ? config.thinking.effort
-    : "off";
 }
 
 export function resolveThinkingSelection(

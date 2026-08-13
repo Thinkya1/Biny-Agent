@@ -41,7 +41,7 @@ export const PROVIDERS = {
 };
 
 const supportedEfforts = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
-const ignoredEfforts = new Set(["none", "default"]);
+const ignoredEfforts = new Set(["default"]);
 
 /** 将 models.dev 的单个模型转换为 Biny 使用的元数据。不可用于文本 agent 的模型会被跳过。 */
 export function toMetadata(providerId, modelId, model) {
@@ -52,7 +52,7 @@ export function toMetadata(providerId, modelId, model) {
   if (contextWindow <= 0 || maxOutputTokens <= 0) return undefined;
   if (modalities && !modalities.output.includes("text")) return undefined;
 
-  const reasoningEfforts = parseReasoningEfforts(providerId, modelId, model.reasoning_options);
+  const reasoning = parseReasoningOptions(providerId, modelId, model.reasoning_options);
   const pricing = toPricing(providerId, modelId, model.cost);
   const capabilities = {
     tools: model.tool_call,
@@ -71,7 +71,8 @@ export function toMetadata(providerId, modelId, model) {
     ...(positiveNumber(model.limit.input) ? { maxInputTokens: model.limit.input } : {}),
     maxOutputTokens,
     capabilities,
-    reasoningEfforts,
+    reasoningEfforts: reasoning.efforts,
+    ...(reasoning.thinkingLevelMap ? { thinkingLevelMap: reasoning.thinkingLevelMap } : {}),
     ...(typeof model.knowledge === "string" ? { knowledgeCutoff: model.knowledge } : {}),
     ...(typeof model.structured_output === "boolean" ? { structuredOutput: model.structured_output } : {}),
     ...(typeof model.last_updated === "string" ? { lastUpdated: model.last_updated } : {}),
@@ -207,8 +208,9 @@ function assertModelShape(providerId, modelId, model) {
   }
 }
 
-function parseReasoningEfforts(providerId, modelId, options = []) {
+function parseReasoningOptions(providerId, modelId, options = []) {
   const efforts = new Set();
+  let supportsOff = false;
   for (const option of options) {
     if (!isRecord(option) || typeof option.type !== "string") {
       throw new Error(`models.dev model ${providerId}/${modelId} has an unsupported reasoning option`);
@@ -219,13 +221,26 @@ function parseReasoningEfforts(providerId, modelId, options = []) {
     }
     for (const value of option.values) {
       if (value === null || ignoredEfforts.has(value)) continue;
+      if (value === "none") {
+        supportsOff = true;
+        continue;
+      }
       if (typeof value !== "string" || !supportedEfforts.has(value)) {
         throw new Error(`models.dev model ${providerId}/${modelId} has an unsupported reasoning effort`);
       }
       efforts.add(value);
     }
   }
-  return [...efforts];
+  const resolved = [...efforts];
+  return {
+    efforts: resolved,
+    thinkingLevelMap: resolved.length
+      ? Object.fromEntries([
+        ...(supportsOff ? [["off", "none"]] : []),
+        ...resolved.map((effort) => [effort, effort])
+      ])
+      : undefined
+  };
 }
 
 function priceNumber(providerId, modelId, value, field) {

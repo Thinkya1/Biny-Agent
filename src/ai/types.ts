@@ -8,6 +8,24 @@ import type { ModelApiBackend, ModelCompatibility, ModelPricing, ModelProvider, 
 
 export type AiProtocol = "anthropic" | "openai-compatible";
 export type AiAuthMode = "api-key" | "oauth-bearer";
+export type ProviderEmbeddingWire = "openai-compatible" | "google-generative-ai";
+
+/** Provider 对 embedding 的显式 wire 声明；聊天模型目录不能代替这项能力。 */
+export interface ProviderEmbeddingModelDefinition {
+  id: string;
+  displayName: string;
+  description?: string;
+  dimensions?: number;
+  recommendedThresholds: {
+    currentWorkspace: number;
+    crossWorkspace: number;
+  };
+}
+
+export interface ProviderEmbeddingDefinition {
+  wire: ProviderEmbeddingWire;
+  models: readonly ProviderEmbeddingModelDefinition[];
+}
 
 export interface ModelCapabilities {
   tools: boolean;
@@ -67,6 +85,7 @@ export interface ProviderDefinition {
   requiresApiKey: boolean;
   authModes: AiAuthMode[];
   reasoningProtocol?: "deepseek" | "openai" | "google" | "anthropic" | "alibaba" | "moonshotai";
+  embedding?: ProviderEmbeddingDefinition;
   modelDefaults?: ProviderModelDefaults;
   fetchModels?: (context: {
     providerAlias: string;
@@ -93,6 +112,8 @@ export interface ModelCatalogEntry {
   limits?: ModelLimits;
   capabilities: Partial<ModelCapabilities>;
   reasoningEfforts: ReasoningEffort[];
+  /** 区分服务商明确声明与按模型 ID 推断的档位，避免弱推断覆盖权威元数据。 */
+  reasoningEffortsSource?: "declared" | "inferred";
   thinkingLevelMap?: ThinkingLevelMap;
   apiBackend?: ModelApiBackend;
   baseUrl?: string;

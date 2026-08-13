@@ -50,6 +50,7 @@ const modelSchema = z.object({
     streaming: z.boolean().optional()
   }),
   reasoningEfforts: z.array(z.enum(["minimal", "low", "medium", "high", "xhigh", "max"])),
+  reasoningEffortsSource: z.enum(["declared", "inferred"]).optional(),
   thinkingLevelMap: z.record(z.string(), z.string().nullable()).optional(),
   apiBackend: z.string().optional(),
   baseUrl: z.string().url().optional(),
@@ -70,7 +71,8 @@ const entrySchema = z.object({
 });
 
 const fileSchema = z.object({
-  version: z.literal(1),
+  // v1 没有档位来源，曾把 ID 推断持久化成权威 map；直接失效可避免旧缓存继续覆盖模型事实。
+  version: z.literal(2),
   providers: z.record(entrySchema)
 });
 
@@ -212,7 +214,7 @@ async function withStoreLock<T>(filePath: string, operation: () => Promise<T>): 
 }
 
 function emptyStore(): ModelsStoreFile {
-  return { version: 1, providers: {} };
+  return { version: 2, providers: {} };
 }
 
 function isNotFound(error: unknown): boolean {

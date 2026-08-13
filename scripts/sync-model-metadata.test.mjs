@@ -17,7 +17,7 @@ const model = {
   cost: { input: 1, output: 2, cache_read: 0.1, cache_write: 0.2 }
 };
 
-test("toMetadata converts model facts and drops unsupported reasoning values", () => {
+test("toMetadata converts model facts and preserves explicit off support", () => {
   assert.deepEqual(toMetadata("example", "example-agent", model), {
     displayName: "Example Agent",
     description: "A tool-capable model.",
@@ -32,6 +32,7 @@ test("toMetadata converts model facts and drops unsupported reasoning values", (
       audio: false
     },
     reasoningEfforts: ["low", "high"],
+    thinkingLevelMap: { off: "none", low: "low", high: "high" },
     knowledgeCutoff: "2025-01",
     structuredOutput: true,
     lastUpdated: "2026-01-01",
