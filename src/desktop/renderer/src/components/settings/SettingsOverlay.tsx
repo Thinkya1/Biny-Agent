@@ -81,7 +81,7 @@ const settingsNav: Array<{ badge?: string; tab: SettingsTab; label: string }> = 
   { tab: "外观", label: "外观" },
   { tab: "个性化", label: "个性化" },
   { tab: "模型", label: "模型供应商" },
-  { tab: "记忆", label: "记忆" },
+  { badge: "Beta", tab: "记忆", label: "记忆" },
   { badge: "Beta", tab: "联网搜索", label: "联网搜索" },
   { tab: "关于", label: "关于" }
 ];

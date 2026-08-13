@@ -1432,6 +1432,86 @@ select {
 }
 
 /* 单库记忆 v3：沿用设置中心的表面与边框 token，不引入额外装饰层。 */
+.memory-settings-v3 .memory-overview-card {
+  padding: 20px;
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, var(--surface)) 0%, var(--surface) 58%);
+}
+
+.memory-overview-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.memory-overview-heading > div:first-child {
+  min-width: 0;
+}
+
+.memory-kicker {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--accent);
+  font-size: calc(10px * var(--font-scale));
+  font-weight: 650;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.memory-overview-heading h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: calc(20px * var(--font-scale));
+  font-weight: 650;
+  letter-spacing: -.02em;
+}
+
+.memory-overview-heading p {
+  max-width: 520px;
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: calc(11.5px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.memory-overview-heading .setting-row {
+  min-width: 240px;
+  padding: 0;
+  border-bottom: 0;
+}
+
+.memory-overview-stats {
+  margin-top: 18px;
+}
+
+.memory-overview-stats .memory-stat-card {
+  border-color: color-mix(in srgb, var(--accent) 15%, var(--border));
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+
+.memory-library-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.memory-library-toolbar > button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 8px;
+  color: var(--cindy-selection-text);
+  background: var(--accent);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.memory-library-toolbar > button:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
 .memory-settings-v3 .setting-row:last-child {
   border-bottom: 0;
 }
@@ -1498,7 +1578,7 @@ select {
 .memory-editor-fields legend {
   color: var(--text-secondary);
   font-size: calc(11px * var(--font-scale));
-  font-weight: 540;
+  font-weight: 520;
 }
 
 .memory-select-field select,
@@ -1545,6 +1625,8 @@ select {
   border-radius: 9px;
   color: var(--text);
   background: var(--surface);
+  font-size: calc(12px * var(--font-scale));
+  font-weight: 520;
   text-align: left;
 }
 
@@ -1802,12 +1884,16 @@ select {
 }
 
 .memory-origin-tag {
+  display: inline-flex;
+  height: 18px;
+  align-items: center;
   flex: 0 0 auto;
-  padding: 1px 7px;
+  padding: 0 7px;
   border-radius: 999px;
   color: var(--text-secondary);
   background: var(--surface);
   font-size: calc(10px * var(--font-scale));
+  line-height: 1;
 }
 
 .memory-entry-head {
@@ -1899,6 +1985,20 @@ select {
 }
 
 @media (max-width: 720px) {
+  .memory-overview-heading,
+  .memory-library-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .memory-overview-heading .setting-row {
+    min-width: 0;
+  }
+
+  .memory-library-toolbar > button {
+    width: 100%;
+  }
+
   .model-detail-panel {
     display: none;
   }
