@@ -44,7 +44,15 @@
       "node-pty",
       "onnxruntime-node",
       "sharp"
-    ]
+    ],
+    "overrides": {
+      "adm-zip": "0.6.0",
+      "sharp": "0.35.3",
+      "fast-uri": "3.1.5",
+      "ip-address": "10.3.1",
+      "hono": "4.12.34",
+      "@hono/node-server": "2.0.11"
+    }
   },
   "dependencies": {
     "@astryxdesign/core": "0.2.0",
