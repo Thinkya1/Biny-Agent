@@ -18,7 +18,7 @@ import { catalogForConnection } from "../providerCatalog.js";
 import { AttachmentList } from "./composer/AttachmentList.js";
 import type { PendingAttachment } from "./composer/AttachmentList.js";
 import { ComposerActionButton } from "./composer/ComposerActionButton.js";
-import { PermissionMenu, ThinkingMenu } from "./composer/ComposerMenus.js";
+import { AddMenu, PermissionMenu, ThinkingMenu } from "./composer/ComposerMenus.js";
 import { ModelMenu } from "./composer/ModelMenu.js";
 import { thinkingLabel } from "./composer/composerLabels.js";
 import { Icon } from "./Icon.js";
@@ -50,7 +50,7 @@ export interface ContextUsage {
   maxTokens: number;
 }
 
-type ComposerMenu = "permission" | "model" | "thinking" | null;
+type ComposerMenu = "permission" | "model" | "thinking" | "add" | null;
 
 const MAX_COMPOSER_ATTACHMENTS = 8;
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
@@ -85,6 +85,7 @@ export const Composer = memo(function Composer({
   const [slashDismissed, setSlashDismissed] = useState(false);
   const inputRef = useRef<ChatComposerInputHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const addAnchorRef = useRef<HTMLDivElement>(null);
   const permissionAnchorRef = useRef<HTMLDivElement>(null);
   const modelAnchorRef = useRef<HTMLDivElement>(null);
   const thinkingAnchorRef = useRef<HTMLDivElement>(null);
@@ -328,16 +329,47 @@ export const Composer = memo(function Composer({
               ref={fileInputRef}
               type="file"
             />
-            <ComposerActionButton
-              className="cindy-composer-add"
-              disabled={!project || busy || running}
-              disabledReason={!project ? "请先打开一个项目。" : running ? "当前对话正在运行，请等待结束后再添加附件。" : busy ? "当前附件或命令正在处理，请稍候。" : undefined}
-              label="添加附件"
-              onClick={() => fileInputRef.current?.click()}
-              tooltip="添加文件或目录"
-            >
-              <Icon name="add" size={15} />
-            </ComposerActionButton>
+            <div className="composer-menu-anchor" ref={addAnchorRef}>
+              <ComposerActionButton
+                aria-expanded={menu === "add"}
+                aria-haspopup="menu"
+                className="cindy-composer-add"
+                data-composer-menu="add"
+                disabled={!project || busy || running}
+                disabledReason={!project ? "请先打开一个项目。" : running ? "当前对话正在运行，请等待结束后再添加附件。" : busy ? "当前附件或命令正在处理，请稍候。" : undefined}
+                label="添加附件或开启规划模式"
+                onClick={() => setMenu(menu === "add" ? null : "add")}
+                tooltip="添加文件，或勾选规划模式"
+              >
+                <Icon name="add" size={15} />
+              </ComposerActionButton>
+              <AddMenu
+                anchorRef={addAnchorRef}
+                onPickFiles={() => {
+                  setMenu(null);
+                  fileInputRef.current?.click();
+                }}
+                onPlanModeChange={(active) => {
+                  setMenu(null);
+                  setMode(active ? "plan" : "chat");
+                }}
+                open={menu === "add"}
+                planActive={mode === "plan"}
+              />
+            </div>
+            {/* 规划模式激活后显示为可退出的模式 pill（参考 Maka Agent）。 */}
+            {mode === "plan" ? (
+              <ComposerActionButton
+                active
+                className="cindy-plan-pill"
+                label="退出规划模式"
+                onClick={() => setMode("chat")}
+                tooltip="规划模式已启用，点击关闭"
+              >
+                <Icon name="chart" size={13} />
+                <span>规划</span>
+              </ComposerActionButton>
+            ) : null}
             <div className="composer-menu-anchor" ref={permissionAnchorRef}>
               <ComposerActionButton
                 className="cindy-permission-pill"
@@ -365,16 +397,6 @@ export const Composer = memo(function Composer({
                 }}
               />
             </div>
-            <ComposerActionButton
-              active={mode === "plan"}
-              className="cindy-plan-pill"
-              label={mode === "plan" ? "退出规划模式" : "进入规划模式"}
-              onClick={() => setMode(mode === "plan" ? "chat" : "plan")}
-              tooltip={mode === "plan" ? "规划模式已启用，点击关闭" : "让 Agent 先分析任务并制定计划"}
-            >
-              <Icon name="chart" size={13} />
-              <span>{mode === "plan" ? "规划" : "计划"}</span>
-            </ComposerActionButton>
           </div>
         )}
         input={(
