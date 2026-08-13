@@ -406,6 +406,7 @@ async function testStatusCommandUsesStructuredContextStatus(): Promise<void> {
   const result = await executeRuntimeCommand(runtime, commandRuntime, "/status", "tui");
 
   assert.equal(result?.title, "Status");
+  assert.ok(result?.card, "/status should include structured card data");
   assert.match(result?.content ?? "", /Model: test\/model \(Off\)/u);
   assert.match(result?.content ?? "", /Context window:/u);
   assert.match(result?.content ?? "", /Input budget:/u);
@@ -1329,6 +1330,24 @@ function fakeCommandRuntime(options: FakeRuntimeOptions = {}): CommandRuntime {
     workspaceRoot: info.workspaceRoot,
     agent,
     extensionReport: () => "",
+    extensionStatus: () => ({
+      mcp: [],
+      skills: [],
+      skillWarnings: [],
+      plugins: [],
+      subagent: {
+        enabled: false,
+        maxSteps: 0,
+        maxOutputTokens: 0,
+        maxConcurrentSubagents: 0,
+        maxPendingSubagents: 0,
+        timeoutMs: 0,
+        allowedTools: [],
+        agents: []
+      },
+      toolScheduling: { maxConcurrentTools: 0, maxQueuedToolCalls: 0 },
+      toolCounts: { builtin: 0, mcp: 0, skill: 0, plugin: 0, subagent: 0 }
+    }),
     startSubagentTask: (task, taskOptions) => {
       const taskId = taskOptions?.taskId ?? "fake-subagent";
       agent.recordHostedUserMessage(task);

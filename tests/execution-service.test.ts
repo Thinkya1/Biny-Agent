@@ -260,6 +260,24 @@ function fakeRuntime(
       close: async () => []
     },
     extensionReport: () => "",
+    extensionStatus: () => ({
+      mcp: [],
+      skills: [],
+      skillWarnings: [],
+      plugins: [],
+      subagent: {
+        enabled: false,
+        maxSteps: 0,
+        maxOutputTokens: 0,
+        maxConcurrentSubagents: 0,
+        maxPendingSubagents: 0,
+        timeoutMs: 0,
+        allowedTools: [],
+        agents: []
+      },
+      toolScheduling: { maxConcurrentTools: 0, maxQueuedToolCalls: 0 },
+      toolCounts: { builtin: 0, mcp: 0, skill: 0, plugin: 0, subagent: 0 }
+    }),
     refreshSkills: async () => undefined,
     setSubagentParentRunId: () => undefined,
     cancelSubagentTasks: () => undefined,

@@ -5,6 +5,7 @@
  * 只对变化的条目调用 update，避免每次 token 都重建整棵子树。
  */
 import { Container } from "@earendil-works/pi-tui";
+import { CardComponent } from "./cards.js";
 import {
   AssistantMessageComponent,
   ActivitySummaryComponent,
@@ -81,5 +82,6 @@ function createItemComponent(item: TranscriptItem): TranscriptItemComponent | un
   // 思考只保留状态行，完整 reasoning 不进入 TUI 主界面。
   if (item.kind === "reasoning") return new ThinkingComponent(item);
   if (item.kind === "tool") return new ToolExecutionComponent(item);
+  if (item.kind === "card") return new CardComponent(item);
   return new NoticeComponent(item);
 }

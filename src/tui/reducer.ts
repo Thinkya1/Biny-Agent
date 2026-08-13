@@ -6,6 +6,7 @@
  * completion event commits each cell exactly once.
  */
 import type { AgentHostEvent } from "../runtime/agentEvents.js";
+import type { CommandCardData } from "../runtime/commandCard.js";
 import { activitySummaryText } from "../runtime/activitySummary.js";
 import { publicUserMessage } from "../session/publicMessage.js";
 import {
@@ -31,6 +32,7 @@ export type TuiAction = AgentHostEvent
   | { type: "maintenance.started" }
   | { type: "error.message"; message: string }
   | { type: "system.message"; content: string }
+  | { type: "command.card"; command: string; title: string; data: CommandCardData }
   | { type: "transcript.cleared" }
   | { type: "transcript.replaced"; items: TranscriptItem[]; viewingSessionId?: string }
   | { type: "permission.details.toggled" };
@@ -147,6 +149,17 @@ export function tuiReducer(state: TuiState, event: TuiAction): TuiState {
       return {
         ...state,
         transcript: commitItem(state.transcript, notificationItem(state.transcript, event.content))
+      };
+    case "command.card":
+      return {
+        ...state,
+        transcript: commitItem(state.transcript, {
+          id: nextTranscriptId(state.transcript, "card"),
+          kind: "card",
+          command: event.command,
+          title: event.title,
+          data: event.data
+        })
       };
     case "transcript.cleared":
       return {

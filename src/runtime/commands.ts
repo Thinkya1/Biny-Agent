@@ -9,6 +9,16 @@ import { formatSubagentAgentList } from "../extensions/report.js";
 import { redactSecrets } from "../utils/secrets.js";
 import { formatSubagentTaskReport } from "./subagentTaskReport.js";
 import { formatStatusReport } from "./statusReport.js";
+import {
+  buildMcpCard,
+  buildPluginsCard,
+  buildSkillsCard,
+  buildStatusCard,
+  buildSubagentAgentsCard,
+  buildSubagentTasksCard,
+  buildUsageCard
+} from "./commandCards.js";
+import type { CommandCardData } from "./commandCard.js";
 import type { CommandRuntime } from "./CommandRuntime.js";
 import type { InteractiveRuntimeHandle } from "./InteractiveAgentRuntime.js";
 import type { CommandSurface } from "./commandRegistry.js";
@@ -23,6 +33,8 @@ export interface RuntimeCommandResult {
   command: string;
   title: string;
   content: string;
+  /** TUI 渲染 Codex 风格卡片的结构化数据；CLI / Desktop 忽略，继续用 `content`。 */
+  card?: CommandCardData;
 }
 
 /**
@@ -39,16 +51,25 @@ export async function executeRuntimeCommand(
     const snapshot = runtime.getSnapshot();
     const info = snapshot.info;
     const context = await services.agent.contextStatus();
-    return result(command, "Status", formatStatusReport(
-      info,
-      snapshot.permissionMode,
-      context,
-      services.agent.usageSummary(),
-      services.extensionReport(),
-      typeof services.agent.modelRequestSummary === "function" ? services.agent.modelRequestSummary() : undefined
-    ));
+    const usage = services.agent.usageSummary();
+    const extensions = services.extensionStatus();
+    const modelRequests = typeof services.agent.modelRequestSummary === "function" ? services.agent.modelRequestSummary() : undefined;
+    return {
+      ...result(command, "Status", formatStatusReport(
+        info,
+        snapshot.permissionMode,
+        context,
+        usage,
+        services.extensionReport(),
+        modelRequests
+      )),
+      card: buildStatusCard(info, snapshot.permissionMode, context, usage, extensions, modelRequests)
+    };
   }
-  if (command === "/usage") return result(command, "Usage", services.agent.usageReport());
+  if (command === "/usage") {
+    const summary = services.agent.usageSummary();
+    return { ...result(command, "Usage", services.agent.usageReport()), card: buildUsageCard(summary) };
+  }
   if (command === "/tasks") {
     const page = services.taskRuns.list({ status: args[0] === undefined ? undefined : readTaskStatus(args[0]) });
     return result(command, "Tasks", JSON.stringify(page, null, 2));
@@ -102,7 +123,10 @@ export async function executeRuntimeCommand(
   }
   if (command === "/mcp") {
     if (args[0]?.toLowerCase() !== "reconnect") {
-      return result(command, "MCP", services.extensionReport("mcp").replace(/^MCP\n/, ""));
+      return {
+        ...result(command, "MCP", services.extensionReport("mcp").replace(/^MCP\n/, "")),
+        card: buildMcpCard(services.extensionStatus().mcp)
+      };
     }
     const serverName = args[1]?.trim();
     if (!serverName || args.length !== 2) throw new Error("Usage: /mcp reconnect <server>");
@@ -118,8 +142,19 @@ export async function executeRuntimeCommand(
         : `Reconnect failed for ${serverName}: ${status.lastError ?? "unknown error"}`
     );
   }
-  if (command === "/skills") return result(command, "[Skills]", services.extensionReport("skills").replace(/^Skills\n/, ""));
-  if (command === "/plugins") return result(command, "Plugins", services.extensionReport("plugins").replace(/^Plugins\n/, ""));
+  if (command === "/skills") {
+    const extensions = services.extensionStatus();
+    return {
+      ...result(command, "[Skills]", services.extensionReport("skills").replace(/^Skills\n/, "")),
+      card: buildSkillsCard(extensions.skills, extensions.skillWarnings)
+    };
+  }
+  if (command === "/plugins") {
+    return {
+      ...result(command, "Plugins", services.extensionReport("plugins").replace(/^Plugins\n/, "")),
+      card: buildPluginsCard(services.extensionStatus().plugins)
+    };
+  }
   if (command === "/personality") {
     const patch = personalityPatch(args);
     if (!patch) return result(command, "Personality", formatPersonalizationState(await services.agent.getPersonalizationState()));
@@ -236,10 +271,18 @@ async function executeSubagentCommand(
     return result(command, "Subagent", await runForegroundSubagent(runtime, services, task) || "Subagent returned no text.");
   }
   if (action === "agents") {
-    return result(command, "Subagent", formatSubagentAgentList(await services.listSubagentAgents()));
+    const definitions = await services.listSubagentAgents();
+    return {
+      ...result(command, "Subagent", formatSubagentAgentList(definitions)),
+      card: buildSubagentAgentsCard(definitions)
+    };
   }
   if (action === "status") {
-    return result(command, "Subagent", formatSubagentTaskReport(services.subagents?.listSnapshots() ?? []));
+    const snapshots = services.subagents?.listSnapshots() ?? [];
+    return {
+      ...result(command, "Subagent", formatSubagentTaskReport(snapshots)),
+      card: buildSubagentTasksCard(snapshots)
+    };
   }
   if (action === "cancel") {
     const taskId = args[1]?.trim();

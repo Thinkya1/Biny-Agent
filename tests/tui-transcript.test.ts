@@ -6,6 +6,7 @@ import { diffLineStyle } from "../src/tui/diffLines.js";
 import { formatSessionAge, formatToolDuration } from "../src/tui/transcriptText.js";
 import { TranscriptView } from "../src/tui/components/transcriptView.js";
 import { ActivitySummaryComponent, ThinkingComponent, ToolExecutionComponent, splitToolTitle } from "../src/tui/components/messages.js";
+import { CardComponent, renderCardLines } from "../src/tui/components/cards.js";
 import { PendingAttachmentsComponent, pendingAttachmentLabel } from "../src/tui/components/pendingAttachments.js";
 import { PermissionDialog, SelectDialog, TextViewerDialog } from "../src/tui/components/dialogs.js";
 import {
@@ -23,6 +24,7 @@ import {
 } from "../src/tui/components/chrome.js";
 import {
   ctrlCAction,
+  isCardCapableCommand,
   isDoubleCtrlC,
   memoryPolicyOptionForOverride,
   memoryPolicySelectOptions,
@@ -45,6 +47,16 @@ import {
 } from "../src/tui/theme/index.js";
 import { slashCommandsForSurface } from "../src/runtime/commandRegistry.js";
 import { formatStatusReport } from "../src/runtime/statusReport.js";
+import {
+  buildMcpCard,
+  buildSkillsCard,
+  buildStatusCard,
+  buildSubagentTasksCard,
+  buildUsageCard
+} from "../src/runtime/commandCards.js";
+import type { CommandCardData } from "../src/runtime/commandCard.js";
+import type { ExtensionStatus } from "../src/extensions/report.js";
+import type { CardTranscriptItem } from "../src/tui/types.js";
 import type { InteractiveRuntimeSnapshot } from "../src/runtime/agentEvents.js";
 import type { AgentSessionInfo } from "../src/agent/AgentSession.js";
 import type { ContextStatus } from "../src/agent/context/types.js";
@@ -128,11 +140,17 @@ async function main(): Promise<void> {
   testSlashCommandParity();
   testPersonalizationSelectors();
   testStatusReportUsesRuntimeAndContextFields();
+  testCommandCardCommitsTranscriptItem();
+  testCommandCardRendersBoxedAlignedCard();
+  testCardComponentTogglesDetailsLocally();
+  testStatusAndUsageCardBuilders();
+  testExtensionCardBuilders();
   testSkillSlashCommandItems();
   testSkillUserMessageHidesInstructions();
   testDoubleCtrlCGuard();
   testAutocompleteEnterOnlyConfirmsSkillSelection();
   await testSlashAutocompleteInsertsSingleSlash();
+  testCardCapableCommandDetection();
   testThemeTokensResolveToAnsi();
   testTranscriptViewSyncsIncrementally();
   testAssistantMarkdownRendersBlocks();
@@ -202,6 +220,22 @@ function testAutocompleteEnterOnlyConfirmsSkillSelection(): void {
   assert.equal(shouldConfirmAutocompleteOnEnter("\r", true, "/model"), false);
   assert.equal(shouldConfirmAutocompleteOnEnter("\r", false, "/skill:demo"), false);
   assert.equal(shouldConfirmAutocompleteOnEnter("\t", true, "/skill:demo"), false);
+}
+
+function testCardCapableCommandDetection(): void {
+  assert.equal(isCardCapableCommand("/status", []), true);
+  assert.equal(isCardCapableCommand("/usage", []), true);
+  assert.equal(isCardCapableCommand("/skills", []), true);
+  assert.equal(isCardCapableCommand("/plugins", []), true);
+  assert.equal(isCardCapableCommand("/mcp", []), true);
+  // /mcp reconnect 和 /subagent 的任务/取消路径不产出卡片。
+  assert.equal(isCardCapableCommand("/mcp", ["reconnect", "server"]), false);
+  assert.equal(isCardCapableCommand("/subagent", ["status"]), true);
+  assert.equal(isCardCapableCommand("/subagent", ["agents"]), true);
+  assert.equal(isCardCapableCommand("/subagent", ["--", "inspect"]), false);
+  assert.equal(isCardCapableCommand("/subagent", ["cancel", "task-1"]), false);
+  assert.equal(isCardCapableCommand("/tasks", []), false);
+  assert.equal(isCardCapableCommand("/compact", []), false);
 }
 
 function testModelThinkingOptionsUseModelCapabilities(): void {
@@ -383,6 +417,259 @@ function testStatusReportUsesRuntimeAndContextFields(): void {
   assert.match(report, /Memory recall: included global=1, project=2; trimmed global=0, project=1; omitted global=0, project=1/u);
   assert.match(report, /Memory budget: 11,500\/12,000 chars; 1 omitted/u);
   assert.doesNotMatch(report, /^Context$/mu);
+}
+
+function testCommandCardCommitsTranscriptItem(): void {
+  let state = createInitialTuiState("/workspace");
+  state = reduce(state, {
+    type: "command.card",
+    command: "/status",
+    title: "Status",
+    data: { title: "Status", sections: [{ rows: [{ label: "Model", value: "test" }] }] }
+  });
+  assert.deepEqual(state.transcript.committed.map((item) => item.kind), ["card"]);
+  const item = state.transcript.committed[0];
+  assert.equal(item?.kind, "card");
+  if (item?.kind !== "card") return;
+  assert.equal(item.command, "/status");
+  assert.equal(item.title, "Status");
+  assert.equal(item.data.sections[0]?.rows[0]?.label, "Model");
+}
+
+function testCommandCardRendersBoxedAlignedCard(): void {
+  const data: CommandCardData = {
+    title: "Status",
+    sections: [
+      {
+        rows: [
+          { label: "Model", value: "gpt-5 (high)" },
+          { label: "Provider", value: "openai" }
+        ]
+      },
+      {
+        rows: [
+          { label: "Token usage", value: [{ tokens: 130_000, style: "bold" }, { text: " total " }, { text: "(120k input)", style: "dim" }] },
+          { label: "Context window", value: [{ text: "23% left" }, { text: " (45k used / 200k)", style: "dim" }] },
+          { label: "Compaction", value: "active; 5 messages compacted", detail: true }
+        ]
+      }
+    ]
+  };
+  const item: CardTranscriptItem = { id: "card-1", kind: "card", command: "/status", title: "Status", data };
+
+  const folded = plainLines(renderCardLines(item, false, 60)).join("\n");
+  assert.match(folded, /^\/status$/mu);
+  assert.match(folded, /^╭─ Status ─+╮$/mu);
+  assert.match(folded, /^╰─+╯$/mu);
+  assert.match(folded, /Model:\s+gpt-5 \(high\)/u);
+  assert.match(folded, /23% left/u);
+  // 折叠细节不显示，提示行报告剩余字段数
+  assert.doesNotMatch(folded, /5 messages compacted/u);
+  assert.match(folded, /1 more field · ctrl\+o to expand/u);
+
+  const expanded = plainLines(renderCardLines(item, true, 60)).join("\n");
+  assert.match(expanded, /5 messages compacted/u);
+  assert.match(expanded, /ctrl\+o to collapse/u);
+  // token 走紧凑格式化
+  assert.match(expanded, /130k total/u);
+
+  // 极窄终端退回 label: value 平铺（每行仍按宽度截断）
+  const narrow = plainLines(renderCardLines(item, false, 8)).join("\n");
+  assert.match(narrow, /^Model:/mu);
+  assert.doesNotMatch(narrow, /╭─/u);
+}
+
+function testCardComponentTogglesDetailsLocally(): void {
+  const view = new TranscriptView();
+  let state = createInitialTuiState("/workspace");
+  state = reduce(state, {
+    type: "command.card",
+    command: "/status",
+    title: "Status",
+    data: { title: "Status", sections: [{ rows: [{ label: "Detail", value: "secret detail", detail: true }] }] }
+  });
+  view.sync(state.transcript);
+  const component = view.componentFor(state.transcript.committed[0]?.id ?? "");
+  assert.ok(component instanceof CardComponent);
+  const before = renderView(view, 60);
+  assert.doesNotMatch(before, /secret detail/u);
+  if (!(component instanceof CardComponent)) return;
+  component.toggleDetails();
+  const after = renderView(view, 60);
+  assert.match(after, /secret detail/u);
+  component.toggleDetails();
+  assert.doesNotMatch(renderView(view, 60), /secret detail/u);
+}
+
+function testStatusAndUsageCardBuilders(): void {
+  const info: AgentSessionInfo = {
+    workspaceRoot: "/workspace",
+    sessionId: "session-1",
+    sessionFile: "/workspace/.biny/sessions/session-1.jsonl",
+    provider: "deepseek",
+    modelLabel: "deepseek-v4-pro",
+    reasoningLabel: "Max",
+    modelAlias: "deepseek-pro",
+    thinking: "max"
+  };
+  const context: ContextStatus = {
+    loadedInstructions: ["/workspace/AGENTS.md"],
+    instructionBytes: 120,
+    instructionCapBytes: 32_768,
+    snapshotRefreshedAt: undefined,
+    snapshotDirty: false,
+    repoMapRefreshedAt: undefined,
+    repoMapDirty: false,
+    repoMapEntries: 12,
+    activePaths: [],
+    recentActivity: { paths: [], summaries: [] },
+    compaction: { summaryPresent: false, compactedMessages: 0, lastCompactedAt: undefined },
+    budget: {
+      maxTokens: 981_056,
+      usedTokens: 12_345,
+      contextWindow: 1_000_000,
+      maxOutputTokens: 32_768,
+      modelAlias: "deepseek-pro",
+      estimatedTokens: 12_600,
+      providerInputTokens: 12_345,
+      omitted: [],
+      autoCompacted: false,
+      source: "provider",
+      measuredAt: undefined
+    },
+    memoryEnabled: false,
+    memoryTopics: []
+  };
+  const usage: UsageSummary = {
+    calls: 2,
+    inputTokens: 20_000,
+    outputTokens: 4_000,
+    totalTokens: 24_000,
+    reasoningTokens: 3_000,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheMissTokens: 0,
+    costUsd: 0.0123,
+    pricingKnown: true,
+    pricedCalls: 2,
+    unpricedCalls: 0,
+    latestCacheHitRate: 0.85,
+    sessionCacheHitRate: 0.9,
+    epochCacheHitRates: { "epoch-1": 0.5, "epoch-2": null }
+  };
+  const extensions: ExtensionStatus = {
+    mcp: [],
+    skills: [],
+    skillWarnings: [],
+    plugins: [],
+    subagent: {
+      enabled: true,
+      maxSteps: 8,
+      maxOutputTokens: 32_768,
+      maxConcurrentSubagents: 2,
+      maxPendingSubagents: 4,
+      timeoutMs: 600_000,
+      allowedTools: ["read_file"],
+      agents: []
+    },
+    toolScheduling: { maxConcurrentTools: 1, maxQueuedToolCalls: 4 },
+    toolCounts: { builtin: 4, mcp: 0, skill: 0, plugin: 0, subagent: 1 }
+  };
+
+  const card = buildStatusCard(info, "ask", context, usage, extensions, {
+    calls: 3,
+    succeeded: 2,
+    failed: 1,
+    totalAttempts: 4,
+    retries: 1,
+    totalDurationMs: 12_000
+  });
+  const rows = card.sections.flatMap((section) => section.rows);
+  assert.ok(rows.some((row) => row.label === "Model" && row.value === "deepseek-v4-pro (Max)" && !row.detail));
+  assert.ok(rows.some((row) => row.label === "Session" && row.tone === "dim"));
+  const tokenRow = rows.find((row) => row.label === "Token usage");
+  assert.ok(tokenRow && !tokenRow.detail);
+  const windowRow = rows.find((row) => row.label === "Context window");
+  assert.ok(windowRow && Array.isArray(windowRow.value));
+  const windowFirst = windowRow.value[0];
+  assert.ok(windowFirst && typeof windowFirst === "object" && "text" in windowFirst);
+  assert.match(windowFirst.text, /% left/u);
+  // 余量充足时百分比无强调色
+  assert.equal(windowFirst.style, undefined);
+  assert.ok(rows.some((row) => row.label === "Compaction" && row.detail));
+  assert.ok(rows.some((row) => row.label === "Instructions" && row.detail));
+  assert.ok(rows.some((row) => row.label === "MCP" && !row.detail));
+  assert.ok(rows.some((row) => row.label === "Subagent" && !row.detail));
+
+  // 上下文余量不足时窗口百分比标 warning / error
+  const lowContext = { ...context, budget: { ...context.budget, usedTokens: 990_000 } };
+  const lowCard = buildStatusCard(info, "ask", lowContext, usage, extensions);
+  const lowWindow = lowCard.sections.flatMap((section) => section.rows).find((row) => row.label === "Context window");
+  assert.ok(lowWindow && Array.isArray(lowWindow.value));
+  const lowFirst = lowWindow.value[0];
+  assert.ok(lowFirst && typeof lowFirst === "object" && "text" in lowFirst);
+  assert.match(lowFirst.text, /1% left/u);
+  assert.equal(lowFirst.style, "error");
+
+  const usageCard = buildUsageCard(usage);
+  const usageRows = usageCard.sections.flatMap((section) => section.rows);
+  const total = usageRows.find((row) => row.label === "Total tokens");
+  assert.ok(total && typeof total.value === "object" && !Array.isArray(total.value) && "tokens" in total.value);
+  assert.equal(total.value.tokens, 24_000);
+  assert.equal(total.value.style, "bold");
+  const cost = usageRows.find((row) => row.label === "Cost");
+  assert.deepEqual(cost?.value, { text: "$0.0123", style: "success" });
+  assert.ok(usageRows.some((row) => row.label === "Epoch" && row.detail));
+  assert.ok(usageRows.some((row) => row.label === "Cache hit" && !row.detail));
+
+  const emptyUsage = buildUsageCard({ ...usage, calls: 0 });
+  assert.match(String(emptyUsage.sections[0]?.rows[0]?.value), /no model calls recorded/u);
+}
+
+function testExtensionCardBuilders(): void {
+  const mcpCard = buildMcpCard([
+    {
+      name: "fs",
+      command: "npx",
+      transport: "stdio",
+      enabled: true,
+      connected: true,
+      toolNames: ["read", "write"],
+      promptNames: [],
+      hasResources: false
+    },
+    { name: "legacy", command: "bin", transport: "stdio", enabled: true, connected: false, toolNames: [], promptNames: [], hasResources: false, lastError: "timeout" }
+  ]);
+  const mcpRows = mcpCard.sections[0]?.rows ?? [];
+  assert.equal(mcpRows[0]?.label, "fs");
+  assert.equal(mcpRows[0]?.tone, "success");
+  assert.equal(mcpRows[1]?.tone, "warning");
+  assert.ok(mcpRows.some((row) => row.detail && row.label === ""));
+
+  const skillsCard = buildSkillsCard([{ name: "zeta" }, { name: "ai-slop" }], ["duplicate skill: alpha"]);
+  const skillsRows = skillsCard.sections[0]?.rows ?? [];
+  assert.match(String(skillsRows[0]?.value), /2 loaded: ai-slop, zeta/u);
+  const warning = skillsRows.find((row) => row.detail);
+  assert.ok(warning && typeof warning.value === "object" && !Array.isArray(warning.value) && "text" in warning.value);
+  assert.equal(warning.value.style, "warning");
+
+  const subagentCard = buildSubagentTasksCard([
+    {
+      taskId: "task-1",
+      parentRunId: "parent-1",
+      task: "inspect the build output",
+      status: "completed",
+      createdAt: "2026-07-18T00:00:00.000Z",
+      deadline: "2026-07-18T00:02:00.000Z"
+    }
+  ]);
+  const subagentRows = subagentCard.sections[0]?.rows ?? [];
+  assert.equal(subagentRows[0]?.label, "task-1");
+  assert.equal(subagentRows[0]?.tone, "success");
+  assert.ok(subagentRows.slice(1).every((row) => row.detail));
+
+  const empty = buildMcpCard([]);
+  assert.match(String(empty.sections[0]?.rows[0]?.value), /no servers configured/u);
 }
 
 function testTranscriptUsesIndependentItemKinds(): void {
@@ -1183,6 +1470,12 @@ function testDialogsRenderAndHandleKeys(): void {
   assert.match(plainLines(viewer.render(40)).join("\n"), /line 4/u);
   viewer.handleInput("\u001B");
   assert.equal(closed, true);
+
+  // Ctrl+C 也关闭查看器：全局双 Ctrl+C 退出依赖弹层先消费掉第一次按键。
+  let closedByCtrlC = false;
+  const ctrlCViewer = new TextViewerDialog("Details", "body", 5, () => { closedByCtrlC = true; });
+  ctrlCViewer.handleInput("\u0003");
+  assert.equal(closedByCtrlC, true);
 }
 
 function testPermissionDialogRequiresFullYes(): void {

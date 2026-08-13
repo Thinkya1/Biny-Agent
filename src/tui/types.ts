@@ -5,6 +5,7 @@
  * 这些类型服务于 reducer 与组件渲染，不暴露底层 recorder 或 provider 对象。
  */
 import type { ToolInputDisplay } from "../tools/types.js";
+import type { CommandCardData } from "../runtime/commandCard.js";
 
 export type TuiLaunchMode = "new" | "resume-picker" | "resume-session";
 
@@ -49,6 +50,15 @@ export interface ErrorTranscriptItem extends TranscriptItemBase {
   content: string;
 }
 
+/** 报告类 slash command 的 Codex 风格卡片，内联进对话历史。 */
+export interface CardTranscriptItem extends TranscriptItemBase {
+  kind: "card";
+  /** 触发的命令原文，如 `/status`。 */
+  command: string;
+  title: string;
+  data: CommandCardData;
+}
+
 export type ToolTranscriptStatus = "pending" | "running" | "success" | "failed" | "denied" | "skipped" | "cancelled" | "unknown";
 
 export interface ToolTranscriptItem extends TranscriptItemBase {
@@ -79,6 +89,7 @@ export type TranscriptItem =
   | AssistantTranscriptItem
   | ActivityTranscriptItem
   | ToolTranscriptItem
+  | CardTranscriptItem
   | NotificationTranscriptItem
   | ErrorTranscriptItem;
 

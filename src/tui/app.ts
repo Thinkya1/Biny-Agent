@@ -44,6 +44,7 @@ import {
 import type { SessionSummary } from "../session/events.js";
 import type { UsageSummary } from "../session/metadata.js";
 import { FooterComponent, ShortcutsBarComponent, StatusIndicatorComponent, WelcomeComponent } from "./components/chrome.js";
+import { CardComponent } from "./components/cards.js";
 import { PermissionDialog, SelectDialog, TextViewerDialog } from "./components/dialogs.js";
 import { PendingAttachmentsComponent } from "./components/pendingAttachments.js";
 import { TranscriptView } from "./components/transcriptView.js";
@@ -75,6 +76,16 @@ export interface TuiExitSummary {
 const TUI_SLASH_COMMANDS = slashCommandsForSurface("tui");
 const TUI_AUTOCOMPLETE_COMMANDS = TUI_SLASH_COMMANDS.filter((command) => command.name !== "/skills");
 const TUI_SHUTDOWN_DRAIN_MS = 1_500;
+
+/** 应返回卡片数据的报告类命令（Host 版本过旧时才会缺失 `card` 字段）。 */
+const CARD_COMMANDS = new Set(["/status", "/usage", "/skills", "/plugins"]);
+
+export function isCardCapableCommand(command: string, args: readonly string[]): boolean {
+  if (CARD_COMMANDS.has(command)) return true;
+  if (command === "/mcp") return args[0]?.toLowerCase() !== "reconnect";
+  if (command === "/subagent") return args[0] === "status" || args[0] === "agents";
+  return false;
+}
 
 export const personalitySelectOptions = [
   { value: "inherit", label: "Inherit", description: "Use the global personality for this chat." },
@@ -129,6 +140,8 @@ export class BinyTui {
   private readonly editor: Editor;
 
   private mode: Extract<AgentRunMode, "chat" | "plan"> = "chat";
+  /** 最近一张命令卡片的 transcript id，供 ctrl+o 展开/折叠细节。 */
+  private lastCardId: string | undefined;
   /** 当前输入尚未发送的图片；实际读写剪贴板和存储都在 TUI runtime。 */
   private pendingAttachments: AgentAttachment[] = [];
   private permissionMode: PermissionMode = "ask";
@@ -238,7 +251,8 @@ export class BinyTui {
         try {
           this.runtimeHost = await startRuntimeHost(this.workspaceRoot, runtime, commands, {
             createRuntime: createLocalRuntime,
-            resumeInterrupted: false
+            resumeInterrupted: false,
+            configDir: globalConfigDir()
           });
         } catch (error) {
           await runtime.close();
@@ -560,11 +574,9 @@ export class BinyTui {
       return { consume: true };
     }
 
-    // 选择器自己处理 Ctrl+C 作为取消，不让全局退出逻辑抢先执行。
-    if (matchesKey(data, "ctrl+c") && this.overlay) {
-      this.lastCtrlCAt = 0;
-      return undefined;
-    }
+    // 连续两次 Ctrl+C 始终退出（弹层打开时也一样，和 Codex 体感一致）；
+    // 单次 Ctrl+C 在弹层打开时交给弹层自己处理（选择器取消、查看器关闭），
+    // 避免「想退出却发现被弹层卡住」。
     if (matchesKey(data, "ctrl+c")) {
       const now = Date.now();
       if (ctrlCAction(this.lastCtrlCAt, now) === "exit") {
@@ -572,6 +584,7 @@ export class BinyTui {
         void this.exit();
       } else {
         this.lastCtrlCAt = now;
+        if (this.overlay) return undefined;
         if (busy) {
           this.dismissAutocomplete();
           this.runtime?.cancelCurrentRun();
@@ -591,6 +604,16 @@ export class BinyTui {
       return undefined;
     }
     if (this.overlay) return undefined;
+    // ctrl+o 展开/折叠最近一张命令卡片的细节；权限弹层内由 PermissionDialog 自己处理。
+    if (matchesKey(data, "ctrl+o") && this.lastCardId) {
+      const component = this.chatContainer.componentFor(this.lastCardId);
+      if (component instanceof CardComponent) {
+        this.dismissAutocomplete();
+        component.toggleDetails();
+        this.ui.requestRender();
+        return { consume: true };
+      }
+    }
     // Windows 终端通常把 Ctrl+V 留给文本粘贴，只用 Alt+V 读取图片剪贴板。
     const isClipboardPaste = process.platform === "win32" ? matchesKey(data, "alt+v") : matchesKey(data, "ctrl+v");
     if (isClipboardPaste) {
@@ -892,7 +915,24 @@ export class BinyTui {
       ? await executeRuntimeCommand(runtime, commands, value, "tui")
       : await requireRemoteRuntime(runtime).executeCommand(value, "tui");
     if (sharedResult) {
-      this.showTextViewer(sharedResult.title, sharedResult.content);
+      if (sharedResult.card) {
+        // 卡片 id 由 reducer 按同一公式生成；这里先算出来，供 ctrl+o 定位组件。
+        const cardId = `card-${String(this.state.transcript.committed.length + this.state.transcript.active.length + 1)}`;
+        this.lastCardId = cardId;
+        this.dispatch({
+          type: "command.card",
+          command: sharedResult.command,
+          title: sharedResult.title,
+          data: sharedResult.card
+        });
+      } else {
+        // 附着到旧版本 Host 时没有 card 字段：退回文本弹层，并说明原因，
+        // 避免「体感不对」又无从查起。
+        if (isCardCapableCommand(command, args)) {
+          this.notify(`${command} 需要较新的 Host：当前 Host 运行的是旧版本代码，无法渲染卡片。请重启 Desktop 或结束残留的 biny 进程后重试。`);
+        }
+        this.showTextViewer(sharedResult.title, sharedResult.content);
+      }
       if (command === "/compact") await this.refreshContextUsage();
       return;
     }

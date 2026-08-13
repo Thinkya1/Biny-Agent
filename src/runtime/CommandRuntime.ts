@@ -56,6 +56,8 @@ export interface CommandRuntime {
   capabilities: CapabilityStore;
   subagents: SubagentTaskManager | undefined;
   extensionReport(section?: ExtensionSection): string;
+  /** 扩展实时状态的快照；`/status` 等命令的卡片和文本报告共用。 */
+  extensionStatus(): ExtensionStatus;
   /** 当前可用于 TUI 补全的 Skill 元数据；正文仍按需加载。 */
   listSkills(): SkillDefinition[];
   /** 用户提交 `/skill:name` 后才读取并展开 Skill 正文。 */
@@ -279,6 +281,7 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
     capabilities,
     subagents: subagentTaskManager,
     extensionReport: (section?: ExtensionSection): string => formatExtensionReport(extensionStatus(), section),
+    extensionStatus: (): ExtensionStatus => extensionStatus(),
     listSkills: (): SkillDefinition[] => [...requireSkillBundle(skills).skills],
     expandSkillCommand: async (input: string): Promise<string> => await expandSkillCommandText(requireSkillBundle(skills), input),
     refreshSkills: async (): Promise<void> => {

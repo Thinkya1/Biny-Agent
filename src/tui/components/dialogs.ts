@@ -96,7 +96,8 @@ export class TextViewerDialog extends Container {
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, "escape") || matchesKey(data, "q")) {
+    // Ctrl+C 也关闭查看器：全局双 Ctrl+C 退出依赖弹层先消费掉第一次按键。
+    if (matchesKey(data, "escape") || matchesKey(data, "q") || matchesKey(data, "ctrl+c")) {
       this.onClose();
       return;
     }

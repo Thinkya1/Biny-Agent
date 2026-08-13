@@ -106,7 +106,7 @@ export function formatStatusReport(
   ].join("\n");
 }
 
-function formatCount(value: number): string {
+export function formatCount(value: number): string {
   return numberFormatter.format(Math.max(0, Math.round(value)));
 }
 
@@ -123,7 +123,7 @@ function formatInputMeasurement(estimatedTokens: number | undefined, providerInp
   return `estimated ${formatCount(estimatedTokens)}; provider ${formatCount(providerInputTokens)}; delta ${signedDelta}`;
 }
 
-function contextComponentLabel(id: string): string {
+export function contextComponentLabel(id: string): string {
   return {
     task: "task",
     history: "history",
