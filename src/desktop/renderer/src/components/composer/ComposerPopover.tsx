@@ -27,6 +27,15 @@ interface PopoverPosition {
 export function ComposerPopover({ anchorRef, align = "start", children, className, phase }: ComposerPopoverProps): React.JSX.Element | null {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<PopoverPosition>();
+  // 设置中心用原生 <dialog>.showModal() 打开，dialog 会进入浏览器顶层（top layer），
+  // 挂在 document.body 下的 fixed 元素会被它盖住，即使 z-index 更高也显示不出来。
+  // 因此菜单要挂进最近的 <dialog> 内部；普通场景（composer）没有 dialog 祖先，仍挂 body。
+  // 挂载后再解析目标，避免在渲染期间读取 ref。
+  const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    setPortalTarget(anchorRef.current?.closest("dialog") ?? document.body);
+  }, [anchorRef]);
 
   useLayoutEffect(() => {
     const anchor = anchorRef.current;
@@ -75,7 +84,9 @@ export function ComposerPopover({ anchorRef, align = "start", children, classNam
       window.removeEventListener("scroll", updatePosition, true);
       resizeObserver?.disconnect();
     };
-  }, [align, anchorRef]);
+    // portal 目标解析后 surface 会换一个 DOM 节点（重新挂载进 <dialog>），必须重新测量，
+    // 否则后续滚动/缩放重算时拿到的还是已脱离文档的旧节点。
+  }, [align, anchorRef, portalTarget]);
 
   if (typeof document === "undefined") return null;
 
@@ -91,11 +102,13 @@ export function ComposerPopover({ anchorRef, align = "start", children, classNam
     zIndex: 160
   };
 
+  // 设置中心的菜单挂进 <dialog> 内部（顶层渲染顺序）；composer 场景仍在首帧后挂回 body，
+  // 效果与之前一致，只是 portal 目标从 document.body 改成解析结果。
   return createPortal(
     <div className={className} data-origin={position?.origin ?? (align === "end" ? "bottom-right" : "bottom-left")} data-popover-phase={phase} ref={surfaceRef} style={style}>
       {children}
     </div>,
-    document.body
+    portalTarget ?? document.body
   );
 }
 

@@ -57,13 +57,18 @@ export function ModelMenu({
       onClose();
     };
     const closeOnEscape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape" || event.isComposing) return;
+      // 菜单挂在设置中心的原生 <dialog> 内部时，dialog 自己的 keydown 监听会在冒泡阶段
+      // 处理 Escape 并关闭整个设置中心。这里在捕获阶段消费掉事件，保证一次 Escape 只关菜单。
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
     };
     window.addEventListener("pointerdown", closeOnOutsidePointer);
-    window.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("keydown", closeOnEscape, true);
     return () => {
       window.removeEventListener("pointerdown", closeOnOutsidePointer);
-      window.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("keydown", closeOnEscape, true);
     };
   }, [anchorRef, onClose, open]);
 
