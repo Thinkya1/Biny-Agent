@@ -11,6 +11,7 @@ import type { ContextBudgetStatus } from "../../../agent/context/types.js";
 import type { PermissionMode, PermissionResult } from "../../../permission/PermissionManager.js";
 import { activeRun, pendingPermission } from "../../../runtime/agentEvents.js";
 import type {
+  DesktopActiveView,
   DesktopAttachment,
   DesktopFontPreference,
   DesktopMenuAction,
@@ -75,7 +76,7 @@ interface RenameTarget {
   metadataRevision?: string;
 }
 
-type DesktopPage = "chat" | "extensions";
+type DesktopPage = Exclude<DesktopActiveView, "runtime">;
 
 export function App(): React.JSX.Element {
   const [version, setVersion] = useState("0.1.0");
@@ -152,11 +153,14 @@ export function App(): React.JSX.Element {
   }, []);
 
   const openExtensions = useCallback((): void => {
+    loadRequestRef.current += 1;
     setPage("extensions");
     setRuntimePanelOpen(false);
+    setLoading(false);
     setSearchOpen(false);
     setSettingsOpen(false);
     setSettingsTargetTab(undefined);
+    void window.biny.setActiveView("extensions").catch((error) => setToast(errorMessage(error)));
   }, []);
 
   useEffect(() => {
@@ -254,7 +258,8 @@ export function App(): React.JSX.Element {
     sessionId: string,
     showLoader = true,
     activeRequest?: number,
-    nextWorkspace?: DesktopWorkspaceSnapshot
+    nextWorkspace?: DesktopWorkspaceSnapshot,
+    activeView: DesktopActiveView = "chat"
   ): Promise<boolean> => {
     const request = activeRequest ?? loadRequestRef.current + 1;
     if (activeRequest === undefined) loadRequestRef.current = request;
@@ -268,6 +273,7 @@ export function App(): React.JSX.Element {
         mergeWorkspaceProject(nextWorkspace);
       }
       setPage("chat");
+      setRuntimePanelOpen(activeView === "runtime");
       selectedRef.current = sessionId;
       setSelectedSessionId(sessionId);
       // 上下文用量属于某一个会话，换会话就作废，等新会话跑出 context.updated 再显示。
@@ -282,7 +288,7 @@ export function App(): React.JSX.Element {
           }
         : current);
       // 读取成功且仍持有最新请求后才提交持久化选择；失败或过期请求不会触碰主进程状态。
-      void window.biny.commitSelection(projectId, sessionId).catch((error) => setToast(errorMessage(error)));
+      void window.biny.commitSelection(projectId, sessionId, activeView).catch((error) => setToast(errorMessage(error)));
       return true;
     } catch (error) {
       if (loadRequestRef.current !== request) return false;
@@ -302,16 +308,16 @@ export function App(): React.JSX.Element {
     if (loadRequestRef.current !== request) return false;
     if (preferredSessionId) return await openSession(snapshot.project.id, preferredSessionId, true, request, snapshot);
     setPage("chat");
+    setRuntimePanelOpen(false);
     projectRef.current = snapshot.project.id;
     selectedRef.current = undefined;
     mergeWorkspaceProject(snapshot);
-    // 进入 Desktop 本身不等于恢复旧会话；只有用户点击会话、显式 handoff 或
-    // 正在运行的 Host 会话才允许打开聊天正文。
+    // 显式切换项目或新建任务时进入空白草稿，不沿用该项目之前保存的会话正文。
     setSelectedSessionId(undefined);
     setDocument(undefined);
     setContextBudget(undefined);
     setLoading(false);
-    void window.biny.commitSelection(snapshot.project.id, undefined).catch((error) => setToast(errorMessage(error)));
+    void window.biny.commitSelection(snapshot.project.id, undefined, "chat").catch((error) => setToast(errorMessage(error)));
     return true;
   }, [mergeWorkspaceProject, openSession]);
 
@@ -319,7 +325,23 @@ export function App(): React.JSX.Element {
     // 从项目选择到会话读取共用同一个请求号，较早的跨项目请求不能在较新的点击后重新取得提交权。
     const request = loadRequestRef.current + 1;
     loadRequestRef.current = request;
-    setLoading(true);
+    const startingCurrentDraft = target.sessionId === undefined && target.projectId === projectRef.current;
+    if (startingCurrentDraft) {
+      // 当前项目的新建任务应立即呈现空白输入框。startDraft 只负责重置旧运行时，
+      // 这里不能把它伪装成“恢复会话”，也不能继续显示上一段聊天正文。
+      setPage("chat");
+      setRuntimePanelOpen(false);
+      selectedRef.current = undefined;
+      setSelectedSessionId(undefined);
+      setDocument(undefined);
+      setContextBudget(undefined);
+      setWorkspace((current) => current?.project.id === target.projectId
+        ? { ...current, selectedSessionId: undefined }
+        : current);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     try {
       if (target.sessionId === undefined) {
         const snapshot = await window.biny.startDraft(target.projectId);
@@ -353,13 +375,22 @@ export function App(): React.JSX.Element {
       setFilePanelWidth(bootstrap.filePanelWidth ?? DEFAULT_FILE_PANEL_WIDTH);
       setThemePreference(bootstrap.themePreference ?? "system");
       setFontPreference(bootstrap.fontPreference ?? DEFAULT_FONT_PREFERENCE);
+      setPage(bootstrap.activeView === "extensions" ? "extensions" : "chat");
+      setRuntimePanelOpen(bootstrap.activeView === "runtime" && Boolean(bootstrap.workspace));
       if (bootstrap.workspace) {
         mergeWorkspaceProject(bootstrap.workspace);
-        // Desktop 启动本身不等于恢复或交接；只有 `/app` 的显式 handoff 才会
-        // 在 bootstrap 中带 selectedSessionId。历史 session 仍只展示在侧栏。
+        // 显式 `/app` 交接优先于持久化位置；普通启动则恢复上次会话正文，
+        // 但不会自动继续中断的运行。
         const nextSessionId = bootstrap.selectedSessionId;
         if (nextSessionId) {
-          const opened = await openSession(bootstrap.workspace.project.id, nextSessionId);
+          const opened = await openSession(
+            bootstrap.workspace.project.id,
+            nextSessionId,
+            true,
+            undefined,
+            undefined,
+            bootstrap.activeView
+          );
           if (opened) commitNavigation(pushNavigation(createNavigationState(), { projectId: bootstrap.workspace.project.id, sessionId: nextSessionId }));
         }
         else setLoading(false);
@@ -455,9 +486,17 @@ export function App(): React.JSX.Element {
       setToast("请先打开项目，再查看自动化与后台运行。");
       return;
     }
+    loadRequestRef.current += 1;
     setPage("chat");
     setSearchOpen(false);
+    setLoading(false);
     setRuntimePanelOpen(true);
+    void window.biny.setActiveView("runtime").catch((error) => setToast(errorMessage(error)));
+  }, []);
+
+  const changeRuntimePanelOpen = useCallback((open: boolean): void => {
+    setRuntimePanelOpen(open);
+    void window.biny.setActiveView(open ? "runtime" : "chat").catch((error) => setToast(errorMessage(error)));
   }, []);
 
   const navigateToSession = useCallback(async (projectId: string, sessionId: string): Promise<void> => {
@@ -729,6 +768,8 @@ export function App(): React.JSX.Element {
       setWorkspace(bootstrap.workspace);
       setDocument(undefined);
       setSelectedSessionId(undefined);
+      setPage(bootstrap.activeView === "extensions" ? "extensions" : "chat");
+      setRuntimePanelOpen(bootstrap.activeView === "runtime" && Boolean(bootstrap.workspace));
       commitNavigation(createNavigationState());
     } catch (error) {
       setToast(errorMessage(error));
@@ -976,7 +1017,7 @@ export function App(): React.JSX.Element {
         onRollbackFiles={rollbackFiles}
         onRetry={(input) => void sendPrompt(input, "chat", []).catch((error) => setToast(errorMessage(error)))}
         onToggleInspector={inspector.toggleInspector}
-        onRuntimePanelOpenChange={setRuntimePanelOpen}
+        onRuntimePanelOpenChange={changeRuntimePanelOpen}
         project={workspace?.project}
         projectId={workspace?.project.id}
         runtimeError={workspace?.runtimeError}

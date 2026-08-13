@@ -1,6 +1,6 @@
 /**
- * 桌面端界面状态的持久化：项目列表、当前项目与会话、会话标题/置顶、侧栏与面板宽度、
- * 主题偏好、窗口位置。
+ * 桌面端界面状态的持久化：项目列表、当前项目与会话、当前主界面、会话标题/置顶、
+ * 侧栏与面板宽度、主题偏好、窗口位置。
  *
  * 读取时逐字段校验并夹到合法范围，文件损坏则改名备份后回退默认值——界面状态不值得让应用
  * 起不来。写入串行化，避免高频改动（拖动侧栏等）互相覆盖。
@@ -10,7 +10,7 @@ import path from "node:path";
 import { clampStoredFilePanelWidth, DEFAULT_FILE_PANEL_WIDTH } from "../../filePanelSizing.js";
 import { DEFAULT_FONT_PREFERENCE, normalizeFontPreference } from "../../fontPreference.js";
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, normalizeSidebarWidth } from "../../sidebarSizing.js";
-import type { DesktopFontPreference, DesktopProject, DesktopThemePreference } from "../../protocol.js";
+import type { DesktopActiveView, DesktopFontPreference, DesktopProject, DesktopThemePreference } from "../../protocol.js";
 
 interface DesktopSessionMetadata {
   title?: string;
@@ -25,10 +25,11 @@ export interface DesktopWindowBounds {
 }
 
 interface PersistedDesktopState {
-  version: 1;
+  version: 2;
   projects: DesktopProject[];
   activeProjectId?: string;
   selectedSessionIds: Record<string, string>;
+  activeView: DesktopActiveView;
   sessionMetadata: Record<string, DesktopSessionMetadata>;
   sidebarWidth: number;
   filePanelWidth: number;
@@ -40,10 +41,11 @@ interface PersistedDesktopState {
 }
 
 const defaultState: PersistedDesktopState = {
-  version: 1,
+  version: 2,
   projects: [],
   activeProjectId: undefined,
   selectedSessionIds: {},
+  activeView: "chat",
   sessionMetadata: {},
   sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
   filePanelWidth: DEFAULT_FILE_PANEL_WIDTH,
@@ -63,10 +65,11 @@ export class DesktopStateStore {
     try {
       const raw = JSON.parse(await fs.readFile(this.filePath, "utf8")) as Partial<PersistedDesktopState>;
       this.state = {
-        version: 1,
+        version: 2,
         projects: Array.isArray(raw.projects) ? raw.projects.map((project) => ({ ...project, pinned: project.pinned === true })) : [],
         activeProjectId: typeof raw.activeProjectId === "string" ? raw.activeProjectId : undefined,
         selectedSessionIds: isRecord(raw.selectedSessionIds) ? stringRecord(raw.selectedSessionIds) : {},
+        activeView: validActiveView(raw.activeView) ? raw.activeView : "chat",
         sessionMetadata: isRecord(raw.sessionMetadata) ? metadataRecord(raw.sessionMetadata) : {},
         sidebarWidth: typeof raw.sidebarWidth === "number" ? normalizeSidebarWidth(raw.sidebarWidth) : DEFAULT_SIDEBAR_WIDTH,
         filePanelWidth: typeof raw.filePanelWidth === "number" ? clampStoredFilePanelWidth(raw.filePanelWidth) : DEFAULT_FILE_PANEL_WIDTH,
@@ -120,14 +123,24 @@ export class DesktopStateStore {
     await this.save();
   }
 
-  /** Renderer 确认导航成功后，一次提交当前项目与该项目的会话选择。 */
-  async commitSelection(projectId: string, sessionId: string | undefined): Promise<void> {
+  /** Renderer 确认导航成功后，一次提交当前项目、该项目的会话选择和主界面。 */
+  async commitSelection(projectId: string, sessionId: string | undefined, activeView: DesktopActiveView): Promise<void> {
     if (!this.state.projects.some((project) => project.id === projectId)) {
       throw new Error(`Unknown project: ${projectId}`);
     }
     this.state.activeProjectId = projectId;
     if (sessionId === undefined) delete this.state.selectedSessionIds[projectId];
     else this.state.selectedSessionIds[projectId] = sessionId;
+    this.state.activeView = activeView;
+    await this.save();
+  }
+
+  activeView(): DesktopActiveView {
+    return this.state.activeView;
+  }
+
+  async setActiveView(activeView: DesktopActiveView): Promise<void> {
+    this.state.activeView = activeView;
     await this.save();
   }
 
@@ -350,6 +363,10 @@ function sameFont(left: DesktopFontPreference, right: DesktopFontPreference): bo
 
 function validThemePreference(value: unknown): value is DesktopThemePreference {
   return value === "system" || value === "light" || value === "dark";
+}
+
+function validActiveView(value: unknown): value is DesktopActiveView {
+  return value === "chat" || value === "runtime" || value === "extensions";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

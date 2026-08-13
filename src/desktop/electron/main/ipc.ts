@@ -23,7 +23,7 @@ import { z } from "zod";
 import { modelApiBackendSchema, modelCompatibilitySchema, modelLimitsSchema, modelProviderSchema, providerProtocolSchema, reasoningEffortSchema } from "../../../config/schema.js";
 import { memoryPolicySchema } from "../../../personalization/index.js";
 import { clampFontSize } from "../../fontPreference.js";
-import type { DesktopBootstrap, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopThemePreference } from "../../protocol.js";
+import type { DesktopActiveView, DesktopBootstrap, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopThemePreference } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 import { DesktopAgentManager } from "./DesktopAgentManager.js";
 import { DesktopBrowserService } from "./DesktopBrowserService.js";
@@ -63,6 +63,7 @@ const sessionTreePageOptionsSchema = z.object({
   includeArchived: z.boolean().optional()
 }).optional();
 const permissionModeSchema = z.enum(["ask", "read-only", "auto", "full-access"]);
+const activeViewSchema = z.enum(["chat", "runtime", "extensions"]);
 const terminalSizeSchema = z.number().int().min(2).max(1_000);
 const terminalDataSchema = z.string().max(1_000_000);
 const thinkingSchema = z.union([z.literal("off"), reasoningEffortSchema]);
@@ -280,11 +281,16 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.workspaceSnapshot(idSchema.parse(projectId));
   });
 
-  handle(desktopIpc.commitSelection, async (_event, projectId: unknown, sessionId: unknown) => {
+  handle(desktopIpc.commitSelection, async (_event, projectId: unknown, sessionId: unknown, activeView: unknown) => {
     await context.state.commitSelection(
       idSchema.parse(projectId),
-      sessionId === undefined ? undefined : idSchema.parse(sessionId)
+      sessionId === undefined ? undefined : idSchema.parse(sessionId),
+      activeViewSchema.parse(activeView)
     );
+  });
+
+  handle(desktopIpc.setActiveView, async (_event, activeView: unknown) => {
+    await context.state.setActiveView(activeViewSchema.parse(activeView) satisfies DesktopActiveView);
   });
 
   handle(desktopIpc.setProjectPinned, async (_event, projectId: unknown, pinned: unknown) => {

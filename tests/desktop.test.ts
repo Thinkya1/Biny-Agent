@@ -92,6 +92,7 @@ testSidebarSizing();
 testSidebarLayoutState();
 await testSidebarStateNormalizesWidth();
 await testDesktopThemePreference();
+await testDesktopActiveViewPersistence();
 await testDesktopMemoryV3CasAndOriginFilters();
 await testDesktopSettingsTransaction();
 await testDesktopGlobalWriteGateAndRuntimeRefresh();
@@ -1104,6 +1105,26 @@ async function testDesktopThemePreference(): Promise<void> {
     assert.equal(restored.themePreference(), "dark");
     await restored.setThemePreference("light");
     assert.equal(restored.themePreference(), "light");
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopActiveViewPersistence(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-active-view-"));
+  try {
+    const statePath = path.join(workspaceRoot, "desktop-state.json");
+    const state = new DesktopStateStore(statePath);
+    await state.load();
+    assert.equal(state.activeView(), "chat");
+    await state.setActiveView("extensions");
+    const restored = new DesktopStateStore(statePath);
+    await restored.load();
+    assert.equal(restored.activeView(), "extensions");
+    await writeFile(statePath, `${JSON.stringify({ version: 1, activeView: "unknown" })}\n`);
+    const migrated = new DesktopStateStore(statePath);
+    await migrated.load();
+    assert.equal(migrated.activeView(), "chat");
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
@@ -2227,7 +2248,7 @@ async function testDesktopNavigationReadsDoNotPersistSelection(): Promise<void> 
     const second = await projects.createProject(secondRoot);
     assert.equal(state.activeProjectId(), undefined, "upserting projects must not select them");
 
-    await state.commitSelection(second.id, "session-second");
+    await state.commitSelection(second.id, "session-second", "runtime");
     const firstDataRoot = await projects.dataRoot(first);
     await ensureAgentDirs(firstDataRoot);
     const recorder = new SessionRecorder(firstDataRoot, "session-first");
@@ -2235,19 +2256,26 @@ async function testDesktopNavigationReadsDoNotPersistSelection(): Promise<void> 
     await recorder.close();
 
     const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
-    await agents.workspaceSnapshot(first.id);
-    await agents.startDraft(first.id);
+    const beforeDraft = await agents.workspaceSnapshot(first.id);
+    const draft = await agents.startDraft(first.id);
+    assert.deepEqual(
+      draft.sessions.map((session) => session.id),
+      beforeDraft.sessions.map((session) => session.id),
+      "starting a draft must not create a session or send a message"
+    );
     await agents.openSession(first.id, "session-first");
     assert.equal(state.activeProjectId(), second.id);
     assert.equal(state.selectedSessionId(second.id), "session-second");
+    assert.equal(state.activeView(), "runtime");
     assert.equal(state.selectedSessionId(first.id), undefined, "navigation reads wait for the Renderer commit");
 
-    await state.commitSelection(first.id, "session-first");
+    await state.commitSelection(first.id, "session-first", "chat");
     const restored = new DesktopStateStore(path.join(desktopRoot, "desktop-state.json"));
     await restored.load();
     assert.equal(restored.activeProjectId(), first.id);
     assert.equal(restored.selectedSessionId(first.id), "session-first");
-    await assert.rejects(state.commitSelection("missing-project", undefined), /Unknown project/);
+    assert.equal(restored.activeView(), "chat");
+    await assert.rejects(state.commitSelection("missing-project", undefined, "chat"), /Unknown project/);
     assert.equal(state.activeProjectId(), first.id);
     await agents.closeAll();
   } finally {

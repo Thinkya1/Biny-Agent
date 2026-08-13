@@ -87,8 +87,7 @@ async function startDesktopApplication(): Promise<void> {
   await settings.recoverAtStartup();
   const prepareHandoff = async (handoff: DesktopLaunchHandoff): Promise<DesktopSessionHandoff> => {
     const project = await projects.createProject(handoff.workspaceRoot);
-    await state.setActiveProject(project.id);
-    await state.setSelectedSession(project.id, handoff.sessionId);
+    await state.commitSelection(project.id, handoff.sessionId, "chat");
     return { projectId: project.id, sessionId: handoff.sessionId };
   };
   const initialTarget = initialHandoff === undefined ? undefined : await prepareHandoff(initialHandoff);
@@ -114,9 +113,16 @@ async function startDesktopApplication(): Promise<void> {
     const explicitSessionId = initialTarget !== undefined && initialTarget.projectId === activeProjectId
       ? initialTarget.sessionId
       : undefined;
-    const visibleWorkspace = workspace && explicitSessionId === undefined
-      ? { ...workspace, selectedSessionId: undefined }
-      : workspace;
+    const activeView = explicitSessionId === undefined ? state.activeView() : "chat";
+    const storedSessionId = activeProjectId === undefined ? undefined : state.selectedSessionId(activeProjectId);
+    const restorableSessionId = storedSessionId && workspace?.sessions.some((session) => session.id === storedSessionId)
+      ? storedSessionId
+      : undefined;
+    if (storedSessionId && restorableSessionId === undefined && activeProjectId) {
+      await state.setSelectedSession(activeProjectId, undefined);
+    }
+    const selectedSessionId = explicitSessionId ?? (activeView === "extensions" ? undefined : restorableSessionId);
+    const visibleWorkspace = workspace ? { ...workspace, selectedSessionId } : undefined;
     const sidebarSessions = await agents.sidebarSessions(workspace);
     return {
       version: app.getVersion(),
@@ -124,7 +130,8 @@ async function startDesktopApplication(): Promise<void> {
       projects: state.projects(),
       sidebarSessions,
       activeProjectId,
-      selectedSessionId: explicitSessionId,
+      selectedSessionId,
+      activeView,
       workspace: visibleWorkspace,
       sidebarWidth: state.sidebarWidth(),
       filePanelWidth: state.filePanelWidth(),

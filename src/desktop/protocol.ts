@@ -29,6 +29,7 @@ export const desktopIpc = {
   createEmptyProject: "desktop:project:create-empty",
   selectProject: "desktop:project:select",
   commitSelection: "desktop:selection:commit",
+  setActiveView: "desktop:ui:active-view",
   setProjectPinned: "desktop:project:pin",
   reorderProjects: "desktop:project:reorder",
   renameProject: "desktop:project:rename",
@@ -123,6 +124,7 @@ export const desktopIpc = {
 } as const;
 
 export type DesktopThemePreference = "system" | "light" | "dark";
+export type DesktopActiveView = "chat" | "runtime" | "extensions";
 
 /** 界面字体偏好。`family` 为 CSS 字体族名，"system" 表示跟随操作系统；`size` 为基准字号（px）。 */
 export interface DesktopFontPreference {
@@ -249,6 +251,7 @@ export interface DesktopBootstrap {
   sidebarSessions: DesktopSessionSummary[];
   activeProjectId?: string;
   selectedSessionId?: string;
+  activeView: DesktopActiveView;
   workspace?: DesktopWorkspaceSnapshot;
   sidebarWidth: number;
   filePanelWidth: number;
@@ -871,7 +874,8 @@ export interface DesktopApi {
   openProject(): Promise<DesktopWorkspaceSnapshot | undefined>;
   createEmptyProject(): Promise<DesktopWorkspaceSnapshot | undefined>;
   selectProject(projectId: string): Promise<DesktopWorkspaceSnapshot>;
-  commitSelection(projectId: string, sessionId: string | undefined): Promise<void>;
+  commitSelection(projectId: string, sessionId: string | undefined, activeView: DesktopActiveView): Promise<void>;
+  setActiveView(activeView: DesktopActiveView): Promise<void>;
   setProjectPinned(projectId: string, pinned: boolean): Promise<DesktopWorkspaceSnapshot>;
   reorderProjects(projectIds: string[]): Promise<DesktopProject[]>;
   renameProject(projectId: string, name: string): Promise<DesktopWorkspaceSnapshot>;
