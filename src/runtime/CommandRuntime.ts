@@ -159,7 +159,10 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
     }
     // 读取/写入 durable memory 与“当前聊天是否自动召回/贡献”是两组独立开关。
     // 工具始终注册；显式 save_memory 不会因聊天策略关闭而丢失。
-    for (const tool of createMemoryTools(() => agent?.getLocalMemory())) toolRegistry.registerBuiltinTool(tool);
+    for (const tool of createMemoryTools(
+      () => agent?.getLocalMemory(),
+      { indexEntry: async (entry) => await agent?.indexMemoryEntry(entry) }
+    )) toolRegistry.registerBuiltinTool(tool);
     // MCP/Plugin 仍由 Host 持有连接和执行权，但先把工具能力注册进统一 envelope，
     // 这样 Desktop/TUI 查询 capability projection 时能看到已加载的 Host-owned 能力。
     for (const entry of toolRegistry.listEntries()) {

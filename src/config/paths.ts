@@ -48,7 +48,7 @@ export function projectSessionsDir(workspaceRoot: string, options: PathEnvironme
   return projectStateDir("sessions", workspaceRoot, options);
 }
 
-/** Memory 保持项目作用域，但物理存储位于全局 agent 目录，避免污染项目工作区。 */
+/** 旧 v2 项目 Memory 目录仅用于首次迁移读取；v3 单库位于全局 agent 目录。 */
 export function projectMemoryDir(workspaceRoot: string, options: PathEnvironment = {}): string {
   return projectStateDir("memory", workspaceRoot, options);
 }

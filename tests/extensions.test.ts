@@ -36,19 +36,21 @@ async function main(): Promise<void> {
     testUsageCostAccounting();
     testPromptCacheAccounting();
     testShellPermissionBoundary();
-    testScopedMemoryToolSchemas();
+    testSourceAwareMemoryToolSchemas();
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
 }
 
-function testScopedMemoryToolSchemas(): void {
+function testSourceAwareMemoryToolSchemas(): void {
   const [saveMemory, recallMemory] = createMemoryTools(() => undefined);
   assert.ok(saveMemory && recallMemory);
-  assert.deepEqual((saveMemory.parameters.properties.scope as { enum?: string[] }).enum, ["global", "project"]);
-  assert.deepEqual((recallMemory.parameters.properties.scope as { enum?: string[] }).enum, ["all", "global", "project"]);
+  assert.deepEqual((saveMemory.parameters.properties.audience as { enum?: string[] }).enum, ["workspace", "universal"]);
+  assert.equal("scope" in saveMemory.parameters.properties, false);
+  assert.deepEqual((recallMemory.parameters.properties.origin as { enum?: string[] }).enum, ["all", "current_workspace", "user", "other_workspaces"]);
+  assert.equal("scope" in recallMemory.parameters.properties, false);
   const missingEvidence = saveMemory.resolveExecution({
-    scope: "global",
+    audience: "universal",
     kind: "preference",
     topic: "style",
     title: "Concise replies",
@@ -56,7 +58,7 @@ function testScopedMemoryToolSchemas(): void {
   });
   assert.equal("isError" in missingEvidence && missingEvidence.isError, true);
   const explicit = saveMemory.resolveExecution({
-    scope: "global",
+    audience: "universal",
     kind: "preference",
     topic: "style",
     title: "Concise replies",

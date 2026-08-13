@@ -1,8 +1,8 @@
 /**
  * 记忆条目的序列化、脱敏和确定性检索。
  *
- * 每个 v2 Markdown 文件只承载一条 entry；YAML frontmatter 是机器可读事实，正文保留给用户
- * 审计。检索只使用本地关键词、CJK bigram、路径、时间和 importance，不建立向量索引。
+ * 每个 v3 Markdown 文件只承载一条 entry；YAML frontmatter 是机器可读事实，正文保留给用户
+ * 审计。向量索引属于可重建派生数据，不进入本文件格式。
  */
 import path from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -12,16 +12,17 @@ import type {
   MemoryEntry,
   MemoryEntryInput,
   MemoryLineage,
-  MemoryMatch
+  MemoryMatch,
+  MemoryOrigin
 } from "./memoryTypes.js";
 
-export const memoryFormatVersion = 2;
+export const memoryFormatVersion = 3;
 export const maxMemoryEntryChars = 32_000;
 export const maxMemorySummaryChars = 2_000;
 export const maxMemoryCandidateChars = 2_000;
 
 const lineageSchema = z.object({
-  source: z.enum(["explicit", "completed_task", "candidate", "migration", "consolidation"]),
+  source: z.enum(["explicit", "explicit_edit", "completed_task", "candidate", "migration", "consolidation"]),
   externalContext: z.boolean(),
   sessionId: z.string().optional(),
   turnId: z.string().optional(),
@@ -35,7 +36,14 @@ const lineageSchema = z.object({
 const frontmatterSchema = z.object({
   version: z.literal(memoryFormatVersion),
   id: z.string().min(8).max(128),
-  scope: z.enum(["global", "project"]),
+  origin: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("user") }),
+    z.object({
+      kind: z.literal("workspace"),
+      workspaceId: z.string().regex(/^[a-f0-9]{24}$/u),
+      workspaceName: z.string().min(1).max(120)
+    })
+  ]),
   kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]),
   topic: z.string(),
   title: z.string(),
@@ -49,6 +57,36 @@ const frontmatterSchema = z.object({
   revision: z.number().int().nonnegative(),
   lineage: z.array(lineageSchema).min(1)
 });
+
+const legacyV2FrontmatterSchema = z.object({
+  version: z.literal(2),
+  id: z.string().min(8).max(128),
+  scope: z.enum(["global", "project"]),
+  kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]),
+  topic: z.string(),
+  title: z.string(),
+  summary: z.string(),
+  decisions: z.array(z.string()).default([]),
+  paths: z.array(z.string()).default([]),
+  keywords: z.array(z.string()).default([]),
+  importance: z.number(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  revision: z.number().int().nonnegative(),
+  lineage: z.array(z.object({
+    source: z.enum(["explicit", "completed_task", "candidate", "migration", "consolidation"]),
+    externalContext: z.boolean(),
+    sessionId: z.string().optional(),
+    turnId: z.string().optional(),
+    runId: z.string().optional(),
+    candidateId: z.string().optional(),
+    sourceEntryIds: z.array(z.string()).optional(),
+    legacyPath: z.string().optional(),
+    userEvidence: z.string().optional()
+  })).min(1)
+});
+
+export type LegacyV2MemoryEntry = z.infer<typeof legacyV2FrontmatterSchema>;
 
 export interface StoredEntryFields {
   id: string;
@@ -64,11 +102,22 @@ export interface RankedMemoryEntry {
 }
 
 export function sanitizeMemoryEntryInput(input: MemoryEntryInput): MemoryEntryInput {
-  if (input.scope !== "global" && input.scope !== "project") throw new Error(`Invalid memory scope: ${String(input.scope)}`);
+  if (input.origin === undefined && input.audience === undefined && input.scope === undefined) {
+    throw new Error("Memory entry requires origin or audience.");
+  }
+  if (input.origin !== undefined) validateMemoryOrigin(input.origin);
+  if (input.audience !== undefined && input.audience !== "universal" && input.audience !== "workspace") {
+    throw new Error(`Invalid memory audience: ${String(input.audience)}`);
+  }
+  if (input.scope !== undefined && input.scope !== "global" && input.scope !== "project") {
+    throw new Error(`Invalid memory scope: ${String(input.scope)}`);
+  }
   if (!isMemoryKind(input.kind)) throw new Error(`Invalid memory kind: ${String(input.kind)}`);
   const lineage = (Array.isArray(input.lineage) ? input.lineage : [input.lineage]).map(sanitizeMemoryLineage);
   if (!lineage.length) throw new Error("Memory entry lineage must not be empty.");
   const sanitized: MemoryEntryInput = {
+    origin: input.origin === undefined ? undefined : sanitizeMemoryOrigin(input.origin),
+    audience: input.audience,
     scope: input.scope,
     kind: input.kind,
     topic: normalizeMemoryTopic(redactSecrets(input.topic)),
@@ -80,16 +129,18 @@ export function sanitizeMemoryEntryInput(input: MemoryEntryInput): MemoryEntryIn
     importance: normalizeImportance(input.importance),
     lineage
   };
-  if (!sanitized.title) sanitized.title = "Project note";
+  if (!sanitized.title) sanitized.title = "Memory note";
   return sanitized;
 }
 
 /** 写盘前再次脱敏，候选经过模型也不能绕过第一道过滤。 */
 export function createStoredMemoryEntry(input: MemoryEntryInput, fields: StoredEntryFields): MemoryEntry {
   const safe = sanitizeMemoryEntryInput(sanitizeMemoryEntryInput(input));
+  if (!safe.origin) throw new Error("Stored memory entry requires a resolved origin.");
   return {
     id: sanitizeIdentifier(fields.id),
-    scope: safe.scope,
+    origin: safe.origin,
+    scope: scopeFromOrigin(safe.origin),
     kind: safe.kind,
     topic: safe.topic,
     title: safe.title,
@@ -101,7 +152,13 @@ export function createStoredMemoryEntry(input: MemoryEntryInput, fields: StoredE
     createdAt: assertIsoTime(fields.createdAt),
     updatedAt: assertIsoTime(fields.updatedAt),
     revision: Math.max(0, Math.trunc(fields.revision)),
-    lineage: Array.isArray(safe.lineage) ? safe.lineage : [safe.lineage]
+    lineage: Array.isArray(safe.lineage) ? safe.lineage : [safe.lineage],
+    recallCount: "recallCount" in input && typeof input.recallCount === "number"
+      ? Math.max(0, Math.trunc(input.recallCount))
+      : 0,
+    lastRecalledAt: "lastRecalledAt" in input && typeof input.lastRecalledAt === "string"
+      ? assertIsoTime(input.lastRecalledAt)
+      : undefined
   };
 }
 
@@ -115,7 +172,7 @@ export function renderMemoryEntry(entry: MemoryEntry): string {
   const frontmatter = stringifyYaml({
     version: memoryFormatVersion,
     id: safe.id,
-    scope: safe.scope,
+    origin: safe.origin,
     kind: safe.kind,
     topic: safe.topic,
     title: safe.title,
@@ -158,7 +215,7 @@ export function parseMemoryEntryFile(content: string): MemoryEntry | undefined {
   const value = parsed.data;
   try {
     return createStoredMemoryEntry({
-      scope: value.scope,
+      origin: value.origin,
       kind: value.kind,
       topic: value.topic,
       title: value.title,
@@ -179,20 +236,29 @@ export function parseMemoryEntryFile(content: string): MemoryEntry | undefined {
   }
 }
 
+/** v2 scope 文件只在只读迁移阶段解析；不会作为 v3 活跃条目返回。 */
+export function parseLegacyV2MemoryEntryFile(content: string): LegacyV2MemoryEntry | undefined {
+  const raw = parseFrontmatter(content);
+  if (raw === undefined) return undefined;
+  const parsed = legacyV2FrontmatterSchema.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
+
 export function assertAllowedScopedEntry(entry: MemoryEntryInput, workspaceRoot: string): void {
-  if (entry.scope !== "global") return;
+  const universal = entry.origin?.kind === "user" || entry.audience === "universal" || entry.scope === "global";
+  if (!universal) return;
   if (entry.kind !== "preference" && entry.kind !== "working_style") {
-    throw new Error("Global memory only accepts preference and working_style entries.");
+    throw new Error("Universal memory only accepts preference and working_style entries.");
   }
   if ((entry.paths?.length ?? 0) > 0 || (entry.decisions?.length ?? 0) > 0 || containsProjectPath(entry, workspaceRoot)) {
-    throw new Error("Project paths and decisions must be stored in project memory.");
+    throw new Error("Workspace paths and decisions must be stored in workspace memory.");
   }
   const lineages = Array.isArray(entry.lineage) ? entry.lineage : [entry.lineage];
   const evidenced = lineages.some((lineage) => (
     (lineage.source === "explicit" || lineage.source === "completed_task" || lineage.source === "candidate")
     && Boolean(lineage.userEvidence?.trim())
   ));
-  if (!evidenced) throw new Error("Global memory requires explicit, auditable user evidence.");
+  if (!evidenced) throw new Error("Universal memory requires explicit, auditable user evidence.");
 }
 
 export function rankMemoryEntries(entries: MemoryEntry[], query: string, queryPaths: string[], now: Date): RankedMemoryEntry[] {
@@ -264,7 +330,8 @@ export function sanitizeMemoryLineage(lineage: MemoryLineage): MemoryLineage {
 }
 
 export function memoryEntryEquals(left: MemoryEntry, right: MemoryEntryInput): boolean {
-  return normalizeForDedup(left.title) === normalizeForDedup(right.title)
+  return (right.origin === undefined || memoryOriginsEqual(left.origin, right.origin))
+    && normalizeForDedup(left.title) === normalizeForDedup(right.title)
     && normalizeForDedup(left.summary) === normalizeForDedup(right.summary);
 }
 
@@ -344,8 +411,45 @@ function isMemoryKind(value: string): value is MemoryEntryInput["kind"] {
 
 function isLineageSource(value: string): value is MemoryLineage["source"] {
   return value === "explicit"
+    || value === "explicit_edit"
     || value === "completed_task"
     || value === "candidate"
     || value === "migration"
     || value === "consolidation";
+}
+
+export function scopeFromOrigin(origin: MemoryOrigin): "global" | "project" {
+  return origin.kind === "user" ? "global" : "project";
+}
+
+export function memoryOriginsEqual(left: MemoryOrigin, right: MemoryOrigin): boolean {
+  return left.kind === right.kind && (left.kind === "user" || (right.kind === "workspace" && left.workspaceId === right.workspaceId));
+}
+
+function validateMemoryOrigin(origin: MemoryOrigin): void {
+  if (origin.kind === "user") return;
+  if (origin.kind !== "workspace" || !/^[a-f0-9]{24}$/u.test(origin.workspaceId) || !origin.workspaceName.trim()) {
+    throw new Error("Invalid workspace memory origin.");
+  }
+}
+
+function sanitizeMemoryOrigin(origin: MemoryOrigin): MemoryOrigin {
+  validateMemoryOrigin(origin);
+  if (origin.kind === "user") return { kind: "user" };
+  return {
+    kind: "workspace",
+    workspaceId: origin.workspaceId,
+    workspaceName: redactSecrets(origin.workspaceName).replace(/\s+/g, " ").trim().slice(0, 120)
+  };
+}
+
+function parseFrontmatter(content: string): unknown | undefined {
+  if (!content.startsWith("---\n")) return undefined;
+  const closing = content.indexOf("\n---", 4);
+  if (closing < 0) return undefined;
+  try {
+    return parseYaml(content.slice(4, closing));
+  } catch {
+    return undefined;
+  }
 }

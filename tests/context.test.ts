@@ -11,7 +11,7 @@ import { WorkspaceContext } from "../src/agent/context/WorkspaceContext.js";
 import { cloneAgentMessages, messageReasoning, messageText } from "../src/agent/modelMessages.js";
 import { selectPlanTools } from "../src/agent/planMode.js";
 import { buildSystemPrompt, refreshRuntimeSystemPrompt, stableSystemPromptForCache, withActiveRunCompactionSummary } from "../src/agent/prompts.js";
-import { BINY_AGENT_DIR_ENV, projectMemoryDir, projectSessionsDir } from "../src/config/paths.js";
+import { BINY_AGENT_DIR_ENV, globalAgentDir, projectSessionsDir } from "../src/config/paths.js";
 import type { AgentConfig } from "../src/config/schema.js";
 import { defaultConfig } from "../src/config/schema.js";
 import { PermissionManager } from "../src/permission/PermissionManager.js";
@@ -1465,7 +1465,7 @@ async function testMemoryRedactionDedupAndWriter(): Promise<void> {
     });
     assert.equal(duplicate.written, false);
 
-    const debugFile = path.join(projectMemoryDir(await fs.realpath(workspaceRoot)), "entries", "debugging.md");
+    const debugFile = path.join(globalAgentDir(), "memory", "entries", "debugging.md");
     const stored = await fs.readFile(debugFile, "utf8");
     assert.equal(stored.includes("sk-supersecretvalue123"), false);
     assert.match(stored, /\[redacted\]/);
@@ -1540,6 +1540,7 @@ async function testMemoryQueueLifecycleAndUsagePersistence(): Promise<void> {
     assert.ok(Date.now() - shutdownStartedAt < 800);
 
     const config = testConfig();
+    config.context.memory.enabled = true;
     config.context.memory.useMemories = true;
     config.context.memory.generateMemories = true;
     const provider = new ContextTestModel();
@@ -1558,8 +1559,8 @@ async function testMemoryQueueLifecycleAndUsagePersistence(): Promise<void> {
     const overview = await agent.getLocalMemory().getOverview();
     await agent.close();
     const replay = await replaySession(recorder.filePath);
-    assert.equal(overview.scopes.project.candidateCount, 1);
-    assert.equal(replay.usage.some((usage) => usage.operation === "memory"), false);
+    assert.equal(overview.candidateCount, 1);
+    assert.equal(replay.usage.some((usage) => usage.operation === "memory"), true, "query rewrite usage is attributed to memory");
 
     const shortAgent = new AgentSession({
       workspaceRoot,
@@ -1573,7 +1574,7 @@ async function testMemoryQueueLifecycleAndUsagePersistence(): Promise<void> {
     await shortAgent.runTask("hi");
     const afterShortTurn = await shortAgent.getLocalMemory().getOverview();
     await shortAgent.close();
-    assert.equal(afterShortTurn.scopes.project.candidateCount, 1);
+    assert.equal(afterShortTurn.candidateCount, 1);
   });
 }
 
@@ -1624,7 +1625,9 @@ async function testMemoryEntryManagementAndCjkSearch(): Promise<void> {
 
 async function testMemoryStorageBoundaries(): Promise<void> {
   await withTempWorkspace(async (workspaceRoot) => {
-    await ensureAgentDirs(workspaceRoot);
+    const isolatedAgentRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-boundary-agent-"));
+    const previousAgentRoot = process.env[BINY_AGENT_DIR_ENV];
+    process.env[BINY_AGENT_DIR_ENV] = isolatedAgentRoot;
     const outsideRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-outside-"));
     const store = new LocalMemory(workspaceRoot, () => new ContextTestModel().model);
     const entry = {
@@ -1639,7 +1642,7 @@ async function testMemoryStorageBoundaries(): Promise<void> {
       const victim = path.join(outsideRoot, "victim.md");
       const victimContent = "outside-memory-must-stay-unchanged";
       await fs.writeFile(victim, victimContent, "utf8");
-      const memoryDir = projectMemoryDir(await fs.realpath(workspaceRoot));
+      const memoryDir = path.join(globalAgentDir(), "memory");
       await fs.mkdir(path.dirname(memoryDir), { recursive: true });
 
       await fs.symlink(outsideRoot, memoryDir);
@@ -1662,6 +1665,9 @@ async function testMemoryStorageBoundaries(): Promise<void> {
       await assert.rejects(store.write(entry), /single regular file/);
       assert.equal(await fs.readFile(victim, "utf8"), victimContent);
     } finally {
+      if (previousAgentRoot === undefined) delete process.env[BINY_AGENT_DIR_ENV];
+      else process.env[BINY_AGENT_DIR_ENV] = previousAgentRoot;
+      await rm(isolatedAgentRoot, { recursive: true, force: true });
       await rm(outsideRoot, { recursive: true, force: true });
     }
   });

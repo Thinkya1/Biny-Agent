@@ -27,6 +27,7 @@ async function main(): Promise<void> {
   await testApiAdapterDispatch();
   await testProviderRuntimeCatalog();
   await testProviderRuntimeMetadata();
+  await testNoOffThinkingUsesDefaultEffort();
   await testModelSwitchRecalculatesBudget();
   await testModelSwitchDoesNotPersistInferredMetadata();
   await testPersistedProviderCatalog();
@@ -581,6 +582,87 @@ async function testModelSwitchRecalculatesBudget(): Promise<void> {
   assert.equal(reloadedManager.getInfo().thinking, "off");
 }
 
+async function testNoOffThinkingUsesDefaultEffort(): Promise<void> {
+  let requestBody: Record<string, unknown> | undefined;
+  const config = configSchema.parse({
+    ...defaultConfig,
+    defaultModel: "always-reasoning",
+    providers: { openai: { type: "openai", baseUrl: "https://example.test/v1", apiKey: "test-key" } },
+    models: {
+      "always-reasoning": {
+        provider: "openai",
+        model: "always-reasoning",
+        capabilities: { tools: true, reasoning: true, streaming: true },
+        thinkingLevelMap: { low: "low", high: "provider-high", max: "max" }
+      }
+    },
+    thinking: { enabled: false, effort: "max" }
+  });
+  const configStore: AgentConfigStore = {
+    load: async () => structuredClone(config),
+    save: async () => undefined
+  };
+  const manager = new ModelManager("/tmp/biny-no-off-thinking-test", config, configStore);
+  assert.equal(manager.getInfo().thinking, "high");
+  assert.equal(manager.getModelSettings().reasoning, "high");
+  assert.ok((manager.getContextBudget().reasoningReserveTokens ?? 0) > 0);
+
+  const fetcher = async (_input: URL | RequestInfo, init?: RequestInit): Promise<Response> => {
+    requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    return new Response([
+      'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+      "data: [DONE]"
+    ].join("\n\n") + "\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  const providers = new ProviderRegistry(config, [], new AiRegistry(), undefined, fetcher);
+  const settings = providers.createModelSettings();
+  assert.equal(settings.reasoning, "high");
+  assert.deepEqual(settings.providerOptions, { openai: { reasoningEffort: "provider-high" } });
+  for await (const _event of await settings.model.streamSimple?.({
+    messages: [{ role: "user", content: "think" }],
+    tools: []
+  }, {
+    reasoning: settings.reasoning,
+    providerOptions: settings.providerOptions
+  }) ?? []) {
+    // Drain the first-prompt path so the final provider payload is captured.
+  }
+  assert.equal(requestBody?.reasoning_effort, "provider-high");
+
+  await assert.rejects(
+    providers.require("openai").streamSimple(config, config.models["always-reasoning"]!, {
+      messages: [{ role: "user", content: "disable" }],
+      tools: []
+    }, { reasoning: "off" }),
+    /does not support disabling thinking/u
+  );
+
+  const disabledConfig = configSchema.parse({
+    ...config,
+    providers: {
+      openai: { ...config.providers.openai, compatibility: { supportsReasoning: false } }
+    }
+  });
+  const disabledManager = new ModelManager("/tmp/biny-disabled-reasoning-test", disabledConfig, {
+    load: async () => structuredClone(disabledConfig),
+    save: async () => undefined
+  });
+  assert.equal(disabledManager.getInfo().thinking, "off");
+  assert.equal(disabledManager.getModelSettings().reasoning, "off");
+  assert.equal(disabledManager.getContextBudget().reasoningReserveTokens, 0);
+  assert.deepEqual(new ModelRuntime(disabledConfig).listModels().find((choice) => choice.alias === "always-reasoning")?.efforts, []);
+  const disabledProviders = new ProviderRegistry(disabledConfig, [], new AiRegistry(), undefined, fetcher);
+  assert.equal(disabledProviders.createModelSettings().providerOptions, undefined);
+  await assert.rejects(
+    disabledProviders.require("openai").streamSimple(disabledConfig, disabledConfig.models["always-reasoning"]!, {
+      messages: [{ role: "user", content: "think" }],
+      tools: []
+    }, { reasoning: "high" }),
+    /does not support high thinking effort/u
+  );
+}
+
 async function testModelSwitchDoesNotPersistInferredMetadata(): Promise<void> {
   const config = configSchema.parse({
     ...defaultConfig,
@@ -605,7 +687,7 @@ async function testModelSwitchDoesNotPersistInferredMetadata(): Promise<void> {
   const manager = new ModelManager("/tmp/biny-model-switch-metadata-test", config, configStore);
 
   assert.equal(manager.getContextBudget().contextWindow, 1_000_000);
-  await manager.switchModel("pro", "off");
+  await manager.switchModel("pro", "high");
   assert.equal(stored.models.pro?.contextWindow, undefined);
   assert.equal(manager.getContextBudget().contextWindow, 1_000_000);
 }
@@ -624,7 +706,8 @@ async function testPersistedProviderCatalog(): Promise<void> {
     maxInputTokens: 60_000,
     limits: { toolSchemaReserveTokens: 2_048, protocolSafetyMarginTokens: 1_024 },
     capabilities: { tools: true, parallelToolCalls: true, reasoning: true, reasoningStream: true, reasoningSummary: true, streaming: true },
-    reasoningEfforts: [],
+    reasoningEfforts: ["high" as const],
+    reasoningEffortsSource: "inferred" as const,
     headers: { Authorization: "Bearer secret", "x-model-feature": "safe" }
   };
   try {
@@ -638,6 +721,7 @@ async function testPersistedProviderCatalog(): Promise<void> {
     assert.equal(restored?.models[0]?.maxInputTokens, 60_000);
     assert.equal(restored?.models[0]?.limits?.toolSchemaReserveTokens, 2_048);
     assert.equal(restored?.models[0]?.capabilities.reasoningSummary, true);
+    assert.equal(restored?.models[0]?.reasoningEffortsSource, "inferred");
     assert.equal((await secondStore.read("other"))?.models[0]?.id, "other-model");
     if (process.platform !== "win32") assert.equal((await stat(filePath)).mode & 0o777, 0o600);
 
@@ -676,6 +760,9 @@ async function testPersistedProviderCatalog(): Promise<void> {
     } finally {
       globalThis.fetch = originalFetch;
     }
+
+    await writeFile(filePath, JSON.stringify({ version: 1, providers: { catalog: { models: [model] } } }));
+    assert.equal(await new FileModelsStore(filePath).read("catalog"), undefined);
 
     await writeFile(filePath, "{broken", "utf8");
     await firstStore.write("recovered", { models: [{ ...model, id: "recovered-model", provider: "recovered" }] });

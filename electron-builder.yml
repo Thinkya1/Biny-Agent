@@ -1,6 +1,12 @@
 appId: com.biny.desktop
 productName: Biny
 asar: true
+asarUnpack:
+  - node_modules/onnxruntime-node/**/*
+  - node_modules/onnxruntime-web/**/*.wasm
+  - node_modules/@huggingface/transformers/**/*.wasm
+  - node_modules/sharp/**/*
+  - node_modules/@img/**/*
 directories:
   output: release
   buildResources: build

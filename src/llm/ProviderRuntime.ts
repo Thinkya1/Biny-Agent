@@ -5,17 +5,24 @@
  * API 协议的 HTTP/SSE 实现由 ApiAdapterRegistry 负责，两层不互相冒充。
  */
 import type { AgentModel, ModelStreamContext, ModelStreamEvent, ModelStreamOptions } from "../agent/core/types.js";
-import { modelCapabilities, modelReasoningConfig, modelThinkingLevelMap, nativeReasoningEffort, normalizeModelMetadata, reasoningBudgetTokens, thinkingLevelMapForModel } from "../ai/capabilities.js";
+import { effectiveThinkingSelection, modelCapabilities, modelReasoningConfig, modelThinkingLevelMap, nativeReasoningEffort, normalizeModelMetadata, reasoningBudgetTokens } from "../ai/capabilities.js";
 import { fetchModelCatalogSnapshot } from "../ai/modelCatalog.js";
-import { lookupModelMetadata, thinkingLevelMapForProviderModel, type ModelMetadata } from "../ai/modelMetadata.js";
+import { accessPathThinkingLevelMap, lookupModelMetadata, thinkingLevelMapForEfforts, type ModelMetadata } from "../ai/modelMetadata.js";
 import { providerDefinition, providerProtocol } from "../ai/provider.js";
 import type { ModelCatalogEntry, ProviderDefinition } from "../ai/types.js";
-import type { AgentConfig, ModelAliasConfig, ModelApiBackend, ModelCompatibility, ProviderConfig } from "../config/schema.js";
+import type { AgentConfig, ModelAliasConfig, ModelApiBackend, ModelCompatibility, ProviderConfig, ThinkingLevelMap } from "../config/schema.js";
 import { createNativeModel } from "./nativeModel.js";
 import { openAiCodexHeaders, refreshSubscriptionOAuthTokens } from "./subscriptionAuth.js";
 import { AiRegistry } from "./AiRegistry.js";
 import type { ModelsStore } from "./ModelsStore.js";
 import { createProxyAwareFetch } from "../network/proxyFetch.js";
+import {
+  listProviderEmbeddingModels,
+  ProviderEmbeddingRuntime,
+  type EmbeddingModelDescriptor,
+  type EmbeddingModelRef,
+  type EmbeddingModelRuntime
+} from "./embedding/index.js";
 
 const oauthRefreshWindowMs = 5 * 60 * 1_000;
 
@@ -46,6 +53,8 @@ export interface ProviderRuntime {
     options?: ModelStreamOptions
   ): Promise<AsyncIterable<ModelStreamEvent>>;
   refreshCredential(signal?: AbortSignal): Promise<ProviderConfig | undefined>;
+  listEmbeddingModels(): EmbeddingModelDescriptor[];
+  createEmbeddingRuntime(modelId: string): EmbeddingModelRuntime;
 }
 
 export class ConfiguredProviderRuntime implements ProviderRuntime {
@@ -77,6 +86,14 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       // 一个扩展过滤器异常不能让整个模型菜单消失，退回完整目录。
       return models.map((model) => ({ ...model }));
     }
+  }
+
+  listEmbeddingModels(): EmbeddingModelDescriptor[] {
+    return listProviderEmbeddingModels(this.id, this.config, this.definition);
+  }
+
+  createEmbeddingRuntime(modelId: string): EmbeddingModelRuntime {
+    return new ProviderEmbeddingRuntime(this.id, this.config, this.definition, modelId, { fetcher: this.fetcher });
   }
 
   restoreModels(models: readonly ModelCatalogEntry[]): void {
@@ -127,14 +144,15 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
 
   resolveModel(model: ModelAliasConfig): ModelAliasConfig {
     const catalog = this.mergedCatalog().find((entry) => entry.id === model.model);
-    const catalogModel = catalog ? catalogEntryToModel(catalog, this.config.type) : undefined;
     const generated = lookupModelMetadata(this.config.type, model.model);
+    const catalogModel = catalog ? catalogEntryToModel(catalog, generated !== undefined) : undefined;
     const generatedModel = generated ? metadataToModel(this.id, this.config.type, model.model, generated) : undefined;
     const catalogBase = catalogModel && generatedModel
       ? mergeModelMetadata(generatedModel, catalogModel)
       : catalogModel ?? generatedModel;
+    const merged = catalogBase ? mergeModelMetadata(catalogBase, model) : model;
     return normalizeModelMetadata(
-      catalogBase ? mergeModelMetadata(catalogBase, model) : model,
+      { ...merged, compatibility: mergeCompatibility(this.config.compatibility, merged.compatibility) },
       this.definition.modelDefaults
     );
   }
@@ -176,15 +194,11 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       ?? (api === "anthropic_messages"
         ? "anthropic"
         : api === "responses" || this.config.type === "openai-compatible" ? "openai" : undefined);
+    const compatibility = normalizedModel.compatibility;
     const capabilities = modelCapabilities(normalizedModel);
-    const compatibility = mergeCompatibility(this.config.compatibility, normalizedModel.compatibility);
-    const reasoning = modelReasoningConfig(normalizedModel);
-    const enabled = agentConfig.thinking.enabled
-      && capabilities.reasoning
-      && compatibility?.supportsReasoning !== false
-      && reasoning !== undefined
-      && reasoning.efforts.includes(agentConfig.thinking.effort);
-    const effort = enabled ? agentConfig.thinking.effort : undefined;
+    const selection = effectiveThinkingSelection(normalizedModel, agentConfig.thinking);
+    const enabled = selection !== "off";
+    const effort = enabled ? selection : undefined;
     const retry = this.config.retry ?? { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
     const providerOptions = createProviderOptions(reasoningProtocol, this.config, normalizedModel, api, enabled, effort);
 
@@ -217,7 +231,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
     return {
       model: executable,
       providerOptions,
-      reasoning: enabled ? agentConfig.thinking.effort : "off",
+      reasoning: selection,
       timeoutMs: this.config.timeoutMs,
       maxOutputTokens: normalizedModel.maxOutputTokens,
       contextWindow: normalizedModel.contextWindow
@@ -281,7 +295,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
   }
 
   private normalizeCatalogEntry(entry: ModelCatalogEntry): ModelCatalogEntry {
-    const model = catalogEntryToModel(entry, this.config.type);
+    const model = catalogEntryToModel(entry);
     const normalized = normalizeModelMetadata(model, this.definition.modelDefaults);
     const reasoning = modelReasoningConfig(normalized);
     return {
@@ -295,6 +309,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       limits: normalized.limits,
       capabilities: modelCapabilities(normalized),
       reasoningEfforts: reasoning?.efforts ?? [],
+      reasoningEffortsSource: entry.reasoningEffortsSource,
       thinkingLevelMap: modelThinkingLevelMap(normalized),
       apiBackend: normalized.apiBackend,
       baseUrl: normalized.baseUrl,
@@ -352,6 +367,14 @@ export class ProviderRegistry {
   createModelSettings(alias = this.config.defaultModel): NativeModelSettings {
     const { provider, model } = this.forModel(alias);
     return provider.createModelSettings(this.config, model);
+  }
+
+  listEmbeddingModels(): EmbeddingModelDescriptor[] {
+    return [...this.providers.values()].flatMap((provider) => provider.listEmbeddingModels());
+  }
+
+  createEmbeddingRuntime(ref: Extract<EmbeddingModelRef, { kind: "provider" }>): EmbeddingModelRuntime {
+    return this.require(ref.provider).createEmbeddingRuntime(ref.model);
   }
 
   validate(alias = this.config.defaultModel): void {
@@ -459,12 +482,11 @@ function resolveSimpleThinking(
   return { enabled: true, effort: requested };
 }
 
-function catalogEntryToModel(entry: ModelCatalogEntry, providerType?: string): ModelAliasConfig {
-  const thinkingLevelMap = entry.reasoningEfforts.length
-    ? providerType === undefined
-      ? entry.thinkingLevelMap ?? thinkingLevelMapForModel(entry.id, true, entry.reasoningEfforts)
-      : thinkingLevelMapForProviderModel(providerType, entry.id, entry.reasoningEfforts)
-    : entry.thinkingLevelMap;
+function catalogEntryToModel(entry: ModelCatalogEntry, preferGeneratedReasoning = false): ModelAliasConfig {
+  const thinkingLevelMap = preferGeneratedReasoning && entry.reasoningEffortsSource === "inferred"
+    ? undefined
+    : entry.thinkingLevelMap
+      ?? (entry.reasoningEfforts.length ? thinkingLevelMapForEfforts(entry.reasoningEfforts) : undefined);
   return {
     provider: entry.provider,
     model: entry.id,
@@ -485,9 +507,10 @@ function catalogEntryToModel(entry: ModelCatalogEntry, providerType?: string): M
 }
 
 function metadataToModel(provider: string, providerType: string, modelId: string, metadata: ModelMetadata): ModelAliasConfig {
-  const thinkingLevelMap = metadata.reasoningEfforts.length
-    ? thinkingLevelMapForProviderModel(providerType, modelId, metadata.reasoningEfforts)
-    : undefined;
+  const thinkingLevelMap = accessPathThinkingLevelMap(providerType, modelId)
+    ?? (metadata.thinkingLevelMap
+    ? { ...metadata.thinkingLevelMap }
+    : metadata.reasoningEfforts.length ? thinkingLevelMapForEfforts(metadata.reasoningEfforts) : undefined);
   return {
     provider,
     model: modelId,
@@ -515,6 +538,7 @@ function liveCatalogMetadata(entry: ModelCatalogEntry, provider: string): ModelC
     limits: entry.limits ? { ...entry.limits } : undefined,
     capabilities: { ...entry.capabilities },
     reasoningEfforts: [...entry.reasoningEfforts],
+    reasoningEffortsSource: entry.reasoningEffortsSource,
     thinkingLevelMap: entry.thinkingLevelMap ? { ...entry.thinkingLevelMap } : undefined,
     apiBackend: undefined,
     baseUrl: undefined,
@@ -525,6 +549,7 @@ function liveCatalogMetadata(entry: ModelCatalogEntry, provider: string): ModelC
 }
 
 function mergeCatalogMetadata(base: ModelCatalogEntry, overlay: ModelCatalogEntry): ModelCatalogEntry {
+  const useBaseReasoning = base.reasoningEffortsSource !== undefined || base.reasoningEfforts.length > 0;
   return {
     ...overlay,
     ...base,
@@ -535,7 +560,8 @@ function mergeCatalogMetadata(base: ModelCatalogEntry, overlay: ModelCatalogEntr
     maxOutputTokens: base.maxOutputTokens ?? overlay.maxOutputTokens,
     limits: mergeCatalogLimits(base.limits, overlay.limits),
     capabilities: mergeCatalogCapabilities(base.capabilities, overlay.capabilities),
-    reasoningEfforts: base.reasoningEfforts.length ? base.reasoningEfforts : overlay.reasoningEfforts,
+    reasoningEfforts: useBaseReasoning ? base.reasoningEfforts : overlay.reasoningEfforts,
+    reasoningEffortsSource: useBaseReasoning ? base.reasoningEffortsSource : overlay.reasoningEffortsSource,
     thinkingLevelMap: base.thinkingLevelMap ?? overlay.thinkingLevelMap,
     apiBackend: base.apiBackend ?? overlay.apiBackend,
     baseUrl: base.baseUrl ?? overlay.baseUrl,
@@ -546,6 +572,8 @@ function mergeCatalogMetadata(base: ModelCatalogEntry, overlay: ModelCatalogEntr
 }
 
 function mergeModelMetadata(base: ModelAliasConfig, override: ModelAliasConfig): ModelAliasConfig {
+  const thinkingLevelMap = override.thinkingLevelMap
+    ?? (override.reasoning ? reasoningConfigThinkingLevelMap(override.reasoning, base.thinkingLevelMap) : base.thinkingLevelMap);
   return {
     ...base,
     ...override,
@@ -557,13 +585,23 @@ function mergeModelMetadata(base: ModelAliasConfig, override: ModelAliasConfig):
     maxInputTokens: override.maxInputTokens ?? base.maxInputTokens,
     maxOutputTokens: override.maxOutputTokens ?? base.maxOutputTokens,
     limits: mergeUserLimits(base.limits, override.limits),
-    thinkingLevelMap: override.thinkingLevelMap ?? base.thinkingLevelMap,
+    thinkingLevelMap,
     reasoning: override.reasoning ?? base.reasoning,
     apiBackend: override.apiBackend ?? base.apiBackend,
     baseUrl: override.baseUrl ?? base.baseUrl,
     headers: mergeHeaders(override.headers, base.headers),
     compatibility: mergeCompatibility(base.compatibility, override.compatibility),
     pricing: override.pricing ?? base.pricing
+  };
+}
+
+function reasoningConfigThinkingLevelMap(
+  reasoning: NonNullable<ModelAliasConfig["reasoning"]>,
+  base: ThinkingLevelMap | undefined
+): ThinkingLevelMap {
+  return {
+    ...(base?.off !== undefined ? { off: base.off } : {}),
+    ...Object.fromEntries(reasoning.efforts.map((effort) => [effort, reasoning.mapping?.[effort] ?? effort]))
   };
 }
 

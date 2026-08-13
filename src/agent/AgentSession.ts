@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { configSchema, type AgentConfig } from "../config/schema.js";
 import { createFileConfigStore, type AgentConfigStore } from "../config/store.js";
+import { globalAgentDir } from "../config/paths.js";
 import {
   listModelChoices,
   modelRuntimeInfo,
@@ -73,6 +74,10 @@ import { modelCapabilities } from "../ai/capabilities.js";
 import { createNativeModelForConfig } from "../llm/nativeFactory.js";
 import type { NativeModelSettings } from "../llm/nativeFactory.js";
 import { isModelContextOverflowError } from "../llm/nativeModel.js";
+import { generateNativeText } from "../llm/nativeJson.js";
+import { ProviderRegistry } from "../llm/ProviderRuntime.js";
+import { LocalEmbeddingManager } from "../llm/embedding/LocalEmbeddingRuntime.js";
+import type { EmbeddingModelDescriptor, EmbeddingModelRuntime, LocalEmbeddingModelId } from "../llm/embedding/types.js";
 import { readAttachment, type AgentAttachment } from "../attachments/store.js";
 import type { AttachmentReference } from "../attachments/store.js";
 import { TodoStore } from "../session/todoStore.js";
@@ -92,6 +97,16 @@ import {
   type GlobalPersonalizationUpdate,
   type ResolvedChatPersonalization
 } from "../personalization/index.js";
+import { MemoryVectorIndex } from "./context/MemoryVectorIndex.js";
+import {
+  HybridMemoryRetriever,
+  memoryEntryContentHash
+} from "./context/HybridMemoryRetriever.js";
+import {
+  MemoryEmbeddingService,
+  type MemoryEmbeddingRuntimeStatus
+} from "./context/MemoryEmbeddingService.js";
+import type { MemoryEntry, MemorySearchOptions, MemorySearchResult } from "./context/memoryTypes.js";
 
 export interface AgentSessionOptions {
   workspaceRoot: string;
@@ -210,6 +225,7 @@ interface ActiveRunMessageQueues {
 }
 
 const maxQueuedRunMessages = 100;
+const memoryMutationCommands = new Set(["add", "forget", "delete", "compact", "consolidate"]);
 
 /**
  * Stateful core agent for one workspace. Hosts use this public surface instead
@@ -218,6 +234,9 @@ const maxQueuedRunMessages = 100;
 export class AgentSession {
   private readonly contextMemory: ContextMemory;
   private readonly localMemory: LocalMemory;
+  private readonly memoryRetriever: HybridMemoryRetriever;
+  private readonly localEmbeddingManager: LocalEmbeddingManager;
+  private readonly memoryEmbeddingService: MemoryEmbeddingService;
   private usageRecords: SessionUsage[] = [];
   private modelRequestRecords: ModelRequestMetrics[] = [];
   private unpersistedRelatedUsage: SessionUsage[] = [];
@@ -261,8 +280,9 @@ export class AgentSession {
     // 抽取与整理可使用不同模型。getter 读取 root-turn 快照，因此外部配置变更不会让运行中的
     // turn 漂移；下一根回合才会切换。按 alias 缓存 adapter，避免每个候选重复创建。
     const memoryModels = new Map<string, AgentModel>();
-    const memoryModel = (field: "extractModel" | "consolidationModel"): AgentModel => {
-      const alias = this.activeConfig.context.memory[field];
+    const memoryModel = (field: "memoryModel" | "rewriteModel" | "extractModel" | "consolidationModel"): AgentModel => {
+      const alias = this.activeConfig.context.memory[field]
+        ?? (field === "memoryModel" ? undefined : this.activeConfig.context.memory.memoryModel);
       if (!alias) return getModel();
       const cached = memoryModels.get(alias);
       if (cached) return cached;
@@ -280,6 +300,49 @@ export class AgentSession {
       () => this.sideModelRequestContext(),
       () => memoryModel("consolidationModel")
     );
+    this.localEmbeddingManager = new LocalEmbeddingManager(path.join(globalAgentDir(), "models", "embeddings"));
+    this.memoryEmbeddingService = new MemoryEmbeddingService({
+      localMemory: this.localMemory,
+      localManager: this.localEmbeddingManager,
+      getVectorIndex: () => new MemoryVectorIndex(path.join(globalAgentDir(), "memory")),
+      getActiveModel: () => this.activeConfig.context.memory.embeddingModel,
+      getProviderModels: () => this.providerEmbeddingModels(),
+      getRuntime: async () => await this.activeMemoryEmbeddingRuntime()
+    });
+    this.memoryRetriever = new HybridMemoryRetriever({
+      localMemory: this.localMemory,
+      workspaceRoot: options.workspaceRoot,
+      getEmbeddingRuntime: async () => await this.memoryEmbeddingService.embeddingRuntime(),
+      getVectorIndex: () => this.memoryEmbeddingService.vectorIndex(),
+      getThresholds: (fingerprint, recommended) => (
+        this.activeConfig.context.memory.similarityThresholds[fingerprint] ?? recommended
+      ),
+      queryRewriteEnabled: () => this.activePersonalization.queryRewrite,
+      rewriteQuery: async (query, signal) => {
+        const result = await generateNativeText(memoryModel("rewriteModel"), [{
+          role: "user",
+          content: [{
+            type: "text",
+            text: [
+              "Rewrite the user's question as one concise semantic memory search query.",
+              "Preserve concrete identifiers, paths and technical terms. Return only the query.",
+              "",
+              query
+            ].join("\n")
+          }]
+        }], {
+          signal,
+          timeoutMs: 3_000,
+          maxOutputTokens: 128,
+          reasoning: "off",
+          onRequestMetrics: onModelRequest,
+          requestContext: { ...(this.sideModelRequestContext() ?? {}), operation: "memory" }
+        });
+        if (result.usage) await onUsage(result.usage, "memory");
+        return result.text;
+      },
+      closeVectorIndex: false
+    });
     this.contextMemory = new ContextMemory(
       getModel,
       workspace,
@@ -295,7 +358,8 @@ export class AgentSession {
       },
       options.config.context.compaction,
       onModelRequest,
-      () => this.sideModelRequestContext()
+      () => this.sideModelRequestContext(),
+      this.memoryRetriever
     );
     this.contextMemory.setPersonalization(
       metadataForPersonalization(this.activePersonalization),
@@ -456,6 +520,56 @@ export class AgentSession {
     return this.localMemory;
   }
 
+  /** 手动浏览使用同一套混合检索，但不应用自动注入的跨项目硬门禁。 */
+  async searchMemory(query: string, paths: string[], options: MemorySearchOptions = {}): Promise<MemorySearchResult> {
+    return await this.memoryRetriever.retrieve(query, paths, {
+      limit: options.limit ?? this.localMemory.recallLimit,
+      maxChars: options.maxChars,
+      signal: options.signal,
+      origins: options.origins,
+      automatic: false
+    });
+  }
+
+  async memoryEmbeddingStatus(): Promise<MemoryEmbeddingRuntimeStatus> {
+    await this.refreshMemoryConfig();
+    return await this.memoryEmbeddingService.status();
+  }
+
+  async downloadMemoryEmbeddingModel(model: LocalEmbeddingModelId, signal?: AbortSignal): Promise<void> {
+    await this.refreshMemoryConfig();
+    await this.memoryEmbeddingService.download(model, signal);
+  }
+
+  cancelMemoryEmbeddingDownload(model: LocalEmbeddingModelId): boolean {
+    return this.memoryEmbeddingService.cancelDownload(model);
+  }
+
+  async removeMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<{ filesDeleted: number; bytesFreed: number }> {
+    await this.refreshMemoryConfig();
+    return await this.memoryEmbeddingService.removeLocalModel(model);
+  }
+
+  async rebuildMemoryEmbeddingIndex(signal?: AbortSignal): Promise<void> {
+    await this.refreshMemoryConfig();
+    await this.memoryEmbeddingService.rebuild(signal);
+  }
+
+  cancelMemoryEmbeddingRebuild(): boolean {
+    return this.memoryEmbeddingService.cancelRebuild();
+  }
+
+  async indexMemoryEntry(entry: MemoryEntry): Promise<void> {
+    // Markdown 已在调用前提交。配置瞬时读取失败也只能让该条目留待重建，不能把成功写入
+    // 对外伪装成失败并诱发重复提交；旧快照若仍可用，Service 会安全尝试同指纹增量写。
+    await this.refreshMemoryConfig().catch(() => undefined);
+    await this.memoryEmbeddingService.indexEntry(entry);
+  }
+
+  removeMemoryEmbeddingEntries(entryIds: readonly string[]): void {
+    this.memoryEmbeddingService.removeEntries(entryIds);
+  }
+
   /** 三端共享的读模型；正文只在 global/chat 配置中，resolved 元数据可安全投影到 session。 */
   async getPersonalizationState(): Promise<AgentPersonalizationState> {
     return (await this.readPersonalizationState()).state;
@@ -540,7 +654,16 @@ export class AgentSession {
   }
 
   async runMemoryCommand(args: string[]): Promise<string> {
-    return await runMemoryCommand(this.localMemory, args);
+    const action = args[0]?.toLowerCase() ?? "list";
+    const searchMemory = this.searchMemory.bind(this);
+    if (!memoryMutationCommands.has(action)) return await runMemoryCommand(this.localMemory, args, searchMemory);
+    const before = await this.localMemory.listMemoryEntries({ origins: ["all"] }).catch(() => undefined);
+    try {
+      return await runMemoryCommand(this.localMemory, args, searchMemory);
+    } finally {
+      // /memory 是 TUI/CLI 的同库写入口。索引同步失败不能遮蔽命令本身的存储结果。
+      if (before) await this.reconcileMemoryEmbeddingChanges(before.entries).catch(() => undefined);
+    }
   }
 
   /** Desktop/TUI 的公开交互入口，只接受 chat / plan 策略。 */
@@ -1470,7 +1593,7 @@ export class AgentSession {
     const turnId = runOptions.turnId;
     const runId = runOptions.runId;
     if (!turnId || !runId) return;
-    const externalContext = this.usedExternalContext(messages);
+    const externalContext = Boolean(runOptions.attachments?.length) || this.usedExternalContext(messages);
     const summary = completedMemoryCandidateSummary(task, answer);
     if (!summary) return;
     const input = {
@@ -1488,7 +1611,7 @@ export class AgentSession {
       const overview = await this.localMemory.getOverview();
       try {
         await this.localMemory.enqueueCandidate(input, {
-          expectedRevision: overview.scopes.project.revision,
+          expectedRevision: overview.storeRevision,
           excludeExternalContext: personalization.excludeExternalContext
         });
         return;
@@ -1843,6 +1966,9 @@ export class AgentSession {
 
   async close(): Promise<void> {
     await this.contextMemory.shutdownMemory();
+    this.memoryRetriever.close();
+    this.memoryEmbeddingService.close();
+    await this.localEmbeddingManager.close();
     const relatedUsage = this.takeRelatedUsage();
     if (relatedUsage) {
       this.recorder.record({
@@ -1969,6 +2095,52 @@ export class AgentSession {
         configRevision: snapshot.revision
       }
     };
+  }
+
+  private async refreshMemoryConfig(): Promise<void> {
+    const snapshot = await this.readPersonalizationState();
+    this.activeConfig = snapshot.config;
+    this.activePersonalization = snapshot.state.resolved;
+  }
+
+  private async reconcileMemoryEmbeddingChanges(before: readonly MemoryEntry[]): Promise<void> {
+    const after = (await this.localMemory.listMemoryEntries({ origins: ["all"] })).entries;
+    const previous = new Map(before.map((entry) => [entry.id, memoryEntryContentHash(entry)]));
+    const currentIds = new Set(after.map(({ id }) => id));
+    this.memoryEmbeddingService.removeEntries(before.filter(({ id }) => !currentIds.has(id)).map(({ id }) => id));
+    await this.refreshMemoryConfig().catch(() => undefined);
+    for (const entry of after) {
+      if (previous.get(entry.id) !== memoryEntryContentHash(entry)) {
+        await this.memoryEmbeddingService.indexEntry(entry);
+      }
+    }
+  }
+
+  private providerEmbeddingModels(): EmbeddingModelDescriptor[] {
+    return new ProviderRegistry(this.activeConfig).listEmbeddingModels();
+  }
+
+  private async activeMemoryEmbeddingRuntime(): Promise<EmbeddingModelRuntime | undefined> {
+    const ref = this.activeConfig.context.memory.embeddingModel;
+    if (!ref) return undefined;
+    if (ref.kind === "local") return await this.localEmbeddingManager.createRuntime(ref.model);
+    const providers = new ProviderRegistry(this.activeConfig);
+    const descriptor = providers.listEmbeddingModels().find((candidate) => (
+      candidate.ref.kind === "provider"
+      && candidate.ref.provider === ref.provider
+      && candidate.ref.model === ref.model
+    ));
+    if (!descriptor?.endpoint || descriptor.available === false) {
+      throw new Error(`Embedding model ${ref.provider}/${ref.model} is currently unavailable.`);
+    }
+    const endpointHash = descriptor.privacyEndpointHash;
+    if (!endpointHash) throw new Error(`Embedding endpoint identity is unavailable for ${ref.provider}.`);
+    const confirmed = Object.values(this.activeConfig.context.memory.cloudEmbeddingConsents)
+      .some((consent) => consent.endpointHash === endpointHash);
+    if (!confirmed) {
+      throw new Error(`Cloud embedding privacy confirmation is required for ${ref.provider}.`);
+    }
+    return providers.createEmbeddingRuntime(ref);
   }
 
   /**

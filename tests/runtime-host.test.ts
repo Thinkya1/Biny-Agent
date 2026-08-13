@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AgentRuntimeUpdate, InteractiveRuntimeSnapshot } from "../src/runtime/agentEvents.js";
@@ -49,6 +49,11 @@ async function main(): Promise<void> {
   let activeRunId = "run-host-test";
   const exclusiveOperations: string[] = [];
   let memoryExpectedRevision: number | undefined;
+  const indexedMemoryEntries: string[] = [];
+  let downloadedEmbeddingModel: string | undefined;
+  let removedEmbeddingModel: string | undefined;
+  let embeddingRebuilds = 0;
+  let maintenanceRuns = 0;
   let chatExpectedRevision: string | undefined;
   let globalExpectedRevision: string | undefined;
   const globalPersonalization = { enabled: true, personality: "none" as const, customInstructions: "" };
@@ -67,6 +72,16 @@ async function main(): Promise<void> {
     resolved: resolveChatPersonalization(globalPersonalization, memoryPolicy),
     catalogRevision: "catalog-revision-1",
     configRevision: "config-revision-1"
+  });
+  const embeddingStatus = () => ({
+    activeModel: { kind: "local" as const, model: "multilingual-e5-small" as const },
+    models: [],
+    localModels: [],
+    index: { building: 0, failed: 0 },
+    totalEntries: 0,
+    indexedEntries: 0,
+    pendingEntries: 0,
+    failedEntries: 0
   });
   const runtime: FakeRuntime = {
     publish(update): void {
@@ -162,29 +177,95 @@ async function main(): Promise<void> {
       },
       getLocalMemory: () => ({
         loadMaintenanceStatus: async () => ({ state: "idle", eligible: 0, processed: 0, written: 0, failed: 0 }),
-        processEligibleCandidates: async () => ({ scanned: 0, processed: 0, written: 0, failed: 0, startedAt: "", finishedAt: "" }),
+        processEligibleCandidates: async (
+          _options: unknown,
+          derivedIndex?: {
+            indexEntry(entry: { id: string }): Promise<void>;
+            requestRebuild(): void;
+          }
+        ) => {
+          maintenanceRuns += 1;
+          if (maintenanceRuns === 1) {
+            await derivedIndex?.indexEntry({ id: "maintenance-entry-1" });
+          } else {
+            derivedIndex?.requestRebuild();
+          }
+          return { scanned: 1, processed: 1, written: 1, failed: 0, startedAt: "", finishedAt: "" };
+        },
         getOverview: async () => ({
+          storeRevision: 7,
+          entryCount: 0,
+          candidateCount: 0,
+          indexChars: 0,
+          origins: { user: 0, currentWorkspace: 0, otherWorkspaces: 0 },
           scopes: {
             global: { scope: "global", revision: 3, entryCount: 0, candidateCount: 0, indexChars: 0 },
             project: { scope: "project", revision: 7, entryCount: 0, candidateCount: 0, indexChars: 0 }
           },
           revision: { global: 3, project: 7 }
         }),
+        listMemoryEntries: async () => ({ entries: [], storeRevision: 7, revision: { global: 7, project: 7 } }),
         listStoredEntries: async () => ({ entries: [], revision: { global: 3, project: 7 } }),
-        writeScoped: async (_entry: unknown, options: { expectedRevision: number }) => {
+        writeEntry: async (_entry: unknown, options: { expectedRevision: number }) => {
           memoryExpectedRevision = options.expectedRevision;
-          return { written: true, revision: options.expectedRevision + 1 };
-        }
-      })
+          return { written: true, revision: options.expectedRevision + 1, entry: { id: "memory-entry-1" } };
+        },
+        consolidateEntries: async (_selector: string, options: { expectedRevision: number }) => ({
+          before: 2,
+          after: 1,
+          revision: options.expectedRevision + 1
+        })
+      }),
+      indexMemoryEntry: async (entry: { id: string }) => { indexedMemoryEntries.push(entry.id); },
+      removeMemoryEmbeddingEntries: () => undefined,
+      memoryEmbeddingStatus: async () => embeddingStatus(),
+      downloadMemoryEmbeddingModel: async (model: string) => { downloadedEmbeddingModel = model; },
+      cancelMemoryEmbeddingDownload: (model: string) => model === "multilingual-e5-small",
+      removeMemoryEmbeddingModel: async (model: string) => {
+        removedEmbeddingModel = model;
+        return { filesDeleted: 2, bytesFreed: 128 };
+      },
+      rebuildMemoryEmbeddingIndex: async () => { embeddingRebuilds += 1; },
+      cancelMemoryEmbeddingRebuild: () => true
     }
   } as unknown as CommandRuntime;
   const host = await startRuntimeHost(workspace, runtime, commands);
   assert.equal(interruptedStarts, 0, "普通 Host 启动不得自动恢复中断回合");
   const client = await connectRuntimeHost(workspace, { clientId: "test-client", surface: "tui" });
   assert.ok(client);
+  await waitUntil(() => indexedMemoryEntries.includes("maintenance-entry-1"));
   assert.equal(client.getSnapshot().info.sessionId, "session-host-test");
   assert.equal(client.hostInfo?.hostEpoch, host.info.hostEpoch);
   assert.equal(client.hostInfo?.capabilities.includes("personalization"), true);
+  assert.equal(client.hostInfo?.capabilities.includes("memory.v3"), true);
+  assert.equal(client.hostInfo?.capabilities.includes("memory.v2"), false);
+
+  const isolatedAgentRoot = path.join(workspace, "isolated-agent");
+  const isolatedConfigRoot = path.join(workspace, "isolated-config");
+  const previousAgentRoot = process.env.BINY_AGENT_DIR;
+  process.env.BINY_AGENT_DIR = isolatedAgentRoot;
+  try {
+    await assert.rejects(
+      connectRuntimeHost(workspace, {
+        clientId: "isolated-client",
+        surface: "desktop",
+        spawnOptions: {
+          workspaceRoot: workspace,
+          configDir: isolatedConfigRoot,
+          resumeInterrupted: false
+        }
+      }),
+      /Cannot replace a Runtime Host owned by the current process/u
+    );
+    const legacyClient = await connectRuntimeHost(workspace, {
+      clientId: "legacy-environment-client",
+      surface: "cli"
+    });
+    assert.equal(legacyClient, undefined);
+  } finally {
+    if (previousAgentRoot === undefined) delete process.env.BINY_AGENT_DIR;
+    else process.env.BINY_AGENT_DIR = previousAgentRoot;
+  }
 
   const updatePromise = new Promise<AgentRuntimeUpdate>((resolve) => {
     const unsubscribe = client.subscribe((update) => {
@@ -254,10 +335,10 @@ async function main(): Promise<void> {
   assert.equal(globalExpectedRevision, "config-revision-1");
 
   const exclusiveOperationsBeforeMemory = exclusiveOperations.length;
-  await client.memory("write-v2", {
+  await client.memory("write-v3", {
     expectedRevision: 7,
     entry: {
-      scope: "project",
+      audience: "workspace",
       kind: "fact",
       topic: "runtime-host",
       title: "Scoped revision",
@@ -265,12 +346,40 @@ async function main(): Promise<void> {
       lineage: { source: "explicit", externalContext: false }
     }
   });
-  assert.equal(memoryExpectedRevision, 7, "v2 memory CAS must not be replaced by the Runtime Host snapshot revision");
+  assert.equal(memoryExpectedRevision, 7, "v3 memory CAS must not be replaced by the Runtime Host snapshot revision");
+  assert.equal(indexedMemoryEntries.includes("memory-entry-1"), true, "committed Markdown writes must update the active vector index");
   assert.deepEqual(
     exclusiveOperations.slice(exclusiveOperationsBeforeMemory),
     ["memory"],
-    "attached v2 memory requests must use the runtime maintenance boundary"
+    "attached v3 memory requests must use the runtime maintenance boundary"
   );
+  const remoteOverview = await client.memory<{
+    maintenance: { state: string; eligible: number };
+  }>("overview-v3", { selector: "all" });
+  assert.deepEqual(remoteOverview.maintenance, {
+    state: "idle",
+    eligible: 0,
+    processed: 0,
+    written: 0,
+    failed: 0
+  });
+
+  assert.equal((await client.memoryEmbeddingStatus()).activeModel?.kind, "local");
+  await client.downloadMemoryEmbeddingModel("multilingual-e5-small");
+  assert.equal(downloadedEmbeddingModel, "multilingual-e5-small");
+  assert.deepEqual(await client.cancelMemoryEmbeddingDownload("multilingual-e5-small"), {
+    cancelled: true,
+    status: embeddingStatus()
+  });
+  const deletedEmbedding = await client.deleteMemoryEmbeddingModel("paraphrase-multilingual-MiniLM-L12-v2");
+  assert.equal(removedEmbeddingModel, "paraphrase-multilingual-MiniLM-L12-v2");
+  assert.equal(deletedEmbedding.filesDeleted, 2);
+  assert.equal(deletedEmbedding.bytesFreed, 128);
+  await client.rebuildMemoryEmbeddingIndex();
+  assert.equal(embeddingRebuilds, 1);
+  await client.memory("consolidate-v3", { selector: "current_workspace", expectedRevision: 8 });
+  await waitUntil(() => embeddingRebuilds === 2);
+  assert.deepEqual(await client.cancelMemoryEmbeddingRebuild(), { cancelled: true, status: embeddingStatus() });
 
   // 同一 run 的取消可绕过滞后的 revision；Host 改为按 runId 匹配而不是取消当前运行。
   currentSnapshot = { ...currentSnapshot, revision: currentSnapshot.revision + 1 };
@@ -299,8 +408,10 @@ async function main(): Promise<void> {
   await secondClient.close();
   await client.close();
   await host.close();
+  currentSnapshot = snapshot;
   const explicitResumeHost = await startRuntimeHost(workspace, runtime, commands, { resumeInterrupted: true });
   assert.equal(interruptedStarts, 1, "只有显式恢复开关才允许启动中断回合");
+  await waitUntil(() => embeddingRebuilds === 3);
   await explicitResumeHost.close();
   assert.equal(await connectRuntimeHost(workspace, { clientId: "after-close", surface: "tui" }), undefined);
 
@@ -334,19 +445,61 @@ async function main(): Promise<void> {
   });
   assert.equal(spawned.client.getSnapshot().info.workspaceRoot, spawnedWorkspace);
   const initialEpoch = spawned.client.hostInfo?.hostEpoch;
-  await spawned.client.restartOwner();
-  const restartedEpoch = spawned.client.hostInfo?.hostEpoch;
+  await spawned.client.close();
+  const replacementAgentRoot = path.join(spawnedWorkspace, "replacement-agent");
+  const replacementConfigRoot = path.join(spawnedWorkspace, "replacement-config");
+  const previousReplacementAgentRoot = process.env.BINY_AGENT_DIR;
+  process.env.BINY_AGENT_DIR = replacementAgentRoot;
+  try {
+    await cp(configDir, replacementConfigRoot, { recursive: true });
+    const replacementClient = await connectRuntimeHost(spawnedWorkspace, {
+      clientId: "environment-replacement-client",
+      surface: "desktop",
+      spawnOptions: {
+        workspaceRoot: spawnedWorkspace,
+        configDir: replacementConfigRoot,
+        resumeInterrupted: false
+      }
+    });
+    assert.ok(replacementClient);
+    const replacementRegistration = JSON.parse(
+      await readFile(runtimeHostPaths(spawnedWorkspace).registrationPath, "utf8")
+    ) as { configRoot?: unknown; agentRoot?: unknown };
+    assert.equal(replacementRegistration.configRoot, replacementConfigRoot);
+    assert.equal(replacementRegistration.agentRoot, replacementAgentRoot);
+    await replacementClient.close();
+  } finally {
+    if (previousReplacementAgentRoot === undefined) delete process.env.BINY_AGENT_DIR;
+    else process.env.BINY_AGENT_DIR = previousReplacementAgentRoot;
+  }
+  const replacementConfig = replacementConfigRoot;
+  const replacementAgent = replacementAgentRoot;
+  process.env.BINY_AGENT_DIR = replacementAgent;
+  const reattached = await connectRuntimeHost(spawnedWorkspace, {
+    clientId: "post-environment-replacement-client",
+    surface: "cli",
+    spawnOptions: {
+      workspaceRoot: spawnedWorkspace,
+      configDir: replacementConfig,
+      resumeInterrupted: false
+    }
+  });
+  assert.ok(reattached);
+  await reattached.restartOwner();
+  const restartedEpoch = reattached.hostInfo?.hostEpoch;
   assert.notEqual(restartedEpoch, initialEpoch);
-  assert.equal(spawned.client.getSnapshot().info.workspaceRoot, spawnedWorkspace);
+  assert.equal(reattached.getSnapshot().info.workspaceRoot, spawnedWorkspace);
   // 模拟 owner 被系统杀掉：不会执行 Host.close，验证 registration/lock 的接管路径。
   const restartedRegistration = JSON.parse(await readFile(runtimeHostPaths(spawnedWorkspace).registrationPath, "utf8")) as { pid?: unknown };
   if (typeof restartedRegistration.pid === "number") process.kill(restartedRegistration.pid, "SIGKILL");
   const takeoverDeadline = Date.now() + 10_000;
-  while (spawned.client.hostInfo?.hostEpoch === restartedEpoch && Date.now() < takeoverDeadline) {
+  while (reattached.hostInfo?.hostEpoch === restartedEpoch && Date.now() < takeoverDeadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
   }
-  assert.notEqual(spawned.client.hostInfo?.hostEpoch, initialEpoch);
-  await spawned.client.close();
+  assert.notEqual(reattached.hostInfo?.hostEpoch, initialEpoch);
+  await reattached.close();
+  if (previousReplacementAgentRoot === undefined) delete process.env.BINY_AGENT_DIR;
+  else process.env.BINY_AGENT_DIR = previousReplacementAgentRoot;
   const replacementRegistration = JSON.parse(await readFile(runtimeHostPaths(spawnedWorkspace).registrationPath, "utf8")) as { pid?: unknown };
   if (typeof replacementRegistration.pid === "number") process.kill(replacementRegistration.pid, "SIGTERM");
   const exited = new Promise<void>((resolve) => {

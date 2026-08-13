@@ -4,8 +4,8 @@
  * 配置模型是稳定来源，provider `/models` 是可刷新来源。两者在这里合并成同一份模型视图；
  * 注册表只保存模型元数据，不保存 API key，也不会把实时目录自动写回项目配置。
  */
-import { modelCapabilities, modelContextBudget, modelReasoningConfig, modelThinkingLevelMap } from "../ai/capabilities.js";
-import { thinkingLevelMapForProviderModel } from "../ai/modelMetadata.js";
+import { effectiveThinkingSelection, modelCapabilities, modelContextBudget, modelReasoningConfig, modelThinkingLevelMap } from "../ai/capabilities.js";
+import { thinkingLevelMapForEfforts } from "../ai/modelMetadata.js";
 import type { ModelCatalogEntry } from "../ai/types.js";
 import type {
   AgentConfig,
@@ -19,6 +19,7 @@ import type {
 import { isRemovedModelId } from "../config/schema.js";
 import { providerDefinition } from "../ai/provider.js";
 import { ProviderRegistry } from "./ProviderRuntime.js";
+import type { EmbeddingModelDescriptor } from "./embedding/index.js";
 
 export type ModelSource = "configured" | "catalog";
 
@@ -118,6 +119,11 @@ export class ModelRegistry {
     return this.listModels().filter((choice) => choice.available);
   }
 
+  /** Embedding 目录独立于聊天模型 picker，只包含 provider 显式声明的 wire/model。 */
+  listEmbeddingModels(): EmbeddingModelDescriptor[] {
+    return this.providers.listEmbeddingModels();
+  }
+
   isAvailable(resolved: RegisteredModel): boolean {
     return this.providers.get(resolved.providerAlias)?.isConfigured(resolved.model) ?? false;
   }
@@ -189,7 +195,9 @@ export class ModelRegistry {
       capabilities,
       contextWindow: normalized.contextWindow,
       maxInputTokens: normalized.maxInputTokens ?? normalized.limits?.maxInputTokens,
-      inputBudgetTokens: modelContextBudget(normalized, this.config.context.maxInputTokens, alias, { reasoning: this.config.thinking.enabled ? this.config.thinking.effort : "off" }).maxInputTokens,
+      inputBudgetTokens: modelContextBudget(normalized, this.config.context.maxInputTokens, alias, {
+        reasoning: effectiveThinkingSelection(normalized, this.config.thinking)
+      }).maxInputTokens,
       maxOutputTokens: normalized.maxOutputTokens,
       limits: normalized.limits,
       efforts: [...(reasoning?.efforts ?? [])],
@@ -217,9 +225,10 @@ export function hasUsableModelConfiguration(config: AgentConfig, alias: string, 
 }
 
 function catalogEntryToModel(entry: ModelCatalogEntry): ModelAliasConfig {
-  const levelMap = entry.reasoningEfforts.length
-    ? thinkingLevelMapForProviderModel(entry.provider, entry.id, entry.reasoningEfforts)
-    : entry.thinkingLevelMap;
+  const levelMap = entry.reasoningEffortsSource === "inferred"
+    ? undefined
+    : entry.thinkingLevelMap
+      ?? (entry.reasoningEfforts.length ? thinkingLevelMapForEfforts(entry.reasoningEfforts) : undefined);
   return {
     provider: entry.provider,
     model: entry.id,

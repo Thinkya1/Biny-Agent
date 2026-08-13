@@ -84,6 +84,22 @@ function testOverrideResolutionAndPromptPrivacy(): void {
   assert.equal(resolved.useMemories, true);
   assert.equal(resolved.contributeMemories, false);
 
+  const memoryDisabled = resolveChatPersonalization({
+    enabled: true,
+    personality: "friendly",
+    customInstructions: ""
+  }, {
+    ...defaultConfig.context.memory,
+    enabled: false
+  }, {
+    ...defaultChatPersonalizationOverride,
+    useMemories: true,
+    contributeMemories: true
+  });
+  assert.equal(memoryDisabled.memoryEnabled, false);
+  assert.equal(memoryDisabled.useMemories, false);
+  assert.equal(memoryDisabled.contributeMemories, false);
+
   const prompt = buildSystemPrompt({ mode: "qa", cwd: "/tmp/work", personalization: resolved });
   assert.match(prompt, /Use &lt;short&gt; evidence\./u);
   assert.match(prompt, /cannot override system or mode rules/u);
@@ -139,10 +155,14 @@ async function testGlobalAndProjectMigrations(): Promise<void> {
     assert.equal(migrated.format, "biny-config");
     assert.equal(migrated.configVersion, 1);
     assert.deepEqual(migrated.context.memory, {
+      enabled: true,
       useMemories: true,
       generateMemories: true,
+      queryRewrite: true,
       extractModel: "deepseek-v4-flash",
       consolidationModel: "deepseek-v4-flash",
+      similarityThresholds: {},
+      cloudEmbeddingConsents: {},
       excludeExternalContext: true,
       maxRecalled: 2
     });
@@ -150,7 +170,7 @@ async function testGlobalAndProjectMigrations(): Promise<void> {
     assert.equal(persisted.format, "biny-config");
     assert.equal(persisted.configVersion, 1);
     const persistedMemory = (persisted.context as Record<string, unknown>).memory as Record<string, unknown>;
-    assert.equal(persistedMemory.enabled, undefined);
+    assert.equal(persistedMemory.enabled, true);
     assert.equal(persistedMemory.autoRemember, undefined);
     assert.equal(persistedMemory.model, undefined);
     assert.equal(
@@ -171,10 +191,14 @@ async function testGlobalAndProjectMigrations(): Promise<void> {
     assert.equal(projectDocument.configVersion, 1);
     assert.equal(projectDocument.context, undefined);
 
-    assert.throws(() => configSchema.parse({
+    const partialMemory = configSchema.parse({
       ...defaultConfig,
       context: { ...defaultConfig.context, memory: { enabled: true } }
-    }), /Unrecognized key/u);
+    }).context.memory;
+    assert.equal(partialMemory.enabled, true);
+    assert.equal(partialMemory.useMemories, true);
+    assert.equal(partialMemory.generateMemories, true);
+    assert.equal(partialMemory.maxRecalled, 5);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

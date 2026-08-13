@@ -63,12 +63,19 @@ const contextSchema = z.object({
   instructionsMaxBytes: 32 * 1024,
   compaction: { enabled: true, reserveTokens: undefined, keepRecentTokens: undefined, maxSummaryTokens: 4_096 },
   memory: {
-    useMemories: false,
-    generateMemories: false,
+    enabled: false,
+    useMemories: true,
+    generateMemories: true,
+    queryRewrite: true,
+    memoryModel: undefined,
+    rewriteModel: undefined,
     extractModel: undefined,
     consolidationModel: undefined,
+    embeddingModel: undefined,
+    similarityThresholds: {},
+    cloudEmbeddingConsents: {},
     excludeExternalContext: true,
-    maxRecalled: 3
+    maxRecalled: 5
   }
 });
 
@@ -106,6 +113,25 @@ const thinkingSchema = z.object({
   effort: reasoningEffortSchema.default("high")
 }).default({ enabled: true, effort: "high" });
 
+const providerEmbeddingThresholdsSchema = z.object({
+  currentWorkspace: z.number().min(0).max(1),
+  crossWorkspace: z.number().min(0).max(1)
+}).strict().superRefine((value, context) => {
+  if (value.crossWorkspace >= value.currentWorkspace) return;
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: ["crossWorkspace"],
+    message: "Cross-workspace embedding threshold must be at least the current-workspace threshold."
+  });
+});
+
+export const providerEmbeddingModelSchema = z.object({
+  id: z.string().trim().min(1).max(256),
+  displayName: z.string().trim().min(1).max(256),
+  dimensions: z.number().int().min(1).max(65_536).optional(),
+  recommendedThresholds: providerEmbeddingThresholdsSchema.optional()
+}).strict();
+
 const providerConfigSchema = z.object({
   type: modelProviderSchema,
   protocol: providerProtocolSchema.optional(),
@@ -129,8 +155,21 @@ const providerConfigSchema = z.object({
   modelsEndpoint: z.string().url().optional(),
   headers: z.record(z.string()).optional(),
   apiBackend: modelApiBackendSchema.optional(),
-  compatibility: modelCompatibilitySchema.optional()
+  compatibility: modelCompatibilitySchema.optional(),
+  /** 仅显式声明的 provider embedding 型号会进入目录；不会从聊天模型或 ID 猜测。 */
+  embeddingModels: z.array(providerEmbeddingModelSchema).max(64).optional()
 }).superRefine((provider, context) => {
+  const embeddingIds = new Set<string>();
+  for (const [index, model] of (provider.embeddingModels ?? []).entries()) {
+    if (embeddingIds.has(model.id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["embeddingModels", index, "id"],
+        message: `Duplicate embedding model id: ${model.id}`
+      });
+    }
+    embeddingIds.add(model.id);
+  }
   if (provider.type === "openai-compatible" && !provider.baseUrl) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -502,7 +541,7 @@ const canonicalConfigSchema = z.object({
     });
   }
 
-  for (const field of ["extractModel", "consolidationModel"] as const) {
+  for (const field of ["memoryModel", "rewriteModel", "extractModel", "consolidationModel"] as const) {
     const memoryAlias = config.context.memory[field];
     if (memoryAlias && !config.models[memoryAlias]) {
       context.addIssue({
@@ -554,6 +593,7 @@ export const configSchema = z.preprocess(rejectLegacyModelConfig, canonicalConfi
 export type AgentConfig = z.infer<typeof canonicalConfigSchema>;
 export type ModelProvider = z.infer<typeof modelProviderSchema>;
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
+export type ProviderEmbeddingModelConfig = z.infer<typeof providerEmbeddingModelSchema>;
 export type ModelAliasConfig = z.infer<typeof modelAliasSchema>;
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
 export type ThinkingLevel = z.infer<typeof thinkingLevelSchema>;
@@ -659,12 +699,19 @@ export const defaultConfig: AgentConfig = {
     instructionsMaxBytes: 32 * 1024,
     compaction: { enabled: true, reserveTokens: undefined, keepRecentTokens: undefined, maxSummaryTokens: 4_096 },
     memory: {
-      useMemories: false,
-      generateMemories: false,
+      enabled: false,
+      useMemories: true,
+      generateMemories: true,
+      queryRewrite: true,
+      memoryModel: undefined,
+      rewriteModel: undefined,
       extractModel: undefined,
       consolidationModel: undefined,
+      embeddingModel: undefined,
+      similarityThresholds: {},
+      cloudEmbeddingConsents: {},
       excludeExternalContext: true,
-      maxRecalled: 3
+      maxRecalled: 5
     }
   },
   web: {

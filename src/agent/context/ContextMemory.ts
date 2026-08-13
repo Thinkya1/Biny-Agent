@@ -10,8 +10,9 @@ import type { ContextComponentUsage, SessionContextCheckpoint, SessionContextSta
 import type { ModelContextBudget } from "../../ai/types.js";
 import type { AgentAttachment } from "../AgentSession.js";
 import type { PersonalizationMetadata } from "../../personalization/index.js";
-import type { MemoryRecallReport, MemoryScope } from "./memoryTypes.js";
+import type { MemoryOrigin, MemoryOriginCounts, MemoryRecallReport, MemoryScope } from "./memoryTypes.js";
 import { canonicalToolSchemaHash, type PromptEpochReason } from "../../llm/promptCache.js";
+import type { HybridMemoryRetriever } from "./HybridMemoryRetriever.js";
 
 const piReserveTokens = 16_384;
 const piKeepRecentTokens = 20_000;
@@ -70,7 +71,8 @@ export class ContextMemory {
     getBudgetLimits?: () => ModelContextBudget,
     private readonly compactionOptions: ContextCompactionOptions = {},
     private readonly onModelRequest: ModelRequestObserver = () => undefined,
-    private readonly getModelRequestContext: () => ModelRequestContext | undefined = () => undefined
+    private readonly getModelRequestContext: () => ModelRequestContext | undefined = () => undefined,
+    private readonly memoryRetriever?: HybridMemoryRetriever
   ) {
     this.resolveBudget = getBudgetLimits ?? (() => ({
       contextWindow: maxTokens,
@@ -167,6 +169,12 @@ export class ContextMemory {
       }
     }
     this.memoryRecall = memoryRecallForAssembly(recalled.report, recalled.entries, assembly.budget.components);
+    const memoryComponent = assembly.budget.components?.find((component) => component.id === "stable memory");
+    if (memoryComponent?.disposition === "included" && recalled.entries.length) {
+      const ids = recalled.entries.map(({ id }) => id);
+      await (this.memoryRetriever?.recordInjectedRecall(ids, { signal })
+        ?? this.localMemory?.recordInjectedRecall(ids, { signal }))?.catch(() => undefined);
+    }
     this.lastBudget = {
       ...assembly.budget,
       contextWindow: budget.contextWindow,
@@ -564,17 +572,23 @@ export class ContextMemory {
   ): Promise<{
       matches: MemoryMatch[];
       report: MemoryRecallReport;
-      entries: Array<{ scope: MemoryScope; id: string }>;
+      entries: Array<{ origin: MemoryOrigin; originBucket?: keyof MemoryOriginCounts; scope: MemoryScope; id: string }>;
     }> {
     if (!this.localMemory || limit < 1) {
       return { matches: [], report: emptyMemoryRecallReport(), entries: [] };
     }
     try {
-      const result = await this.localMemory.searchScoped(input, paths, {
-        limit,
-        maxChars: memoryRecallMaxChars,
-        signal
-      });
+      const result = this.memoryRetriever === undefined
+        ? await this.localMemory.searchScoped(input, paths, {
+          limit,
+          maxChars: memoryRecallMaxChars,
+          signal
+        })
+        : await this.memoryRetriever.retrieve(input, paths, {
+          limit,
+          maxChars: memoryRecallMaxChars,
+          signal
+        });
       return {
         matches: result.matches.map((match) => ({
           topic: match.topic,
@@ -583,7 +597,12 @@ export class ContextMemory {
           score: match.score
         })),
         report: result.report,
-        entries: result.matches.map((match) => ({ scope: match.entry.scope, id: match.entry.id }))
+        entries: result.matches.map((match) => ({
+          origin: match.entry.origin,
+          originBucket: match.originBucket,
+          scope: match.entry.scope,
+          id: match.entry.id
+        }))
       };
     } catch {
       signal?.throwIfAborted();
@@ -947,6 +966,7 @@ function cloneBudget(budget: ContextBudgetStatus): ContextBudgetStatus {
 
 function emptyMemoryRecallReport(): MemoryRecallReport {
   return {
+    origins: { included: emptyMemoryOriginCounts(), trimmed: emptyMemoryOriginCounts() },
     included: { global: 0, project: 0 },
     trimmed: { global: 0, project: 0 },
     omitted: [],
@@ -956,6 +976,10 @@ function emptyMemoryRecallReport(): MemoryRecallReport {
 
 function cloneMemoryRecallReport(report: MemoryRecallReport): MemoryRecallReport {
   return {
+    origins: {
+      included: { ...report.origins.included },
+      trimmed: { ...report.origins.trimmed }
+    },
     included: { ...report.included },
     trimmed: { ...report.trimmed },
     omitted: report.omitted.map((item) => ({ ...item })),
@@ -965,7 +989,7 @@ function cloneMemoryRecallReport(report: MemoryRecallReport): MemoryRecallReport
 
 function memoryRecallForAssembly(
   report: MemoryRecallReport,
-  entries: Array<{ scope: MemoryScope; id: string }>,
+  entries: Array<{ origin: MemoryOrigin; originBucket?: keyof MemoryOriginCounts; scope: MemoryScope; id: string }>,
   components: ContextComponentUsage[] | undefined
 ): MemoryRecallReport {
   const next = cloneMemoryRecallReport(report);
@@ -974,8 +998,13 @@ function memoryRecallForAssembly(
   for (const entry of entries) {
     if (next.included[entry.scope] > 0) next.included[entry.scope] -= 1;
     next.trimmed[entry.scope] += 1;
+    const bucket = entry.originBucket ?? (entry.origin.kind === "user"
+      ? "user"
+      : next.origins.included.currentWorkspace > 0 ? "currentWorkspace" : "otherWorkspaces");
+    if (next.origins.included[bucket] > 0) next.origins.included[bucket] -= 1;
+    next.origins.trimmed[bucket] += 1;
     if (!next.omitted.some((omission) => omission.scope === entry.scope && omission.id === entry.id)) {
-      next.omitted.push({ scope: entry.scope, id: entry.id, reason: "budget" });
+      next.omitted.push({ origin: entry.origin, scope: entry.scope, id: entry.id, reason: "budget" });
     }
   }
   const omitted = next.omitted.filter((item) => item.reason === "budget").length;
@@ -985,6 +1014,10 @@ function memoryRecallForAssembly(
     omitted
   };
   return next;
+}
+
+function emptyMemoryOriginCounts(): MemoryOriginCounts {
+  return { user: 0, currentWorkspace: 0, otherWorkspaces: 0 };
 }
 
 function normalizeRestoredBudget(budget: ContextBudgetStatus, limits: ModelContextBudget): ContextBudgetStatus {

@@ -17,12 +17,14 @@ import type { AgentAttachment, AgentRunMode, ResumedAgentSession } from "../agen
 import type { ContextStatus, MemoryEntry as LegacyMemoryEntry } from "../agent/context/types.js";
 import type {
   MemoryEntryInput,
+  MemoryEntryPatch,
   MemoryKind,
   MemoryLineage,
   MemoryLineageSource,
-  MemoryScope
+  MemoryOriginSelector
 } from "../agent/context/memoryTypes.js";
 import { thinkingLevelSchema } from "../config/schema.js";
+import { globalAgentDir, globalConfigDir } from "../config/paths.js";
 import {
   chatPersonalizationOverrideSchema,
   memoryPolicySchema,
@@ -32,6 +34,8 @@ import {
   type GlobalPersonalizationUpdate
 } from "../personalization/index.js";
 import type { ModelChoice, ModelRuntimeInfo, ThinkingSelection } from "../llm/ModelManager.js";
+import type { LocalEmbeddingModelId } from "../llm/embedding/types.js";
+import type { MemoryEmbeddingRuntimeStatus } from "../agent/context/MemoryEmbeddingService.js";
 import type { PermissionMode, PermissionResult } from "../permission/PermissionManager.js";
 import type { SessionSummary } from "../session/events.js";
 import type { UsageSummary } from "../session/metadata.js";
@@ -84,7 +88,7 @@ const hostCapabilities = [
   "agent.graph",
   "capability.channel",
   "personalization",
-  "memory.v2"
+  "memory.v3"
 ] as const;
 
 type OperationLane = "query" | "mutation" | "admission" | "control" | "run";
@@ -121,6 +125,8 @@ interface HostRegistration {
   lockPath: string;
   rootHash: string;
   persistenceRoot: string;
+  configRoot?: string;
+  agentRoot?: string;
   hostEpoch: string;
   token: string;
   pid: number;
@@ -133,6 +139,8 @@ interface HostHelloFrame {
   protocolVersion: number;
   rootHash: string;
   token: string;
+  configRoot: string;
+  agentRoot: string;
   clientId: string;
   surface: HostSurface;
   capabilities?: string[];
@@ -201,6 +209,8 @@ export interface HostClientOptions {
 
 interface RuntimeHostClientOptions extends HostClientOptions {
   registration: HostRegistration;
+  /** 仅用于先连上旧环境的空闲 owner，并立即完成同 endpoint 接管。 */
+  environmentTakeover?: boolean;
 }
 
 interface HostConnection {
@@ -246,6 +256,8 @@ export interface RuntimeHostStartOptions {
   createRuntime?: RuntimeHostFactory;
   /** 显式要求 owner 进程启动后检查并续跑在途 turn。默认不续跑。 */
   resumeInterrupted?: boolean;
+  /** Host 发现身份必须包含配置根，避免同一工作区的隔离实例复用错误 owner。 */
+  configDir?: string;
 }
 
 export interface SpawnRuntimeHostOptions extends HostClientOptions, RuntimeHostSpawnOptions {}
@@ -289,13 +301,26 @@ export async function connectRuntimeHost(
   const paths = runtimeHostPaths(persistenceRoot);
   const registration = await readRegistration(paths);
   if (!registration) return undefined;
+  const identityMatches = registrationMatchesCurrentEnvironment(registration, options.spawnOptions);
+  if (!identityMatches && options.spawnOptions === undefined) return undefined;
   try {
-    return await RuntimeHostClient.connect({
+    const client = await RuntimeHostClient.connect({
       registration,
       clientId: options.clientId,
       surface: options.surface,
-      spawnOptions: options.spawnOptions
+      spawnOptions: options.spawnOptions,
+      environmentTakeover: !identityMatches
     });
+    if (identityMatches) return client;
+    try {
+      // 旧 owner 可能来自另一个 BINY_AGENT_DIR。先通过只读 snapshot 确认空闲，
+      // 再沿同一 endpoint 完成替换，保证运行账本始终只有一个 writer。
+      await client.restartOwner();
+      return client;
+    } catch (error) {
+      await client.close().catch(() => undefined);
+      throw error;
+    }
   } catch (error) {
     if (!isConnectionRefused(error)) throw error;
     if (isProcessAlive(registration.pid)) return undefined;
@@ -419,6 +444,8 @@ export async function startRuntimeHost(
     lockPath: paths.lockPath,
     rootHash: paths.rootHash,
     persistenceRoot: path.resolve(persistenceRoot),
+    configRoot: path.resolve(options.configDir ?? globalConfigDir()),
+    agentRoot: path.resolve(globalAgentDir()),
     hostEpoch,
     token,
     pid: process.pid,
@@ -463,6 +490,7 @@ export class RuntimeHostServer {
   private memoryMaintenanceTimer: ReturnType<typeof setInterval> | undefined;
   private memoryMaintenanceAbort: AbortController | undefined;
   private memoryMaintenancePromise: Promise<void> | undefined;
+  private memoryEmbeddingRebuildTimer: ReturnType<typeof setTimeout> | undefined;
   private listening = false;
   private initialized = false;
 
@@ -613,6 +641,8 @@ export class RuntimeHostServer {
       if (this.memoryMaintenanceTimer) clearInterval(this.memoryMaintenanceTimer);
       this.memoryMaintenanceTimer = undefined;
       this.memoryMaintenanceAbort?.abort();
+      if (this.memoryEmbeddingRebuildTimer) clearTimeout(this.memoryEmbeddingRebuildTimer);
+      this.memoryEmbeddingRebuildTimer = undefined;
       for (const connection of this.connections) connection.socket.destroy();
       this.connections.clear();
       if (this.listening) {
@@ -660,14 +690,24 @@ export class RuntimeHostServer {
     const commands = this.commands;
     const promise = (async () => {
       await commands.agent.getLocalMemory().loadMaintenanceStatus({ signal: controller.signal });
-      const state = await commands.agent.getPersonalizationState();
       controller.signal.throwIfAborted();
-      // 关闭贡献后保留既有候选；重新开启时，下一次扫描会继续处理。
-      if (!state.memory.generateMemories || this.runtime.getSnapshot().state.kind !== "idle") return;
-      await commands.agent.getLocalMemory().processEligibleCandidates({
-        excludeExternalContext: state.memory.excludeExternalContext,
-        signal: controller.signal
-      });
+      // 候选入队时已经应用当回合的有效策略。这里按真实队列处理，避免聊天覆盖允许贡献后，
+      // 又被当前全局开关拦住，导致已经承诺生成的候选永久滞留。
+      if (this.runtime.getSnapshot().state.kind !== "idle") return;
+      let rebuildRequested = false;
+      try {
+        await commands.agent.getLocalMemory().processEligibleCandidates(
+          { signal: controller.signal },
+          {
+            indexEntry: async (entry) => await commands.agent.indexMemoryEntry(entry),
+            requestRebuild: () => { rebuildRequested = true; }
+          }
+        );
+      } finally {
+        // LocalMemory 只发失效信号；等整个批次退出后再启动 generation 重建，避免与下一条
+        // 候选的 Markdown mutation 竞态。即使维护被前台任务中断，已提交的整理也会到达这里。
+        if (rebuildRequested) this.scheduleMemoryEmbeddingRebuild();
+      }
     })().catch((error: unknown) => {
       if (!controller.signal.aborted) {
         // LocalMemory 将抽取/整理失败写入 maintenanceStatus；Host 不改变任何任务终态。
@@ -679,6 +719,19 @@ export class RuntimeHostServer {
     });
     this.memoryMaintenancePromise = promise;
     await promise;
+  }
+
+  /** 整理已经提交 Markdown 后异步重建派生索引；失败只保留词法降级，不能改变整理结果。 */
+  private scheduleMemoryEmbeddingRebuild(): void {
+    if (this.closePromise || this.memoryEmbeddingRebuildTimer) return;
+    this.memoryEmbeddingRebuildTimer = setTimeout(() => {
+      this.memoryEmbeddingRebuildTimer = undefined;
+      void this.runtime.runExclusiveOperation(
+        "memory",
+        async (signal) => await this.commands.agent.rebuildMemoryEmbeddingIndex(signal)
+      ).catch(() => undefined);
+    }, 0);
+    this.memoryEmbeddingRebuildTimer.unref?.();
   }
 
   private read(connection: HostConnection, chunk: string): void {
@@ -714,6 +767,8 @@ export class RuntimeHostServer {
         frame.protocolVersion !== protocolVersion
         || frame.rootHash !== this.registration.rootHash
         || frame.token !== this.registration.token
+        || frame.configRoot !== this.registration.configRoot
+        || frame.agentRoot !== this.registration.agentRoot
       ) {
         connection.socket.destroy(new Error("Runtime Host handshake rejected."));
         return;
@@ -1160,13 +1215,47 @@ export class RuntimeHostServer {
       case "skills.expand":
         return await this.commands.expandSkillCommand(requiredString(payload.input, "input"));
       case "memory":
-        // Keep attached clients on the same maintenance boundary as the local
-        // Desktop/TUI paths. Some v2 operations (notably consolidation) call
-        // a model, and even writes must not race the active session.
+        // 记忆写入与整理不能和活动回合竞争同一 AgentSession。
         return await this.runtime.runExclusiveOperation(
           "memory",
           async () => await this.executeMemory(payload)
         );
+      case "memory.embedding.status-v3":
+        return await this.commands.agent.memoryEmbeddingStatus();
+      case "memory.embedding.download-v3":
+        return await this.runtime.runExclusiveOperation(
+          "memory",
+          async (signal) => {
+            await this.commands.agent.downloadMemoryEmbeddingModel(readLocalEmbeddingModel(payload.model), signal);
+            return await this.commands.agent.memoryEmbeddingStatus();
+          }
+        );
+      case "memory.embedding.cancel-download-v3":
+        return {
+          cancelled: this.commands.agent.cancelMemoryEmbeddingDownload(readLocalEmbeddingModel(payload.model)),
+          status: await this.commands.agent.memoryEmbeddingStatus()
+        };
+      case "memory.embedding.delete-v3":
+        return await this.runtime.runExclusiveOperation(
+          "memory",
+          async () => ({
+            ...(await this.commands.agent.removeMemoryEmbeddingModel(readLocalEmbeddingModel(payload.model))),
+            status: await this.commands.agent.memoryEmbeddingStatus()
+          })
+        );
+      case "memory.embedding.rebuild-v3":
+        return await this.runtime.runExclusiveOperation(
+          "memory",
+          async (signal) => {
+            await this.commands.agent.rebuildMemoryEmbeddingIndex(signal);
+            return await this.commands.agent.memoryEmbeddingStatus();
+          }
+        );
+      case "memory.embedding.cancel-rebuild-v3":
+        return {
+          cancelled: this.commands.agent.cancelMemoryEmbeddingRebuild(),
+          status: await this.commands.agent.memoryEmbeddingStatus()
+        };
       case "runtime.restart":
         this.assertRevision(payload);
         return await this.restartRuntime(optionalString(payload.sessionId));
@@ -1356,48 +1445,85 @@ export class RuntimeHostServer {
   private async executeMemory(payload: Record<string, unknown>): Promise<unknown> {
     const memory = this.commands.agent.getLocalMemory();
     const action = requiredString(payload.action, "action");
-    if (action === "overview-v2") {
-      const scope = readMemoryScope(payload.scope);
-      const [overview, entries] = await Promise.all([
-        memory.getOverview(),
-        memory.listStoredEntries({ scopes: [scope] })
-      ]);
-      return { overview, entries };
+    if (action === "overview-v3") {
+      const selector = readMemoryOriginSelector(payload.selector, true);
+      // 两个投影必须对应同一个单库 revision；其它进程可能在两次读取之间提交写入。
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const overview = await memory.getOverview();
+        const entries = await memory.listMemoryEntries({ origins: [selector] });
+        const allEntries = await memory.listMemoryEntries({ origins: ["all"] });
+        if (overview.storeRevision === entries.storeRevision && overview.storeRevision === allEntries.storeRevision) {
+          return {
+            overview,
+            entries,
+            allEntries,
+            maintenance: await memory.loadMaintenanceStatus()
+          };
+        }
+      }
+      throw new Error("Memory store changed repeatedly while reading the v3 overview.");
     }
-    if (action === "search-v2") {
-      const scope = readMemoryScope(payload.scope);
-      return await memory.searchScoped(
+    if (action === "list-v3") {
+      return await memory.listMemoryEntries({
+        origins: [readMemoryOriginSelector(payload.selector, true)],
+        topic: optionalString(payload.topic),
+        limit: optionalSafeInteger(payload.limit)
+      });
+    }
+    if (action === "search-v3") {
+      return await this.commands.agent.searchMemory(
         requiredString(payload.query, "query"),
         payload.paths === undefined ? [] : readStringArray(payload.paths, "paths"),
         {
-          scopes: [scope],
+          origins: [readMemoryOriginSelector(payload.selector, true)],
           limit: optionalSafeInteger(payload.limit),
           maxChars: optionalSafeInteger(payload.maxChars)
         }
       );
     }
-    if (action === "write-v2") {
-      return await memory.writeScoped(readScopedMemoryEntry(payload.entry), {
+    if (action === "write-v3") {
+      const result = await memory.writeEntry(readMemoryEntryInput(payload.entry), {
         expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
       });
+      if (result.written && result.entry) await this.commands.agent.indexMemoryEntry(result.entry);
+      return result;
     }
-    if (action === "delete-v2") {
-      return await memory.deleteStoredEntry(
-        readMemoryScope(payload.scope),
+    if (action === "update-v3") {
+      const result = await memory.updateEntry(
         requiredString(payload.id, "id"),
+        readMemoryEntryPatch(payload.patch),
         { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") }
       );
+      if (result.written && result.entry) await this.commands.agent.indexMemoryEntry(result.entry);
+      return result;
     }
-    if (action === "clear-v2") {
-      return await memory.clearScope(readMemoryScope(payload.scope), {
+    if (action === "delete-v3") {
+      const id = requiredString(payload.id, "id");
+      const result = await memory.deleteEntryById(
+        id,
+        { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") }
+      );
+      if (result.deleted) this.commands.agent.removeMemoryEmbeddingEntries([id]);
+      return result;
+    }
+    if (action === "clear-v3") {
+      const selector = readMemoryOriginSelector(payload.selector, true);
+      const entries = await memory.listMemoryEntries({ origins: [selector] });
+      const result = await memory.clearEntries(selector, {
         expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
       });
+      if (result.deletedEntries) this.commands.agent.removeMemoryEmbeddingEntries(entries.entries.map(({ id }) => id));
+      return result;
     }
-    if (action === "consolidate-v2") {
-      return await memory.consolidateScope(readMemoryScope(payload.scope), {
-        expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision"),
+    if (action === "consolidate-v3") {
+      const selector = readMemoryOriginSelector(payload.selector, true);
+      const expectedRevision = requiredInteger(payload.expectedRevision, "expectedRevision");
+      const result = await memory.consolidateEntries(selector, {
+        expectedRevision,
         topic: optionalString(payload.topic)
       });
+      if (result.revision !== expectedRevision) this.scheduleMemoryEmbeddingRebuild();
+      return result;
     }
     if (action !== "list" && action !== "search") this.assertRevision(payload);
     if (action === "list") return await memory.listEntries();
@@ -1475,10 +1601,12 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   private lastError: Error | undefined;
   private reconnectInProgress = false;
   private ownerRestartPromise: Promise<void> | undefined;
+  private environmentTakeoverHandshake: boolean;
 
   private constructor(private readonly options: RuntimeHostClientOptions) {
     this.persistenceRoot = options.registration.persistenceRoot;
     this.clientId = options.clientId ?? `client-${randomUUID()}`;
+    this.environmentTakeoverHandshake = options.environmentTakeover === true;
   }
 
   static async connect(options: RuntimeHostClientOptions): Promise<RuntimeHostClient> {
@@ -1994,14 +2122,71 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   }
 
   async memory<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
-    const v2 = action.endsWith("-v2");
-    return await this.request<T>("memory", v2
-      ? { action, ...payload }
-      : { action, ...payload, expectedRevision: this.currentRevision() });
+    const v3 = action.endsWith("-v3");
+    return await this.requestWithOwnerCompatibility<T>(
+      "memory",
+      v3 ? { action, ...payload } : { action, ...payload, expectedRevision: this.currentRevision() },
+      "memory.v3"
+    );
+  }
+
+  async memoryEmbeddingStatus(): Promise<MemoryEmbeddingRuntimeStatus> {
+    return await this.requestWithOwnerCompatibility(
+      "memory.embedding.status-v3",
+      {},
+      "memory.v3"
+    );
+  }
+
+  async downloadMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<MemoryEmbeddingRuntimeStatus> {
+    return await this.requestWithOwnerCompatibility(
+      "memory.embedding.download-v3",
+      { model },
+      "memory.v3"
+    );
+  }
+
+  async cancelMemoryEmbeddingDownload(model: LocalEmbeddingModelId): Promise<{ cancelled: boolean; status: MemoryEmbeddingRuntimeStatus }> {
+    return await this.requestWithOwnerCompatibility(
+      "memory.embedding.cancel-download-v3",
+      { model },
+      "memory.v3"
+    );
+  }
+
+  async deleteMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<{
+    filesDeleted: number;
+    bytesFreed: number;
+    status: MemoryEmbeddingRuntimeStatus;
+  }> {
+    return await this.requestWithOwnerCompatibility(
+      "memory.embedding.delete-v3",
+      { model },
+      "memory.v3"
+    );
+  }
+
+  async rebuildMemoryEmbeddingIndex(): Promise<MemoryEmbeddingRuntimeStatus> {
+    return await this.requestWithOwnerCompatibility(
+      "memory.embedding.rebuild-v3",
+      {},
+      "memory.v3"
+    );
+  }
+
+  async cancelMemoryEmbeddingRebuild(): Promise<{ cancelled: boolean; status: MemoryEmbeddingRuntimeStatus }> {
+    return await this.requestWithOwnerCompatibility(
+      "memory.embedding.cancel-rebuild-v3",
+      {},
+      "memory.v3"
+    );
   }
 
   /** 让 owner 按指定会话或新会话重建 AgentSession。 */
   async restartRuntime(sessionId?: string): Promise<InteractiveRuntimeSnapshot> {
+    // 新会话会重新读取当前配置。旧 Host 虽能通过 protocol v2 握手，却无法解析
+    // Memory v3 字段，因此必须在它触碰配置前按能力替换空闲 owner。
+    await this.ensureOwnerCapability("memory.v3");
     const result = await this.request<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }>("runtime.restart", {
       sessionId,
       expectedRevision: this.currentRevision()
@@ -2056,12 +2241,21 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
         }
       };
       socket.on("connect", () => {
+        const registrationIdentity = this.options.registration.configRoot !== undefined
+          && this.options.registration.agentRoot !== undefined
+          ? { configRoot: this.options.registration.configRoot, agentRoot: this.options.registration.agentRoot }
+          : undefined;
+        const identity = this.environmentTakeoverHandshake && registrationIdentity !== undefined
+          ? registrationIdentity
+          : currentRuntimeHostIdentity(this.options.spawnOptions);
         this.send(socket, {
           kind: "hello",
           requestId: helloRequestId,
           protocolVersion,
           rootHash: this.options.registration.rootHash,
           token: this.options.registration.token,
+          configRoot: identity.configRoot,
+          agentRoot: identity.agentRoot,
           clientId: this.clientId,
           surface: this.options.surface ?? "cli",
           capabilities: ["runtime.events.cursor", "runtime.run.reconnect"]
@@ -2085,6 +2279,7 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
       this.pending.set(helloRequestId, {
         resolve: (value) => {
           settled = true;
+          this.environmentTakeoverHandshake = false;
           const result = value as { hostEpoch: string; persistenceRoot: string; sequence: number; capabilities?: string[] };
           this.hostEpoch = result.hostEpoch;
           this.sequence = result.sequence;
@@ -2112,6 +2307,9 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     if (registration && !isProcessAlive(registration.pid)) {
       await removeStaleRegistration(registration);
       registration = undefined;
+    }
+    if (registration && !registrationMatchesCurrentEnvironment(registration, this.options.spawnOptions)) {
+      throw new Error("Runtime Host belongs to a different Biny configuration environment.");
     }
     if (!registration && this.options.spawnOptions) {
       const child = spawnRuntimeHostProcess(this.persistenceRoot, this.options.spawnOptions);
@@ -2430,8 +2628,25 @@ function isHelloFrame(value: unknown): value is HostHelloFrame {
     && record.protocolVersion === protocolVersion
     && typeof record.rootHash === "string"
     && typeof record.token === "string"
+    && typeof record.configRoot === "string"
+    && typeof record.agentRoot === "string"
     && typeof record.clientId === "string"
     && isSurface(record.surface);
+}
+
+function currentRuntimeHostIdentity(options?: RuntimeHostSpawnOptions): { configRoot: string; agentRoot: string } {
+  return {
+    configRoot: path.resolve(options?.configDir ?? globalConfigDir()),
+    agentRoot: path.resolve(globalAgentDir())
+  };
+}
+
+function registrationMatchesCurrentEnvironment(
+  registration: HostRegistration,
+  options?: RuntimeHostSpawnOptions
+): boolean {
+  const identity = currentRuntimeHostIdentity(options);
+  return registration.configRoot === identity.configRoot && registration.agentRoot === identity.agentRoot;
 }
 
 function operationLane(operation: string): OperationLane {
@@ -2458,6 +2673,7 @@ function operationLane(operation: string): OperationLane {
     || operation === "agent.models"
     || operation === "agent.sessions"
     || operation === "personalization.get"
+    || operation === "memory.embedding.status-v3"
     || operation === "skills.list"
     || operation === "run.inspect"
     || operation === "run.list"
@@ -2476,6 +2692,7 @@ function operationLane(operation: string): OperationLane {
     || operation === "capability.get"
     || operation === "host.info"
   ) return "query";
+  if (operation === "memory.embedding.cancel-download-v3" || operation === "memory.embedding.cancel-rebuild-v3") return "control";
   if (operation === "capability.cancel" || operation === "capability.fail" || operation === "capability.release" || operation === "capability.reject") return "control";
   if (operation === "goal.pause" || operation === "goal.cancel" || operation === "graph.pause" || operation === "graph.cancel") return "control";
   if (operation === "capability.register" || operation === "capability.replace" || operation === "capability.invoke" || operation === "capability.accept" || operation === "capability.start" || operation === "capability.result" || operation === "capability.chunk" || operation === "capability.admit" || operation === "graph.start" || operation === "graph.resume" || operation === "goal.resume") return "admission";
@@ -2570,12 +2787,12 @@ function readMemoryEntry(value: unknown): LegacyMemoryEntry {
   };
 }
 
-function readMemoryScope(value: unknown): MemoryScope {
-  if (value === "global" || value === "project") return value;
-  throw new Error("Runtime Host memory scope must be global or project.");
+function readMemoryOriginSelector(value: unknown, allowAll: boolean): MemoryOriginSelector {
+  if (value === "current_workspace" || value === "user" || value === "other_workspaces" || (allowAll && value === "all")) return value;
+  throw new Error(`Runtime Host memory selector must be ${allowAll ? "all, " : ""}current_workspace, user, or other_workspaces.`);
 }
 
-function readScopedMemoryEntry(value: unknown): MemoryEntryInput {
+function readMemoryEntryInput(value: unknown): MemoryEntryInput {
   const record = asRecord(value);
   const importance = record.importance === undefined ? undefined : requiredInteger(record.importance, "entry.importance");
   if (importance !== undefined && (importance < 1 || importance > 5)) {
@@ -2584,7 +2801,7 @@ function readScopedMemoryEntry(value: unknown): MemoryEntryInput {
   const lineageValues = Array.isArray(record.lineage) ? record.lineage : [record.lineage];
   if (lineageValues.some((item) => item === undefined)) throw new Error("Runtime Host memory entry lineage is required.");
   return {
-    scope: readMemoryScope(record.scope),
+    audience: readMemoryAudience(record.audience),
     kind: readMemoryKind(record.kind),
     topic: requiredString(record.topic, "entry.topic"),
     title: requiredString(record.title, "entry.title"),
@@ -2597,11 +2814,40 @@ function readScopedMemoryEntry(value: unknown): MemoryEntryInput {
   };
 }
 
+function readMemoryAudience(value: unknown): "workspace" | "universal" {
+  if (value === "workspace" || value === "universal") return value;
+  throw new Error("Runtime Host memory audience must be workspace or universal.");
+}
+
+function readMemoryEntryPatch(value: unknown): MemoryEntryPatch {
+  const record = asRecord(value);
+  const importance = record.importance === undefined ? undefined : requiredInteger(record.importance, "patch.importance");
+  if (importance !== undefined && (importance < 1 || importance > 5)) {
+    throw new Error("Runtime Host memory patch importance must be between 1 and 5.");
+  }
+  return {
+    kind: record.kind === undefined ? undefined : readMemoryKind(record.kind),
+    topic: optionalString(record.topic),
+    title: optionalString(record.title),
+    summary: optionalString(record.summary),
+    decisions: record.decisions === undefined ? undefined : readStringArray(record.decisions, "patch.decisions"),
+    paths: record.paths === undefined ? undefined : readStringArray(record.paths, "patch.paths"),
+    keywords: record.keywords === undefined ? undefined : readStringArray(record.keywords, "patch.keywords"),
+    importance,
+    userEvidence: optionalString(record.userEvidence)
+  };
+}
+
 function readMemoryKind(value: unknown): MemoryKind {
   if (value === "preference" || value === "working_style" || value === "fact" || value === "decision" || value === "workflow" || value === "gotcha") {
     return value;
   }
   throw new Error("Runtime Host memory entry kind is invalid.");
+}
+
+function readLocalEmbeddingModel(value: unknown): LocalEmbeddingModelId {
+  if (value === "multilingual-e5-small" || value === "paraphrase-multilingual-MiniLM-L12-v2") return value;
+  throw new Error("Runtime Host local embedding model is invalid.");
 }
 
 function readMemoryLineage(value: unknown): MemoryLineage {
@@ -2837,6 +3083,8 @@ async function readRegistration(paths: RuntimeHostPaths): Promise<HostRegistrati
       lockPath: paths.lockPath,
       rootHash: paths.rootHash,
       persistenceRoot: registration.persistenceRoot,
+      configRoot: typeof registration.configRoot === "string" ? path.resolve(registration.configRoot) : undefined,
+      agentRoot: typeof registration.agentRoot === "string" ? path.resolve(registration.agentRoot) : undefined,
       hostEpoch: registration.hostEpoch,
       token: registration.token,
       pid: registration.pid as number,
@@ -2869,6 +3117,8 @@ async function acquireHostLock(paths: RuntimeHostPaths, persistenceRoot: string)
         lockPath: paths.lockPath,
         rootHash: paths.rootHash,
         persistenceRoot: path.resolve(persistenceRoot),
+        configRoot: undefined,
+        agentRoot: undefined,
         hostEpoch: "",
         token: "",
         pid: 0,

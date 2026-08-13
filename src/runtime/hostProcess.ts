@@ -50,7 +50,8 @@ export async function runRuntimeHostProcess(argv: readonly string[] = process.ar
   try {
     server = await startRuntimeHost(options.persistenceRoot, initial.runtime, initial.commands, {
       createRuntime,
-      resumeInterrupted: options.resumeInterrupted
+      resumeInterrupted: options.resumeInterrupted,
+      configDir: options.configDir
     });
   } catch (error) {
     await initial.runtime.close();

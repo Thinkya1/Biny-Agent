@@ -1,67 +1,76 @@
 /**
- * /memory 命令模块。
+ * /memory 单库命令。
  *
- * CLI 与 TUI 共用这一份实现。命令只负责解析和展示，条目、scope revision、锁和原子写均由
- * LocalMemory/MemoryStorage 负责；未指定 scope 的旧命令仍默认 project。
+ * user/current/other 只是来源视图；写入时使用 workspace/universal audience，不再把来源映射成
+ * 两套物理目录或两份 revision。
  */
-import { MemoryRevisionConflictError, type MemoryEntry, type MemoryKind, type MemoryScope } from "./memoryTypes.js";
+import {
+  MemoryRevisionConflictError,
+  type MemoryAudience,
+  type MemoryEntry,
+  type MemoryKind,
+  type MemoryOriginSelector,
+  type MemorySearchOptions,
+  type MemorySearchResult
+} from "./memoryTypes.js";
 import type { LocalMemory } from "./LocalMemory.js";
 
 const memoryKinds: MemoryKind[] = ["preference", "working_style", "fact", "decision", "workflow", "gotcha"];
+const selectors: MemoryOriginSelector[] = ["all", "current_workspace", "user", "other_workspaces"];
 
 export const memoryCommandUsage = [
   "Usage:",
-  "  /memory list [global|project|all]",
-  "  /memory show [global|project] <id-or-topic>",
-  "  /memory add [global|project] [kind] <topic> <note>",
-  "  /memory forget [global|project] <id-or-topic>",
-  "  /memory search [global|project|all] <query>",
-  "  /memory consolidate [global|project] [topic]"
+  "  /memory list [all|current|user|other]",
+  "  /memory show [all|current|user|other] <id-or-topic>",
+  "  /memory add [workspace|universal] [kind] <topic> <note>",
+  "  /memory forget [all|current|user|other] <id-or-topic>",
+  "  /memory search [all|current|user|other] <query>",
+  "  /memory consolidate [current|user] [topic]"
 ].join("\n");
 
-export async function runMemoryCommand(memory: LocalMemory | undefined, args: string[]): Promise<string> {
+export async function runMemoryCommand(
+  memory: LocalMemory | undefined,
+  args: string[],
+  searchMemory?: (query: string, paths: string[], options: MemorySearchOptions) => Promise<MemorySearchResult>
+): Promise<string> {
   if (!memory) return "Local memory is unavailable.";
   const action = args[0]?.toLowerCase() ?? "list";
 
   if (action === "list") {
-    const scopes = readScopes(args[1]);
-    const result = await memory.listStoredEntries({ scopes, limit: 200 });
-    if (!result.entries.length) {
-      return `Local memory is empty for ${scopeLabel(scopes)}. Use /memory add [global|project] [kind] <topic> <note>.`;
-    }
+    const origin = readSelector(args[1]);
+    const result = await memory.listMemoryEntries({ origins: [origin], limit: 200 });
+    if (!result.entries.length) return `Local memory is empty for ${selectorLabel(origin)}. Use /memory add [workspace|universal] [kind] <topic> <note>.`;
     return [
-      `Memory entries (${String(result.entries.length)}; ${scopeLabel(scopes)}):`,
+      `Memory entries (${String(result.entries.length)}; ${selectorLabel(origin)}):`,
       ...result.entries.map(formatEntryLine),
-      `Revisions: global=${String(result.revision.global)}, project=${String(result.revision.project)}`,
+      `Revision: ${String(result.storeRevision)}`,
       "",
       memoryCommandUsage
     ].join("\n");
   }
 
   if (action === "show") {
-    const parsed = readOptionalScope(args.slice(1));
+    const parsed = readOptionalSelector(args.slice(1));
     const selector = parsed.rest.join(" ").trim();
-    if (!selector) return "Usage: /memory show [global|project] <id-or-topic>";
-    const result = await memory.listStoredEntries({ scopes: [parsed.scope], limit: 500 });
+    if (!selector) return "Usage: /memory show [all|current|user|other] <id-or-topic>";
+    const result = await memory.listMemoryEntries({ origins: [parsed.origin], limit: 500 });
     const entries = selectEntries(result.entries, selector);
-    return entries.length
-      ? entries.map(formatEntryDetail).join("\n\n")
-      : `No ${parsed.scope} memory entry or topic named ${selector}.`;
+    return entries.length ? entries.map(formatEntryDetail).join("\n\n") : `No memory entry or topic named ${selector} in ${selectorLabel(parsed.origin)}.`;
   }
 
   if (action === "add") {
-    const parsed = readOptionalScope(args.slice(1));
+    const parsed = readOptionalAudience(args.slice(1));
     const kind = isMemoryKind(parsed.rest[0])
       ? parsed.rest.shift() as MemoryKind
-      : parsed.scope === "global" ? "preference" : "fact";
+      : parsed.audience === "universal" ? "preference" : "fact";
     const topic = parsed.rest.shift()?.trim();
     const note = parsed.rest.join(" ").trim();
-    if (!topic || !note) return "Usage: /memory add [global|project] [kind] <topic> <note>";
-    if (parsed.scope === "global" && kind !== "preference" && kind !== "working_style") {
-      return "Global memory only accepts preference or working_style entries.";
+    if (!topic || !note) return "Usage: /memory add [workspace|universal] [kind] <topic> <note>";
+    if (parsed.audience === "universal" && kind !== "preference" && kind !== "working_style") {
+      return "Universal memory only accepts preference or working_style entries.";
     }
-    const result = await mutateWithFreshRevision(memory, parsed.scope, async (expectedRevision) => await memory.writeScoped({
-      scope: parsed.scope,
+    const result = await mutateWithFreshRevision(memory, async (expectedRevision) => await memory.writeEntry({
+      audience: parsed.audience,
       kind,
       topic,
       title: noteTitle(note),
@@ -73,68 +82,70 @@ export async function runMemoryCommand(memory: LocalMemory | undefined, args: st
       lineage: {
         source: "explicit",
         externalContext: false,
-        userEvidence: parsed.scope === "global" ? note : undefined
+        userEvidence: parsed.audience === "universal" ? note : undefined
       }
     }, { expectedRevision }));
     if (!result.written) return "Skipped: an equivalent note already exists or the note is too short.";
-    return `Saved ${parsed.scope}/${kind} memory ${result.entry?.id ?? result.path ?? topic}.`;
+    return `Saved ${parsed.audience}/${kind} memory ${result.entry?.id ?? result.path ?? topic}.`;
   }
 
   if (action === "forget" || action === "delete") {
-    const parsed = readOptionalScope(args.slice(1));
+    const parsed = readOptionalSelector(args.slice(1));
     const selector = parsed.rest.join(" ").trim();
-    if (!selector) return "Usage: /memory forget [global|project] <id-or-topic>";
-    const snapshot = await memory.listStoredEntries({ scopes: [parsed.scope], limit: 500 });
+    if (!selector) return "Usage: /memory forget [all|current|user|other] <id-or-topic>";
+    const snapshot = await memory.listMemoryEntries({ origins: [parsed.origin], limit: 500 });
     const targets = selectEntries(snapshot.entries, selector);
-    if (!targets.length) return `No ${parsed.scope} memory entry or topic named ${selector}.`;
+    if (!targets.length) return `No memory entry or topic named ${selector} in ${selectorLabel(parsed.origin)}.`;
     let deleted = 0;
     for (const target of targets) {
-      const result = await mutateWithFreshRevision(memory, parsed.scope, async (expectedRevision) => (
-        await memory.deleteStoredEntry(parsed.scope, target.id, { expectedRevision })
+      const result = await mutateWithFreshRevision(memory, async (expectedRevision) => (
+        await memory.deleteEntryById(target.id, { expectedRevision })
       ));
       if (result.deleted) deleted += 1;
     }
-    return `Deleted ${String(deleted)} ${parsed.scope} memory ${deleted === 1 ? "entry" : "entries"}.`;
+    return `Deleted ${String(deleted)} memory ${deleted === 1 ? "entry" : "entries"}.`;
   }
 
   if (action === "search") {
-    const scopes = readScopes(args[1]);
-    const hasScope = isScopeSelector(args[1]);
-    const query = args.slice(hasScope ? 2 : 1).join(" ").trim();
-    if (!query) return "Usage: /memory search [global|project|all] <query>";
-    const result = await memory.searchScoped(query, [], { scopes, limit: 8 });
+    const parsed = readOptionalSelector(args.slice(1));
+    const query = parsed.rest.join(" ").trim();
+    if (!query) return "Usage: /memory search [all|current|user|other] <query>";
+    const options: MemorySearchOptions = { origins: [parsed.origin], limit: 8 };
+    const result = searchMemory
+      ? await searchMemory(query, [], options)
+      : await memory.search(query, [], options);
     if (!result.matches.length) return `No memory matches for: ${query}`;
     return [
       `Memory matches for "${query}":`,
-      ...result.matches.map((match) => `  [${match.entry.scope}/${match.entry.kind}/${match.topic}] ${match.entry.id} (score ${String(match.score)}) ${match.excerpt}`),
-      `Included: global=${String(result.report.included.global)}, project=${String(result.report.included.project)}; trimmed: global=${String(result.report.trimmed.global)}, project=${String(result.report.trimmed.project)}; omitted=${String(result.report.omitted.length)}`
+      ...result.matches.map((match) => `  [${originLabel(match.entry)}/${match.entry.kind}/${match.topic}] ${match.entry.id} (score ${String(match.score)}) ${match.excerpt}`),
+      `Included: user=${String(result.report.origins.included.user)}, current=${String(result.report.origins.included.currentWorkspace)}, other=${String(result.report.origins.included.otherWorkspaces)}; omitted=${String(result.report.omitted.length)}`
     ].join("\n");
   }
 
   if (action === "compact" || action === "consolidate") {
-    const parsed = readOptionalScope(args.slice(1));
+    const parsed = readOptionalSelector(args.slice(1), "current_workspace");
+    if (parsed.origin !== "current_workspace" && parsed.origin !== "user") {
+      return "Consolidation requires current or user so entries from different origins are never merged.";
+    }
     const topic = parsed.rest.join(" ").trim() || undefined;
-    const result = await mutateWithFreshRevision(memory, parsed.scope, async (expectedRevision) => (
-      await memory.consolidateScope(parsed.scope, { expectedRevision, topic })
+    const scope = parsed.origin === "user" ? "global" : "project";
+    const result = await mutateWithFreshRevision(memory, async (expectedRevision) => (
+      await memory.consolidateScope(scope, { expectedRevision, topic })
     ));
     if (result.error) return `Memory consolidation failed without changing data: ${result.error}`;
     return result.after < result.before
-      ? `Consolidated ${parsed.scope} memory: ${String(result.before)} -> ${String(result.after)} entries.`
-      : `${parsed.scope} memory has ${String(result.before)} entries; nothing to merge.`;
+      ? `Consolidated ${selectorLabel(parsed.origin)} memory: ${String(result.before)} -> ${String(result.after)} entries.`
+      : `${selectorLabel(parsed.origin)} memory has ${String(result.before)} entries; nothing to merge.`;
   }
 
   return memoryCommandUsage;
 }
 
-async function mutateWithFreshRevision<T>(
-  memory: LocalMemory,
-  scope: MemoryScope,
-  mutation: (expectedRevision: number) => Promise<T>
-): Promise<T> {
+async function mutateWithFreshRevision<T>(memory: LocalMemory, mutation: (expectedRevision: number) => Promise<T>): Promise<T> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const overview = await memory.getOverview();
     try {
-      return await mutation(overview.scopes[scope].revision);
+      return await mutation(overview.storeRevision);
     } catch (error) {
       if (!(error instanceof MemoryRevisionConflictError) || attempt === 2) throw error;
     }
@@ -142,25 +153,35 @@ async function mutateWithFreshRevision<T>(
   throw new Error("Memory revision retry exhausted.");
 }
 
-function readOptionalScope(args: string[]): { scope: MemoryScope; rest: string[] } {
+function readOptionalAudience(args: string[]): { audience: MemoryAudience; rest: string[] } {
   const rest = [...args];
   const value = rest[0]?.toLowerCase();
-  if (value === "global" || value === "project") {
+  if (value === "workspace" || value === "universal") {
     rest.shift();
-    return { scope: value, rest };
+    return { audience: value, rest };
   }
-  return { scope: "project", rest };
+  return { audience: "workspace", rest };
 }
 
-function readScopes(value: string | undefined): MemoryScope[] {
-  if (value === undefined || value.toLowerCase() === "all") return ["global", "project"];
-  if (value.toLowerCase() === "global" || value.toLowerCase() === "project") return [value.toLowerCase() as MemoryScope];
-  return ["global", "project"];
+function readOptionalSelector(args: string[], fallback: MemoryOriginSelector = "all"): { origin: MemoryOriginSelector; rest: string[] } {
+  const rest = [...args];
+  const normalized = selectorFromInput(rest[0]);
+  if (normalized) {
+    rest.shift();
+    return { origin: normalized, rest };
+  }
+  return { origin: fallback, rest };
 }
 
-function isScopeSelector(value: string | undefined): boolean {
+function readSelector(value: string | undefined): MemoryOriginSelector {
+  return selectorFromInput(value) ?? "all";
+}
+
+function selectorFromInput(value: string | undefined): MemoryOriginSelector | undefined {
   const normalized = value?.toLowerCase();
-  return normalized === "global" || normalized === "project" || normalized === "all";
+  if (normalized === "current") return "current_workspace";
+  if (normalized === "other") return "other_workspaces";
+  return selectors.includes(normalized as MemoryOriginSelector) ? normalized as MemoryOriginSelector : undefined;
 }
 
 function isMemoryKind(value: string | undefined): value is MemoryKind {
@@ -172,24 +193,32 @@ function selectEntries(entries: MemoryEntry[], selector: string): MemoryEntry[] 
   return exact ? [exact] : entries.filter((entry) => entry.topic === selector);
 }
 
+function originLabel(entry: MemoryEntry): string {
+  return entry.origin.kind === "user" ? "user" : `workspace:${entry.origin.workspaceName}`;
+}
+
 function formatEntryLine(entry: MemoryEntry): string {
-  return `  [${entry.scope}/${entry.kind}] ${entry.id}  ${entry.topic}  ${entry.title}  importance=${String(entry.importance)}`;
+  return `  [${originLabel(entry)}/${entry.kind}] ${entry.id}  ${entry.topic}  ${entry.title}  importance=${String(entry.importance)}`;
 }
 
 function formatEntryDetail(entry: MemoryEntry): string {
   return [
-    `${entry.id} [${entry.scope}/${entry.kind}] revision=${String(entry.revision)}`,
+    `${entry.id} [${originLabel(entry)}/${entry.kind}] revision=${String(entry.revision)}`,
     `${entry.title} (${entry.topic}; importance=${String(entry.importance)})`,
     entry.summary,
     ...(entry.decisions.length ? [`Decisions: ${entry.decisions.join("; ")}`] : []),
     ...(entry.paths.length ? [`Paths: ${entry.paths.join(", ")}`] : []),
     `Updated: ${entry.updatedAt}`,
+    `Recalled: ${String(entry.recallCount)}${entry.lastRecalledAt ? `; last ${entry.lastRecalledAt}` : ""}`,
     `Sources: ${entry.lineage.map((lineage) => lineage.source).join(", ")}`
   ].join("\n");
 }
 
-function scopeLabel(scopes: MemoryScope[]): string {
-  return scopes.length === 2 ? "global + project" : scopes[0] ?? "global + project";
+function selectorLabel(selector: MemoryOriginSelector): string {
+  if (selector === "current_workspace") return "current workspace";
+  if (selector === "other_workspaces") return "other workspaces";
+  if (selector === "user") return "universal preferences";
+  return "all origins";
 }
 
 function noteTitle(note: string): string {

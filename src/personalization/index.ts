@@ -7,6 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { EmbeddingModelRef } from "../llm/embedding/types.js";
 
 export const PERSONALIZATION_CONFIG_VERSION = 1 as const;
 export const PERSONALIZATION_CUSTOM_INSTRUCTIONS_MAX_BYTES = 4 * 1024;
@@ -30,21 +31,72 @@ export const personalizationSettingsSchema = z.object({
 
 export type PersonalizationSettings = z.infer<typeof personalizationSettingsSchema>;
 
-export const memoryPolicySchema = z.object({
-  useMemories: z.boolean().default(false),
-  generateMemories: z.boolean().default(false),
+export const embeddingModelRefSchema: z.ZodType<EmbeddingModelRef> = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("local"),
+    model: z.enum(["multilingual-e5-small", "paraphrase-multilingual-MiniLM-L12-v2"])
+  }).strict(),
+  z.object({
+    kind: z.literal("provider"),
+    provider: z.string().min(1),
+    model: z.string().min(1)
+  }).strict()
+]);
+
+export type { EmbeddingModelRef } from "../llm/embedding/types.js";
+
+export const memorySimilarityThresholdSchema = z.object({
+  currentWorkspace: z.number().min(0).max(1),
+  crossWorkspace: z.number().min(0).max(1)
+}).strict().superRefine((value, context) => {
+  if (value.crossWorkspace >= value.currentWorkspace) return;
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: ["crossWorkspace"],
+    message: "Cross-project memory threshold must be at least the current-project threshold."
+  });
+});
+
+const rawMemoryPolicySchema = z.object({
+  // enabled 是硬门禁；聊天级 use/contribute 覆盖不能绕过它。
+  enabled: z.boolean().optional(),
+  useMemories: z.boolean().default(true),
+  generateMemories: z.boolean().default(true),
+  queryRewrite: z.boolean().default(true),
+  memoryModel: z.string().min(1).optional(),
+  rewriteModel: z.string().min(1).optional(),
   extractModel: z.string().min(1).optional(),
   consolidationModel: z.string().min(1).optional(),
+  embeddingModel: embeddingModelRefSchema.optional(),
+  similarityThresholds: z.record(memorySimilarityThresholdSchema).default({}),
+  // key 是 provider alias + endpoint 的不可逆摘要；不保存 URL、凭据或记忆正文。
+  cloudEmbeddingConsents: z.record(z.object({
+    endpointHash: z.string().min(16).max(128),
+    confirmedAt: z.string().datetime()
+  }).strict()).default({}),
   // 外部网页、MCP/Plugin 与子代理结果默认不进入自动记忆候选。
   excludeExternalContext: z.boolean().default(true),
-  maxRecalled: z.number().int().min(1).max(20).default(3)
-}).strict().default({
-  useMemories: false,
-  generateMemories: false,
+  maxRecalled: z.number().int().min(1).max(20).default(5)
+}).strict();
+
+export const memoryPolicySchema = rawMemoryPolicySchema.transform((policy) => ({
+  ...policy,
+  // v2 没有总开关。读取旧配置时用两个既有开关的 OR 初始化，避免升级后意外停用。
+  enabled: policy.enabled ?? (policy.useMemories || policy.generateMemories)
+})).default({
+  enabled: false,
+  useMemories: true,
+  generateMemories: true,
+  queryRewrite: true,
+  memoryModel: undefined,
+  rewriteModel: undefined,
   extractModel: undefined,
   consolidationModel: undefined,
+  embeddingModel: undefined,
+  similarityThresholds: {},
+  cloudEmbeddingConsents: {},
   excludeExternalContext: true,
-  maxRecalled: 3
+  maxRecalled: 5
 });
 
 export type MemoryPolicy = z.infer<typeof memoryPolicySchema>;
@@ -104,10 +156,16 @@ export interface PersonalizationMetadata {
 export interface ResolvedChatPersonalization extends PersonalizationMetadata {
   enabled: boolean;
   customInstructions: string;
+  memoryEnabled: boolean;
   useMemories: boolean;
   contributeMemories: boolean;
+  queryRewrite: boolean;
+  memoryModel?: string;
+  rewriteModel?: string;
   extractModel?: string;
   consolidationModel?: string;
+  embeddingModel?: EmbeddingModelRef;
+  similarityThresholds: Record<string, z.infer<typeof memorySimilarityThresholdSchema>>;
   excludeExternalContext: boolean;
   maxRecalled: number;
 }
@@ -151,12 +209,18 @@ export function resolveChatPersonalization(
   return {
     enabled,
     customInstructions,
-    useMemories: parsedOverride.useMemories === "inherit" ? parsedMemory.useMemories : parsedOverride.useMemories,
-    contributeMemories: parsedOverride.contributeMemories === "inherit"
+    memoryEnabled: parsedMemory.enabled,
+    useMemories: parsedMemory.enabled && (parsedOverride.useMemories === "inherit" ? parsedMemory.useMemories : parsedOverride.useMemories),
+    contributeMemories: parsedMemory.enabled && (parsedOverride.contributeMemories === "inherit"
       ? parsedMemory.generateMemories
-      : parsedOverride.contributeMemories,
+      : parsedOverride.contributeMemories),
+    queryRewrite: parsedMemory.queryRewrite,
+    memoryModel: parsedMemory.memoryModel,
+    rewriteModel: parsedMemory.rewriteModel,
     extractModel: parsedMemory.extractModel,
     consolidationModel: parsedMemory.consolidationModel,
+    embeddingModel: parsedMemory.embeddingModel,
+    similarityThresholds: parsedMemory.similarityThresholds,
     excludeExternalContext: parsedMemory.excludeExternalContext,
     maxRecalled: parsedMemory.maxRecalled,
     ...personalizationMetadata(personality, customInstructions)

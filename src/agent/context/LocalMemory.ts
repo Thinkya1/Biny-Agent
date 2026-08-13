@@ -1,8 +1,8 @@
 /**
- * 本地记忆的模型编排与旧 API 适配层。
+ * 本地记忆的模型编排层。
  *
- * MemoryStorage 负责纯磁盘事实；本类只负责抽取/整理模型调用、6 小时候选维护，以及把旧的
- * topic/index API 映射到一条一文件的 scoped v2 存储。
+ * MemoryStorage 负责单一 v3 Markdown 库与迁移事实；本类负责抽取/整理模型调用、6 小时候选
+ * 维护，以及仍在内部使用的旧 topic API 适配。新调用统一使用 origin/audience。
  */
 import { z } from "zod";
 import type { AgentModel, ModelRequestContext, ModelRequestObserver } from "../core/types.js";
@@ -17,8 +17,10 @@ import type {
 } from "./types.js";
 import {
   assertAllowedScopedEntry,
+  memoryOriginsEqual,
   normalizeMemoryTopic,
-  sanitizeMemoryEntryInput
+  sanitizeMemoryEntryInput,
+  scopeFromOrigin
 } from "./memoryFormat.js";
 import { MemoryStorage } from "./memoryStorage.js";
 import {
@@ -33,17 +35,19 @@ import {
   type MemoryConsolidationOptions,
   type MemoryConsolidationResult,
   type MemoryDeleteResult,
+  type MemoryDerivedIndexSink,
   type MemoryEntriesResult,
   type MemoryEntry,
   type MemoryEntryInput,
+  type MemoryEntryPatch,
   type MemoryListOptions,
   type MemoryMaintenanceOptions,
   type MemoryMaintenanceResult,
   type MemoryMaintenanceStatus,
   type MemoryMutationOptions,
   type MemoryOverview,
+  type MemoryOriginSelector,
   type MemoryReadOptions,
-  type MemoryScope,
   type MemorySearchOptions,
   type MemorySearchResult,
   type ScopedMemoryWriteResult
@@ -51,6 +55,7 @@ import {
 
 const memoryModelTimeoutMs = 30_000;
 const maintenanceCandidateLimit = 32;
+type InternalMemoryScope = "global" | "project";
 
 export interface MemoryWriteResult {
   written: boolean;
@@ -58,6 +63,7 @@ export interface MemoryWriteResult {
 }
 
 const extractedEntrySchema = z.object({
+  audience: z.enum(["universal", "workspace"]).optional(),
   scope: z.enum(["global", "project"]).default("project"),
   kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]).default("fact"),
   topic: z.string().default("project"),
@@ -113,30 +119,42 @@ export class LocalMemory {
     this.storage = new MemoryStorage(workspaceRoot);
   }
 
-  // ------------------------------ v2 public API ------------------------------
+  // ------------------------------ v3 public API ------------------------------
 
   async getOverview(options: MemoryReadOptions = {}): Promise<MemoryOverview> {
     return await this.storage.getOverview(options);
   }
 
-  async listStoredEntries(options: MemoryListOptions = {}): Promise<MemoryEntriesResult> {
-    return await this.storage.listStoredEntries(options);
+  async listMemoryEntries(options: MemoryListOptions = {}): Promise<MemoryEntriesResult> {
+    return await this.storage.listEntries(options);
+  }
+
+  async search(query: string, paths: string[], options: MemorySearchOptions = {}): Promise<MemorySearchResult> {
+    return await this.storage.search(query, paths, { ...options, limit: options.limit ?? this.recallLimit });
   }
 
   async searchScoped(query: string, paths: string[], options: MemorySearchOptions = {}): Promise<MemorySearchResult> {
     return await this.storage.searchScoped(query, paths, { ...options, limit: options.limit ?? this.recallLimit });
   }
 
-  async writeScoped(input: MemoryEntryInput, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
-    return await this.storage.writeScoped(input, options);
+  async writeEntry(input: MemoryEntryInput, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
+    return await this.storage.writeEntry(input, options);
   }
 
-  async deleteStoredEntry(scope: MemoryScope, id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
-    return await this.storage.deleteStoredEntry(scope, id, options);
+  async updateEntry(id: string, patch: MemoryEntryPatch, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
+    return await this.storage.updateEntry(id, patch, options);
   }
 
-  async clearScope(scope: MemoryScope, options: MemoryMutationOptions): Promise<MemoryClearResult> {
-    return await this.storage.clearScope(scope, options);
+  async deleteEntryById(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
+    return await this.storage.deleteEntry(id, options);
+  }
+
+  async clearEntries(selector: MemoryOriginSelector, options: MemoryMutationOptions): Promise<MemoryClearResult> {
+    return await this.storage.clearEntries(selector, options);
+  }
+
+  async recordInjectedRecall(ids: string[], options: MemoryReadOptions & { now?: Date } = {}): Promise<void> {
+    await this.storage.recordInjectedRecall(ids, options);
   }
 
   async enqueueCandidate(input: MemoryCandidateInput, options: MemoryCandidateMutationOptions): Promise<MemoryCandidateMutationResult> {
@@ -151,25 +169,84 @@ export class LocalMemory {
     return await this.storage.removeCandidate(id, options);
   }
 
-  async consolidateScope(scope: MemoryScope, options: MemoryConsolidationOptions): Promise<MemoryConsolidationResult> {
+  async consolidateScope(scope: InternalMemoryScope, options: MemoryConsolidationOptions): Promise<MemoryConsolidationResult> {
+    return await this.consolidateEntries(scope === "global" ? "user" : "current_workspace", options, scope);
+  }
+
+  /**
+   * v3 整理入口。模型一次只能看到同一 origin、同一 workspace 和同一 topic 的条目；即使
+   * UI 选择“全部”，也只是顺序处理多个隔离分组，绝不会把跨项目事实交给同一次合并。
+   */
+  async consolidateEntries(
+    selector: MemoryOriginSelector,
+    options: MemoryConsolidationOptions,
+    compatibilityScope: InternalMemoryScope = selector === "user" ? "global" : "project"
+  ): Promise<MemoryConsolidationResult> {
     options.signal?.throwIfAborted();
-    const snapshot = await this.storage.listStoredEntries({ scopes: [scope], topic: options.topic, signal: options.signal });
-    const actualRevision = snapshot.revision[scope];
+    const snapshot = await this.storage.listEntries({ origins: [selector], topic: options.topic, signal: options.signal });
+    const actualRevision = snapshot.storeRevision;
     if (actualRevision !== options.expectedRevision) {
-      throw new MemoryRevisionConflictError(scope, options.expectedRevision, actualRevision);
+      throw new MemoryRevisionConflictError("store", options.expectedRevision, actualRevision);
     }
     const entries = snapshot.entries;
     const before = entries.length;
-    if (before < 2) return { scope, before, after: before, revision: actualRevision };
+    if (before < 2) return { scope: compatibilityScope, before, after: before, revision: actualRevision };
+
+    const grouped = new Map<string, MemoryEntry[]>();
+    for (const entry of entries) {
+      const key = `${entry.origin.kind === "user" ? "user" : `workspace:${entry.origin.workspaceId}`}\u0000${entry.topic}`;
+      grouped.set(key, [...(grouped.get(key) ?? []), entry]);
+    }
+
+    let revision = actualRevision;
+    let after = before;
+    const errors: string[] = [];
+    for (const initialGroup of grouped.values()) {
+      if (initialGroup.length < 2) continue;
+      options.signal?.throwIfAborted();
+      const current = await this.storage.listEntries({ origins: [selector], topic: initialGroup[0]?.topic, signal: options.signal });
+      if (current.storeRevision !== revision) {
+        throw new MemoryRevisionConflictError("store", revision, current.storeRevision);
+      }
+      const origin = initialGroup[0]?.origin;
+      const group = origin === undefined
+        ? []
+        : current.entries.filter((entry) => memoryOriginsEqual(entry.origin, origin));
+      if (group.length < 2) continue;
+      const result = await this.consolidateExactGroup(group, revision, options.signal);
+      revision = result.revision;
+      after -= group.length - result.after;
+      if (result.error) errors.push(`${group[0]?.topic ?? "unknown"}: ${result.error}`);
+    }
+
+    return {
+      scope: compatibilityScope,
+      before,
+      after,
+      revision,
+      error: errors.length ? errors.join("; ") : undefined
+    };
+  }
+
+  private async consolidateExactGroup(
+    entries: MemoryEntry[],
+    actualRevision: number,
+    signal?: AbortSignal
+  ): Promise<{ after: number; revision: number; error?: string }> {
+    const before = entries.length;
+    const origin = entries[0]?.origin;
+    const topic = entries[0]?.topic;
+    if (!origin || !topic || entries.some((entry) => !memoryOriginsEqual(entry.origin, origin) || entry.topic !== topic)) {
+      return { after: before, revision: actualRevision, error: "Consolidation group crossed an origin or topic boundary." };
+    }
+    const scope = scopeFromOrigin(origin);
 
     let parsed: z.infer<typeof consolidationSchema>;
     try {
-      parsed = await this.consolidateEntriesWithModel(scope, entries, options.signal);
+      parsed = await this.consolidateEntriesWithModel(scope, entries, signal);
     } catch (error) {
-      options.signal?.throwIfAborted();
+      signal?.throwIfAborted();
       return {
-        scope,
-        before,
         after: before,
         revision: actualRevision,
         error: error instanceof Error ? error.message : String(error)
@@ -177,8 +254,8 @@ export class LocalMemory {
     }
     if (!parsed.entries.length || parsed.entries.length >= before) {
       return parsed.entries.length === before
-        ? { scope, before, after: before, revision: actualRevision }
-        : { scope, before, after: before, revision: actualRevision, error: "Model returned an unusable consolidation result." };
+        ? { after: before, revision: actualRevision }
+        : { after: before, revision: actualRevision, error: "Model returned an unusable consolidation result." };
     }
 
     const sourceById = new Map(entries.map((entry) => [entry.id, entry]));
@@ -190,8 +267,6 @@ export class LocalMemory {
     if (groups.some(({ sourceIds }) => !sourceIds.length || sourceIds.some((id) => !sourceById.has(id)))
       || entries.some(({ id }) => !covered.has(id))) {
       return {
-        scope,
-        before,
         after: before,
         revision: actualRevision,
         error: "Consolidation output did not preserve lineage for every source entry."
@@ -203,9 +278,10 @@ export class LocalMemory {
       const lineages = sources.flatMap((source) => source.lineage);
       const externalContext = lineages.some((lineage) => lineage.externalContext);
       return sanitizeMemoryEntryInput({
-        scope,
+        origin,
         kind: entry.kind ?? sources[0]?.kind ?? "fact",
-        topic: entry.topic ?? sources[0]?.topic ?? options.topic ?? "project",
+        // 模型不得借整理改变分组边界；topic 只接受调用前已验证的稳定值。
+        topic,
         title: entry.title,
         summary: entry.summary,
         decisions: entry.decisions,
@@ -224,15 +300,13 @@ export class LocalMemory {
         scope,
         entries.map(({ id }) => id),
         replacements,
-        { expectedRevision: actualRevision, signal: options.signal }
+        { expectedRevision: actualRevision, signal }
       );
-      return { scope, before, after: result.entries.length, revision: result.revision };
+      return { after: result.entries.length, revision: result.revision };
     } catch (error) {
       if (error instanceof MemoryRevisionConflictError) throw error;
-      options.signal?.throwIfAborted();
+      signal?.throwIfAborted();
       return {
-        scope,
-        before,
         after: before,
         revision: actualRevision,
         error: error instanceof Error ? error.message : String(error)
@@ -240,9 +314,12 @@ export class LocalMemory {
     }
   }
 
-  processEligibleCandidates(options: MemoryMaintenanceOptions = {}): Promise<MemoryMaintenanceResult> {
+  processEligibleCandidates(
+    options: MemoryMaintenanceOptions = {},
+    derivedIndex?: MemoryDerivedIndexSink
+  ): Promise<MemoryMaintenanceResult> {
     if (this.maintenancePromise) return this.maintenancePromise;
-    const promise = this.runEligibleCandidateMaintenance(options).finally(() => {
+    const promise = this.runEligibleCandidateMaintenance(options, derivedIndex).finally(() => {
       if (this.maintenancePromise === promise) this.maintenancePromise = undefined;
     });
     this.maintenancePromise = promise;
@@ -380,7 +457,10 @@ export class LocalMemory {
     return results;
   }
 
-  private async runEligibleCandidateMaintenance(options: MemoryMaintenanceOptions): Promise<MemoryMaintenanceResult> {
+  private async runEligibleCandidateMaintenance(
+    options: MemoryMaintenanceOptions,
+    derivedIndex?: MemoryDerivedIndexSink
+  ): Promise<MemoryMaintenanceResult> {
     const now = options.now ?? new Date();
     const startedAt = now.toISOString();
     this.maintenance = {
@@ -406,23 +486,35 @@ export class LocalMemory {
       for (const candidate of scan.candidates) {
         options.signal?.throwIfAborted();
         try {
-          if (candidate.lineage.externalContext && options.excludeExternalContext) {
-            await this.removeCandidateWithRetry(candidate.id, options.signal, now);
-            processed += 1;
-            continue;
-          }
+          // 外部上下文策略在候选入队时按该回合的有效聊天策略判定。进入队列就代表当时已获准，
+          // 维护阶段不能再用后来变化的全局设置覆写这个决定。
           const proposal = await this.extractCandidate(candidate, options.signal);
           options.signal?.throwIfAborted();
           if (proposal) {
             const input = this.classifyCandidateProposal(candidate, proposal);
             const writeResult = await this.writeScopedWithRetry(input, options.signal, now);
-            if (writeResult.written) written += 1;
+            if (writeResult.written) {
+              written += 1;
+              if (writeResult.entry && derivedIndex) {
+                // Markdown 已提交；索引失败不得把候选重新标成失败并诱发重复写入。
+                await derivedIndex.indexEntry(writeResult.entry).catch(() => undefined);
+              }
+            }
             const overview = await this.storage.getOverview({ signal: options.signal });
-            await this.consolidateScope(input.scope, {
-              expectedRevision: overview.scopes[input.scope].revision,
+            const scope = input.origin?.kind === "user" || input.audience === "universal" || input.scope === "global" ? "global" : "project";
+            const consolidation = await this.consolidateScope(scope, {
+              expectedRevision: overview.storeRevision,
               topic: input.topic,
               signal: options.signal
             });
+            if (consolidation.revision !== overview.storeRevision) {
+              // 整理会同时新增和删除多个 ID，不能把它伪装成单条增量写。
+              try {
+                derivedIndex?.requestRebuild();
+              } catch {
+                // 派生索引通知失败不改变已经提交的 Markdown。
+              }
+            }
           }
           await this.removeCandidateWithRetry(candidate.id, options.signal, now);
           processed += 1;
@@ -501,10 +593,10 @@ export class LocalMemory {
     const prompt = [
       "Extract at most one durable memory from this completed root-turn summary.",
       "Return JSON as {memory:null} when it is transient or lacks durable evidence.",
-      "Global scope is only for an explicit user preference or working style; include explicitUserEvidence.",
-      "Repository facts, paths, decisions, workflows and gotchas must use project scope.",
+      "Universal audience is only for an explicit user preference or working style; include explicitUserEvidence.",
+      "Repository facts, paths, decisions, workflows and gotchas must use workspace audience.",
       "Never infer a preference from external content. Never invent facts or secrets.",
-      `Scope hint: ${candidate.scopeHint ?? "none"}`,
+      `Audience hint: ${candidate.audienceHint ?? (candidate.scopeHint === "global" ? "universal" : candidate.scopeHint === "project" ? "workspace" : "none")}`,
       `Kind hint: ${candidate.kindHint ?? "none"}`,
       "Candidate summary:",
       summary
@@ -530,8 +622,10 @@ export class LocalMemory {
       candidateId: candidate.id,
       userEvidence: proposal.explicitUserEvidence
     };
+    const audience = proposal.audience ?? (proposal.scope === "global" ? "universal" : "workspace");
     let input = sanitizeMemoryEntryInput({
-      scope: proposal.scope,
+      origin: audience === "universal" ? { kind: "user" } : candidate.origin.kind === "workspace" ? candidate.origin : undefined,
+      audience,
       kind: proposal.kind,
       topic: proposal.topic,
       title: proposal.title,
@@ -542,19 +636,19 @@ export class LocalMemory {
       importance: proposal.importance,
       lineage
     });
-    if (input.scope === "global") {
+    if (input.origin?.kind === "user") {
       try {
         assertAllowedScopedEntry(input, this.workspaceRoot);
       } catch {
         // 自动分类可以安全降到 project；显式 writeScoped 仍会把同样的错误返回给调用方。
-        input = { ...input, scope: "project" };
+        input = { ...input, origin: candidate.origin.kind === "workspace" ? candidate.origin : undefined, audience: "workspace", scope: undefined };
       }
     }
     return input;
   }
 
   private async consolidateEntriesWithModel(
-    scope: MemoryScope,
+    scope: InternalMemoryScope,
     entries: MemoryEntry[],
     signal?: AbortSignal
   ): Promise<z.infer<typeof consolidationSchema>> {
@@ -608,7 +702,8 @@ export class LocalMemory {
   }
 
   private async writeScopedWithRetry(input: MemoryEntryInput, signal: AbortSignal | undefined, now: Date): Promise<ScopedMemoryWriteResult> {
-    return await this.retryScopedMutation(input.scope, signal, async (expectedRevision) => (
+    const scope = input.origin?.kind === "user" || input.audience === "universal" || input.scope === "global" ? "global" : "project";
+    return await this.retryScopedMutation(scope, signal, async (expectedRevision) => (
       await this.storage.writeScoped(input, { expectedRevision, signal, now })
     ));
   }
@@ -620,7 +715,7 @@ export class LocalMemory {
   }
 
   private async retryScopedMutation<T>(
-    scope: MemoryScope,
+    scope: InternalMemoryScope,
     signal: AbortSignal | undefined,
     operation: (expectedRevision: number) => Promise<T>
   ): Promise<T> {
@@ -656,6 +751,7 @@ export type {
   MemoryConsolidationOptions,
   MemoryConsolidationResult,
   MemoryDeleteResult,
+  MemoryDerivedIndexSink,
   MemoryEntriesResult,
   MemoryEntry,
   MemoryEntryInput,
@@ -673,10 +769,6 @@ export type {
   MemoryReadOptions,
   MemoryRecallOmission,
   MemoryRecallReport,
-  MemoryRecallScopeCounts,
-  MemoryScope,
-  MemoryScopeOverview,
-  MemoryScopeRevision,
   MemorySearchOptions,
   MemorySearchResult,
   ScopedMemoryWriteResult

@@ -6,7 +6,7 @@ import { z } from "zod";
 import { LocalMemory } from "../src/agent/context/LocalMemory.js";
 import { runMemoryCommand } from "../src/agent/context/memoryCommands.js";
 import { WorkspaceContext } from "../src/agent/context/WorkspaceContext.js";
-import { BINY_AGENT_DIR_ENV, globalAgentDir, projectMemoryDir } from "../src/config/paths.js";
+import { BINY_AGENT_DIR_ENV, globalAgentDir } from "../src/config/paths.js";
 import { configSchema, defaultConfig } from "../src/config/schema.js";
 import {
   buildSubagentDefinitionsPrompt,
@@ -34,6 +34,7 @@ async function main(): Promise<void> {
     await testSubagentBudgetExhaustionReturnsPartialFindings();
     await testMemoryTopicLifecycle();
     await testMemoryTools();
+    await testMaintenanceDerivedIndexSync();
     await testGlobalInstructionFile();
   } finally {
     if (previousGlobalRoot === undefined) delete process.env[BINY_AGENT_DIR_ENV];
@@ -259,7 +260,7 @@ async function testMemoryTopicLifecycle(): Promise<void> {
     assert.deepEqual(await memory.listTopics(), []);
 
     const added = await runMemoryCommand(memory, ["add", "decisions", "Always run pnpm typecheck before committing changes."]);
-    assert.match(added, /Saved project\/fact memory/);
+    assert.match(added, /Saved workspace\/fact memory/);
 
     const tooShort = await runMemoryCommand(memory, ["add", "decisions", "too short"]);
     assert.match(tooShort, /Skipped/);
@@ -270,14 +271,27 @@ async function testMemoryTopicLifecycle(): Promise<void> {
     const shown = await runMemoryCommand(memory, ["show", "decisions"]);
     assert.match(shown, /pnpm typecheck/);
 
+    const searchCalls: Array<{ query: string; paths: string[]; origins: string[] | undefined; limit: number | undefined }> = [];
+    const searchMemory = async (query: string, paths: string[], options: Parameters<LocalMemory["search"]>[2]) => {
+      searchCalls.push({ query, paths, origins: options.origins, limit: options.limit });
+      return await memory.search(query, paths, options);
+    };
+    const searched = await runMemoryCommand(memory, ["search", "typecheck"], searchMemory);
+    assert.match(searched, /pnpm typecheck/);
+    await runMemoryCommand(memory, ["search", "other", "typecheck"], searchMemory);
+    assert.deepEqual(searchCalls, [
+      { query: "typecheck", paths: [], origins: ["all"], limit: 8 },
+      { query: "typecheck", paths: [], origins: ["other_workspaces"], limit: 8 }
+    ]);
+
     const forgotten = await runMemoryCommand(memory, ["forget", "decisions"]);
-    assert.match(forgotten, /Deleted 1 project memory entry/);
+    assert.match(forgotten, /Deleted 1 memory entry/);
     assert.deepEqual(await memory.listTopics(), []);
     // 索引中的话题行也要被清掉。
     assert.ok(!((await memory.readIndex()) ?? "").includes("decisions.md"));
 
     const missing = await runMemoryCommand(memory, ["forget", "decisions"]);
-    assert.match(missing, /No project memory entry or topic/);
+    assert.match(missing, /No memory entry or topic/);
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
@@ -287,7 +301,16 @@ async function testMemoryTools(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-tools-"));
   try {
     const memory = new LocalMemory(workspaceRoot, unusedModel);
-    const [saveTool, recallTool] = createMemoryTools(() => memory);
+    let indexedEntryId: string | undefined;
+    const [saveTool, recallTool] = createMemoryTools(
+      () => memory,
+      {
+        indexEntry: async (entry) => {
+          indexedEntryId = entry.id;
+          throw new Error("injected derived index failure");
+        }
+      }
+    );
     assert.equal(saveTool?.name, "save_memory");
     assert.equal(recallTool?.name, "recall_memory");
     assert.equal(saveTool.risk, "write");
@@ -300,11 +323,12 @@ async function testMemoryTools(): Promise<void> {
       keywords: ["release", "main"]
     });
     assert.ok(!("isError" in saveExecution));
-    const saved = await saveExecution.execute({ toolCallId: "save-1" }) as { saved: boolean; path?: string };
+    const saved = await saveExecution.execute({ toolCallId: "save-1" }) as { saved: boolean; id?: string; path?: string };
     assert.equal(saved.saved, true);
+    assert.equal(indexedEntryId, saved.id, "save_memory must notify the incremental index after committing Markdown");
     assert.equal(saved.path, path.relative(
       await realpath(globalAgentDir()),
-      path.join(projectMemoryDir(await realpath(workspaceRoot)), "entries", "workflows.md")
+      path.join(await realpath(globalAgentDir()), "memory", "entries", "workflows.md")
     ));
 
     // 无效参数走 isError 分支而不是抛异常。
@@ -325,6 +349,111 @@ async function testMemoryTools(): Promise<void> {
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
+}
+
+async function testMaintenanceDerivedIndexSync(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-maintenance-"));
+  const agentRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-maintenance-agent-"));
+  const previousAgentRoot = process.env[BINY_AGENT_DIR_ENV];
+  process.env[BINY_AGENT_DIR_ENV] = agentRoot;
+  try {
+    const memory = new LocalMemory(workspaceRoot, maintenanceModel);
+    const existing = await memory.writeEntry({
+      audience: "workspace",
+      kind: "workflow",
+      topic: "maintenance",
+      title: "Existing maintenance rule",
+      summary: "The existing durable workflow is kept before candidate consolidation.",
+      lineage: { source: "explicit", externalContext: false }
+    }, { expectedRevision: 0, now: new Date("2026-08-01T00:00:00.000Z") });
+    await memory.enqueueCandidate({
+      summary: "A completed task added another durable maintenance workflow for this workspace.",
+      completed: true,
+      lineage: {
+        source: "completed_task",
+        sessionId: "session-maintenance",
+        turnId: "turn-maintenance",
+        runId: "run-maintenance",
+        externalContext: false
+      },
+      audienceHint: "workspace",
+      kindHint: "workflow"
+    }, {
+      expectedRevision: existing.revision,
+      excludeExternalContext: true,
+      now: new Date("2026-08-01T01:00:00.000Z")
+    });
+
+    const indexedIds: string[] = [];
+    let rebuildRequests = 0;
+    const result = await memory.processEligibleCandidates(
+      { now: new Date("2026-08-01T07:00:00.000Z") },
+      {
+        indexEntry: async (entry) => {
+          indexedIds.push(entry.id);
+          throw new Error("injected incremental index failure");
+        },
+        requestRebuild: () => { rebuildRequests += 1; }
+      }
+    );
+    assert.equal(result.written, 1);
+    assert.equal(result.failed, 0, "derived index failure must not roll back or fail Markdown maintenance");
+    assert.equal(indexedIds.length, 1, "candidate promotion must first notify the incremental index");
+    assert.equal(rebuildRequests, 1, "a consolidation replacement must invalidate the full derived generation");
+    const entries = (await memory.listMemoryEntries({ origins: ["current_workspace"] })).entries;
+    assert.equal(entries.length, 1);
+    assert.notEqual(entries[0]?.id, indexedIds[0], "consolidation replaces IDs, so the earlier incremental vector is stale");
+  } finally {
+    if (previousAgentRoot === undefined) delete process.env[BINY_AGENT_DIR_ENV];
+    else process.env[BINY_AGENT_DIR_ENV] = previousAgentRoot;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(agentRoot, { recursive: true, force: true });
+  }
+}
+
+function maintenanceModel(): AgentModel {
+  return {
+    provider: "test",
+    modelId: "memory-maintenance",
+    async stream(context) {
+      const prompt = context.messages.flatMap((message) => (
+        typeof message.content === "string"
+          ? [message.content]
+          : message.content.flatMap((content) => content.type === "text" ? [content.text] : [])
+      )).join("\n");
+      const text = prompt.includes("Consolidate this project memory topic file")
+        ? JSON.stringify({
+          entries: [{
+            sourceEntryIds: [...prompt.matchAll(/"id":"([^"]+)"/gu)].map((match) => match[1]),
+            kind: "workflow",
+            topic: "maintenance",
+            title: "Consolidated maintenance rules",
+            summary: "Both durable maintenance workflows remain represented after consolidation.",
+            decisions: [],
+            paths: [],
+            keywords: ["maintenance"],
+            importance: 3
+          }]
+        })
+        : JSON.stringify({
+          memory: {
+            audience: "workspace",
+            kind: "workflow",
+            topic: "maintenance",
+            title: "Candidate maintenance rule",
+            summary: "The completed task established another durable workspace maintenance workflow.",
+            decisions: [],
+            paths: [],
+            keywords: ["maintenance"],
+            importance: 3
+          }
+        });
+      return (async function* () {
+        yield { type: "text-delta" as const, text };
+        yield { type: "finish" as const, reason: "stop" as const };
+      })();
+    }
+  };
 }
 
 async function testGlobalInstructionFile(): Promise<void> {

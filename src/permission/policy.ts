@@ -177,22 +177,22 @@ export function analyzePermissionRequest(input: AnalyzePermissionInput): Permiss
   }
 
   if (input.toolName === "recall_memory") {
-    // 记忆检索只读取全局 Biny 目录中当前项目分区内经过校验的文件。
+    // 记忆检索只读取经过校验的单一来源感知记忆库；不会修改 Markdown 权威数据。
     return {
       ...base(input),
       actionType: "read",
       riskLevel: "low",
-      reason: "searches the durable local project memory store"
+      reason: "searches the source-aware durable memory library"
     };
   }
 
   if (input.toolName === "save_memory") {
-    // 只写入全局 Biny 目录中的当前项目分区（自动记忆抽取本就在无确认路径上写同一存储）。
+    // audience 明确区分 workspace 与 universal；两者共享同一受校验的 Markdown 权威库。
     return {
       ...base(input),
       actionType: "write",
       riskLevel: "low",
-      reason: "saves a redacted note to the durable local project memory store"
+      reason: "saves a redacted note to the source-aware durable memory library"
     };
   }
 

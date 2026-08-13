@@ -50,16 +50,32 @@ export class ProviderDefinitionRegistry {
 
 const definitions: ProviderDefinition[] = [
   definition("deepseek", "https://api.deepseek.com", "DEEPSEEK_API_KEY", { reasoningProtocol: "deepseek", modelDefaults: reasoningProviderDefaults() }),
-  definition("openai", "https://api.openai.com/v1", "OPENAI_API_KEY", { reasoningProtocol: "openai", modelDefaults: reasoningProviderDefaults() }),
+  definition("openai", "https://api.openai.com/v1", "OPENAI_API_KEY", {
+    reasoningProtocol: "openai",
+    embedding: openAiEmbeddingDefinition(),
+    modelDefaults: reasoningProviderDefaults()
+  }),
   definition("anthropic", "https://api.anthropic.com", "ANTHROPIC_API_KEY", { protocol: "anthropic", api: "anthropic_messages", reasoningProtocol: "anthropic", modelDefaults: reasoningProviderDefaults() }),
   definition("claude-subscription", "https://api.anthropic.com", undefined, { protocol: "anthropic", api: "anthropic_messages", authModes: ["oauth-bearer"], reasoningProtocol: "anthropic", modelDefaults: reasoningProviderDefaults() }),
   definition("openai-codex", "https://chatgpt.com/backend-api/codex", undefined, { api: "responses", authModes: ["oauth-bearer"], reasoningProtocol: "openai", modelDefaults: responseReasoningProviderDefaults() }),
-  definition("gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", { reasoningProtocol: "google", modelDefaults: reasoningProviderDefaults() }),
-  definition("google-native", "https://generativelanguage.googleapis.com/v1beta", "GEMINI_API_KEY", { api: "google_generative_ai", fetchModels: fetchGoogleModels, reasoningProtocol: "google", modelDefaults: reasoningProviderDefaults() }),
+  definition("gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", {
+    reasoningProtocol: "google",
+    embedding: geminiOpenAiEmbeddingDefinition(),
+    modelDefaults: reasoningProviderDefaults()
+  }),
+  definition("google-native", "https://generativelanguage.googleapis.com/v1beta", "GEMINI_API_KEY", {
+    api: "google_generative_ai",
+    embedding: googleEmbeddingDefinition(),
+    fetchModels: fetchGoogleModels,
+    reasoningProtocol: "google",
+    modelDefaults: reasoningProviderDefaults()
+  }),
   definition("kimi", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", { reasoningProtocol: "moonshotai", modelDefaults: reasoningProviderDefaults() }),
   definition("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY", { reasoningProtocol: "alibaba", modelDefaults: reasoningProviderDefaults() }),
   definition("ollama", "http://127.0.0.1:11434/v1", undefined, { requiresApiKey: false }),
-  definition("openai-compatible", undefined, undefined),
+  definition("openai-compatible", undefined, undefined, {
+    embedding: { wire: "openai-compatible", models: [] }
+  }),
   definition("xai", "https://api.x.ai/v1", "XAI_API_KEY", { reasoningProtocol: "openai", modelDefaults: reasoningProviderDefaults() }),
   definition("mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
   definition("groq", "https://api.groq.com/openai/v1", "GROQ_API_KEY"),
@@ -114,6 +130,7 @@ function definition(
     requiresApiKey: overrides.requiresApiKey ?? true,
     authModes: overrides.authModes ?? ["api-key"],
     reasoningProtocol: overrides.reasoningProtocol,
+    embedding: overrides.embedding,
     modelDefaults: {
       capabilities: {
         tools: true,
@@ -130,6 +147,50 @@ function definition(
     },
     fetchModels: overrides.fetchModels,
     filterModels: overrides.filterModels
+  };
+}
+
+function openAiEmbeddingDefinition(): NonNullable<ProviderDefinition["embedding"]> {
+  return {
+    wire: "openai-compatible",
+    models: [
+      {
+        id: "text-embedding-3-small",
+        displayName: "text-embedding-3-small",
+        dimensions: 1_536,
+        recommendedThresholds: { currentWorkspace: 0.3, crossWorkspace: 0.5 }
+      },
+      {
+        id: "text-embedding-3-large",
+        displayName: "text-embedding-3-large",
+        dimensions: 3_072,
+        recommendedThresholds: { currentWorkspace: 0.3, crossWorkspace: 0.5 }
+      }
+    ]
+  };
+}
+
+function googleEmbeddingDefinition(): NonNullable<ProviderDefinition["embedding"]> {
+  return {
+    wire: "google-generative-ai",
+    models: [{
+      id: "gemini-embedding-001",
+      displayName: "Gemini Embedding 001",
+      dimensions: 3_072,
+      recommendedThresholds: { currentWorkspace: 0.35, crossWorkspace: 0.55 }
+    }]
+  };
+}
+
+function geminiOpenAiEmbeddingDefinition(): NonNullable<ProviderDefinition["embedding"]> {
+  return {
+    wire: "openai-compatible",
+    models: [{
+      id: "gemini-embedding-001",
+      displayName: "Gemini Embedding 001",
+      dimensions: 3_072,
+      recommendedThresholds: { currentWorkspace: 0.35, crossWorkspace: 0.55 }
+    }]
   };
 }
 
