@@ -25,24 +25,17 @@
 
 ## 快速开始
 
-### 桌面端
-
-Desktop 会记住上次打开的项目、会话和主界面；重新启动后可回到聊天正文、自动化面板或插件页。搜索、设置等临时浮层不会自动重开，中断任务也仍需手动确认恢复。
-
-从 [Releases](https://github.com/Thinkya1/Biny/releases) 下载对应架构的 DMG，打开后在 **设置 → 模型** 中连接模型，再选择项目开始任务。
-
-### 终端
-
-需要 Node.js LTS 和 pnpm 10：
+### 桌面端调试启动
 
 ```bash
-git clone https://github.com/Thinkya1/Biny.git
-cd Biny && pnpm install
-pnpm dev -- init
-export DEEPSEEK_API_KEY="你的 key"
-pnpm dev
+pnpm desktop:dev
 ```
 
+### TUI 调试启动
+
+```bash
+pnpm dev -- tui
+```
 
 ## 配置
 
@@ -85,24 +78,6 @@ CLI/TUI 的模型请求会自动读取 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROX
 }
 ```
 
-### 记忆 v3
-
-默认权威记忆库位于 `~/.biny/agent/memory/`；设置 `BINY_AGENT_DIR` 后改用该目录下的 `memory/`。结构化条目保存在 `entries/*.md`，`MEMORY.md` 是可读索引，整个库共用一个 revision：
-
-- `user` 来源表示跨项目通用的偏好或工作方式，写入时需要用户明确表达的证据；
-- `workspace` 来源表示工作区事实、决策、流程和踩坑，只保存 24 位工作区 ID 与名称快照，不把绝对项目路径写进来源字段；
-- “全部、当前项目、通用偏好、其他项目”只是同一库的视图过滤，不对应不同物理目录。
-
-TUI 的 `/memory` 也使用同一语义：`list`、`show`、`search` 和 `forget` 接受 `all | current | user | other` 来源视图，`add` 接受 `workspace | universal` audience 且默认写入当前 workspace。Agent 的 `save_memory` 工具使用相同 audience，`recall_memory` 从单一库检索。
-
-首次访问 v3 库时，Biny 会把旧 `memory/global/` 与 `memory/<workspace-id>/` 条目迁入 `entries/`。旧目录原样保留为冷备份；迁移成功后不再双写，也不会继续把旧目录作为读取路径。
-
-语义检索是可选增强。Biny 会把词法结果与可用的向量结果混合排序，并按 Embedding 模型指纹分别保存当前项目和跨项目阈值。查询重写、模型请求或向量索引失败，以及模型未下载、指纹或维度不匹配时，不会静默切换另一种 Embedding，而是回退到本地词法检索；此时自动召回只使用通用偏好和当前项目，手动搜索仍可浏览其他来源。真正注入上下文的条目才会增加召回次数。
-
-向量保存在同目录的 `.memory-index.sqlite` 派生索引中，可以重建而不改变 Markdown。两个内置本地模型 `multilingual-e5-small` 和 `paraphrase-multilingual-MiniLM-L12-v2` 的权重不包含在安装包内，只有用户显式下载后才能离线使用。选择云端 Embedding 时，设置页会展示 endpoint，并要求按 provider/endpoint 确认一次隐私提示：重建索引会上传待索引的记忆内容，之后的语义检索会上传查询；拒绝或请求失败时仍按上述规则降级。
-
-普通 Agent 回合在模型自然停止后直接结束；工具调用完成、权限审批和取消分别由各自的运行层处理。工作区发生修改不会自动触发 `typecheck`、`test`、`lint` 或 `build`，独立验收只在调用方明确使用 harness 时运行。运行时提示词会要求模型先识别任务目标、约束和足够完成的标准：范围内的本地操作按当前权限模式执行，外部副作用、破坏性或高成本操作，以及超出请求范围的动作需要审批或澄清。工具调用次数、重复动作和 provider step 仍由运行时预算保护。
-
 ## 开发
 
 ```bash
@@ -111,5 +86,3 @@ pnpm typecheck
 pnpm lint
 pnpm build
 ```
-
-桌面端开发可使用 `pnpm desktop:dev`，实现和 IPC 说明见 [src/desktop/README.md](./src/desktop/README.md)。欢迎通过 Issue 或 PR 反馈，请勿提交 API key、token 或其他本地敏感配置。
