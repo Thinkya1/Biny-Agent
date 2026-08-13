@@ -411,7 +411,7 @@
 
 /*
  * 侧栏块和聊天主区是两个独立的 flex sibling。DOM 仍把主区放在前面，
- * 让 floating chrome 位于主区拖拽区之后；order 只负责恢复视觉上的左侧布局。
+ * 让 floating chrome 位于主区顶部 chrome 之后；order 只负责恢复视觉上的左侧布局。
  * pin spacer 与 aside 共用这个块，固定 peek 切回流内时不会再产生两套布局边界。
  */
 .cindy-sidebar-block {
@@ -972,8 +972,9 @@
   min-height: 0;
   flex: 1 1 0;
   background: var(--cindy-surface);
-  -webkit-app-region: drag;
-  app-region: drag;
+  /* 内容区默认不可拖动；窗口拖动只由顶部 chrome 的明确区域提供，避免新增控件漏标 no-drag 后失去点击。 */
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .cindy-sidebar {
@@ -2209,8 +2210,8 @@
   overflow: hidden;
   background: var(--cindy-surface);
   color: var(--cindy-text);
-  -webkit-app-region: drag;
-  app-region: drag;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .cindy-workspace-home {
@@ -3239,8 +3240,8 @@
   min-height: 0;
   flex: 1 1 auto;
   overflow: hidden;
-  -webkit-app-region: drag;
-  app-region: drag;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .cindy-chat-scroll {

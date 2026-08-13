@@ -254,9 +254,9 @@ export const Composer = memo(function Composer({
     : undefined;
   const thinkingLevels: ThinkingSelection[] = selectedModel ? modelThinkingSelections(selectedModel) : [];
   const thinkingSelectable = thinkingLevels.length > 1 || thinkingLevels.some((level) => level !== "off");
-  const modelName = selectedModel?.displayName ?? runtimeInfo?.modelLabel ?? "GPT-5.6-Luna";
+  const modelName = selectedModel?.displayName ?? runtimeInfo?.modelLabel ?? "未配置模型";
   const usage = formatContextUsage(contextUsage);
-  const inputDisabled = activeElsewhere || modelSetupRequired || busy;
+  const inputDisabled = activeElsewhere || busy;
   const attachmentCount = attachments.length + pendingAttachments.length;
   const sendDisabled = running
     ? false
@@ -275,25 +275,17 @@ export const Composer = memo(function Composer({
             ? "输入消息或添加附件后发送。"
             : undefined;
   const placeholder = running ? "可以继续补充要求…" : "hi biny";
-  const modelSwitchDisabled = !selectedModel || modelSetupRequired || activeElsewhere || running || busy;
+  const modelSwitchDisabled = activeElsewhere || running || busy;
   const modelSwitchDisabledReason = !project
     ? "请先打开一个项目。"
-    : modelSetupRequired
-      ? "还没有可用的模型连接，请先配置模型。"
-      : activeElsewhere
-        ? "另一个会话正在运行，请先切回该会话。"
-        : running
-          ? "当前对话正在运行，等结束后再切换模型。"
-          : busy
-            ? "当前附件或命令正在处理，请稍候。"
-            : !selectedModel
-              ? "当前没有可用的模型。"
-              : undefined;
-  const permissionDisabledReason = !project
-    ? "请先打开一个项目。"
-    : modelSetupRequired
-      ? "还没有可用的模型连接，请先配置模型。"
-      : undefined;
+    : activeElsewhere
+      ? "另一个会话正在运行，请先切回该会话。"
+      : running
+        ? "当前对话正在运行，等结束后再切换模型。"
+        : busy
+          ? "当前附件或命令正在处理，请稍候。"
+          : undefined;
+  const permissionDisabledReason = !project ? "请先打开一个项目。" : undefined;
 
   const handleInputChange = (value: string): void => {
     setInput(value);
@@ -338,8 +330,8 @@ export const Composer = memo(function Composer({
             />
             <ComposerActionButton
               className="cindy-composer-add"
-              disabled={!project || busy || running || modelSetupRequired}
-              disabledReason={!project ? "请先打开一个项目。" : modelSetupRequired ? "还没有可用的模型连接，请先配置模型。" : running ? "当前对话正在运行，请等待结束后再添加附件。" : busy ? "当前附件或命令正在处理，请稍候。" : undefined}
+              disabled={!project || busy || running}
+              disabledReason={!project ? "请先打开一个项目。" : running ? "当前对话正在运行，请等待结束后再添加附件。" : busy ? "当前附件或命令正在处理，请稍候。" : undefined}
               label="添加附件"
               onClick={() => fileInputRef.current?.click()}
               tooltip="添加文件或目录"
@@ -350,7 +342,7 @@ export const Composer = memo(function Composer({
               <ComposerActionButton
                 className="cindy-permission-pill"
                 data-composer-menu="permission"
-                disabled={!project || modelSetupRequired}
+                disabled={!project}
                 disabledReason={permissionDisabledReason}
                 active={menu === "permission"}
                 aria-expanded={menu === "permission"}
@@ -508,6 +500,7 @@ export const Composer = memo(function Composer({
                   const nextModel = models.find((model) => model.alias === alias);
                   void onSwitchModel(alias, nextModel?.defaultThinking ?? currentThinking).catch((modelError) => setError(errorMessage(modelError)));
                 }}
+                onClose={() => setMenu(null)}
                 onConfigureModels={() => {
                   setMenu(null);
                   onConfigureModels();

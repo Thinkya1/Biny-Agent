@@ -19,6 +19,9 @@ import type {
   DesktopSessionDocument,
   DesktopSessionSummary,
   DesktopSessionTreePage,
+  DesktopSettingsCloseRequest,
+  DesktopSettingsCloseResponse,
+  DesktopSettingsSnapshot,
   DesktopSlashResult,
   DesktopThemePreference,
   DesktopWorkspaceDirectory,
@@ -91,6 +94,7 @@ export function App(): React.JSX.Element {
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTargetTab, setSettingsTargetTab] = useState<SettingsTab>();
+  const [settingsCloseRequest, setSettingsCloseRequest] = useState<DesktopSettingsCloseRequest>();
   const [runtimePanelOpen, setRuntimePanelOpen] = useState(false);
   const [page, setPage] = useState<DesktopPage>("chat");
   const [contextBudget, setContextBudget] = useState<ContextBudgetStatus>();
@@ -103,7 +107,6 @@ export function App(): React.JSX.Element {
   const [navigationState, setNavigationState] = useState<DesktopNavigationState>(() => createNavigationState());
   const loadRequestRef = useRef(0);
   const menuActionRef = useRef<(action: DesktopMenuAction) => void>(() => undefined);
-  const modelSetupWasRequiredRef = useRef(false);
 
   const persistSidebarWidth = useCallback((width: number): void => {
     void window.biny.setSidebarWidth(width);
@@ -129,6 +132,17 @@ export function App(): React.JSX.Element {
     setSettingsTargetTab(undefined);
   }, []);
 
+  const resolveSettingsCloseRequest = useCallback(async (
+    requestId: string,
+    response: DesktopSettingsCloseResponse
+  ): Promise<void> => {
+    try {
+      await window.biny.respondSettingsCloseRequest(requestId, response);
+    } finally {
+      setSettingsCloseRequest((current) => current?.requestId === requestId ? undefined : current);
+    }
+  }, []);
+
   const openSearch = useCallback((): void => {
     setSearchOpen(true);
   }, []);
@@ -149,17 +163,6 @@ export function App(): React.JSX.Element {
     selectedRef.current = selectedSessionId;
     projectRef.current = workspace?.project.id;
   }, [selectedSessionId, workspace?.project.id]);
-
-  useEffect(() => {
-    const required = Boolean(workspace?.requiresModelConfiguration);
-    if (required) {
-      modelSetupWasRequiredRef.current = true;
-      openSettings("模型");
-    } else if (modelSetupWasRequiredRef.current) {
-      modelSetupWasRequiredRef.current = false;
-      closeSettings();
-    }
-  }, [closeSettings, openSettings, workspace?.requiresModelConfiguration]);
 
   const commitNavigation = useCallback((next: DesktopNavigationState): void => {
     navigationRef.current = next;
@@ -221,30 +224,27 @@ export function App(): React.JSX.Element {
 
   const {
     addMemoryEntry,
+    cancelMemoryEmbeddingDownload,
+    cancelMemoryEmbeddingRebuild,
     cancelModelLogin,
     clearMemory,
     compactMemory,
-    completeModelLogin,
     deleteMemoryEntry,
+    deleteMemoryEmbeddingModel,
+    downloadMemoryEmbeddingModel,
     fetchModelCatalog,
     loadCookieJarStatus,
+    loadMemoryEmbeddingStatus,
     loadMemoryOverview,
-    loadPersonalizationOverview,
-    loadWebSearchSettings,
     openBrowser,
-    removeModelConfiguration,
-    saveMemorySettings,
-    saveModelConfiguration,
-    saveChatPersonalization,
-    savePersonalizationSettings,
-    saveWebSearchSettings,
+    rebuildMemoryEmbeddingIndex,
     searchMemory,
     startModelLogin,
     switchModel,
-    testModelConfiguration
+    testModelConfiguration,
+    updateMemoryEntry
   } = useDesktopSettingsActions({
     mergeProjectSnapshot,
-    mergeWorkspaceProject,
     projectIdRef: projectRef,
     setWorkspace
   });
@@ -390,6 +390,11 @@ export function App(): React.JSX.Element {
   }), [openNavigationTarget]);
 
   useEffect(() => window.biny.onMenuAction((action) => menuActionRef.current(action)), []);
+
+  useEffect(() => window.biny.onSettingsCloseRequest((request) => {
+    setSettingsCloseRequest(request);
+    setSettingsOpen(true);
+  }), []);
 
   const openProject = useCallback(async (): Promise<void> => {
     try {
@@ -670,7 +675,6 @@ export function App(): React.JSX.Element {
 
   const changeThemePreference = useCallback((theme: DesktopThemePreference): void => {
     setThemePreference(theme);
-    void window.biny.setThemePreference(theme).catch(() => undefined);
   }, []);
 
   // 字号通过 --app-font-size 驱动样式表里的 --font-scale 等比缩放全部文字；
@@ -684,8 +688,15 @@ export function App(): React.JSX.Element {
 
   const changeFontPreference = useCallback((font: DesktopFontPreference): void => {
     setFontPreference(font);
-    void window.biny.setFontPreference(font).catch(() => undefined);
   }, []);
+
+  const settingsCommitted = useCallback((snapshot: DesktopSettingsSnapshot): void => {
+    setThemePreference(snapshot.themePreference);
+    setFontPreference(snapshot.fontPreference);
+    void window.biny.refreshProject(snapshot.projectId)
+      .then(mergeProjectSnapshot)
+      .catch((error: unknown) => setToast(errorMessage(error)));
+  }, [mergeProjectSnapshot]);
 
   const toggleProjectPinned = useCallback(async (projectId: string, pinned: boolean): Promise<void> => {
     try {
@@ -845,35 +856,35 @@ export function App(): React.JSX.Element {
             sessions={sidebarSessions}
           />
           <SettingsOverlay
+            closeRequest={settingsCloseRequest}
             modelSetupRequired={Boolean(workspace?.requiresModelConfiguration)}
             onAddMemoryEntry={addMemoryEntry}
+            onCancelMemoryEmbeddingDownload={cancelMemoryEmbeddingDownload}
+            onCancelMemoryEmbeddingRebuild={cancelMemoryEmbeddingRebuild}
             onCancelModelLogin={cancelModelLogin}
             onClearCookies={async () => await window.biny.clearCookies()}
             onClearMemory={clearMemory}
             onClose={closeSettings}
             onCompactMemory={compactMemory}
-            onCompleteModelLogin={completeModelLogin}
             onDeleteMemoryEntry={deleteMemoryEntry}
+            onDeleteMemoryEmbeddingModel={deleteMemoryEmbeddingModel}
+            onDownloadMemoryEmbeddingModel={downloadMemoryEmbeddingModel}
+            onUpdateMemoryEntry={updateMemoryEntry}
             onExportCookies={async () => await window.biny.exportCookies()}
             onFetchModelCatalog={fetchModelCatalog}
             onFontPreference={changeFontPreference}
+            onSettingsCommitted={settingsCommitted}
+            onResolveCloseRequest={resolveSettingsCloseRequest}
             onImportCookies={async () => await window.biny.importCookies()}
+            onNotify={setToast}
             onLoadCookieJarStatus={loadCookieJarStatus}
             onLoadMemoryOverview={loadMemoryOverview}
-            onLoadPersonalizationOverview={loadPersonalizationOverview}
-            onLoadWebSearchSettings={loadWebSearchSettings}
+            onLoadMemoryEmbeddingStatus={loadMemoryEmbeddingStatus}
             onOpenBrowser={openBrowser}
             onOpenExternal={async (url) => await window.biny.openExternal(url)}
-            onRemoveModelConfiguration={removeModelConfiguration}
-            onSaveMemorySettings={saveMemorySettings}
-            onSaveModelConfiguration={saveModelConfiguration}
-            onSaveChatPersonalization={saveChatPersonalization}
-            onSavePersonalizationSettings={savePersonalizationSettings}
-            onSaveWebSearchSettings={saveWebSearchSettings}
+            onRebuildMemoryEmbeddingIndex={rebuildMemoryEmbeddingIndex}
             onSearchMemory={searchMemory}
-            onSkipModelSetup={closeSettings}
             onStartModelLogin={startModelLogin}
-            onSwitchModel={switchModel}
             onTestModelConfiguration={testModelConfiguration}
             onThemePreference={changeThemePreference}
             open={settingsOpen}

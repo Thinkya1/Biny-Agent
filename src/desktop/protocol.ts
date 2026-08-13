@@ -10,7 +10,12 @@
 import type { InteractiveAgentRunMode } from "../agent/AgentSession.js";
 import type { ModelCatalogEntry } from "../ai/types.js";
 import type { ModelApiBackend, ModelCompatibility, ModelLimits, ModelProvider, ThinkingLevelMap, WebSearchConfig } from "../config/schema.js";
+import type { EmbeddingModelDescriptor } from "../llm/embedding/types.js";
+import type { LocalEmbeddingModelId } from "../llm/embedding/types.js";
+import type { MemoryEmbeddingRuntimeStatus } from "../agent/context/MemoryEmbeddingService.js";
+import type { MemoryMaintenanceStatus } from "../agent/context/memoryTypes.js";
 import type { ModelChoice, ModelRuntimeInfo, ThinkingSelection } from "../llm/ModelManager.js";
+import type { MemoryPolicy } from "../personalization/index.js";
 import type { PermissionMode, PermissionResult } from "../permission/PermissionManager.js";
 import type { AgentHostEvent, AgentRuntimeUpdate, InteractiveRuntimeSnapshot } from "../runtime/agentEvents.js";
 import { slashCommandsForSurface, type SlashCommandDefinition } from "../runtime/commandRegistry.js";
@@ -73,11 +78,26 @@ export const desktopIpc = {
   saveChatPersonalization: "desktop:personalization:save-chat",
   memoryOverview: "desktop:memory:overview",
   saveMemorySettings: "desktop:memory:save-settings",
+  settingsSnapshot: "desktop:settings:snapshot",
+  saveSettings: "desktop:settings:save",
+  stageSettingsCredential: "desktop:settings:credential:stage",
+  completeModelLoginForSettings: "desktop:settings:model-login:complete",
+  releaseSettingsCredentials: "desktop:settings:credential:release",
+  settingsDraftState: "desktop:settings:draft-state",
+  settingsCloseRequest: "desktop:settings:close-request",
+  settingsCloseResponse: "desktop:settings:close-response",
   searchMemory: "desktop:memory:search",
   addMemoryEntry: "desktop:memory:add",
+  updateMemoryEntry: "desktop:memory:update",
   deleteMemoryEntry: "desktop:memory:delete-entry",
   clearMemory: "desktop:memory:clear",
   compactMemory: "desktop:memory:compact",
+  memoryEmbeddingStatus: "desktop:memory:embedding-status",
+  downloadMemoryEmbeddingModel: "desktop:memory:embedding-download",
+  cancelMemoryEmbeddingDownload: "desktop:memory:embedding-cancel-download",
+  deleteMemoryEmbeddingModel: "desktop:memory:embedding-delete",
+  rebuildMemoryEmbeddingIndex: "desktop:memory:embedding-rebuild",
+  cancelMemoryEmbeddingRebuild: "desktop:memory:embedding-cancel-rebuild",
   saveAttachment: "desktop:attachment:save",
   resolveDroppedFile: "desktop:attachment:resolve-path",
   listWorkspaceDirectory: "desktop:file:list-directory",
@@ -333,6 +353,8 @@ export interface DesktopModelConfigurationInput {
   model: string;
   baseUrl?: string;
   apiKey?: string;
+  /** 主进程暂存的 API Key 句柄；与 apiKey 二选一，句柄正文不会进入 IPC 返回值或 journal。 */
+  apiKeyHandle?: string;
   apiKeyEnv?: string;
   requiresApiKey?: boolean;
   supportsTools: boolean;
@@ -423,9 +445,28 @@ export interface DesktopWebSearchSettingsInput {
   provider: DesktopWebSearchProvider;
   /** undefined 保留已存密钥；空字符串表示清除。 */
   apiKey?: string;
+  /** 统一事务可使用主进程暂存句柄，避免明文进入 journal。 */
+  apiKeyHandle?: string;
   apiKeyEnv?: string;
   timeoutMs: number;
   maxResults: number;
+}
+
+export interface DesktopStagedSettingsCredential {
+  handle: string;
+  kind: "api-key" | "oauth-login";
+  expiresAt: string;
+  provider?: DesktopModelLoginProvider;
+}
+
+export interface DesktopStagedModelLoginResult extends DesktopStagedSettingsCredential {
+  kind: "oauth-login";
+  provider: DesktopModelLoginProvider;
+  models: Array<{
+    id: string;
+    displayName: string;
+    supportsThinking: boolean;
+  }>;
 }
 
 /**
@@ -489,9 +530,13 @@ export interface DesktopPersonalizationSettingsInput {
   memory: DesktopMemorySettings;
 }
 
-export type DesktopMemoryScope = "global" | "project";
+export type DesktopMemoryAudience = "workspace" | "universal";
+export type DesktopMemoryOriginFilter = "all" | "current_workspace" | "user" | "other_workspaces";
+export type DesktopMemoryOrigin =
+  | { kind: "user" }
+  | { kind: "workspace"; workspaceId: string; workspaceName: string };
 export type DesktopMemoryKind = "preference" | "working_style" | "fact" | "decision" | "workflow" | "gotcha";
-export type DesktopMemorySource = "explicit" | "completed_task" | "candidate" | "migration" | "consolidation";
+export type DesktopMemorySource = "explicit" | "explicit_edit" | "completed_task" | "candidate" | "migration" | "consolidation";
 
 export interface DesktopMemoryLineage {
   source: DesktopMemorySource;
@@ -506,19 +551,11 @@ export interface DesktopMemoryLineage {
 }
 
 /** 记忆策略的渲染端视图；与 `context.memory` 的当前字段一一对应。 */
-export interface DesktopMemorySettings {
-  useMemories: boolean;
-  generateMemories: boolean;
-  maxRecalled: number;
-  /** 提取与整理可以使用不同模型；undefined 表示跟随会话模型。 */
-  extractModel?: string;
-  consolidationModel?: string;
-  excludeExternalContext: boolean;
-}
+export type DesktopMemorySettings = MemoryPolicy;
 
 export interface DesktopMemoryEntry {
   id: string;
-  scope: DesktopMemoryScope;
+  origin: DesktopMemoryOrigin;
   revision: number;
   topic: string;
   kind: DesktopMemoryKind;
@@ -531,16 +568,33 @@ export interface DesktopMemoryEntry {
   createdAt: string;
   updatedAt: string;
   lineage: DesktopMemoryLineage[];
+  recallCount: number;
+  lastRecalledAt?: string;
 }
 
 export interface DesktopMemoryOverview {
-  scope: DesktopMemoryScope;
+  filter: DesktopMemoryOriginFilter;
   /** 全局记忆策略使用的 config CAS revision。 */
   configRevision: string;
-  /** 当前 scope store 的 CAS revision。 */
+  /** 单一 Markdown 记忆库的 CAS revision。 */
   revision: number;
   settings: DesktopMemorySettings;
+  /** 单一库总条目数；当前 filter 的数量用 entries.length。 */
   totalEntries: number;
+  memoryStats: {
+    total: number;
+    autoGenerated: number;
+    manualAdded: number;
+  };
+  candidateCount: number;
+  indexChars: number;
+  origins: {
+    user: number;
+    currentWorkspace: number;
+    otherWorkspaces: number;
+  };
+  /** 候选维护是即时后台动作；时间来自持久化投影，不参与条目 CAS revision。 */
+  maintenance: MemoryMaintenanceStatus;
   topics: Array<{ topic: string; entries: number }>;
   entries: DesktopMemoryEntry[];
 }
@@ -552,7 +606,7 @@ export interface DesktopMemorySettingsSnapshot {
 
 export interface DesktopMemorySearchMatch {
   id: string;
-  scope: DesktopMemoryScope;
+  origin: DesktopMemoryOrigin;
   topic: string;
   kind: DesktopMemoryKind;
   lineage: DesktopMemoryLineage[];
@@ -562,14 +616,36 @@ export interface DesktopMemorySearchMatch {
   path: string;
   excerpt: string;
   score: number;
+  recallCount: number;
+  lastRecalledAt?: string;
 }
 
 export interface DesktopMemoryCompactionResult {
-  scope: DesktopMemoryScope;
+  filter: DesktopMemoryOriginFilter;
   before: number;
   after: number;
   revision: number;
   error?: string;
+}
+
+/** Renderer 只接收主进程计算好的 endpoint 摘要，不能为了 SHA-256 引入 Node-only agent 模块。 */
+export interface DesktopEmbeddingModelDescriptor extends EmbeddingModelDescriptor {
+  privacyEndpointHash?: string;
+}
+
+export type DesktopMemoryEmbeddingStatus = Omit<MemoryEmbeddingRuntimeStatus, "models"> & {
+  models: DesktopEmbeddingModelDescriptor[];
+};
+
+export interface DesktopMemoryEmbeddingCancellationResult {
+  cancelled: boolean;
+  status: DesktopMemoryEmbeddingStatus;
+}
+
+export interface DesktopMemoryEmbeddingDeleteResult {
+  filesDeleted: number;
+  bytesFreed: number;
+  status: DesktopMemoryEmbeddingStatus;
 }
 
 export interface DesktopMemorySettingsInput {
@@ -577,11 +653,143 @@ export interface DesktopMemorySettingsInput {
   settings: DesktopMemorySettings;
 }
 
+export interface DesktopSettingsModelsSnapshot {
+  configured: ModelChoice[];
+  connections: DesktopModelConnection[];
+  /** 脱敏的独立 embedding 目录；不含 provider headers 或凭据。 */
+  embeddingModels: DesktopEmbeddingModelDescriptor[];
+  defaultModel: string;
+  thinking: ThinkingSelection;
+}
+
+export interface DesktopSettingsChatSnapshot {
+  sessionId: string;
+  metadataRevision: string;
+  personalization: DesktopChatPersonalizationOverride;
+}
+
+export interface DesktopSettingsPendingRecovery {
+  journalId: string;
+  message: string;
+}
+
+/** Renderer 只同步关闭判断需要的布尔状态，不把草稿内容复制到主进程。 */
+export interface DesktopSettingsDraftState {
+  dirty: boolean;
+  canSave: boolean;
+  open: boolean;
+}
+
+export type DesktopSettingsCloseIntent = "window" | "quit";
+
+export interface DesktopSettingsCloseRequest {
+  requestId: string;
+  intent: DesktopSettingsCloseIntent;
+  canSave: boolean;
+}
+
+export type DesktopSettingsCloseResponse = "saved" | "discarded" | "cancelled";
+
+/** 设置页一次读取的脱敏快照；两个 revision 分别保护 Desktop 偏好和全局 config。 */
+export interface DesktopSettingsSnapshot {
+  projectId: string;
+  /** 任一驻留项目存在运行中任务时，全局设置和即时共享动作都只读。 */
+  hasRunningTasks: boolean;
+  preferenceRevision: number;
+  configRevision: string;
+  themePreference: DesktopThemePreference;
+  fontPreference: DesktopFontPreference;
+  personalization: DesktopPersonalizationSettings;
+  memory: DesktopMemorySettings;
+  webSearch: DesktopWebSearchSettings;
+  models: DesktopSettingsModelsSnapshot;
+  chat?: DesktopSettingsChatSnapshot;
+  pendingRecovery?: DesktopSettingsPendingRecovery;
+}
+
+export interface DesktopSettingsModelsInput {
+  upserts: DesktopModelConfigurationInput[];
+  removeAliases: string[];
+  defaultModel?: {
+    alias: string;
+    thinking: ThinkingSelection;
+  };
+  oauthCredentialHandles?: string[];
+}
+
+export interface DesktopSettingsChatInput {
+  sessionId: string;
+  expectedMetadataRevision: string;
+  personalization: DesktopChatPersonalizationOverride;
+}
+
+/** 设置草稿的统一提交输入。明文凭据只允许出现在本次 IPC 入参，绝不进入返回值或 journal。 */
+export interface DesktopSettingsSaveInput {
+  expectedPreferenceRevision: number;
+  expectedConfigRevision: string;
+  themePreference?: DesktopThemePreference;
+  fontPreference?: DesktopFontPreference;
+  personalization?: DesktopPersonalizationSettings;
+  memory?: DesktopMemorySettings;
+  webSearch?: DesktopWebSearchSettingsInput;
+  models?: DesktopSettingsModelsInput;
+  chat?: DesktopSettingsChatInput;
+}
+
+export type DesktopSettingsSegment = "preferences" | "config" | "chat_metadata";
+
+export interface DesktopSettingsConflict {
+  segment: DesktopSettingsSegment;
+  expectedRevision: string;
+  actualRevision: string;
+}
+
+export type DesktopSettingsSaveResult =
+  | {
+      status: "committed";
+      journalId: string;
+      appliedFields: string[];
+      snapshot: DesktopSettingsSnapshot;
+    }
+  | {
+      status: "rolled_back";
+      journalId?: string;
+      conflicts?: DesktopSettingsConflict[];
+      message?: string;
+      draftRetained: true;
+      snapshot: DesktopSettingsSnapshot;
+    }
+  | {
+      status: "recovery_required";
+      journalId: string;
+      message: string;
+      snapshot?: DesktopSettingsSnapshot;
+    };
+
 export interface DesktopMemoryEntryInput {
+  audience: DesktopMemoryAudience;
   topic: string;
-  note: string;
   kind: DesktopMemoryKind;
+  title: string;
+  summary: string;
+  decisions: string[];
+  paths: string[];
+  keywords: string[];
   importance: number;
+  /** 通用偏好必须保留用户明确表达的证据；工作区记忆可省略。 */
+  userEvidence?: string;
+}
+
+export interface DesktopMemoryEntryPatch {
+  topic?: string;
+  kind?: DesktopMemoryKind;
+  title?: string;
+  summary?: string;
+  decisions?: string[];
+  paths?: string[];
+  keywords?: string[];
+  importance?: number;
+  userEvidence?: string;
 }
 
 export type DesktopSlashCommand = SlashCommandDefinition;
@@ -711,13 +919,27 @@ export interface DesktopApi {
   personalizationOverview(projectId: string, sessionId?: string): Promise<DesktopPersonalizationOverview>;
   savePersonalizationSettings(projectId: string, input: DesktopPersonalizationSettingsInput): Promise<DesktopPersonalizationOverview>;
   saveChatPersonalization(projectId: string, sessionId: string, input: DesktopChatPersonalizationOverride, expectedRevision: string): Promise<DesktopWorkspaceSnapshot>;
-  memoryOverview(projectId: string, scope: DesktopMemoryScope): Promise<DesktopMemoryOverview>;
+  memoryOverview(projectId: string, filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview>;
   saveMemorySettings(projectId: string, input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot>;
-  searchMemory(projectId: string, scope: DesktopMemoryScope, query: string): Promise<DesktopMemorySearchMatch[]>;
-  addMemoryEntry(projectId: string, scope: DesktopMemoryScope, input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryOverview>;
-  deleteMemoryEntry(projectId: string, scope: DesktopMemoryScope, entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
-  clearMemory(projectId: string, scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryOverview>;
-  compactMemory(projectId: string, scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryCompactionResult>;
+  settingsSnapshot(projectId: string, sessionId?: string): Promise<DesktopSettingsSnapshot>;
+  saveSettings(projectId: string, input: DesktopSettingsSaveInput): Promise<DesktopSettingsSaveResult>;
+  stageSettingsCredential(secret: string): Promise<DesktopStagedSettingsCredential>;
+  completeModelLoginForSettings(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string, pastedAuthorization?: string): Promise<DesktopStagedModelLoginResult>;
+  releaseSettingsCredentials(handles: string[]): Promise<void>;
+  updateSettingsDraftState(state: DesktopSettingsDraftState): Promise<void>;
+  respondSettingsCloseRequest(requestId: string, response: DesktopSettingsCloseResponse): Promise<boolean>;
+  searchMemory(projectId: string, filter: DesktopMemoryOriginFilter, query: string): Promise<DesktopMemorySearchMatch[]>;
+  addMemoryEntry(projectId: string, input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  updateMemoryEntry(projectId: string, entryId: string, patch: DesktopMemoryEntryPatch, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  deleteMemoryEntry(projectId: string, entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  clearMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  compactMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
+  memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus>;
+  downloadMemoryEmbeddingModel(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
+  cancelMemoryEmbeddingDownload(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingCancellationResult>;
+  deleteMemoryEmbeddingModel(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingDeleteResult>;
+  rebuildMemoryEmbeddingIndex(projectId: string): Promise<DesktopMemoryEmbeddingStatus>;
+  cancelMemoryEmbeddingRebuild(projectId: string): Promise<DesktopMemoryEmbeddingCancellationResult>;
   saveAttachment(projectId: string, name: string, mimeType: string, bytes: Uint8Array): Promise<DesktopAttachment>;
   resolveDroppedFile(file: File): string;
   listWorkspaceDirectory(projectId: string, relativePath: string): Promise<DesktopWorkspaceDirectory>;
@@ -742,4 +964,5 @@ export interface DesktopApi {
   onAgentEvent(listener: (envelope: DesktopAgentEventEnvelope) => void): () => void;
   onSessionHandoff(listener: (target: DesktopSessionHandoff) => void): () => void;
   onMenuAction(listener: (action: DesktopMenuAction) => void): () => void;
+  onSettingsCloseRequest(listener: (request: DesktopSettingsCloseRequest) => void): () => void;
 }

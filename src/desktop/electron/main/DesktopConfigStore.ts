@@ -8,8 +8,14 @@ import path from "node:path";
 import { loadConfig, saveConfig } from "../../../config/loader.js";
 import {
   applyStoredCredentials,
+  CREDENTIAL_TRANSACTION_JOURNAL,
   createCredentialStore,
-  saveStoredCredentials,
+  deferredCredentialTransactionStatus,
+  finalizeDeferredCredentialTransaction,
+  recoverStoredCredentialTransaction,
+  rollbackDeferredCredentialTransaction,
+  saveConfigAndStoredCredentials,
+  type DeferredCredentialTransactionStatus,
   type CredentialStore
 } from "../../../config/credentials.js";
 import type { AgentConfig } from "../../../config/schema.js";
@@ -31,7 +37,12 @@ export class DesktopConfigStore implements AgentConfigStore {
   ) {}
 
   async load(workspaceRoot = this.root): Promise<AgentConfig> {
-    return await applyStoredCredentials(await loadConfig(workspaceRoot, { globalDir: this.root }), this.credentials);
+    const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(
+      this.root,
+      async () => await this.loadUnlocked(workspaceRoot)
+    ));
+    this.writeTail = run.then(() => undefined, () => undefined);
+    return await run;
   }
 
   async save(config: AgentConfig, workspaceRoot = this.root): Promise<void> {
@@ -54,10 +65,105 @@ export class DesktopConfigStore implements AgentConfigStore {
     workspaceRoot = this.root
   ): Promise<VersionedConfigSnapshot> {
     const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(this.root, async () => {
-      assertConfigRevision(expectedRevision, await this.load(workspaceRoot));
+      assertConfigRevision(expectedRevision, await this.loadUnlocked(workspaceRoot));
       await this.saveUnlocked(config, workspaceRoot);
-      return await this.loadVersioned(workspaceRoot);
+      const saved = await this.loadUnlocked(workspaceRoot);
+      return { config: saved, revision: configDocumentRevision(saved) };
     }));
+    this.writeTail = run.then(() => undefined, () => undefined);
+    return await run;
+  }
+
+  async saveVersionedDeferred(
+    config: AgentConfig,
+    expectedRevision: string,
+    deferredFor: string,
+    workspaceRoot = this.root
+  ): Promise<VersionedConfigSnapshot> {
+    const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(this.root, async () => {
+      assertConfigRevision(expectedRevision, await this.loadUnlocked(workspaceRoot));
+      await this.saveUnlocked(config, workspaceRoot, deferredFor);
+      const saved = await this.loadUnlocked(workspaceRoot);
+      return { config: saved, revision: configDocumentRevision(saved) };
+    }));
+    this.writeTail = run.then(() => undefined, () => undefined);
+    return await run;
+  }
+
+  async deferredCredentialStatus(
+    deferredFor: string,
+    workspaceRoot = this.root
+  ): Promise<DeferredCredentialTransactionStatus> {
+    const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(this.root, async () => (
+      await deferredCredentialTransactionStatus(
+        this.credentials,
+        this.credentialJournalPath(),
+        async () => await loadConfig(workspaceRoot, { globalDir: this.root }),
+        deferredFor
+      )
+    )));
+    this.writeTail = run.then(() => undefined, () => undefined);
+    return await run;
+  }
+
+  async finalizeDeferredCredentials(deferredFor: string, workspaceRoot = this.root): Promise<void> {
+    const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(this.root, async () => {
+      await finalizeDeferredCredentialTransaction(
+        this.credentials,
+        this.credentialJournalPath(),
+        async () => await loadConfig(workspaceRoot, { globalDir: this.root }),
+        deferredFor
+      );
+    }));
+    this.writeTail = run.then(() => undefined, () => undefined);
+    await run;
+  }
+
+  async rollbackVersionedDeferred(
+    before: AgentConfig,
+    targetRevision: string,
+    deferredFor: string,
+    workspaceRoot = this.root
+  ): Promise<"not_needed" | "completed" | "failed"> {
+    const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(this.root, async () => {
+      const loadDocument = async (): Promise<AgentConfig> => await loadConfig(workspaceRoot, { globalDir: this.root });
+      await recoverStoredCredentialTransaction(this.credentials, this.credentialJournalPath(), loadDocument);
+      const currentRevision = configDocumentRevision(await loadDocument());
+      const beforeRevision = configDocumentRevision(before);
+      const configNeedsRollback = currentRevision === targetRevision && targetRevision !== beforeRevision;
+      if (!configNeedsRollback && currentRevision !== beforeRevision) return "failed" as const;
+      const credentialSide = await rollbackDeferredCredentialTransaction(
+        this.credentials,
+        this.credentialJournalPath(),
+        loadDocument,
+        deferredFor,
+        configNeedsRollback
+          ? async () => {
+              await saveConfig(workspaceRoot, before, { globalDir: this.root });
+              assertConfigRevision(beforeRevision, await loadDocument());
+            }
+          : undefined
+      );
+      if (configNeedsRollback) this.currentRevision += 1;
+      return configNeedsRollback || credentialSide === "target" ? "completed" as const : "not_needed" as const;
+    }).catch(() => "failed" as const));
+    this.writeTail = run.then(() => undefined, () => undefined);
+    return await run;
+  }
+
+  async rollbackDeferredCredentials(
+    deferredFor: string,
+    workspaceRoot = this.root
+  ): Promise<"not_needed" | "completed" | "failed"> {
+    const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(this.root, async () => {
+      const side = await rollbackDeferredCredentialTransaction(
+        this.credentials,
+        this.credentialJournalPath(),
+        async () => await loadConfig(workspaceRoot, { globalDir: this.root }),
+        deferredFor
+      );
+      return side === "target" ? "completed" as const : "not_needed" as const;
+    }).catch(() => "failed" as const));
     this.writeTail = run.then(() => undefined, () => undefined);
     return await run;
   }
@@ -70,10 +176,31 @@ export class DesktopConfigStore implements AgentConfigStore {
     return this.currentRevision;
   }
 
-  private async saveUnlocked(config: AgentConfig, workspaceRoot: string): Promise<void> {
-    const previous = await this.load(workspaceRoot);
-    await saveStoredCredentials(config, this.credentials, previous);
-    await saveConfig(workspaceRoot, config, { globalDir: this.root });
+  private async saveUnlocked(config: AgentConfig, workspaceRoot: string, deferredFor?: string): Promise<void> {
+    const previous = await this.loadUnlocked(workspaceRoot);
+    await saveConfigAndStoredCredentials(
+      config,
+      previous,
+      this.credentials,
+      this.credentialJournalPath(),
+      async () => await saveConfig(workspaceRoot, config, { globalDir: this.root }),
+      async () => await loadConfig(workspaceRoot, { globalDir: this.root }),
+      { deferredFor }
+    );
     this.currentRevision += 1;
+  }
+
+  private async loadUnlocked(workspaceRoot: string): Promise<AgentConfig> {
+    const loadDocument = async (): Promise<AgentConfig> => await loadConfig(workspaceRoot, { globalDir: this.root });
+    await recoverStoredCredentialTransaction(
+      this.credentials,
+      this.credentialJournalPath(),
+      loadDocument
+    );
+    return await applyStoredCredentials(await loadDocument(), this.credentials);
+  }
+
+  private credentialJournalPath(): string {
+    return path.join(this.root, CREDENTIAL_TRANSACTION_JOURNAL);
   }
 }

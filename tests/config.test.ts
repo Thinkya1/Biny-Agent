@@ -5,10 +5,19 @@ import path from "node:path";
 import { loadConfig, loadConfigFile, saveConfig, saveConfigFile } from "../src/config/loader.js";
 import { BINY_AGENT_DIR_ENV, globalAgentDir, globalConfigPath, projectMemoryDir, projectSessionsDir } from "../src/config/paths.js";
 import { configSchema, defaultConfig } from "../src/config/schema.js";
-import { BINY_KEYCHAIN_SERVICE, MacKeychainCredentialStore } from "../src/config/credentials.js";
+import {
+  BINY_KEYCHAIN_SERVICE,
+  deferredCredentialTransactionStatus,
+  finalizeDeferredCredentialTransaction,
+  MacKeychainCredentialStore,
+  rollbackDeferredCredentialTransaction,
+  WEB_SEARCH_CREDENTIAL_ACCOUNT,
+  providerCredentialAccount,
+  saveConfigAndStoredCredentials
+} from "../src/config/credentials.js";
 import { resolveRunBudget } from "../src/agent/runBudget.js";
 import { createFileConfigStore } from "../src/config/store.js";
-import { ConfigRevisionConflictError } from "../src/config/versioned.js";
+import { ConfigRevisionConflictError, configDocumentRevision } from "../src/config/versioned.js";
 import type { CredentialStore } from "../src/config/credentials.js";
 
 await testGlobalPathResolution();
@@ -20,6 +29,10 @@ await testProjectCredentialFieldsAreRejected();
 await testProjectModelAliasMustBeGlobal();
 await testLegacyProjectConfigIsIgnored();
 await testVersionedGlobalConfigRejectsStaleWriters();
+testConfigRevisionMatchesJsonRoundTrip();
+await testCredentialTransactionCompensatesPartialWrites();
+await testDeferredCredentialTransactionKeepsRollbackLineage();
+await testFileConfigStoreDeferredCredentialContract();
 await testMacKeychainCredentialStore();
 
 async function testGlobalPathResolution(): Promise<void> {
@@ -244,6 +257,213 @@ async function testVersionedGlobalConfigRejectsStaleWriters(): Promise<void> {
     );
     assert.equal((await firstLoad()).config.personalization.personality, "friendly");
     await assert.rejects(fs.access(path.join(globalRoot, ".config.write.lock")));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+function testConfigRevisionMatchesJsonRoundTrip(): void {
+  const explicitUndefined = structuredClone(defaultConfig);
+  explicitUndefined.providers.deepseek = {
+    ...explicitUndefined.providers.deepseek!,
+    headers: undefined,
+    embeddingModels: undefined
+  };
+  const persistedShape = JSON.parse(JSON.stringify(explicitUndefined)) as typeof explicitUndefined;
+  assert.equal(configDocumentRevision(explicitUndefined), configDocumentRevision(persistedShape));
+}
+
+async function testCredentialTransactionCompensatesPartialWrites(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-credential-transaction-"));
+  const journalPath = path.join(root, ".credentials.transaction.json");
+  const providerAccount = providerCredentialAccount("deepseek", "apiKey");
+  const values = new Map<string, string>([
+    [WEB_SEARCH_CREDENTIAL_ACCOUNT, "old-web-secret"],
+    [providerAccount, "old-provider-secret"]
+  ]);
+  let failProviderWrite = true;
+  const store: CredentialStore = {
+    persistent: true,
+    get: async (account) => values.get(account),
+    set: async (account, value) => {
+      if (account === providerAccount && value === "new-provider-secret" && failProviderWrite) {
+        failProviderWrite = false;
+        throw new Error("injected Keychain failure");
+      }
+      values.set(account, value);
+    },
+    delete: async (account) => {
+      values.delete(account);
+    }
+  };
+  const previous = structuredClone(defaultConfig);
+  previous.web.search.apiKey = "old-web-secret";
+  previous.providers.deepseek!.apiKey = "old-provider-secret";
+  const next = structuredClone(previous);
+  next.web.search.apiKey = "new-web-secret";
+  next.providers.deepseek!.apiKey = "new-provider-secret";
+
+  try {
+    await assert.rejects(
+      saveConfigAndStoredCredentials(
+        next,
+        previous,
+        store,
+        journalPath,
+        async () => assert.fail("config must not be persisted after a partial Keychain write"),
+        async () => previous
+      ),
+      /injected Keychain failure/u
+    );
+    assert.equal(values.get(WEB_SEARCH_CREDENTIAL_ACCOUNT), "old-web-secret");
+    assert.equal(values.get(providerAccount), "old-provider-secret");
+    assert.equal([...values.keys()].some((account) => account.startsWith("settings-tx:")), false);
+    await assert.rejects(fs.access(journalPath), /ENOENT/u);
+
+    await assert.rejects(
+      saveConfigAndStoredCredentials(
+        next,
+        previous,
+        store,
+        journalPath,
+        async () => {
+          const journal = await fs.readFile(journalPath, "utf8");
+          assert.equal(journal.includes("old-provider-secret"), false);
+          assert.equal(journal.includes("new-provider-secret"), false);
+          throw new Error("injected config failure");
+        },
+        async () => previous
+      ),
+      /injected config failure/u
+    );
+    assert.equal(values.get(WEB_SEARCH_CREDENTIAL_ACCOUNT), "old-web-secret");
+    assert.equal(values.get(providerAccount), "old-provider-secret");
+    assert.equal([...values.keys()].some((account) => account.startsWith("settings-tx:")), false);
+    await assert.rejects(fs.access(journalPath), /ENOENT/u);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testDeferredCredentialTransactionKeepsRollbackLineage(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-deferred-credential-transaction-"));
+  const journalPath = path.join(root, ".credentials.transaction.json");
+  const account = providerCredentialAccount("deepseek", "apiKey");
+  const values = new Map<string, string>([[account, "before-secret"]]);
+  const store: CredentialStore = {
+    persistent: true,
+    get: async (key) => values.get(key),
+    set: async (key, value) => {
+      values.set(key, value);
+    },
+    delete: async (key) => {
+      values.delete(key);
+    }
+  };
+  const before = structuredClone(defaultConfig);
+  before.providers.deepseek!.apiKey = "before-secret";
+  const target = structuredClone(before);
+  target.providers.deepseek!.apiKey = "target-secret";
+  let document = structuredClone(before);
+
+  try {
+    await saveConfigAndStoredCredentials(
+      target,
+      before,
+      store,
+      journalPath,
+      async () => {
+        document = structuredClone(target);
+      },
+      async () => document,
+      { deferredFor: "outer-rollback" }
+    );
+    assert.equal(values.get(account), "target-secret");
+    assert.equal(
+      await deferredCredentialTransactionStatus(store, journalPath, async () => document, "outer-rollback"),
+      "target",
+      "inner marker proves the credential-only commit although beforeRevision equals targetRevision"
+    );
+    const pendingJournal = await fs.readFile(journalPath, "utf8");
+    assert.equal(pendingJournal.includes("before-secret"), false);
+    assert.equal(pendingJournal.includes("target-secret"), false);
+    assert.equal([...values.keys()].some((key) => key.startsWith("settings-tx:")), true);
+
+    await rollbackDeferredCredentialTransaction(
+      store,
+      journalPath,
+      async () => document,
+      "outer-rollback",
+      async () => {
+        document = structuredClone(before);
+      }
+    );
+    assert.equal(values.get(account), "before-secret");
+    assert.equal([...values.keys()].some((key) => key.startsWith("settings-tx:")), false);
+    await assert.rejects(fs.access(journalPath), /ENOENT/u);
+
+    await saveConfigAndStoredCredentials(
+      target,
+      before,
+      store,
+      journalPath,
+      async () => {
+        document = structuredClone(target);
+      },
+      async () => document,
+      { deferredFor: "outer-finalize" }
+    );
+    await finalizeDeferredCredentialTransaction(store, journalPath, async () => document, "outer-finalize");
+    assert.equal(values.get(account), "target-secret");
+    assert.equal([...values.keys()].some((key) => key.startsWith("settings-tx:")), false);
+    await assert.rejects(fs.access(journalPath), /ENOENT/u);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testFileConfigStoreDeferredCredentialContract(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-deferred-config-store-"));
+  const workspace = path.join(root, "workspace");
+  const globalRoot = path.join(root, "global");
+  const account = providerCredentialAccount("deepseek", "apiKey");
+  const values = new Map<string, string>();
+  const credentialStore: CredentialStore = {
+    persistent: true,
+    get: async (key) => values.get(key),
+    set: async (key, value) => {
+      values.set(key, value);
+    },
+    delete: async (key) => {
+      values.delete(key);
+    }
+  };
+  try {
+    await fs.mkdir(workspace);
+    const store = createFileConfigStore(workspace, { globalDir: globalRoot, credentialStore });
+    const loadVersioned = store.loadVersioned;
+    const saveDeferred = store.saveVersionedDeferred;
+    const status = store.deferredCredentialStatus;
+    const finalize = store.finalizeDeferredCredentials;
+    const rollback = store.rollbackVersionedDeferred;
+    if (!loadVersioned || !saveDeferred || !status || !finalize || !rollback) {
+      throw new Error("Deferred credential transaction API is unavailable.");
+    }
+    const before = await loadVersioned();
+    const target = structuredClone(before.config);
+    target.providers.deepseek!.apiKey = "deferred-store-target";
+    const saved = await saveDeferred(target, before.revision, "store-rollback");
+    assert.equal(saved.revision, before.revision, "credential-only updates keep the public config revision");
+    assert.equal(await status("store-rollback"), "target");
+    assert.equal(values.get(account), "deferred-store-target");
+    assert.equal(await rollback(before.config, saved.revision, "store-rollback"), "completed");
+    assert.equal(values.get(account), undefined);
+
+    await saveDeferred(target, before.revision, "store-finalize");
+    assert.equal(await status("store-finalize"), "target");
+    await finalize("store-finalize");
+    assert.equal(values.get(account), "deferred-store-target");
+    await assert.rejects(fs.access(path.join(globalRoot, ".credentials.transaction.json")), /ENOENT/u);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

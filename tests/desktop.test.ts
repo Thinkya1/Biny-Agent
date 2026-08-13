@@ -22,6 +22,7 @@ import { DesktopConfigStore } from "../src/desktop/electron/main/DesktopConfigSt
 import { DesktopModelLoginService } from "../src/desktop/electron/main/DesktopModelLoginService.js";
 import { DesktopProjectService } from "../src/desktop/electron/main/DesktopProjectService.js";
 import { DesktopStateStore } from "../src/desktop/electron/main/DesktopStateStore.js";
+import { DesktopSettingsTransaction } from "../src/desktop/electron/main/DesktopSettingsTransaction.js";
 import { DesktopUserDataStore } from "../src/desktop/electron/main/DesktopUserDataStore.js";
 import { clampFilePanelWidth, DEFAULT_FILE_PANEL_WIDTH, MAX_FILE_PANEL_WIDTH, MIN_FILE_PANEL_WIDTH } from "../src/desktop/filePanelSizing.js";
 import { clampSidebarResizeWidth, clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, isCompactSidebarWidth, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, SIDEBAR_RAIL_THRESHOLD, SIDEBAR_RAIL_WIDTH } from "../src/desktop/sidebarSizing.js";
@@ -91,6 +92,10 @@ testSidebarSizing();
 testSidebarLayoutState();
 await testSidebarStateNormalizesWidth();
 await testDesktopThemePreference();
+await testDesktopMemoryV3CasAndOriginFilters();
+await testDesktopSettingsTransaction();
+await testDesktopGlobalWriteGateAndRuntimeRefresh();
+await testDesktopSettingsCredentialLifecycle();
 await testDesktopModelConfiguration();
 await testDesktopModelSwitchDoesNotResumeInterruptedTurn();
 await testDesktopSubagentSlashCommands();
@@ -98,7 +103,6 @@ await testDesktopDoesNotResumePersistedIdleSession();
 await testDesktopCredentialsAreSeparated();
 await testDesktopWebSearchSettings();
 await testDesktopPersonalizationCasAndChatOverride();
-await testDesktopScopedMemoryCas();
 await testDesktopRequiresModelConfiguration();
 await testDesktopConnectionMetadata();
 await testDesktopCodexLoginCallbackLifecycle();
@@ -1105,6 +1109,309 @@ async function testDesktopThemePreference(): Promise<void> {
   }
 }
 
+async function testDesktopSettingsTransaction(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-settings-transaction-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-settings-transaction-data-"));
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const settings = new DesktopSettingsTransaction(state, agents);
+    const initial = await settings.snapshot(project.id);
+
+    const conflict = await settings.save(project.id, {
+      expectedPreferenceRevision: initial.preferenceRevision + 1,
+      expectedConfigRevision: initial.configRevision,
+      themePreference: "dark"
+    });
+    assert.equal(conflict.status, "rolled_back");
+    if (conflict.status !== "rolled_back") throw new Error("expected rolled_back");
+    assert.equal(conflict.conflicts?.[0]?.segment, "preferences");
+    assert.equal(state.themePreference(), "system", "preflight conflict must not write preferences");
+
+    const originalCommitConfig = agents.commitSettingsConfig.bind(agents);
+    agents.commitSettingsConfig = async () => { throw new Error("injected config write failure"); };
+    const configFailure = await settings.save(project.id, {
+      expectedPreferenceRevision: initial.preferenceRevision,
+      expectedConfigRevision: initial.configRevision,
+      themePreference: "dark",
+      personalization: { ...initial.personalization, personality: "friendly" }
+    });
+    assert.equal(configFailure.status, "rolled_back");
+    assert.equal(state.themePreference(), "system", "config failure must compensate preferences");
+    agents.commitSettingsConfig = originalCommitConfig;
+
+    const beforeChatFailure = await settings.snapshot(project.id);
+    const originalCommitChat = agents.commitSettingsChat.bind(agents);
+    agents.commitSettingsChat = async () => { throw new Error("injected chat write failure"); };
+    const chatFailure = await settings.save(project.id, {
+      expectedPreferenceRevision: beforeChatFailure.preferenceRevision,
+      expectedConfigRevision: beforeChatFailure.configRevision,
+      themePreference: "dark",
+      personalization: { ...beforeChatFailure.personalization, personality: "pragmatic" },
+      chat: {
+        sessionId: "settings-draft",
+        expectedMetadataRevision: "missing",
+        personalization: {
+          personality: "friendly",
+          customInstructions: { mode: "inherit", value: undefined },
+          useMemories: "inherit",
+          contributeMemories: "inherit"
+        }
+      }
+    });
+    assert.equal(chatFailure.status, "rolled_back");
+    assert.equal(state.themePreference(), "system", "chat failure must compensate preferences");
+    assert.equal((await settings.snapshot(project.id)).personalization.personality, "none", "chat failure must compensate config");
+    agents.commitSettingsChat = originalCommitChat;
+
+    const recoveryBase = await settings.snapshot(project.id);
+    agents.commitSettingsConfig = async () => { throw new Error("injected ambiguous config failure"); };
+    const originalRollbackConfig = agents.rollbackSettingsConfig.bind(agents);
+    agents.rollbackSettingsConfig = async () => "failed";
+    const recovery = await settings.save(project.id, {
+      expectedPreferenceRevision: recoveryBase.preferenceRevision,
+      expectedConfigRevision: recoveryBase.configRevision,
+      themePreference: "dark",
+      personalization: { ...recoveryBase.personalization, personality: "friendly" }
+    });
+    assert.equal(recovery.status, "recovery_required");
+    if (recovery.status !== "recovery_required") throw new Error("expected recovery_required");
+    // commit 在真正写配置前失败，偏好已完成可验证补偿；下一次访问可安全清掉 journal。
+    assert.equal((await settings.snapshot(project.id)).pendingRecovery, undefined);
+    agents.commitSettingsConfig = originalCommitConfig;
+    agents.rollbackSettingsConfig = originalRollbackConfig;
+
+    const journalPath = state.settingsTransactionJournalPath();
+    await rm(journalPath, { force: true });
+    const startupBase = await settings.snapshot(project.id);
+    const startupBefore = state.settingsPreferences();
+    const startupAfter = await state.applySettingsPreferences({ themePreference: "dark" }, startupBefore.revision);
+    await writeFile(journalPath, `${JSON.stringify({
+      version: 1,
+      id: "startup-recovery-journal",
+      projectId: project.id,
+      createdAt: new Date().toISOString(),
+      segments: {
+        preferences: { included: true, state: "committed", before: startupBefore, after: startupAfter },
+        config: {
+          included: false,
+          state: "pending",
+          beforeRevision: startupBase.configRevision,
+          targetRevision: startupBase.configRevision,
+          credentialHandles: []
+        },
+        chatMetadata: { included: false, state: "pending" }
+      }
+    }, null, 2)}\n`);
+    const restartedState = new DesktopStateStore(path.join(desktopRoot, "desktop-state.json"));
+    await restartedState.load();
+    const restartedAgents = new DesktopAgentManager(restartedState, projects, configStore, () => undefined);
+    const restarted = new DesktopSettingsTransaction(restartedState, restartedAgents);
+    const recovered = await restarted.snapshot(project.id);
+    assert.equal(recovered.pendingRecovery, undefined);
+    assert.equal(recovered.themePreference, "dark", "startup recovery finalizes a fully committed preference-only transaction");
+    await restartedAgents.closeAll();
+  } finally {
+    await agents?.closeAll();
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopGlobalWriteGateAndRuntimeRefresh(): Promise<void> {
+  const firstRoot = await mkdtemp(path.join(os.tmpdir(), "biny-global-gate-first-"));
+  const secondRoot = await mkdtemp(path.join(os.tmpdir(), "biny-global-gate-second-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-global-gate-data-"));
+  const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
+  let agents: DesktopAgentManager | undefined;
+  try {
+    process.env.BINY_RUNTIME_HOST_ENTRY = path.join(desktopRoot, "missing-runtime-host-entry.js");
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const first = await projects.createProject(firstRoot);
+    const second = await projects.createProject(secondRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    await agents.setPermissionMode(first.id, "read-only");
+    await agents.setPermissionMode(second.id, "read-only");
+
+    const internals = agents as unknown as {
+      rebuildManagedRuntime(projectId: string, managed: unknown): Promise<void>;
+    };
+    const originalRebuild = internals.rebuildManagedRuntime.bind(agents);
+    const rebuilt: string[] = [];
+    internals.rebuildManagedRuntime = async (projectId: string, _managed: unknown): Promise<void> => {
+      rebuilt.push(projectId);
+    };
+
+    const before = await agents.settingsConfigSnapshot(first.id);
+    const prepared = await agents.prepareSettingsConfig(first.id, {
+      expectedPreferenceRevision: state.settingsPreferences().revision,
+      expectedConfigRevision: before.revision,
+      personalization: { ...before.personalization, personality: "friendly" }
+    });
+    const transactionId = "global-runtime-refresh";
+    await agents.commitSettingsConfig(prepared, transactionId);
+    assert.deepEqual(new Set(rebuilt), new Set([first.id, second.id]), "config commit must refresh every resident idle runtime");
+
+    rebuilt.length = 0;
+    assert.equal(await agents.rollbackSettingsConfig(prepared, transactionId), "completed");
+    assert.deepEqual(new Set(rebuilt), new Set([first.id, second.id]), "config rollback must refresh the same resident runtimes");
+    internals.rebuildManagedRuntime = originalRebuild;
+
+    // 模拟第二个项目正在运行：当前项目本身空闲也必须拒绝所有共享写入口。
+    const originalHasRunningTasks = agents.hasRunningTasks.bind(agents);
+    agents.hasRunningTasks = () => true;
+    const current = await agents.settingsConfigSnapshot(first.id);
+    assert.throws(() => agents?.assertNoRunningTasks(), /任务运行期间/u);
+    await assert.rejects(
+      agents.prepareSettingsConfig(first.id, {
+        expectedPreferenceRevision: state.settingsPreferences().revision,
+        expectedConfigRevision: current.revision,
+        personalization: { ...current.personalization, personality: "pragmatic" }
+      }),
+      /任务运行期间/u
+    );
+    await assert.rejects(
+      agents.addMemoryEntry(first.id, {
+        audience: "workspace",
+        topic: "门禁测试",
+        kind: "fact",
+        title: "不能并发写入",
+        summary: "另一个项目正在运行时，共享记忆库必须拒绝当前项目发起的新写入操作。",
+        decisions: [],
+        paths: [],
+        keywords: ["gate"],
+        importance: 3
+      }, 0),
+      /任务运行期间/u
+    );
+    await assert.rejects(agents.rebuildMemoryEmbeddingIndex(first.id), /任务运行期间/u);
+    await assert.rejects(
+      agents.saveMemorySettings(first.id, {
+        expectedRevision: current.revision,
+        settings: { ...current.memory, enabled: true }
+      }),
+      /任务运行期间/u
+    );
+    agents.hasRunningTasks = originalHasRunningTasks;
+  } finally {
+    await agents?.closeAll();
+    if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
+    else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
+    await rm(firstRoot, { recursive: true, force: true });
+    await rm(secondRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopSettingsCredentialLifecycle(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-settings-credential-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-settings-credential-data-"));
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const released = agents.stageSettingsCredential("released-secret");
+    agents.releaseSettingsCredentials([released.handle]);
+    const current = await agents.settingsConfigSnapshot(project.id);
+    await assert.rejects(
+      agents.prepareSettingsConfig(project.id, {
+        expectedPreferenceRevision: 0,
+        expectedConfigRevision: current.revision,
+        models: {
+          upserts: [{
+            alias: "released-model",
+            displayName: "Released model",
+            providerAlias: "released",
+            providerType: "openai-compatible",
+            model: "released-model",
+            apiKeyHandle: released.handle,
+            supportsTools: true
+          }],
+          removeAliases: []
+        }
+      }),
+      /不存在或已过期/u
+    );
+
+    const expired = agents.stageSettingsCredential("expired-secret");
+    const stagedCredentials = (agents as unknown as {
+      stagedSettingsCredentials: Map<string, { expiresAt: number }>;
+    }).stagedSettingsCredentials;
+    stagedCredentials.get(expired.handle)!.expiresAt = Date.now() - 1;
+    await assert.rejects(
+      agents.prepareSettingsConfig(project.id, {
+        expectedPreferenceRevision: 0,
+        expectedConfigRevision: current.revision,
+        models: {
+          upserts: [{
+            alias: "expired-model",
+            displayName: "Expired model",
+            providerAlias: "expired",
+            providerType: "openai-compatible",
+            model: "expired-model",
+            apiKeyHandle: expired.handle,
+            supportsTools: true
+          }],
+          removeAliases: []
+        }
+      }),
+      /不存在或已过期/u
+    );
+
+    const staged = agents.stageSettingsCredential("one-shot-secret");
+    const transaction = new DesktopSettingsTransaction(state, agents);
+    const snapshot = await transaction.snapshot(project.id);
+    const saved = await transaction.save(project.id, {
+      expectedPreferenceRevision: snapshot.preferenceRevision,
+      expectedConfigRevision: snapshot.configRevision,
+      models: {
+        upserts: [{
+          alias: "staged-model",
+          displayName: "Staged model",
+          providerAlias: "staged",
+          providerType: "openai-compatible",
+          model: "staged-model",
+          baseUrl: "https://example.com/v1",
+          apiKeyHandle: staged.handle,
+          supportsTools: true
+        }],
+        removeAliases: []
+      }
+    });
+    assert.equal(saved.status, "committed", JSON.stringify(saved));
+    const after = await agents.settingsConfigSnapshot(project.id);
+    await assert.rejects(
+      agents.prepareSettingsConfig(project.id, {
+        expectedPreferenceRevision: state.settingsPreferences().revision,
+        expectedConfigRevision: after.revision,
+        models: {
+          upserts: [{
+            alias: "staged-model-copy",
+            displayName: "Staged model copy",
+            providerAlias: "staged-copy",
+            providerType: "openai-compatible",
+            model: "staged-model-copy",
+            apiKeyHandle: staged.handle,
+            supportsTools: true
+          }],
+          removeAliases: []
+        }
+      }),
+      /不存在或已过期/u
+    );
+    const configText = await readFile(path.join(desktopRoot, "config.json"), "utf8");
+    assert.equal(configText.includes("one-shot-secret"), false, "staged credential must not enter config document");
+    assert.equal((await readFile(state.settingsTransactionJournalPath(), "utf8").catch(() => "")).includes("one-shot-secret"), false);
+  } finally {
+    await agents?.closeAll();
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
 async function testDesktopModelConfiguration(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-model-config-"));
   const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-data-"));
@@ -1484,8 +1791,9 @@ async function testDesktopPersonalizationCasAndChatOverride(): Promise<void> {
   }
 }
 
-async function testDesktopScopedMemoryCas(): Promise<void> {
+async function testDesktopMemoryV3CasAndOriginFilters(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-scoped-memory-workspace-"));
+  const otherWorkspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-scoped-memory-other-workspace-"));
   const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-scoped-memory-data-"));
   const previousAgentDir = process.env[BINY_AGENT_DIR_ENV];
   const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
@@ -1502,70 +1810,119 @@ async function testDesktopScopedMemoryCas(): Promise<void> {
     await state.setSelectedSession(project.id, recorder.sessionId);
 
     agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
-    const initialProject = await agents.memoryOverview(project.id, "project");
+    const initialProject = await agents.memoryOverview(project.id, "current_workspace");
     assert.equal(initialProject.revision, 0);
     assert.equal(initialProject.totalEntries, 0);
-    const projectMemory = await agents.addMemoryEntry(project.id, "project", {
+    assert.equal(initialProject.maintenance.state, "idle");
+    const projectMemory = await agents.addMemoryEntry(project.id, {
+      audience: "workspace",
       topic: "发布流程",
-      note: "发布前先运行 Desktop 类型检查和定向测试，并保留失败输出供排查。",
       kind: "workflow",
+      title: "Desktop 发布检查",
+      summary: "发布前先运行 Desktop 类型检查和定向测试，并保留失败输出供排查。",
+      decisions: ["先验证再发布"],
+      paths: ["src/desktop"],
+      keywords: ["desktop", "typecheck"],
       importance: 5
     }, initialProject.revision);
     assert.equal(projectMemory.revision, 1);
     assert.equal(projectMemory.entries[0]?.kind, "workflow");
     assert.equal(projectMemory.entries[0]?.importance, 5);
     assert.ok(projectMemory.entries[0]?.updatedAt);
+    assert.equal(projectMemory.entries[0]?.origin.kind, "workspace");
     assert.equal(projectMemory.entries[0]?.lineage[0]?.sessionId, recorder.sessionId);
     await assert.rejects(
-      agents.addMemoryEntry(project.id, "project", {
+      agents.addMemoryEntry(project.id, {
+        audience: "workspace",
         topic: "过期写入",
-        note: "这条写入携带过期的 scope revision，不能覆盖已经保存的项目记忆。",
         kind: "fact",
+        title: "过期写入",
+        summary: "这条写入携带过期的 store revision，不能覆盖已经保存的项目记忆。",
+        decisions: [],
+        paths: [],
+        keywords: [],
         importance: 3
       }, initialProject.revision),
-      /Memory project revision conflict/u
+      /Memory revision conflict/u
     );
 
-    const initialGlobal = await agents.memoryOverview(project.id, "global");
-    assert.equal(initialGlobal.revision, 0, "project 写入不能推进 global store revision");
+    const initialGlobal = await agents.memoryOverview(project.id, "user");
+    assert.equal(initialGlobal.revision, 1, "不同来源视图必须共享同一个 store revision");
     await assert.rejects(
-      agents.addMemoryEntry(project.id, "global", {
+      agents.addMemoryEntry(project.id, {
+        audience: "universal",
         topic: "项目事实",
-        note: "全局 scope 不应接受没有偏好语义的普通项目事实，即使用户显式点击保存。",
         kind: "fact",
+        title: "不合法的通用事实",
+        summary: "通用偏好来源不应接受没有偏好语义的普通项目事实，即使用户显式点击保存。",
+        decisions: [],
+        paths: [],
+        keywords: [],
         importance: 3
       }, initialGlobal.revision),
-      /Global memory only accepts/u
+      /Universal memory only accepts/u
     );
-    const globalMemory = await agents.addMemoryEntry(project.id, "global", {
+    const globalMemory = await agents.addMemoryEntry(project.id, {
+      audience: "universal",
       topic: "沟通偏好",
-      note: "用户明确希望长任务的进度同步保持简洁，并优先说明已验证的结果。",
       kind: "preference",
+      title: "进度同步偏好",
+      summary: "用户明确希望长任务的进度同步保持简洁，并优先说明已验证的结果。",
+      decisions: [],
+      paths: [],
+      keywords: ["进度", "验证"],
+      userEvidence: "用户明确说长任务同步应简洁，并先报告验证结果。",
       importance: 4
     }, initialGlobal.revision);
-    assert.equal(globalMemory.revision, 1);
-    assert.equal((await agents.memoryOverview(project.id, "project")).revision, 1);
+    assert.equal(globalMemory.revision, 2);
+    assert.equal(globalMemory.origins.user, 1);
+    assert.equal(globalMemory.origins.currentWorkspace, 1);
+    assert.deepEqual(globalMemory.memoryStats, { total: 2, autoGenerated: 0, manualAdded: 2 });
+    assert.equal((await agents.memoryOverview(project.id, "current_workspace")).revision, 2);
 
-    const matches = await agents.searchMemory(project.id, "project", "Desktop 类型检查");
+    const otherProject = await projects.createProject(otherWorkspaceRoot);
+    const otherMemory = await agents.addMemoryEntry(otherProject.id, {
+      audience: "workspace",
+      topic: "其他项目",
+      kind: "fact",
+      title: "其他工作区事实",
+      summary: "这条事实来自另一个工作区，只能通过其他项目来源筛选浏览。",
+      decisions: [],
+      paths: [],
+      keywords: ["other-workspace"],
+      importance: 3
+    }, globalMemory.revision);
+    assert.equal(otherMemory.revision, 3);
+    const otherWorkspaceView = await agents.memoryOverview(project.id, "other_workspaces");
+    assert.equal(otherWorkspaceView.totalEntries, 3);
+    assert.deepEqual(otherWorkspaceView.memoryStats, { total: 3, autoGenerated: 0, manualAdded: 3 });
+    assert.equal(otherWorkspaceView.entries.length, 1);
+    assert.equal(otherWorkspaceView.entries[0]?.origin.kind, "workspace");
+    assert.notEqual(
+      otherWorkspaceView.entries[0]?.origin.kind === "workspace" ? otherWorkspaceView.entries[0].origin.workspaceId : undefined,
+      projectMemory.entries[0]?.origin.kind === "workspace" ? projectMemory.entries[0].origin.workspaceId : undefined
+    );
+
+    const matches = await agents.searchMemory(project.id, "current_workspace", "Desktop 类型检查");
     assert.equal(matches[0]?.id, projectMemory.entries[0]?.id);
     assert.equal(matches[0]?.lineage?.[0]?.sessionId, recorder.sessionId);
 
+    const updated = await agents.updateMemoryEntry(project.id, projectMemory.entries[0]!.id, {
+      summary: "发布前必须运行 Desktop 类型检查和定向测试，失败输出应原样保留供后续排查。",
+      importance: 4
+    }, otherMemory.revision);
+    assert.equal(updated.revision, 4);
+    assert.equal(updated.entries.find(({ id }) => id === projectMemory.entries[0]!.id)?.lineage.at(-1)?.source, "explicit_edit");
+
     const policy = await agents.saveMemorySettings(project.id, {
-      expectedRevision: globalMemory.configRevision,
-      settings: {
-        useMemories: true,
-        generateMemories: true,
-        extractModel: undefined,
-        consolidationModel: undefined,
-        excludeExternalContext: true,
-        maxRecalled: 4
-      }
+      expectedRevision: updated.configRevision,
+      settings: { ...updated.settings, enabled: true, useMemories: true, generateMemories: true, maxRecalled: 4 }
     });
     assert.equal(policy.settings.maxRecalled, 4);
-    assert.notEqual(policy.configRevision, globalMemory.configRevision);
+    assert.notEqual(policy.configRevision, updated.configRevision);
     await assert.rejects(
       agents.saveMemorySettings(project.id, {
-        expectedRevision: globalMemory.configRevision,
+        expectedRevision: updated.configRevision,
         settings: { ...policy.settings, maxRecalled: 5 }
       }),
       /Global config revision conflict/u
@@ -1573,18 +1930,18 @@ async function testDesktopScopedMemoryCas(): Promise<void> {
 
     const afterDelete = await agents.deleteMemoryEntry(
       project.id,
-      "project",
       projectMemory.entries[0]!.id,
-      projectMemory.revision
+      updated.revision
     );
-    assert.equal(afterDelete.revision, 2);
-    assert.equal(afterDelete.totalEntries, 0);
-    const compacted = await agents.compactMemory(project.id, "project", afterDelete.revision);
-    assert.deepEqual(compacted, { scope: "project", before: 0, after: 0, revision: 2 });
-    await assert.rejects(agents.compactMemory(project.id, "project", 1), /Memory project revision conflict/u);
-    const cleared = await agents.clearMemory(project.id, "global", globalMemory.revision);
+    assert.equal(afterDelete.revision, 5);
+    assert.equal(afterDelete.totalEntries, 2);
+    assert.equal((await agents.memoryOverview(project.id, "current_workspace")).entries.length, 0);
+    const compacted = await agents.compactMemory(project.id, "current_workspace", afterDelete.revision);
+    assert.deepEqual(compacted, { filter: "current_workspace", before: 0, after: 0, revision: 5, error: undefined });
+    await assert.rejects(agents.compactMemory(project.id, "current_workspace", 1), /Memory revision conflict/u);
+    const cleared = await agents.clearMemory(project.id, "all", afterDelete.revision);
     assert.equal(cleared.totalEntries, 0);
-    assert.equal(cleared.revision, 2);
+    assert.equal(cleared.revision, 6);
   } finally {
     await agents?.closeAll();
     if (previousAgentDir === undefined) delete process.env[BINY_AGENT_DIR_ENV];
@@ -1592,6 +1949,7 @@ async function testDesktopScopedMemoryCas(): Promise<void> {
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
     await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(otherWorkspaceRoot, { recursive: true, force: true });
     await rm(desktopRoot, { recursive: true, force: true });
   }
 }
@@ -1611,7 +1969,9 @@ async function testDesktopRequiresModelConfiguration(): Promise<void> {
     await configStore.save(unconfigured);
     const initial = await agents.workspaceSnapshot(project.id);
     assert.equal(initial.requiresModelConfiguration, true);
-    assert.equal(initial.models.length, 0);
+    assert.equal(initial.models[0]?.alias, unconfigured.defaultModel, "saved unavailable models remain visible in settings projections");
+    assert.equal(initial.models[0]?.available, false);
+    assert.equal(initial.pickerModels.length, 0, "unavailable models stay out of task model pickers");
 
     const configured = structuredClone(unconfigured);
     configured.providers.setup!.apiKey = "desktop-test-key";
@@ -1619,6 +1979,27 @@ async function testDesktopRequiresModelConfiguration(): Promise<void> {
     const ready = await agents.workspaceSnapshot(project.id);
     assert.equal(ready.requiresModelConfiguration, false);
     assert.equal(ready.models[0]?.alias, configured.defaultModel);
+
+    const fallbackAvailable = structuredClone(configured);
+    fallbackAvailable.providers.setup!.apiKey = undefined;
+    fallbackAvailable.providers.fallback = {
+      type: "openai-compatible",
+      baseUrl: "https://fallback.example.com/v1",
+      apiKey: "desktop-fallback-key"
+    };
+    fallbackAvailable.models["fallback-model"] = {
+      provider: "fallback",
+      model: "fallback-model",
+      supportsTools: true
+    };
+    await configStore.save(fallbackAvailable);
+    const fallbackReady = await agents.workspaceSnapshot(project.id);
+    assert.equal(fallbackReady.requiresModelConfiguration, false, "another usable model keeps the composer available when the default is unavailable");
+    assert.deepEqual(fallbackReady.pickerModels.map((model) => model.alias), ["fallback-model"]);
+    assert.deepEqual(fallbackReady.models.map((model) => model.alias), ["setup-model", "fallback-model"]);
+    const switched = await agents.switchModel(project.id, "fallback-model", "off");
+    assert.equal(switched.modelAlias, "fallback-model", "a usable fallback can be selected before the invalid default runtime initializes");
+    assert.equal((await configStore.load()).defaultModel, "fallback-model");
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(desktopRoot, { recursive: true, force: true });
@@ -2016,6 +2397,12 @@ function testProviderCatalogResolution(): void {
 
 function testModelChoicesDeduplicateEquivalentAliases(): void {
   const config = structuredClone(defaultConfig);
+  const unavailable = structuredClone(defaultConfig);
+  unavailable.providers.deepseek!.apiKey = undefined;
+  unavailable.providers.deepseek!.apiKeyEnv = "BINY_TEST_MISSING_MODEL_KEY";
+  delete process.env.BINY_TEST_MISSING_MODEL_KEY;
+  assert.equal(listConfiguredModelChoices(unavailable).length, 2, "saved models remain visible when credentials are unavailable");
+  assert.equal(listConfiguredModelChoices(unavailable).every((model) => !model.available), true);
   config.providers.deepseek!.apiKey = "test-key";
   config.models["deepseek-deepseek-v4-flash"] = { ...config.models["deepseek-v4-flash"] };
   assert.deepEqual(listModelChoices(config).map((model) => model.alias), [

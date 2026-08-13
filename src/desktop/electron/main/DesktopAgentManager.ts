@@ -15,22 +15,30 @@
 import type { AgentAttachment, InteractiveAgentRunMode } from "../../../agent/AgentSession.js";
 import type {
   MemoryEntriesResult,
+  MemoryMaintenanceStatus,
   MemoryOverview,
   MemorySearchResult
 } from "../../../agent/context/memoryTypes.js";
 import type { ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { providerDefinition } from "../../../ai/provider.js";
 import { builtinProviderModels } from "../../../ai/builtinModels.js";
 import { loadProjectSettings } from "../../../config/projectSettings.js";
 import { globalConfigDir } from "../../../config/paths.js";
+import type { DeferredCredentialTransactionStatus } from "../../../config/credentials.js";
 import { configSchema, type AgentConfig, type ProviderConfig } from "../../../config/schema.js";
 import type { AgentConfigStore } from "../../../config/store.js";
+import { configDocumentRevision } from "../../../config/versioned.js";
 import { createNativeModelSettings, validateModelConfiguration } from "../../../llm/nativeFactory.js";
 import { ModelRuntime } from "../../../llm/ModelRuntime.js";
+import { listLocalEmbeddingModels } from "../../../llm/embedding/LocalEmbeddingRuntime.js";
+import { listProviderEmbeddingModels } from "../../../llm/embedding/ProviderEmbeddingRuntime.js";
+import { embeddingModelRefKey, type EmbeddingModelDescriptor, type LocalEmbeddingModelId } from "../../../llm/embedding/types.js";
+import type { MemoryEmbeddingRuntimeStatus } from "../../../agent/context/MemoryEmbeddingService.js";
 import { FileModelsStore, restoreProviderCatalogs, type ModelsStore } from "../../../llm/ModelsStore.js";
-import { hasUsableModelConfiguration, listConfiguredModelChoices, listPickerModelChoices, type ModelRuntimeInfo, type ThinkingSelection } from "../../../llm/ModelManager.js";
+import { hasUsableModelConfiguration, listConfiguredModelChoices, listPickerModelChoices, modelRuntimeInfo, type ModelRuntimeInfo, type ThinkingSelection } from "../../../llm/ModelManager.js";
 import type { PermissionMode, PermissionResult } from "../../../permission/PermissionManager.js";
 import { webSearchKeyEnvNames } from "../../../tools/web/search.js";
 import { executeRuntimeCommand } from "../../../runtime/commands.js";
@@ -50,8 +58,19 @@ import {
   type RuntimeHostServer
 } from "../../../runtime/RuntimeHost.js";
 import { SessionLeaseError } from "../../../runtime/SessionLease.js";
-import { sessionCatalogRecordRevision } from "../../../session/catalog.js";
-import type { AgentPersonalizationState, GlobalPersonalizationUpdate } from "../../../personalization/index.js";
+import {
+  deleteSessionCatalogRecord,
+  readSessionCatalogRecord,
+  sessionCatalogRecordRevision,
+  SESSION_CATALOG_MISSING_REVISION,
+  writeSessionCatalogRecord,
+  type SessionCatalogRecord
+} from "../../../session/catalog.js";
+import {
+  defaultChatPersonalizationOverride,
+  type AgentPersonalizationState,
+  type GlobalPersonalizationUpdate
+} from "../../../personalization/index.js";
 import { activeRun, isTerminalRunEvent, runtimeIsBusy, type AgentHostEvent, type AgentRuntimeUpdate } from "../../../runtime/agentEvents.js";
 import { evaluateTaskRetry } from "../../../runtime/TaskRetryPolicy.js";
 import { isTaskRunTerminal } from "../../../runtime/TaskRunStore.js";
@@ -59,10 +78,15 @@ import { withAttachmentReferences } from "../../attachmentReferences.js";
 import type {
   DesktopAttachment,
   DesktopChatPersonalizationOverride,
+  DesktopEmbeddingModelDescriptor,
   DesktopMemoryCompactionResult,
   DesktopMemoryEntryInput,
+  DesktopMemoryEntryPatch,
+  DesktopMemoryEmbeddingCancellationResult,
+  DesktopMemoryEmbeddingDeleteResult,
+  DesktopMemoryEmbeddingStatus,
   DesktopMemoryOverview,
-  DesktopMemoryScope,
+  DesktopMemoryOriginFilter,
   DesktopMemorySearchMatch,
   DesktopMemorySettingsInput,
   DesktopMemorySettingsSnapshot,
@@ -84,6 +108,11 @@ import type {
   DesktopSlashResult,
   DesktopWebSearchSettings,
   DesktopWebSearchSettingsInput,
+  DesktopSettingsChatSnapshot,
+  DesktopSettingsModelsSnapshot,
+  DesktopSettingsSaveInput,
+  DesktopStagedModelLoginResult,
+  DesktopStagedSettingsCredential,
   DesktopWorkspaceSnapshot
 } from "../../protocol.js";
 import type { AutomationCreateInput } from "../../../runtime/AutomationScheduler.js";
@@ -100,12 +129,56 @@ interface ManagedRuntime {
   unsubscribe(): void;
 }
 
+const SETTINGS_CREDENTIAL_TTL_MS = 30 * 60 * 1000;
+
+type StagedSettingsCredential =
+  | {
+      kind: "api-key";
+      secret: string;
+      expiresAt: number;
+    }
+  | {
+      kind: "oauth-login";
+      projectId: string;
+      authenticated: AuthenticatedModelLogin;
+      expiresAt: number;
+    };
+
+export interface DesktopSettingsConfigSnapshot {
+  revision: string;
+  personalization: AgentConfig["personalization"];
+  memory: AgentConfig["context"]["memory"];
+  webSearch: DesktopWebSearchSettings;
+  models: DesktopSettingsModelsSnapshot;
+}
+
+export interface PreparedDesktopSettingsConfig {
+  projectId: string;
+  workspaceRoot: string;
+  before: AgentConfig;
+  after: AgentConfig;
+  beforeRevision: string;
+  targetRevision: string;
+  credentialHandles: string[];
+}
+
+export interface PreparedDesktopSettingsChat {
+  projectId: string;
+  persistenceRoot: string;
+  sessionId: string;
+  before?: SessionCatalogRecord;
+  after: SessionCatalogRecord;
+  beforeRevision: string;
+  targetRevision: string;
+}
+
 export class DesktopAgentManager {
   private readonly runtimes = new Map<string, ManagedRuntime>();
   private readonly runtimeInitializations = new Map<string, Promise<ManagedRuntime>>();
   private readonly liveEvents = new Map<string, Map<string, AgentHostEvent[]>>();
   private readonly runtimeErrors = new Map<string, string>();
   private readonly modelLoginOperations = new Map<string, AbortController>();
+  private readonly stagedSettingsCredentials = new Map<string, StagedSettingsCredential>();
   private readonly modelLogin: DesktopModelLoginService;
   private closing = false;
 
@@ -145,7 +218,9 @@ export class DesktopAgentManager {
       selectedSessionId: this.state.selectedSessionId(projectId),
       runtime: runtime?.getSnapshot(),
       runtimeError: this.runtimeErrors.get(projectId),
-      requiresModelConfiguration: !config || !hasUsableModelConfiguration(config),
+      // 默认模型失效不等于整个应用没有模型。只要选择器里还有一个可用模型，
+      // 用户就应能继续输入并切换过去，不能被“需要配置模型”状态锁死。
+      requiresModelConfiguration: !config || pickerModels.length === 0,
       pickerModels,
       models,
       connections: config ? describeModelConnections(config) : [],
@@ -405,6 +480,33 @@ export class DesktopAgentManager {
   }
 
   async switchModel(projectId: string, alias: string, thinking: ThinkingSelection): Promise<ModelRuntimeInfo> {
+    const project = this.projects.requireProject(projectId);
+    const config = await this.configStore.load(project.path);
+    if (!this.runtimes.has(projectId) && !hasUsableModelConfiguration(config)) {
+      // Runtime 会用默认模型初始化。默认模型凭据失效时先验证并持久化用户选中的
+      // 可用模型，否则 ModelManager 在构造阶段就会被旧默认模型挡住。
+      const catalogs = await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore);
+      const targetRuntime = new ModelRuntime(config, catalogs);
+      const resolved = targetRuntime.resolve(alias);
+      const candidate = configSchema.parse({
+        ...config,
+        defaultModel: resolved.alias,
+        models: {
+          ...config.models,
+          [resolved.alias]: config.models[resolved.alias] ?? {
+            provider: resolved.providerAlias,
+            model: resolved.model.model
+          }
+        },
+        thinking: {
+          enabled: thinking !== "off",
+          effort: thinking === "off" ? config.thinking.effort : thinking
+        }
+      });
+      new ModelRuntime(candidate, catalogs).createModelSettings();
+      await this.configStore.save(candidate, project.path);
+      return modelRuntimeInfo(await this.configStore.load(project.path));
+    }
     const { runtime, commands } = await this.ensureRuntime(projectId);
     if (commands) {
       return await runtime.runExclusiveOperation(
@@ -413,6 +515,294 @@ export class DesktopAgentManager {
       );
     }
     return await requireRemoteRuntime(runtime).switchModel(alias, thinking);
+  }
+
+  async settingsConfigSnapshot(projectId: string): Promise<DesktopSettingsConfigSnapshot> {
+    const project = this.projects.requireProject(projectId);
+    const current = await this.requireVersionedConfig().loadVersioned!(project.path);
+    return describeSettingsConfigSnapshot(current.config, current.revision);
+  }
+
+  async settingsChatSnapshot(projectId: string, sessionId: string): Promise<DesktopSettingsChatSnapshot> {
+    const project = this.projects.requireProject(projectId);
+    const persistenceRoot = await this.projects.dataRoot(project);
+    const current = await readSessionCatalogRecord(persistenceRoot, sessionId);
+    return {
+      sessionId,
+      metadataRevision: current === undefined ? SESSION_CATALOG_MISSING_REVISION : sessionCatalogRecordRevision(current),
+      personalization: current?.personalization ?? defaultChatPersonalizationOverride
+    };
+  }
+
+  async prepareSettingsConfig(
+    projectId: string,
+    input: DesktopSettingsSaveInput
+  ): Promise<PreparedDesktopSettingsConfig> {
+    this.assertNoRunningTasks("任务运行期间不能提交全局设置。");
+    const project = this.projects.requireProject(projectId);
+    const current = await this.requireVersionedConfig().loadVersioned!(project.path);
+    let next = current.config;
+    const credentialHandles = new Set<string>();
+
+    if (input.personalization !== undefined || input.memory !== undefined) {
+      next = configSchema.parse({
+        ...next,
+        personalization: input.personalization ?? next.personalization,
+        context: {
+          ...next.context,
+          memory: input.memory ?? next.context.memory
+        }
+      });
+    }
+    if (input.webSearch !== undefined) {
+      const sameProvider = input.webSearch.provider === next.web.search.provider;
+      const apiKey = input.webSearch.apiKeyHandle === undefined
+        ? input.webSearch.apiKey
+        : this.requireApiKeyHandle(input.webSearch.apiKeyHandle, credentialHandles);
+      next = configSchema.parse({
+        ...next,
+        web: {
+          ...next.web,
+          search: {
+            enabled: input.webSearch.enabled,
+            provider: input.webSearch.provider,
+            apiKey: apiKey === undefined ? (sameProvider ? next.web.search.apiKey : undefined) : apiKey || undefined,
+            apiKeyEnv: sameProvider ? input.webSearch.apiKeyEnv : undefined,
+            timeoutMs: input.webSearch.timeoutMs,
+            maxResults: input.webSearch.maxResults
+          }
+        }
+      });
+    }
+    if (input.models !== undefined) {
+      for (const handle of input.models.oauthCredentialHandles ?? []) {
+        const staged = this.requireStagedCredential(handle);
+        if (staged.kind !== "oauth-login" || staged.projectId !== projectId) {
+          throw new Error("OAuth credential handle 与当前项目或用途不匹配。");
+        }
+        credentialHandles.add(handle);
+        next = this.buildConfigWithAuthenticatedLogin(next, staged.authenticated);
+      }
+      for (const upsert of input.models.upserts) {
+        const apiKey = upsert.apiKeyHandle === undefined
+          ? upsert.apiKey
+          : this.requireApiKeyHandle(upsert.apiKeyHandle, credentialHandles);
+        const resolved = { ...upsert, apiKey, apiKeyHandle: undefined };
+        next = this.buildConfigWithModel(next, resolved);
+      }
+      const projectSettings = await loadProjectSettings(project.path);
+      for (const requestedAlias of input.models.removeAliases) {
+        const alias = resolveConfiguredModelAlias(next, requestedAlias);
+        if (!alias) throw new Error(`未知模型：${requestedAlias}`);
+        if (projectSettings.defaultModel === alias) {
+          throw new Error(`不能删除项目 .biny/settings.json 当前引用的模型：${alias}`);
+        }
+        const remaining = Object.entries(next.models).filter(([key]) => key !== alias);
+        if (!remaining.length) throw new Error("至少需要保留一个可用模型。");
+        next = configSchema.parse({
+          ...next,
+          defaultModel: next.defaultModel === alias ? remaining[0]![0] : next.defaultModel,
+          models: Object.fromEntries(remaining)
+        });
+      }
+      if (input.models.defaultModel !== undefined) {
+        const alias = resolveConfiguredModelAlias(next, input.models.defaultModel.alias);
+        if (!alias) throw new Error(`未知模型：${input.models.defaultModel.alias}`);
+        const selection = input.models.defaultModel.thinking;
+        next = configSchema.parse({
+          ...next,
+          defaultModel: alias,
+          thinking: {
+            enabled: selection !== "off",
+            effort: selection === "off" ? next.thinking.effort : selection
+          }
+        });
+      }
+      validateModelConfiguration(next, next.defaultModel);
+    }
+
+    return {
+      projectId,
+      workspaceRoot: project.path,
+      before: current.config,
+      after: next,
+      beforeRevision: current.revision,
+      targetRevision: configDocumentRevision(next),
+      credentialHandles: [...credentialHandles]
+    };
+  }
+
+  async commitSettingsConfig(prepared: PreparedDesktopSettingsConfig, transactionId: string): Promise<void> {
+    this.assertNoRunningTasks("任务运行期间不能提交全局设置。");
+    const saved = await this.requireSettingsTransactionConfig().saveVersionedDeferred!(
+      prepared.after,
+      prepared.beforeRevision,
+      transactionId,
+      prepared.workspaceRoot
+    );
+    if (saved.revision !== prepared.targetRevision) {
+      throw new Error(`全局配置保存后的 revision 与事务候选不一致：${prepared.targetRevision} -> ${saved.revision}。`);
+    }
+    this.runtimeErrors.delete(prepared.projectId);
+    await this.rebuildIdleManagedRuntimes();
+  }
+
+  async settingsConfigTransactionStatus(
+    projectId: string,
+    transactionId: string
+  ): Promise<DeferredCredentialTransactionStatus> {
+    const project = this.projects.requireProject(projectId);
+    return await this.requireSettingsTransactionConfig().deferredCredentialStatus!(transactionId, project.path);
+  }
+
+  async finalizeSettingsConfig(projectId: string, transactionId: string): Promise<void> {
+    const project = this.projects.requireProject(projectId);
+    await this.requireSettingsTransactionConfig().finalizeDeferredCredentials!(transactionId, project.path);
+  }
+
+  async rollbackSettingsConfig(
+    prepared: PreparedDesktopSettingsConfig,
+    transactionId: string
+  ): Promise<"not_needed" | "completed" | "failed"> {
+    try {
+      const result = await this.requireSettingsTransactionConfig().rollbackVersionedDeferred!(
+        prepared.before,
+        prepared.targetRevision,
+        transactionId,
+        prepared.workspaceRoot
+      );
+      if (result === "failed") return result;
+      await this.rebuildIdleManagedRuntimes();
+      return result;
+    } catch {
+      return "failed";
+    }
+  }
+
+  async rollbackPendingSettingsConfig(
+    projectId: string,
+    transactionId: string
+  ): Promise<"not_needed" | "completed" | "failed"> {
+    const project = this.projects.requireProject(projectId);
+    const result = await this.requireSettingsTransactionConfig().rollbackDeferredCredentials!(transactionId, project.path);
+    if (result !== "failed") await this.rebuildIdleManagedRuntimes();
+    return result;
+  }
+
+  async prepareSettingsChat(
+    projectId: string,
+    input: NonNullable<DesktopSettingsSaveInput["chat"]>
+  ): Promise<PreparedDesktopSettingsChat> {
+    const project = this.projects.requireProject(projectId);
+    const persistenceRoot = await this.projects.dataRoot(project);
+    const before = await readSessionCatalogRecord(persistenceRoot, input.sessionId);
+    const now = new Date().toISOString();
+    const after: SessionCatalogRecord = {
+      ...(before ?? {
+        version: 1,
+        sessionId: input.sessionId,
+        rootSessionId: input.sessionId,
+        createdAt: now,
+        updatedAt: now
+      }),
+      personalization: input.personalization,
+      updatedAt: now
+    };
+    return {
+      projectId,
+      persistenceRoot,
+      sessionId: input.sessionId,
+      before,
+      after,
+      beforeRevision: before === undefined ? SESSION_CATALOG_MISSING_REVISION : sessionCatalogRecordRevision(before),
+      targetRevision: sessionCatalogRecordRevision(after)
+    };
+  }
+
+  async commitSettingsChat(prepared: PreparedDesktopSettingsChat): Promise<void> {
+    this.assertNoRunningTasks("任务运行期间不能提交聊天设置。");
+    await writeSessionCatalogRecord(prepared.persistenceRoot, prepared.after, {
+      expectedRevision: prepared.beforeRevision
+    });
+  }
+
+  async rollbackSettingsChat(prepared: PreparedDesktopSettingsChat): Promise<"not_needed" | "completed" | "failed"> {
+    try {
+      const current = await readSessionCatalogRecord(prepared.persistenceRoot, prepared.sessionId);
+      const revision = current === undefined ? SESSION_CATALOG_MISSING_REVISION : sessionCatalogRecordRevision(current);
+      if (revision === prepared.beforeRevision) return "not_needed";
+      if (revision !== prepared.targetRevision) return "failed";
+      if (prepared.before === undefined) {
+        await deleteSessionCatalogRecord(prepared.persistenceRoot, prepared.sessionId);
+      } else {
+        await writeSessionCatalogRecord(prepared.persistenceRoot, {
+          ...prepared.before,
+          // catalog merge 不会用 undefined 删除字段；显式默认覆盖与原先“无覆盖”的行为等价。
+          personalization: prepared.before.personalization ?? defaultChatPersonalizationOverride
+        }, {
+          expectedRevision: prepared.targetRevision
+        });
+      }
+      return "completed";
+    } catch {
+      return "failed";
+    }
+  }
+
+  stageSettingsCredential(secret: string): DesktopStagedSettingsCredential {
+    if (!secret.trim() || secret.length > 16_000) throw new Error("凭据不能为空且不能超过 16000 个字符。");
+    this.pruneStagedSettingsCredentials();
+    const handle = randomUUID();
+    const expiresAt = Date.now() + SETTINGS_CREDENTIAL_TTL_MS;
+    this.stagedSettingsCredentials.set(handle, { kind: "api-key", secret, expiresAt });
+    return { handle, kind: "api-key", expiresAt: new Date(expiresAt).toISOString(), provider: undefined };
+  }
+
+  async completeModelLoginForSettings(
+    projectId: string,
+    provider: DesktopModelLoginProvider,
+    authRequestId: string,
+    pastedAuthorization?: string
+  ): Promise<DesktopStagedModelLoginResult> {
+    this.projects.requireProject(projectId);
+    const operation = new AbortController();
+    this.modelLoginOperations.set(authRequestId, operation);
+    try {
+      const authenticated = await this.modelLogin.complete(provider, authRequestId, pastedAuthorization);
+      operation.signal.throwIfAborted();
+      let models: NonNullable<AuthenticatedModelLogin["models"]>;
+      try {
+        models = await this.modelLogin.discoverModels(provider, authenticated.accessToken, operation.signal);
+      } catch {
+        operation.signal.throwIfAborted();
+        models = [];
+      }
+      const handle = randomUUID();
+      const expiresAt = Date.now() + SETTINGS_CREDENTIAL_TTL_MS;
+      this.stagedSettingsCredentials.set(handle, {
+        kind: "oauth-login",
+        projectId,
+        authenticated: { ...authenticated, models },
+        expiresAt
+      });
+      return {
+        handle,
+        kind: "oauth-login",
+        expiresAt: new Date(expiresAt).toISOString(),
+        provider,
+        models
+      };
+    } finally {
+      this.modelLoginOperations.delete(authRequestId);
+    }
+  }
+
+  releaseSettingsCredentials(handles: string[]): void {
+    for (const handle of handles) this.stagedSettingsCredentials.delete(handle);
+  }
+
+  consumeSettingsCredentials(handles: string[]): void {
+    this.releaseSettingsCredentials(handles);
   }
 
   async startModelLogin(projectId: string, provider: DesktopModelLoginProvider): Promise<DesktopModelLoginStartResult> {
@@ -426,10 +816,7 @@ export class DesktopAgentManager {
     authRequestId: string,
     pastedAuthorization?: string
   ): Promise<DesktopWorkspaceSnapshot> {
-    const managed = this.runtimes.get(projectId);
-    if (managed && runtimeIsBusy(managed.runtime.getSnapshot())) {
-      throw new Error("任务运行期间不能修改模型配置。");
-    }
+    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
     this.projects.requireProject(projectId);
     const operation = new AbortController();
     this.modelLoginOperations.set(authRequestId, operation);
@@ -450,9 +837,10 @@ export class DesktopAgentManager {
         ...authenticated,
         models: discoveredModels
       });
+      this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
       await this.saveProjectConfig(projectId, candidate);
       this.runtimeErrors.delete(projectId);
-      if (managed) await this.rebuildManagedRuntime(projectId, managed);
+      await this.rebuildIdleManagedRuntimes();
       return await this.workspaceSnapshot(projectId);
     } finally {
       this.modelLoginOperations.delete(authRequestId);
@@ -466,27 +854,22 @@ export class DesktopAgentManager {
   }
 
   async saveModelConfiguration(projectId: string, input: DesktopModelConfigurationInput): Promise<DesktopWorkspaceSnapshot> {
-    const managed = this.runtimes.get(projectId);
-    if (managed && runtimeIsBusy(managed.runtime.getSnapshot())) {
-      throw new Error("任务运行期间不能修改模型配置。");
-    }
+    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
     this.projects.requireProject(projectId);
     const current = await this.loadProjectConfig(projectId);
     const next = this.buildConfigWithModel(current, input);
     // 写入全局配置前先验证候选模型的 endpoint、协议和凭据；运行时切换还会再次经过
     // ModelManager 的同一校验，避免设置页和 TUI/CLI 产生两套可用性规则。
     if (input.makeDefault || next.defaultModel === input.alias) validateModelConfiguration(next, input.alias);
+    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
     await this.saveProjectConfig(projectId, next);
     this.runtimeErrors.delete(projectId);
-    if (managed) await this.rebuildManagedRuntime(projectId, managed);
+    await this.rebuildIdleManagedRuntimes();
     return await this.workspaceSnapshot(projectId);
   }
 
   async removeModelConfiguration(projectId: string, alias: string): Promise<DesktopWorkspaceSnapshot> {
-    const managed = this.runtimes.get(projectId);
-    if (managed && runtimeIsBusy(managed.runtime.getSnapshot())) {
-      throw new Error("任务运行期间不能修改模型配置。");
-    }
+    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
     this.projects.requireProject(projectId);
     const current = await this.loadProjectConfig(projectId);
     const configuredAlias = resolveConfiguredModelAlias(current, alias);
@@ -503,9 +886,10 @@ export class DesktopAgentManager {
       defaultModel: nextDefault,
       models: Object.fromEntries(remaining)
     });
+    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
     await this.saveProjectConfig(projectId, next);
     this.runtimeErrors.delete(projectId);
-    if (managed) await this.rebuildManagedRuntime(projectId, managed);
+    await this.rebuildIdleManagedRuntimes();
     return await this.workspaceSnapshot(projectId);
   }
 
@@ -516,10 +900,7 @@ export class DesktopAgentManager {
   }
 
   async saveWebSearchSettings(projectId: string, input: DesktopWebSearchSettingsInput): Promise<DesktopWebSearchSettings> {
-    const managed = this.runtimes.get(projectId);
-    if (managed && runtimeIsBusy(managed.runtime.getSnapshot())) {
-      throw new Error("任务运行期间不能修改联网搜索配置。");
-    }
+    this.assertNoRunningTasks("任务运行期间不能修改联网搜索配置。");
     this.projects.requireProject(projectId);
     const current = await this.loadProjectConfig(projectId);
     // 密钥槽位是各 provider 共用的：换 provider 时必须丢弃旧密钥和自定义 env 名，
@@ -540,9 +921,10 @@ export class DesktopAgentManager {
         }
       }
     });
+    this.assertNoRunningTasks("任务运行期间不能修改联网搜索配置。");
     await this.saveProjectConfig(projectId, next);
     // 工具注册表在 runtime 装配时读取搜索配置，关闭后下次使用即按新配置重建。
-    if (managed) await this.rebuildManagedRuntime(projectId, managed);
+    await this.rebuildIdleManagedRuntimes();
     return describeWebSearchSettings(next.web.search);
   }
 
@@ -573,7 +955,9 @@ export class DesktopAgentManager {
     input: DesktopChatPersonalizationOverride,
     expectedRevision: string
   ): Promise<DesktopWorkspaceSnapshot> {
+    this.assertNoRunningTasks("任务运行期间不能修改当前聊天的个性化设置。");
     const managed = await this.runtimeForSession(projectId, sessionId, "任务运行期间不能修改当前聊天的个性化设置。");
+    this.assertNoRunningTasks("任务运行期间不能修改当前聊天的个性化设置。");
     if (managed.commands) {
       await managed.commands.agent.updateChatPersonalization(input, expectedRevision);
     } else {
@@ -582,24 +966,28 @@ export class DesktopAgentManager {
     return await this.workspaceSnapshot(projectId);
   }
 
-  /** 当前 scope 的 store 条目与 revision；策略始终来自全局 versioned config。 */
-  async memoryOverview(projectId: string, scope: DesktopMemoryScope): Promise<DesktopMemoryOverview> {
+  /** 单一记忆库条目与 revision；filter 只影响视图，不参与物理存储。 */
+  async memoryOverview(projectId: string, filter: DesktopMemoryOriginFilter = "all"): Promise<DesktopMemoryOverview> {
     this.projects.requireProject(projectId);
     const [personalization, store] = await Promise.all([
       this.currentPersonalizationState(projectId),
-      this.readMemoryStore(projectId, scope)
+      this.readMemoryStore(projectId, filter)
     ]);
-    const entries = store.entries.entries.filter((entry) => entry.scope === scope);
+    const entries = store.entries.entries;
     const topicCounts = new Map<string, number>();
     for (const entry of entries) topicCounts.set(entry.topic, (topicCounts.get(entry.topic) ?? 0) + 1);
     return {
-      scope,
+      filter,
       configRevision: requireConfigRevision(personalization),
-      // listStoredEntries 的 entries 与 revision 来自同一份 scope 快照；overview 可能在
-      // 另一进程并发写入时更新得更早或更晚，不能拿它的 revision 给这批条目做 CAS。
-      revision: store.entries.revision[scope],
+      // entries 与 storeRevision 来自同一份单库快照；overview 只补充统计，不能替代 CAS revision。
+      revision: store.entries.storeRevision,
       settings: { ...personalization.memory },
-      totalEntries: entries.length,
+      totalEntries: store.overview.entryCount,
+      memoryStats: memoryStats(store.allEntries),
+      candidateCount: store.overview.candidateCount,
+      indexChars: store.overview.indexChars,
+      origins: { ...store.overview.origins },
+      maintenance: { ...store.maintenance },
       topics: [...topicCounts.entries()].map(([topic, count]) => ({ topic, entries: count })),
       entries
     };
@@ -615,18 +1003,18 @@ export class DesktopAgentManager {
     return { configRevision: requireConfigRevision(state), settings: { ...state.memory } };
   }
 
-  async searchMemory(projectId: string, scope: DesktopMemoryScope, query: string): Promise<DesktopMemorySearchMatch[]> {
+  async searchMemory(projectId: string, filter: DesktopMemoryOriginFilter, query: string): Promise<DesktopMemorySearchMatch[]> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.ensureRuntime(projectId);
     const result = commands
       ? await runtime.runExclusiveOperation(
         "memory",
-        async () => await requireLocalMemory(commands).searchScoped(query, [], { scopes: [scope], limit: 8 })
+        async () => await commands.agent.searchMemory(query, [], { origins: [filter], limit: 8 })
       )
-      : await requireRemoteRuntime(runtime).memory<MemorySearchResult>("search-v2", { scope, query });
+      : await requireRemoteRuntime(runtime).memory<MemorySearchResult>("search-v3", { selector: filter, query, limit: 8 });
     return result.matches.map((match) => ({
       id: match.entry.id,
-      scope: match.entry.scope,
+      origin: match.entry.origin,
       topic: match.topic,
       kind: match.entry.kind,
       lineage: match.entry.lineage,
@@ -635,90 +1023,286 @@ export class DesktopAgentManager {
       updatedAt: match.entry.updatedAt,
       path: match.path,
       excerpt: match.excerpt,
-      score: match.score
+      score: match.score,
+      recallCount: match.entry.recallCount,
+      lastRecalledAt: match.entry.lastRecalledAt
     }));
   }
 
   async addMemoryEntry(
     projectId: string,
-    scope: DesktopMemoryScope,
     input: DesktopMemoryEntryInput,
     expectedRevision: number
   ): Promise<DesktopMemoryOverview> {
     this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能新增记忆。"
+    );
     const sessionId = this.state.selectedSessionId(projectId);
     const entry = {
-      scope,
+      audience: input.audience,
       kind: input.kind,
       topic: input.topic,
-      title: input.note.split("\n", 1)[0]?.slice(0, 120) || "手动记忆",
-      summary: input.note,
+      title: input.title,
+      summary: input.summary,
+      decisions: input.decisions,
+      paths: input.paths,
+      keywords: input.keywords,
       importance: input.importance,
       lineage: {
         source: "explicit" as const,
         externalContext: false,
         sessionId,
-        userEvidence: input.note
+        userEvidence: input.userEvidence ?? (input.audience === "universal" ? input.summary : undefined)
       }
     };
     const result = commands
       ? await runtime.runExclusiveOperation(
         "memory",
-        async () => await requireLocalMemory(commands).writeScoped(entry, { expectedRevision })
+        async () => {
+          const written = await requireLocalMemory(commands).writeEntry(entry, { expectedRevision });
+          if (written.written && written.entry) await commands.agent.indexMemoryEntry(written.entry);
+          return written;
+        }
       )
-      : await requireRemoteRuntime(runtime).memory<{ written: boolean; path?: string }>("write-v2", { entry, expectedRevision });
+      : await requireRemoteRuntime(runtime).memory<{ written: boolean; path?: string }>("write-v3", { entry, expectedRevision });
     if (!result.written) {
       throw new Error(result.path ? "已存在等价的记忆条目，未重复保存。" : "内容太短，至少需要 20 个字符才能作为持久记忆。");
     }
-    return await this.memoryOverview(projectId, scope);
+    return await this.memoryOverview(projectId);
+  }
+
+  async updateMemoryEntry(
+    projectId: string,
+    entryId: string,
+    patch: DesktopMemoryEntryPatch,
+    expectedRevision: number
+  ): Promise<DesktopMemoryOverview> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能编辑记忆。"
+    );
+    const result = commands
+      ? await runtime.runExclusiveOperation(
+        "memory",
+        async () => {
+          const written = await requireLocalMemory(commands).updateEntry(entryId, patch, { expectedRevision });
+          if (written.written && written.entry) await commands.agent.indexMemoryEntry(written.entry);
+          return written;
+        }
+      )
+      : await requireRemoteRuntime(runtime).memory<{ written: boolean }>("update-v3", {
+        id: entryId,
+        patch,
+        expectedRevision
+      });
+    if (!result.written) throw new Error("未找到该记忆条目，或修改后的正文不足 20 个字符。");
+    return await this.memoryOverview(projectId);
   }
 
   async deleteMemoryEntry(
     projectId: string,
-    scope: DesktopMemoryScope,
     entryId: string,
     expectedRevision: number
   ): Promise<DesktopMemoryOverview> {
     this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能删除记忆。"
+    );
     const result = commands
       ? await runtime.runExclusiveOperation(
         "memory",
-        async () => await requireLocalMemory(commands).deleteStoredEntry(scope, entryId, { expectedRevision })
+        async () => {
+          const deleted = await requireLocalMemory(commands).deleteEntryById(entryId, { expectedRevision });
+          if (deleted.deleted) commands.agent.removeMemoryEmbeddingEntries([entryId]);
+          return deleted;
+        }
       )
-      : await requireRemoteRuntime(runtime).memory<{ deleted: boolean }>("delete-v2", { scope, id: entryId, expectedRevision });
+      : await requireRemoteRuntime(runtime).memory<{ deleted: boolean }>("delete-v3", { id: entryId, expectedRevision });
     if (!result.deleted) throw new Error("未找到该记忆条目，可能已被删除。");
-    return await this.memoryOverview(projectId, scope);
+    return await this.memoryOverview(projectId);
   }
 
-  async clearMemory(projectId: string, scope: DesktopMemoryScope, expectedRevision: number): Promise<DesktopMemoryOverview> {
+  async clearMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview> {
     this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能清空记忆。"
+    );
     if (commands) {
       await runtime.runExclusiveOperation(
         "memory",
-        async () => await requireLocalMemory(commands).clearScope(scope, { expectedRevision })
+        async () => {
+          const memory = requireLocalMemory(commands);
+          const entries = await memory.listMemoryEntries({ origins: [filter] });
+          const cleared = await memory.clearEntries(filter, { expectedRevision });
+          if (cleared.deletedEntries) commands.agent.removeMemoryEmbeddingEntries(entries.entries.map(({ id }) => id));
+          return cleared;
+        }
       );
     } else {
-      await requireRemoteRuntime(runtime).memory("clear-v2", { scope, expectedRevision });
+      await requireRemoteRuntime(runtime).memory("clear-v3", { selector: filter, expectedRevision });
     }
-    return await this.memoryOverview(projectId, scope);
+    return await this.memoryOverview(projectId);
   }
 
   async compactMemory(
     projectId: string,
-    scope: DesktopMemoryScope,
-    expectedRevision: number
+    filter: DesktopMemoryOriginFilter,
+    expectedRevision: number,
+    topic?: string
   ): Promise<DesktopMemoryCompactionResult> {
     this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
-    return commands
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能整理记忆。"
+    );
+    const result = commands
       ? await runtime.runExclusiveOperation(
         "memory",
-        async () => await requireLocalMemory(commands).consolidateScope(scope, { expectedRevision })
+        async () => await requireLocalMemory(commands).consolidateEntries(filter, { expectedRevision, topic })
       )
-      : await requireRemoteRuntime(runtime).memory<DesktopMemoryCompactionResult>("consolidate-v2", { scope, expectedRevision });
+      : await requireRemoteRuntime(runtime).memory<DesktopMemoryCompactionResult>("consolidate-v3", {
+        selector: filter,
+        expectedRevision,
+        topic
+      });
+    // 远端 Host 会在自身 maintenance boundary 后调度；同进程 fallback 由 Manager 补上。
+    if (commands && result.revision !== expectedRevision) this.scheduleMemoryEmbeddingRebuild(projectId);
+    return {
+      filter,
+      before: result.before,
+      after: result.after,
+      revision: result.revision,
+      error: result.error
+    };
+  }
+
+  async memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    const status = commands
+      ? await commands.agent.memoryEmbeddingStatus()
+      : await requireRemoteRuntime(runtime).memoryEmbeddingStatus();
+    return describeMemoryEmbeddingStatus(status);
+  }
+
+  async downloadMemoryEmbeddingModel(
+    projectId: string,
+    model: LocalEmbeddingModelId
+  ): Promise<DesktopMemoryEmbeddingStatus> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能下载 Embedding 模型。"
+    );
+    if (!commands) return describeMemoryEmbeddingStatus(await requireRemoteRuntime(runtime).downloadMemoryEmbeddingModel(model));
+    const status = await runtime.runExclusiveOperation("memory", async (signal) => {
+      await commands.agent.downloadMemoryEmbeddingModel(model, signal);
+      return await commands.agent.memoryEmbeddingStatus();
+    });
+    return describeMemoryEmbeddingStatus(status);
+  }
+
+  async cancelMemoryEmbeddingDownload(
+    projectId: string,
+    model: LocalEmbeddingModelId
+  ): Promise<DesktopMemoryEmbeddingCancellationResult> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    if (!commands) {
+      const result = await requireRemoteRuntime(runtime).cancelMemoryEmbeddingDownload(model);
+      return { cancelled: result.cancelled, status: describeMemoryEmbeddingStatus(result.status) };
+    }
+    const cancelled = commands.agent.cancelMemoryEmbeddingDownload(model);
+    return { cancelled, status: describeMemoryEmbeddingStatus(await commands.agent.memoryEmbeddingStatus()) };
+  }
+
+  async deleteMemoryEmbeddingModel(
+    projectId: string,
+    model: LocalEmbeddingModelId
+  ): Promise<DesktopMemoryEmbeddingDeleteResult> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能删除 Embedding 模型。"
+    );
+    if (!commands) {
+      const result = await requireRemoteRuntime(runtime).deleteMemoryEmbeddingModel(model);
+      return { ...result, status: describeMemoryEmbeddingStatus(result.status) };
+    }
+    const result = await runtime.runExclusiveOperation("memory", async () => ({
+      ...(await commands.agent.removeMemoryEmbeddingModel(model)),
+      status: await commands.agent.memoryEmbeddingStatus()
+    }));
+    return { ...result, status: describeMemoryEmbeddingStatus(result.status) };
+  }
+
+  async rebuildMemoryEmbeddingIndex(projectId: string): Promise<DesktopMemoryEmbeddingStatus> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能重建记忆索引。"
+    );
+    if (!commands) return describeMemoryEmbeddingStatus(await requireRemoteRuntime(runtime).rebuildMemoryEmbeddingIndex());
+    const status = await runtime.runExclusiveOperation("memory", async (signal) => {
+      await commands.agent.rebuildMemoryEmbeddingIndex(signal);
+      return await commands.agent.memoryEmbeddingStatus();
+    });
+    return describeMemoryEmbeddingStatus(status);
+  }
+
+  async cancelMemoryEmbeddingRebuild(projectId: string): Promise<DesktopMemoryEmbeddingCancellationResult> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    if (!commands) {
+      const result = await requireRemoteRuntime(runtime).cancelMemoryEmbeddingRebuild();
+      return { cancelled: result.cancelled, status: describeMemoryEmbeddingStatus(result.status) };
+    }
+    const cancelled = commands.agent.cancelMemoryEmbeddingRebuild();
+    return { cancelled, status: describeMemoryEmbeddingStatus(await commands.agent.memoryEmbeddingStatus()) };
+  }
+
+  /** 设置事务已经复读确认后才调用；重建失败只留在派生状态，不改变 committed 结果。 */
+  settingsCommitted(prepared: PreparedDesktopSettingsConfig): void {
+    const before = prepared.before.context.memory.embeddingModel;
+    const after = prepared.after.context.memory.embeddingModel;
+    if (after === undefined) return;
+    const beforeDescriptor = before === undefined
+      ? undefined
+      : describeEmbeddingModels(prepared.before).find(({ ref }) => embeddingModelRefKey(ref) === embeddingModelRefKey(before));
+    const afterDescriptor = describeEmbeddingModels(prepared.after)
+      .find(({ ref }) => embeddingModelRefKey(ref) === embeddingModelRefKey(after));
+    const beforeEndpointHash = beforeDescriptor?.ref.kind === "provider"
+      ? beforeDescriptor.privacyEndpointHash
+      : undefined;
+    const afterEndpointHash = afterDescriptor?.ref.kind === "provider"
+      ? afterDescriptor.privacyEndpointHash
+      : undefined;
+    const beforeConsent = beforeEndpointHash !== undefined
+      ? Object.values(prepared.before.context.memory.cloudEmbeddingConsents).some(({ endpointHash }) => (
+          endpointHash === beforeEndpointHash
+        ))
+      : undefined;
+    const afterConsent = afterEndpointHash !== undefined
+      ? Object.values(prepared.after.context.memory.cloudEmbeddingConsents).some(({ endpointHash }) => (
+          endpointHash === afterEndpointHash
+        ))
+      : undefined;
+    if (before !== undefined
+      && embeddingModelRefKey(before) === embeddingModelRefKey(after)
+      && beforeDescriptor?.fingerprint === afterDescriptor?.fingerprint
+      && (after.kind === "local" || beforeConsent === afterConsent)) return;
+    this.scheduleMemoryEmbeddingRebuild(prepared.projectId);
+  }
+
+  private scheduleMemoryEmbeddingRebuild(projectId: string): void {
+    setTimeout(() => {
+      void this.rebuildMemoryEmbeddingIndex(projectId).catch(() => undefined);
+    }, 0).unref?.();
   }
 
   /**
@@ -793,6 +1377,63 @@ export class DesktopAgentManager {
     }
   }
 
+  private requireVersionedConfig(): AgentConfigStore & Required<Pick<AgentConfigStore, "loadVersioned" | "saveVersioned">> {
+    if (!this.configStore.loadVersioned || !this.configStore.saveVersioned) {
+      throw new Error("当前配置存储不支持统一设置事务。");
+    }
+    return this.configStore as AgentConfigStore & Required<Pick<AgentConfigStore, "loadVersioned" | "saveVersioned">>;
+  }
+
+  private requireSettingsTransactionConfig(): AgentConfigStore & Required<Pick<
+    AgentConfigStore,
+    | "loadVersioned"
+    | "saveVersionedDeferred"
+    | "deferredCredentialStatus"
+    | "finalizeDeferredCredentials"
+    | "rollbackVersionedDeferred"
+    | "rollbackDeferredCredentials"
+  >> {
+    const store = this.configStore;
+    if (!store.loadVersioned
+      || !store.saveVersionedDeferred
+      || !store.deferredCredentialStatus
+      || !store.finalizeDeferredCredentials
+      || !store.rollbackVersionedDeferred
+      || !store.rollbackDeferredCredentials) {
+      throw new Error("当前配置存储不支持统一设置凭据事务。");
+    }
+    return store as AgentConfigStore & Required<Pick<
+      AgentConfigStore,
+      | "loadVersioned"
+      | "saveVersionedDeferred"
+      | "deferredCredentialStatus"
+      | "finalizeDeferredCredentials"
+      | "rollbackVersionedDeferred"
+      | "rollbackDeferredCredentials"
+    >>;
+  }
+
+  private requireStagedCredential(handle: string): StagedSettingsCredential {
+    this.pruneStagedSettingsCredentials();
+    const staged = this.stagedSettingsCredentials.get(handle);
+    if (!staged) throw new Error("暂存凭据不存在或已过期，请重新输入或登录。");
+    return staged;
+  }
+
+  private requireApiKeyHandle(handle: string, used: Set<string>): string {
+    const staged = this.requireStagedCredential(handle);
+    if (staged.kind !== "api-key") throw new Error("暂存凭据类型不匹配。");
+    used.add(handle);
+    return staged.secret;
+  }
+
+  private pruneStagedSettingsCredentials(): void {
+    const now = Date.now();
+    for (const [handle, staged] of this.stagedSettingsCredentials) {
+      if (staged.expiresAt <= now) this.stagedSettingsCredentials.delete(handle);
+    }
+  }
+
   private buildConfigWithModel(current: AgentConfig, input: DesktopModelConfigurationInput): AgentConfig {
     const existingProvider = current.providers[input.providerAlias];
     const profile = providerDefinition(input.providerType);
@@ -811,7 +1452,8 @@ export class DesktopAgentManager {
       modelsEndpoint: sameProvider ? existingProvider.modelsEndpoint : undefined,
       headers: sameProvider ? existingProvider.headers : undefined,
       apiBackend: sameProvider ? existingProvider.apiBackend : undefined,
-      compatibility: sameProvider ? existingProvider.compatibility : undefined
+      compatibility: sameProvider ? existingProvider.compatibility : undefined,
+      embeddingModels: sameProvider ? existingProvider.embeddingModels : undefined
     };
     const existingModel = current.models[input.alias];
     const sameModel = existingModel?.provider === input.providerAlias && existingModel.model === input.model;
@@ -1056,6 +1698,14 @@ export class DesktopAgentManager {
     });
   }
 
+  /**
+   * 全局配置、共享记忆库、Embedding 缓存和 Cookie 都跨项目复用。任何驻留项目仍在
+   * 运行时都不能写这些资源，否则另一个 Runtime 会在单次回合中读到两套状态。
+   */
+  assertNoRunningTasks(message = "任务运行期间不能修改全局共享状态。"): void {
+    if (this.hasRunningTasks()) throw new Error(message);
+  }
+
   isProjectRunning(projectId: string): boolean {
     const runtime = this.runtimes.get(projectId)?.runtime;
     if (!runtime) return false;
@@ -1093,6 +1743,7 @@ export class DesktopAgentManager {
     this.closing = true;
     for (const operation of this.modelLoginOperations.values()) operation.abort(new DOMException("Desktop is shutting down", "AbortError"));
     this.modelLoginOperations.clear();
+    this.stagedSettingsCredentials.clear();
     await Promise.allSettled(this.runtimeInitializations.values());
     const managedRuntimes = [...this.runtimes.values()];
     this.runtimes.clear();
@@ -1114,6 +1765,17 @@ export class DesktopAgentManager {
     }
     await this.closeManagedRuntime(managed);
     this.runtimes.delete(projectId);
+  }
+
+  /** 全局 config 对每个项目 Runtime 生效；提交与补偿都必须刷新同一批空闲实例。 */
+  private async rebuildIdleManagedRuntimes(): Promise<void> {
+    const resident = [...this.runtimes.entries()];
+    for (const [projectId, managed] of resident) {
+      // 只处理快照中的原实例；并发导航若已经替换了它，不应误关新 Runtime。
+      if (this.runtimes.get(projectId) !== managed || runtimeIsBusy(managed.runtime.getSnapshot())) continue;
+      await this.rebuildManagedRuntime(projectId, managed);
+      this.runtimeErrors.delete(projectId);
+    }
   }
 
   private async closeManagedRuntime(
@@ -1229,7 +1891,8 @@ export class DesktopAgentManager {
         };
         host = await startRuntimeHost(persistenceRoot, runtime, commands, {
           createRuntime: createLocalRuntime,
-          resumeInterrupted: false
+          resumeInterrupted: false,
+          configDir: globalConfigDir()
         });
       } catch (error) {
         // 两个入口同时启动时，只有抢到 Host lock 的一方创建 owner；另一方丢弃
@@ -1273,7 +1936,7 @@ export class DesktopAgentManager {
 
   private async requireConfiguredModel(projectId: string): Promise<void> {
     const config = await this.loadProjectConfig(projectId);
-    if (!hasUsableModelConfiguration(config)) {
+    if (listPickerModelChoices(config).length === 0) {
       throw new Error("请先在设置的“模型”中配置一个可用模型，再开始任务。");
     }
   }
@@ -1319,14 +1982,18 @@ export class DesktopAgentManager {
     update: GlobalPersonalizationUpdate,
     expectedRevision: string
   ): Promise<AgentPersonalizationState> {
+    this.assertNoRunningTasks("任务运行期间不能修改个性化或记忆设置。");
     const managed = await this.ensureRuntime(projectId);
+    this.assertNoRunningTasks("任务运行期间不能修改个性化或记忆设置。");
     const commands = managed.commands;
-    return commands
+    const state = commands
       ? await managed.runtime.runExclusiveOperation(
         "personalization",
         async () => await commands.agent.updateGlobalPersonalization(update, expectedRevision)
       )
       : await requireRemoteRuntime(managed.runtime).updateGlobalPersonalization(update, expectedRevision);
+    await this.rebuildIdleManagedRuntimes();
+    return state;
   }
 
   private async runtimeForSession(projectId: string, sessionId: string, busyMessage: string): Promise<ManagedRuntime> {
@@ -1337,24 +2004,51 @@ export class DesktopAgentManager {
     return managed;
   }
 
+  private async runtimeForGlobalWrite(projectId: string, busyMessage: string): Promise<ManagedRuntime> {
+    this.assertNoRunningTasks(busyMessage);
+    const managed = await this.ensureRuntime(projectId);
+    // 初始化 Runtime 期间另一个项目可能开始运行，真正写入前必须再做一次全局检查。
+    this.assertNoRunningTasks(busyMessage);
+    return managed;
+  }
+
   private async readMemoryStore(
     projectId: string,
-    scope: DesktopMemoryScope
-  ): Promise<{ overview: MemoryOverview; entries: MemoryEntriesResult }> {
+    filter: DesktopMemoryOriginFilter
+  ): Promise<{ overview: MemoryOverview; entries: MemoryEntriesResult; allEntries: MemoryEntriesResult; maintenance: MemoryMaintenanceStatus }> {
     const { runtime, commands } = await this.ensureRuntime(projectId);
     if (commands) {
       return await runtime.runExclusiveOperation("memory", async () => {
         const memory = requireLocalMemory(commands);
-        return {
-          overview: await memory.getOverview(),
-          entries: await memory.listStoredEntries({ scopes: [scope] })
-        };
+        // 根锁只覆盖单次读；跨进程写入可能落在两个投影之间，所以用共享 revision 复读确认。
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const overview = await memory.getOverview();
+          const entries = await memory.listMemoryEntries({ origins: [filter] });
+          const allEntries = await memory.listMemoryEntries({ origins: ["all"] });
+          if (overview.storeRevision === entries.storeRevision && overview.storeRevision === allEntries.storeRevision) {
+            return { overview, entries, allEntries, maintenance: await memory.loadMaintenanceStatus() };
+          }
+        }
+        throw new Error("读取记忆库时发生连续并发写入，请稍后重试。");
       });
     }
-    return await requireRemoteRuntime(runtime).memory<{ overview: MemoryOverview; entries: MemoryEntriesResult }>(
-      "overview-v2",
-      { scope }
-    );
+    const remote = requireRemoteRuntime(runtime);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const snapshot = await remote.memory<{
+        overview: MemoryOverview;
+        entries: MemoryEntriesResult;
+        allEntries?: MemoryEntriesResult;
+        maintenance: MemoryMaintenanceStatus;
+      }>("overview-v3", { selector: filter });
+      if (snapshot.allEntries) return { ...snapshot, allEntries: snapshot.allEntries };
+
+      // 同协议的旧 Host 不返回 allEntries；使用其已有 list-v3 能力补齐全库统计。
+      const allEntries = await remote.memory<MemoryEntriesResult>("list-v3", { selector: "all" });
+      if (snapshot.entries.storeRevision === allEntries.storeRevision) {
+        return { ...snapshot, allEntries };
+      }
+    }
+    throw new Error("读取远程记忆库时发生连续并发写入，请稍后重试。");
   }
 
   private buildConfigWithAuthenticatedLogin(current: AgentConfig, authenticated: AuthenticatedModelLogin): AgentConfig {
@@ -1440,6 +2134,17 @@ export class DesktopAgentManager {
   }
 }
 
+function memoryStats(entries: MemoryEntriesResult): { total: number; autoGenerated: number; manualAdded: number } {
+  let autoGenerated = 0;
+  let manualAdded = 0;
+  for (const entry of entries.entries) {
+    const manual = entry.lineage.some((item) => item.source === "explicit" || item.source === "explicit_edit");
+    if (manual) manualAdded += 1;
+    else if (entry.lineage.some((item) => item.source === "completed_task" || item.source === "candidate" || item.source === "consolidation")) autoGenerated += 1;
+  }
+  return { total: entries.entries.length, autoGenerated, manualAdded };
+}
+
 function modelAliasForAuthenticatedModel(providerAlias: string, modelId: string): string {
   return `${providerAlias}-${modelId}`.replace(/[^a-z0-9.-]+/gi, "-");
 }
@@ -1471,6 +2176,45 @@ function describeWebSearchSettings(search: AgentConfig["web"]["search"]): Deskto
     hasApiKey: Boolean(search.apiKey),
     envKeyName,
     envKeyDetected: Boolean(envKeyName && process.env[envKeyName])
+  };
+}
+
+function describeSettingsConfigSnapshot(config: AgentConfig, revision: string): DesktopSettingsConfigSnapshot {
+  return {
+    revision,
+    personalization: { ...config.personalization },
+    memory: structuredClone(config.context.memory),
+    webSearch: describeWebSearchSettings(config.web.search),
+    models: {
+      configured: listConfiguredModelChoices(config),
+      connections: describeModelConnections(config),
+      embeddingModels: describeEmbeddingModels(config),
+      defaultModel: config.defaultModel,
+      thinking: config.thinking.enabled ? config.thinking.effort : "off"
+    }
+  };
+}
+
+function describeEmbeddingModels(config: AgentConfig): DesktopEmbeddingModelDescriptor[] {
+  return [
+    ...listLocalEmbeddingModels(),
+    ...Object.entries(config.providers).flatMap(([providerAlias, provider]) => (
+      listProviderEmbeddingModels(providerAlias, provider, providerDefinition(provider.type))
+    ))
+  ].map(describeDesktopEmbeddingModel);
+}
+
+function describeMemoryEmbeddingStatus(status: MemoryEmbeddingRuntimeStatus): DesktopMemoryEmbeddingStatus {
+  return {
+    ...status,
+    models: status.models.map(describeDesktopEmbeddingModel)
+  };
+}
+
+function describeDesktopEmbeddingModel(descriptor: EmbeddingModelDescriptor): DesktopEmbeddingModelDescriptor {
+  return {
+    ...descriptor,
+    privacyEndpointHash: descriptor.privacyEndpointHash
   };
 }
 

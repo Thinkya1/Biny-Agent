@@ -148,10 +148,12 @@ async function assertLockBinding(
 }
 
 function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  // 与 JSON.stringify 的持久化语义保持一致：对象里的 undefined 键会消失，数组槽位则为
+  // null。否则构造候选时显式传入可选 undefined 会产生一个永远无法从磁盘复读的 revision。
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item === undefined ? null : item)).join(",")}]`;
   if (typeof value === "object" && value !== null) {
     const object = value as Record<string, unknown>;
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
+    return `{${Object.keys(object).filter((key) => object[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
 }

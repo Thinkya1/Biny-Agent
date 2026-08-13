@@ -1015,6 +1015,9 @@ select {
 
 .settings-modal.is-full-page {
   --settings-content-max: 912px;
+  --settings-sidebar-width: 264px;
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -1022,6 +1025,12 @@ select {
   border-radius: 0;
   background: var(--surface-raised);
   box-shadow: none;
+}
+
+.settings-modal-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
 }
 
 .settings-modal.is-full-page .settings-tabs {
@@ -1046,6 +1055,66 @@ select {
 
 .settings-back-button:hover {
   background: transparent;
+}
+
+.settings-search-box {
+  display: flex;
+  height: 34px;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 17px;
+  color: var(--text-tertiary);
+  background: var(--surface);
+}
+
+.settings-search-box:focus-within {
+  border-color: var(--border-strong);
+}
+
+.settings-search-box input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: calc(12px * var(--font-scale));
+}
+
+.settings-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-tabs .settings-search-results button {
+  height: auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 9px 11px;
+  border-radius: 10px;
+}
+
+.settings-search-results button strong {
+  color: var(--text);
+  font-size: calc(12px * var(--font-scale));
+  font-weight: 560;
+}
+
+.settings-search-results button small,
+.settings-search-results > p {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: calc(10.5px * var(--font-scale));
+  line-height: 1.45;
+}
+
+.settings-search-results > p {
+  padding: 10px 12px;
 }
 
 .settings-nav-list {
@@ -1103,6 +1172,90 @@ select {
   width: min(var(--settings-content-max), calc(100% - 56px));
 }
 
+.settings-page-footer {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  min-height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 12px max(28px, calc((100% - var(--settings-sidebar-width) - var(--settings-content-max)) / 2)) 12px calc(var(--settings-sidebar-width) + max(28px, calc((100% - var(--settings-sidebar-width) - var(--settings-content-max)) / 2)));
+  background: var(--surface-raised);
+}
+
+.settings-page-footer::before {
+  position: absolute;
+  inset: 0 8px auto;
+  border-top: 1px solid var(--border);
+  content: "";
+}
+
+.settings-save-status {
+  color: var(--text-tertiary);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.settings-save-status.is-invalid,
+.settings-save-status.is-recovery_required {
+  color: var(--red);
+}
+
+.settings-footer-actions,
+.settings-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-page-footer button,
+.settings-confirm-actions button {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.settings-page-footer button:last-child,
+.settings-confirm-actions button:last-child {
+  color: var(--cindy-selection-text);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.settings-confirm-panel {
+  width: min(430px, 100%);
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-raised);
+}
+
+.settings-confirm-panel h3 {
+  margin: 0 0 8px;
+  font-size: calc(15px * var(--font-scale));
+}
+
+.settings-confirm-panel p {
+  margin: 0 0 18px;
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--font-scale));
+  line-height: 1.6;
+}
+
+.settings-confirm-panel input {
+  width: 100%;
+  height: 36px;
+  margin: 0 0 16px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+}
+
 .settings-sections > section,
 .settings-sections > .connection-section {
   margin-bottom: 14px;
@@ -1110,6 +1263,29 @@ select {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface);
+}
+
+.settings-inline-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  font-size: calc(12px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.settings-inline-notice strong {
+  flex: none;
+  color: var(--text);
+}
+
+.settings-inline-notice.is-warning {
+  border-color: color-mix(in srgb, var(--yellow) 36%, var(--border));
 }
 
 .settings-sections h3 {
@@ -1255,6 +1431,432 @@ select {
   background: var(--border);
 }
 
+/* 单库记忆 v3：沿用设置中心的表面与边框 token，不引入额外装饰层。 */
+.memory-settings-v3 .setting-row:last-child {
+  border-bottom: 0;
+}
+
+.memory-slider-field,
+.memory-threshold-field,
+.memory-select-field,
+.memory-editor-fields > label,
+.memory-editor-grid label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.memory-slider-field {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.memory-slider-field > span,
+.memory-threshold-field > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-slider-field small {
+  color: var(--text-tertiary);
+  font-size: calc(10.5px * var(--font-scale));
+  font-weight: 400;
+}
+
+.memory-slider-field input,
+.memory-threshold-field input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.memory-threshold-grid,
+.memory-model-grid,
+.memory-editor-grid,
+.memory-index-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.memory-threshold-grid > button {
+  align-self: end;
+  justify-self: start;
+}
+
+.memory-threshold-field em {
+  color: var(--text-secondary);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-select-field > span,
+.memory-editor-fields label > span,
+.memory-editor-fields legend {
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--font-scale));
+  font-weight: 540;
+}
+
+.memory-select-field select,
+.memory-editor-fields input,
+.memory-editor-fields select,
+.memory-editor-fields textarea {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: 0;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.memory-editor-fields textarea {
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.memory-select-field select:focus,
+.memory-editor-fields input:focus,
+.memory-editor-fields select:focus,
+.memory-editor-fields textarea:focus {
+  border-color: var(--border-strong);
+}
+
+.memory-model-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.memory-model-trigger {
+  display: flex;
+  width: 100%;
+  min-height: 38px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface);
+  text-align: left;
+}
+
+.memory-model-trigger:hover,
+.memory-model-trigger[aria-expanded="true"] {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.memory-model-trigger > span:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-model-trigger > svg {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+}
+
+.memory-advanced-toggle {
+  margin-top: 12px;
+}
+
+.memory-embedding-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.memory-embedding-groups > div {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.memory-embedding-option {
+  display: flex;
+  width: 100%;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.memory-embedding-option:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.memory-embedding-option.is-selected {
+  border-color: var(--border-strong);
+  background: var(--surface-selected);
+}
+
+.memory-embedding-option > span,
+.memory-index-summary > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.memory-embedding-option small,
+.memory-index-summary small {
+  overflow-wrap: anywhere;
+  color: var(--text-tertiary);
+  font-size: calc(10.5px * var(--font-scale));
+  line-height: 1.45;
+}
+
+.memory-embedding-option em {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-style: normal;
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.memory-embedding-select {
+  position: relative;
+  margin-top: 14px;
+}
+
+.memory-embedding-trigger {
+  display: flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--surface-soft);
+  text-align: left;
+}
+
+.memory-embedding-trigger > span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-embedding-trigger small {
+  color: var(--text-tertiary);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.memory-embedding-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  overflow: auto;
+  max-height: min(360px, 52vh);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  box-shadow: 0 14px 36px var(--shadow);
+}
+
+.memory-embedding-search {
+  display: flex;
+  width: 100%;
+  height: 40px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-tertiary);
+}
+
+.memory-embedding-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+}
+
+.memory-embedding-group {
+  padding: 7px 5px;
+}
+
+.memory-embedding-group + .memory-embedding-group {
+  border-top: 1px solid var(--border);
+}
+
+.memory-embedding-group > strong {
+  display: block;
+  padding: 4px 8px 6px;
+  color: var(--text-secondary);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.memory-embedding-select .memory-embedding-option {
+  min-height: 42px;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+}
+
+.memory-embedding-select .memory-embedding-option:hover,
+.memory-embedding-select .memory-embedding-option.is-selected {
+  background: var(--surface-selected);
+}
+
+.memory-embedding-option > button:first-child {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  padding: 7px 9px;
+  color: var(--text);
+  text-align: left;
+}
+
+.memory-embedding-option > button:first-child > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.memory-embedding-option-action {
+  display: flex;
+  min-width: 72px;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 7px;
+}
+
+.memory-embedding-option-action button {
+  min-height: 28px;
+  padding: 0 7px;
+  color: var(--text-secondary);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.memory-embedding-option-action em {
+  color: var(--text-secondary);
+  font-style: normal;
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.memory-index-summary > span {
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.memory-embedding-maintenance {
+  display: flex;
+  flex-direction: column;
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.memory-embedding-maintenance .setting-row {
+  padding-inline: 0;
+}
+
+.memory-index-actions {
+  margin-top: 12px;
+}
+
+.memory-filter-tabs {
+  display: flex;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.memory-filter-tabs button {
+  min-width: 98px;
+}
+
+.memory-list-heading {
+  margin-top: 14px;
+}
+
+.memory-origin-tag {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.memory-entry-head {
+  flex-wrap: wrap;
+}
+
+.memory-entry-head .settings-inline-actions {
+  margin-left: auto;
+}
+
+.memory-editor-panel {
+  width: min(680px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-raised);
+}
+
+.memory-editor-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.memory-editor-fields fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.memory-editor-fields legend {
+  margin-bottom: 7px;
+}
+
+.memory-editor-panel .model-dialog-footer {
+  position: sticky;
+  bottom: -18px;
+  margin: 18px -18px -18px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.memory-clear-panel strong {
+  color: var(--text);
+}
+
 .desktop-model-dialog > div > .connect-dialog {
   width: 100%;
   max-height: none;
@@ -1283,8 +1885,16 @@ select {
     padding-inline: 18px;
   }
 
+  .settings-modal.is-full-page {
+    --settings-sidebar-width: 190px;
+  }
+
   .settings-modal.is-full-page .settings-content > header {
     padding-inline: 28px;
+  }
+
+  .memory-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1298,7 +1908,18 @@ select {
     padding-inline: 12px;
   }
 
+  .settings-modal.is-full-page {
+    --settings-sidebar-width: 160px;
+  }
+
   .appearance-settings .theme-option-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-threshold-grid,
+  .memory-model-grid,
+  .memory-editor-grid,
+  .memory-index-summary {
     grid-template-columns: 1fr;
   }
 }

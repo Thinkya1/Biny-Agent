@@ -34,6 +34,8 @@ interface PersistedDesktopState {
   filePanelWidth: number;
   themePreference: DesktopThemePreference;
   fontPreference: DesktopFontPreference;
+  /** 只覆盖设置页偏好字段，供统一设置保存执行进程内 CAS。 */
+  preferenceRevision: number;
   windowBounds?: DesktopWindowBounds;
 }
 
@@ -47,6 +49,7 @@ const defaultState: PersistedDesktopState = {
   filePanelWidth: DEFAULT_FILE_PANEL_WIDTH,
   themePreference: "system",
   fontPreference: { ...DEFAULT_FONT_PREFERENCE },
+  preferenceRevision: 0,
   windowBounds: undefined
 };
 
@@ -69,6 +72,7 @@ export class DesktopStateStore {
         filePanelWidth: typeof raw.filePanelWidth === "number" ? clampStoredFilePanelWidth(raw.filePanelWidth) : DEFAULT_FILE_PANEL_WIDTH,
         themePreference: validThemePreference(raw.themePreference) ? raw.themePreference : "system",
         fontPreference: normalizeFontPreference(raw.fontPreference),
+        preferenceRevision: validPreferenceRevision(raw.preferenceRevision) ? raw.preferenceRevision : 0,
         windowBounds: validWindowBounds(raw.windowBounds) ? raw.windowBounds : undefined
       };
     } catch (error) {
@@ -222,8 +226,7 @@ export class DesktopStateStore {
   }
 
   async setThemePreference(theme: DesktopThemePreference): Promise<void> {
-    this.state.themePreference = theme;
-    await this.save();
+    await this.applySettingsPreferences({ themePreference: theme }, this.state.preferenceRevision);
   }
 
   fontPreference(): DesktopFontPreference {
@@ -231,8 +234,62 @@ export class DesktopStateStore {
   }
 
   async setFontPreference(font: DesktopFontPreference): Promise<void> {
-    this.state.fontPreference = normalizeFontPreference(font);
-    await this.save();
+    await this.applySettingsPreferences({ fontPreference: font }, this.state.preferenceRevision);
+  }
+
+  settingsPreferences(): DesktopPreferenceSnapshot {
+    return {
+      revision: this.state.preferenceRevision,
+      themePreference: this.state.themePreference,
+      fontPreference: { ...this.state.fontPreference }
+    };
+  }
+
+  /** 设置事务只通过此入口改主题/字体；revision 不匹配时保证零写入。 */
+  async applySettingsPreferences(
+    patch: DesktopPreferencePatch,
+    expectedRevision: number
+  ): Promise<DesktopPreferenceSnapshot> {
+    if (this.state.preferenceRevision !== expectedRevision) {
+      throw new DesktopPreferenceRevisionConflictError(expectedRevision, this.state.preferenceRevision);
+    }
+    const themePreference = patch.themePreference ?? this.state.themePreference;
+    const fontPreference = patch.fontPreference === undefined
+      ? this.state.fontPreference
+      : normalizeFontPreference(patch.fontPreference);
+    if (themePreference === this.state.themePreference && sameFont(fontPreference, this.state.fontPreference)) {
+      return this.settingsPreferences();
+    }
+    const previous = this.settingsPreferences();
+    this.state.themePreference = themePreference;
+    this.state.fontPreference = { ...fontPreference };
+    this.state.preferenceRevision += 1;
+    try {
+      await this.save();
+      return this.settingsPreferences();
+    } catch (error) {
+      if (this.state.preferenceRevision === previous.revision + 1) {
+        this.state.themePreference = previous.themePreference;
+        this.state.fontPreference = { ...previous.fontPreference };
+        this.state.preferenceRevision = previous.revision;
+      }
+      throw error;
+    }
+  }
+
+  /** 补偿也推进 revision，避免回滚后旧 Renderer 草稿重新变成可提交状态。 */
+  async restoreSettingsPreferences(
+    snapshot: DesktopPreferenceSnapshot,
+    expectedRevision: number
+  ): Promise<DesktopPreferenceSnapshot> {
+    return await this.applySettingsPreferences({
+      themePreference: snapshot.themePreference,
+      fontPreference: snapshot.fontPreference
+    }, expectedRevision);
+  }
+
+  settingsTransactionJournalPath(): string {
+    return `${this.filePath}.settings-journal.json`;
   }
 
   windowBounds(): DesktopWindowBounds | undefined {
@@ -246,18 +303,49 @@ export class DesktopStateStore {
 
   private save(): Promise<void> {
     const snapshot = JSON.stringify(this.state, null, 2);
-    this.writeTail = this.writeTail.then(async () => {
+    const run = this.writeTail.then(async () => {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
       const temporaryPath = `${this.filePath}.tmp`;
       await fs.writeFile(temporaryPath, `${snapshot}\n`, "utf8");
       await fs.rename(temporaryPath, this.filePath);
     });
-    return this.writeTail;
+    this.writeTail = run.catch(() => undefined);
+    return run;
+  }
+}
+
+export interface DesktopPreferenceSnapshot {
+  revision: number;
+  themePreference: DesktopThemePreference;
+  fontPreference: DesktopFontPreference;
+}
+
+export interface DesktopPreferencePatch {
+  themePreference?: DesktopThemePreference;
+  fontPreference?: DesktopFontPreference;
+}
+
+export class DesktopPreferenceRevisionConflictError extends Error {
+  readonly name = "DesktopPreferenceRevisionConflictError";
+
+  constructor(
+    readonly expectedRevision: number,
+    readonly actualRevision: number
+  ) {
+    super(`Desktop preference revision conflict: expected ${String(expectedRevision)}, actual ${String(actualRevision)}.`);
   }
 }
 
 function metadataKey(projectId: string, sessionId: string): string {
   return `${projectId}:${sessionId}`;
+}
+
+function validPreferenceRevision(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function sameFont(left: DesktopFontPreference, right: DesktopFontPreference): boolean {
+  return left.family === right.family && left.size === right.size;
 }
 
 function validThemePreference(value: unknown): value is DesktopThemePreference {

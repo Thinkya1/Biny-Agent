@@ -41,8 +41,6 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
   };
 
   const tasks = records(projection?.tasks);
-  const automations = records(projection?.automations);
-  const pendingFires = records(projection?.pendingFires);
   const goals = records(projection?.goals);
   const graphs = records(projection?.graphs);
   const capabilities = records(projection?.capabilities);
@@ -54,7 +52,7 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
       <header className="cindy-runtime-panel-header">
         <div>
           <strong>后台运行</strong>
-          <span>任务、自动化与 Graph 由 Runtime authority 管理</span>
+          <span>任务与 Graph 由 Runtime authority 管理</span>
         </div>
         <div className="cindy-runtime-panel-actions">
           <button aria-label="刷新后台运行状态" className="cindy-runtime-panel-icon" disabled={busyAction !== undefined} onClick={() => void onRefresh().catch(onError)} title="刷新" type="button">
@@ -68,9 +66,7 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
 
       <div className="cindy-runtime-summary" aria-label="后台运行统计">
         <span>任务 {tasks.length}</span>
-        <span>自动化 {automations.length}</span>
         <span>Graph {graphs.length}</span>
-        <span>待触发 {pendingFires.length}</span>
       </div>
 
       <RuntimeSection title="任务" empty="暂无持久任务">
@@ -91,35 +87,6 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
                   {busyAction === `${action.operation}:${id}` ? "处理中…" : action.label}
                 </button>
               ) : null}
-            </RuntimeRow>
-          );
-        })}
-      </RuntimeSection>
-
-      <RuntimeSection title="自动化" empty="暂无自动化">
-        {automations.map((automation) => {
-          const id = recordId(automation, "automationId", "id");
-          if (!id) return null;
-          const status = recordText(automation, "status") ?? "unknown";
-          const paused = status === "paused";
-          return (
-            <RuntimeRow key={id} label={recordText(automation, "name") ?? id} status={status}>
-              <button
-                className="cindy-runtime-row-action"
-                disabled={busyAction !== undefined}
-                onClick={() => void runAction(`${paused ? "automation.resume" : "automation.pause"}:${id}`, paused ? "automation.resume" : "automation.pause", { automationId: id })}
-                type="button"
-              >
-                {paused ? "恢复" : "暂停"}
-              </button>
-              <button
-                className="cindy-runtime-row-action"
-                disabled={busyAction !== undefined}
-                onClick={() => void runAction(`automation.run:${id}`, "automation.run", { automationId: id })}
-                type="button"
-              >
-                立即执行
-              </button>
             </RuntimeRow>
           );
         })}
@@ -161,7 +128,7 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
   );
 }
 
-function RuntimeSection({ children, empty, title }: { children: React.ReactNode; empty: string; title: string }): React.JSX.Element {
+function RuntimeSection({ children, empty, title }: { children?: React.ReactNode; empty: string; title: string }): React.JSX.Element {
   const content = Array.isArray(children) ? children.filter(Boolean) : children;
   const isEmpty = Array.isArray(content) ? content.length === 0 : !content;
   return (

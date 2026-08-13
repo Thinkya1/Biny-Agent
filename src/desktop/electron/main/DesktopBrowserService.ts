@@ -37,7 +37,10 @@ export class DesktopBrowserService {
   /** 仅在本进程真的使用过这个 session 后才在退出时覆盖 jar，避免覆盖 CLI 新导入的内容。 */
   private browserSessionManaged = false;
 
-  constructor(private readonly getJarPath: () => Promise<string>) {}
+  constructor(
+    private readonly getJarPath: () => Promise<string>,
+    private readonly assertCookieMutationAllowed: () => void = () => undefined
+  ) {}
 
   /**
    * 打开浏览器窗口并导航到目标地址；窗口已存在则复用（再开一个只会让登录态看起来分裂）。
@@ -101,6 +104,7 @@ export class DesktopBrowserService {
     };
     const result = parent ? await dialog.showSaveDialog(parent, options) : await dialog.showSaveDialog(options);
     if (result.canceled || !result.filePath) return await this.status();
+    this.assertCookieMutationAllowed();
     // 导出文件由用户自己保管，同样按 0600 落盘：里面是等同于登录凭据的东西。
     await fs.writeFile(result.filePath, serializeCookieJar(cookies), { encoding: "utf8", mode: 0o600 });
     await fs.chmod(result.filePath, 0o600);
@@ -118,6 +122,7 @@ export class DesktopBrowserService {
     const filePath = result.filePaths[0];
     if (result.canceled || !filePath) return await this.status();
     const cookies = parseCookieJar(await fs.readFile(filePath, "utf8"));
+    this.assertCookieMutationAllowed();
     const browserSession = session.fromPartition(browserPartition);
     let imported = 0;
     const failures: string[] = [];
@@ -139,6 +144,7 @@ export class DesktopBrowserService {
 
   /** 清除浏览器 session 与共享 jar 里的全部 cookie（等同于在所有站点登出）。 */
   async clear(): Promise<DesktopCookieJarStatus> {
+    this.assertCookieMutationAllowed();
     this.browserSessionManaged = true;
     await session.fromPartition(browserPartition).clearStorageData({ storages: ["cookies"] });
     await writeCookieJar(await this.getJarPath(), []);
@@ -180,17 +186,29 @@ export class DesktopBrowserService {
     this.cookieListenerAttached = true;
     session.fromPartition(browserPartition).cookies.on("changed", () => {
       this.browserSessionManaged = true;
-      if (this.syncTimer) clearTimeout(this.syncTimer);
-      this.syncTimer = setTimeout(() => {
-        this.syncTimer = undefined;
-        void this.syncToJar();
-      }, syncDebounceMs);
+      this.scheduleSyncToJar();
     });
+  }
+
+  private scheduleSyncToJar(): void {
+    if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = undefined;
+      void this.syncToJar();
+    }, syncDebounceMs);
   }
 
   /** 覆盖写 jar。串行化是因为防抖兜底和关窗兜底可能同时触发，并发写会互相截断。 */
   private async syncToJar(): Promise<void> {
     const run = this.syncTail.then(async () => {
+      try {
+        this.assertCookieMutationAllowed();
+      } catch {
+        // 浏览器 session 可以继续登录，但共享 jar 必须保持本次 Agent 回合开始时的版本；
+        // 等所有项目空闲后再同步最新整份 cookie，避免落下部分登录态。
+        this.scheduleSyncToJar();
+        return;
+      }
       await writeCookieJar(await this.getJarPath(), await this.readSessionCookies());
     });
     this.syncTail = run.catch(() => undefined);

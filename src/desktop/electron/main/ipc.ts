@@ -21,25 +21,31 @@ import {
 } from "electron";
 import { z } from "zod";
 import { modelApiBackendSchema, modelCompatibilitySchema, modelLimitsSchema, modelProviderSchema, providerProtocolSchema, reasoningEffortSchema } from "../../../config/schema.js";
+import { memoryPolicySchema } from "../../../personalization/index.js";
 import { clampFontSize } from "../../fontPreference.js";
-import type { DesktopBootstrap, DesktopSessionMenuAction, DesktopThemePreference } from "../../protocol.js";
+import type { DesktopBootstrap, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopThemePreference } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 import { DesktopAgentManager } from "./DesktopAgentManager.js";
 import { DesktopBrowserService } from "./DesktopBrowserService.js";
 import { DesktopProjectService } from "./DesktopProjectService.js";
 import { DesktopSkillService } from "./DesktopSkillService.js";
 import { DesktopStateStore } from "./DesktopStateStore.js";
+import { DesktopSettingsTransaction } from "./DesktopSettingsTransaction.js";
 import { DesktopTerminalManager } from "./DesktopTerminalManager.js";
+import { runtimeMutationStartsWork } from "./settingsRuntimeGate.js";
 
 interface IpcContext {
   state: DesktopStateStore;
   projects: DesktopProjectService;
   agents: DesktopAgentManager;
+  settings: DesktopSettingsTransaction;
   terminals: DesktopTerminalManager;
   browser: DesktopBrowserService;
   skills: DesktopSkillService;
   getWindow(): BrowserWindow | undefined;
   bootstrap(): Promise<DesktopBootstrap>;
+  updateSettingsDraftState(state: DesktopSettingsDraftState): void;
+  resolveSettingsCloseRequest(requestId: string, response: DesktopSettingsCloseResponse): boolean;
 }
 
 // 以下 schema 是渲染层参数的唯一入口校验，上限值都刻意给得比正常用法宽松，
@@ -70,6 +76,7 @@ const modelConfigurationSchema = z.object({
   model: z.string().trim().min(1).max(240),
   baseUrl: z.string().url().optional(),
   apiKey: z.string().min(1).max(4_000).optional(),
+  apiKeyHandle: z.string().uuid().optional(),
   apiKeyEnv: z.string().trim().min(1).max(120).optional(),
   requiresApiKey: z.boolean().optional(),
   supportsTools: z.boolean(),
@@ -111,6 +118,7 @@ const webSearchSettingsSchema = z.object({
   enabled: z.boolean(),
   provider: z.enum(["duckduckgo", "google", "tavily", "brave", "anysearch"]),
   apiKey: z.string().max(4_000).optional(),
+  apiKeyHandle: z.string().uuid().optional(),
   apiKeyEnv: z.string().trim().min(1).max(120).optional(),
   timeoutMs: z.number().int().min(1_000).max(60_000),
   maxResults: z.number().int().min(1).max(10)
@@ -129,15 +137,9 @@ const chatPersonalizationSchema = z.object({
   useMemories: z.union([z.literal("inherit"), z.boolean()]),
   contributeMemories: z.union([z.literal("inherit"), z.boolean()])
 }).strict();
-const memoryScopeSchema = z.enum(["global", "project"]);
-const memorySettingsSchema = z.object({
-  useMemories: z.boolean(),
-  generateMemories: z.boolean(),
-  maxRecalled: z.number().int().min(1).max(20),
-  extractModel: z.string().trim().min(1).max(240).optional(),
-  consolidationModel: z.string().trim().min(1).max(240).optional(),
-  excludeExternalContext: z.boolean()
-}).strict();
+const memoryOriginFilterSchema = z.enum(["all", "current_workspace", "user", "other_workspaces"]);
+const memoryAudienceSchema = z.enum(["workspace", "universal"]);
+const memorySettingsSchema = memoryPolicySchema;
 const personalizationSettingsSchema = z.object({
   expectedRevision: configRevisionSchema,
   settings: z.object({
@@ -148,19 +150,67 @@ const personalizationSettingsSchema = z.object({
   memory: memorySettingsSchema
 }).strict();
 const memoryTopicSchema = z.string().trim().min(1).max(64);
-const memoryNoteSchema = z.string().trim().min(1).max(4_000);
+const memoryTitleSchema = z.string().trim().min(1).max(120);
+const memorySummarySchema = z.string().trim().min(1).max(4_000);
+const memoryDecisionListSchema = z.array(z.string().trim().min(1).max(500)).max(8);
+const memoryPathListSchema = z.array(z.string().trim().min(1).max(500)).max(16);
+const memoryKeywordListSchema = z.array(z.string().trim().min(1).max(120)).max(12);
+const memoryUserEvidenceSchema = z.string().trim().min(1).max(1_000).optional();
 const memoryQuerySchema = z.string().trim().min(1).max(2_000);
 const memoryEntryIdSchema = z.string().min(1).max(512);
 const memoryRevisionSchema = z.number().int().nonnegative();
+const localEmbeddingModelSchema = z.enum(["multilingual-e5-small", "paraphrase-multilingual-MiniLM-L12-v2"]);
 const memorySettingsInputSchema = z.object({
   expectedRevision: configRevisionSchema,
   settings: memorySettingsSchema
 }).strict();
+const themePreferenceSchema = z.enum(["system", "light", "dark"]);
+const fontPreferenceSchema = z.object({
+  family: z.string().min(1).max(100),
+  size: z.number().finite()
+}).strict();
+const settingsSaveInputSchema = z.object({
+  expectedPreferenceRevision: z.number().int().nonnegative(),
+  expectedConfigRevision: configRevisionSchema,
+  themePreference: themePreferenceSchema.optional(),
+  fontPreference: fontPreferenceSchema.optional(),
+  personalization: personalizationSettingsSchema.shape.settings.optional(),
+  memory: memorySettingsSchema.optional(),
+  webSearch: webSearchSettingsSchema.optional(),
+  models: z.object({
+    upserts: z.array(modelConfigurationSchema).max(200),
+    removeAliases: z.array(idSchema).max(200),
+    defaultModel: z.object({ alias: idSchema, thinking: thinkingSchema }).strict().optional(),
+    oauthCredentialHandles: z.array(z.string().uuid()).max(20).optional()
+  }).strict().optional(),
+  chat: z.object({
+    sessionId: idSchema,
+    expectedMetadataRevision: configRevisionSchema,
+    personalization: chatPersonalizationSchema
+  }).strict().optional()
+}).strict();
 const memoryEntryInputSchema = z.object({
+  audience: memoryAudienceSchema,
   topic: memoryTopicSchema,
-  note: memoryNoteSchema,
   kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]),
-  importance: z.number().int().min(1).max(5)
+  title: memoryTitleSchema,
+  summary: memorySummarySchema,
+  decisions: memoryDecisionListSchema,
+  paths: memoryPathListSchema,
+  keywords: memoryKeywordListSchema,
+  importance: z.number().int().min(1).max(5),
+  userEvidence: memoryUserEvidenceSchema
+}).strict();
+const memoryEntryPatchSchema = z.object({
+  topic: memoryTopicSchema.optional(),
+  kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]).optional(),
+  title: memoryTitleSchema.optional(),
+  summary: memorySummarySchema.optional(),
+  decisions: memoryDecisionListSchema.optional(),
+  paths: memoryPathListSchema.optional(),
+  keywords: memoryKeywordListSchema.optional(),
+  importance: z.number().int().min(1).max(5).optional(),
+  userEvidence: memoryUserEvidenceSchema
 }).strict();
 const runtimeMutationSchema = z.enum([
   "task.create", "task.start", "task.cancel", "task.approve", "task.resume", "task.retry",
@@ -171,11 +221,27 @@ const runtimeMutationSchema = z.enum([
   "capability.invoke", "capability.accept", "capability.start", "capability.result", "capability.chunk", "capability.fail", "capability.cancel"
 ]);
 const runtimePayloadSchema = z.record(z.unknown()).optional();
+const settingsDraftStateSchema = z.object({
+  dirty: z.boolean(),
+  canSave: z.boolean(),
+  open: z.boolean()
+}).strict();
+const settingsCloseResponseSchema = z.enum(["saved", "discarded", "cancelled"]);
 const skillIdSchema = z.string().trim().min(1).max(128);
 const skillFilePathSchema = z.string().trim().min(1).max(2_000);
 const skillFileContentSchema = z.string().max(512 * 1024);
 
 export function registerDesktopIpc(context: IpcContext): void {
+  const settings = context.settings;
+  const handleRecoveryGated = (
+    channel: string,
+    listener: Parameters<typeof ipcMain.handle>[1]
+  ): void => {
+    handle(channel, async (event, ...args) => {
+      await settings.assertRuntimeReady();
+      return await listener(event, ...args);
+    });
+  };
   handle(desktopIpc.bootstrap, async () => await context.bootstrap());
 
   handle(desktopIpc.openProject, async () => {
@@ -281,7 +347,7 @@ export function registerDesktopIpc(context: IpcContext): void {
     context.terminals.dispose(idSchema.parse(terminalId));
   });
 
-  handle(desktopIpc.startDraft, async (_event, projectId: unknown) => {
+  handleRecoveryGated(desktopIpc.startDraft, async (_event, projectId: unknown) => {
     return await context.agents.startDraft(idSchema.parse(projectId));
   });
 
@@ -344,7 +410,7 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await showSessionMenu(context.getWindow(), z.boolean().parse(pinned), z.boolean().optional().default(false).parse(archived));
   });
 
-  handle(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown) => {
+  handleRecoveryGated(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown) => {
     return await context.agents.sendPrompt(
       idSchema.parse(projectId),
       sessionId === undefined ? undefined : idSchema.parse(sessionId),
@@ -355,11 +421,11 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handle(desktopIpc.resumeInterruptedTurn, async (_event, projectId: unknown, sessionId: unknown) => {
+  handleRecoveryGated(desktopIpc.resumeInterruptedTurn, async (_event, projectId: unknown, sessionId: unknown) => {
     return await context.agents.resumeInterruptedTurn(idSchema.parse(projectId), idSchema.parse(sessionId));
   });
 
-  handle(desktopIpc.editPrompt, async (_event, projectId: unknown, sessionId: unknown, userMessageIndex: unknown, input: unknown, mode: unknown, attachments: unknown) => {
+  handleRecoveryGated(desktopIpc.editPrompt, async (_event, projectId: unknown, sessionId: unknown, userMessageIndex: unknown, input: unknown, mode: unknown, attachments: unknown) => {
     return await context.agents.editPrompt(
       idSchema.parse(projectId),
       idSchema.parse(sessionId),
@@ -374,7 +440,7 @@ export function registerDesktopIpc(context: IpcContext): void {
     await context.agents.cancelRun(idSchema.parse(projectId), idSchema.parse(runId));
   });
 
-  handle(desktopIpc.runSlashCommand, async (_event, projectId: unknown, sessionId: unknown, command: unknown) => {
+  handleRecoveryGated(desktopIpc.runSlashCommand, async (_event, projectId: unknown, sessionId: unknown, command: unknown) => {
     return await context.agents.runSlashCommand(
       idSchema.parse(projectId),
       sessionId === undefined ? undefined : idSchema.parse(sessionId),
@@ -382,27 +448,27 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handle(desktopIpc.resolvePermission, async (_event, projectId: unknown, requestId: unknown, result: unknown) => {
+  handleRecoveryGated(desktopIpc.resolvePermission, async (_event, projectId: unknown, requestId: unknown, result: unknown) => {
     await context.agents.resolvePermission(idSchema.parse(projectId), idSchema.parse(requestId), permissionResultSchema.parse(result));
   });
 
-  handle(desktopIpc.setPermissionMode, async (_event, projectId: unknown, mode: unknown) => {
+  handleRecoveryGated(desktopIpc.setPermissionMode, async (_event, projectId: unknown, mode: unknown) => {
     return await context.agents.setPermissionMode(idSchema.parse(projectId), permissionModeSchema.parse(mode));
   });
 
-  handle(desktopIpc.switchModel, async (_event, projectId: unknown, alias: unknown, thinking: unknown) => {
+  handleRecoveryGated(desktopIpc.switchModel, async (_event, projectId: unknown, alias: unknown, thinking: unknown) => {
     return await context.agents.switchModel(idSchema.parse(projectId), idSchema.parse(alias), thinkingSchema.parse(thinking));
   });
 
-  handle(desktopIpc.saveModelConfiguration, async (_event, projectId: unknown, configuration: unknown) => {
+  handleRecoveryGated(desktopIpc.saveModelConfiguration, async (_event, projectId: unknown, configuration: unknown) => {
     return await context.agents.saveModelConfiguration(idSchema.parse(projectId), modelConfigurationSchema.parse(configuration));
   });
 
-  handle(desktopIpc.testModelConfiguration, async (_event, projectId: unknown, configuration: unknown) => {
+  handleRecoveryGated(desktopIpc.testModelConfiguration, async (_event, projectId: unknown, configuration: unknown) => {
     return await context.agents.testModelConfiguration(idSchema.parse(projectId), modelConfigurationSchema.parse(configuration));
   });
 
-  handle(desktopIpc.removeModelConfiguration, async (_event, projectId: unknown, alias: unknown) => {
+  handleRecoveryGated(desktopIpc.removeModelConfiguration, async (_event, projectId: unknown, alias: unknown) => {
     return await context.agents.removeModelConfiguration(idSchema.parse(projectId), idSchema.parse(alias));
   });
 
@@ -414,7 +480,7 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.startModelLogin(idSchema.parse(projectId), modelLoginProviderSchema.parse(provider));
   });
 
-  handle(desktopIpc.completeModelLogin, async (_event, projectId: unknown, provider: unknown, authRequestId: unknown, pastedAuthorization: unknown) => {
+  handleRecoveryGated(desktopIpc.completeModelLogin, async (_event, projectId: unknown, provider: unknown, authRequestId: unknown, pastedAuthorization: unknown) => {
     return await context.agents.completeModelLogin(
       idSchema.parse(projectId),
       modelLoginProviderSchema.parse(provider),
@@ -427,23 +493,25 @@ export function registerDesktopIpc(context: IpcContext): void {
     await context.agents.cancelModelLogin(idSchema.parse(projectId), modelLoginProviderSchema.parse(provider), idSchema.parse(authRequestId));
   });
 
-  handle(desktopIpc.compact, async (_event, projectId: unknown, hint: unknown) => {
+  handleRecoveryGated(desktopIpc.compact, async (_event, projectId: unknown, hint: unknown) => {
     return await context.agents.compact(idSchema.parse(projectId), hint === undefined ? undefined : z.string().max(2_000).parse(hint));
   });
 
-  handle(desktopIpc.runtimeProjection, async (_event, projectId: unknown) => {
+  handleRecoveryGated(desktopIpc.runtimeProjection, async (_event, projectId: unknown) => {
     return await context.agents.runtimeProjection(idSchema.parse(projectId));
   });
 
   handle(desktopIpc.runtimeMutation, async (_event, projectId: unknown, operation: unknown, payload: unknown) => {
+    const parsedOperation = runtimeMutationSchema.parse(operation);
+    if (runtimeMutationStartsWork(parsedOperation)) await settings.assertRuntimeReady();
     return await context.agents.runtimeMutation(
       idSchema.parse(projectId),
-      runtimeMutationSchema.parse(operation),
+      parsedOperation,
       runtimePayloadSchema.parse(payload) ?? {}
     );
   });
 
-  handle(desktopIpc.runtimeEvents, async (_event, projectId: unknown, afterSequence: unknown, limit: unknown) => {
+  handleRecoveryGated(desktopIpc.runtimeEvents, async (_event, projectId: unknown, afterSequence: unknown, limit: unknown) => {
     return await context.agents.runtimeEvents(
       idSchema.parse(projectId),
       afterSequence === undefined ? undefined : z.number().int().nonnegative().parse(afterSequence),
@@ -455,7 +523,7 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.webSearchSettings(idSchema.parse(projectId));
   });
 
-  handle(desktopIpc.saveWebSearchSettings, async (_event, projectId: unknown, input: unknown) => {
+  handleRecoveryGated(desktopIpc.saveWebSearchSettings, async (_event, projectId: unknown, input: unknown) => {
     return await context.agents.saveWebSearchSettings(idSchema.parse(projectId), webSearchSettingsSchema.parse(input));
   });
 
@@ -465,11 +533,18 @@ export function registerDesktopIpc(context: IpcContext): void {
 
   handle(desktopIpc.cookieJarStatus, async () => await context.browser.status());
 
-  handle(desktopIpc.exportCookies, async () => await context.browser.exportToFile(context.getWindow()));
+  handle(desktopIpc.exportCookies, async () => {
+    context.agents.assertNoRunningTasks("任务运行期间不能导出 Cookie。");
+    return await context.browser.exportToFile(context.getWindow());
+  });
 
-  handle(desktopIpc.importCookies, async () => await context.browser.importFromFile(context.getWindow()));
+  handle(desktopIpc.importCookies, async () => {
+    context.agents.assertNoRunningTasks("任务运行期间不能导入 Cookie。");
+    return await context.browser.importFromFile(context.getWindow());
+  });
 
   handle(desktopIpc.clearCookies, async () => {
+    context.agents.assertNoRunningTasks("任务运行期间不能清除 Cookie。");
     const options: MessageBoxOptions = {
       type: "warning",
       title: "清除 Cookie",
@@ -483,24 +558,25 @@ export function registerDesktopIpc(context: IpcContext): void {
     const window = context.getWindow();
     const confirmation = window ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
     if (confirmation.response !== 0) return await context.browser.status();
+    context.agents.assertNoRunningTasks("任务运行期间不能清除 Cookie。");
     return await context.browser.clear();
   });
 
-  handle(desktopIpc.personalizationOverview, async (_event, projectId: unknown, sessionId: unknown) => {
+  handleRecoveryGated(desktopIpc.personalizationOverview, async (_event, projectId: unknown, sessionId: unknown) => {
     return await context.agents.personalizationOverview(
       idSchema.parse(projectId),
       sessionId === undefined ? undefined : idSchema.parse(sessionId)
     );
   });
 
-  handle(desktopIpc.savePersonalizationSettings, async (_event, projectId: unknown, input: unknown) => {
+  handleRecoveryGated(desktopIpc.savePersonalizationSettings, async (_event, projectId: unknown, input: unknown) => {
     return await context.agents.savePersonalizationSettings(
       idSchema.parse(projectId),
       personalizationSettingsSchema.parse(input)
     );
   });
 
-  handle(desktopIpc.saveChatPersonalization, async (_event, projectId: unknown, sessionId: unknown, input: unknown, expectedRevision: unknown) => {
+  handleRecoveryGated(desktopIpc.saveChatPersonalization, async (_event, projectId: unknown, sessionId: unknown, input: unknown, expectedRevision: unknown) => {
     return await context.agents.saveChatPersonalization(
       idSchema.parse(projectId),
       idSchema.parse(sessionId),
@@ -509,42 +585,151 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handle(desktopIpc.memoryOverview, async (_event, projectId: unknown, scope: unknown) => {
-    return await context.agents.memoryOverview(idSchema.parse(projectId), memoryScopeSchema.parse(scope));
+  handleRecoveryGated(desktopIpc.memoryOverview, async (_event, projectId: unknown, filter: unknown) => {
+    return await context.agents.memoryOverview(
+      idSchema.parse(projectId),
+      filter === undefined ? undefined : memoryOriginFilterSchema.parse(filter)
+    );
   });
 
-  handle(desktopIpc.saveMemorySettings, async (_event, projectId: unknown, input: unknown) => {
+  handleRecoveryGated(desktopIpc.saveMemorySettings, async (_event, projectId: unknown, input: unknown) => {
     return await context.agents.saveMemorySettings(idSchema.parse(projectId), memorySettingsInputSchema.parse(input));
   });
 
-  handle(desktopIpc.searchMemory, async (_event, projectId: unknown, scope: unknown, query: unknown) => {
-    return await context.agents.searchMemory(idSchema.parse(projectId), memoryScopeSchema.parse(scope), memoryQuerySchema.parse(query));
+  handle(desktopIpc.settingsSnapshot, async (_event, projectId: unknown, sessionId: unknown) => {
+    return await settings.snapshot(
+      idSchema.parse(projectId),
+      sessionId === undefined ? undefined : idSchema.parse(sessionId)
+    );
   });
 
-  handle(desktopIpc.addMemoryEntry, async (_event, projectId: unknown, scope: unknown, input: unknown, expectedRevision: unknown) => {
+  handle(desktopIpc.saveSettings, async (_event, projectId: unknown, input: unknown) => {
+    context.agents.assertNoRunningTasks("任务运行期间不能保存设置。");
+    const result = await settings.save(idSchema.parse(projectId), settingsSaveInputSchema.parse(input));
+    const preference = result.snapshot?.themePreference;
+    if (preference !== undefined) {
+      applyNativeThemePreference(preference);
+      const window = context.getWindow();
+      if (window && !window.isDestroyed()) window.setBackgroundColor(themeBackgroundColor(preference));
+    }
+    return result;
+  });
+
+  handle(desktopIpc.stageSettingsCredential, async (_event, secret: unknown) => {
+    return context.agents.stageSettingsCredential(z.string().min(1).max(16_000).parse(secret));
+  });
+
+  handle(desktopIpc.completeModelLoginForSettings, async (
+    _event,
+    projectId: unknown,
+    provider: unknown,
+    authRequestId: unknown,
+    pastedAuthorization: unknown
+  ) => {
+    return await context.agents.completeModelLoginForSettings(
+      idSchema.parse(projectId),
+      modelLoginProviderSchema.parse(provider),
+      idSchema.parse(authRequestId),
+      pastedAuthorization === undefined ? undefined : z.string().max(16_000).parse(pastedAuthorization)
+    );
+  });
+
+  handle(desktopIpc.releaseSettingsCredentials, async (_event, handles: unknown) => {
+    context.agents.releaseSettingsCredentials(z.array(z.string().uuid()).max(200).parse(handles));
+  });
+
+  handle(desktopIpc.settingsDraftState, async (_event, value: unknown) => {
+    context.updateSettingsDraftState(settingsDraftStateSchema.parse(value));
+  });
+
+  handle(desktopIpc.settingsCloseResponse, async (_event, requestId: unknown, response: unknown) => {
+    return context.resolveSettingsCloseRequest(
+      idSchema.parse(requestId),
+      settingsCloseResponseSchema.parse(response)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.searchMemory, async (_event, projectId: unknown, filter: unknown, query: unknown) => {
+    return await context.agents.searchMemory(
+      idSchema.parse(projectId),
+      memoryOriginFilterSchema.parse(filter),
+      memoryQuerySchema.parse(query)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.addMemoryEntry, async (_event, projectId: unknown, input: unknown, expectedRevision: unknown) => {
     return await context.agents.addMemoryEntry(
       idSchema.parse(projectId),
-      memoryScopeSchema.parse(scope),
       memoryEntryInputSchema.parse(input),
       memoryRevisionSchema.parse(expectedRevision)
     );
   });
 
-  handle(desktopIpc.deleteMemoryEntry, async (_event, projectId: unknown, scope: unknown, entryId: unknown, expectedRevision: unknown) => {
+  handleRecoveryGated(desktopIpc.updateMemoryEntry, async (_event, projectId: unknown, entryId: unknown, patch: unknown, expectedRevision: unknown) => {
+    return await context.agents.updateMemoryEntry(
+      idSchema.parse(projectId),
+      memoryEntryIdSchema.parse(entryId),
+      memoryEntryPatchSchema.parse(patch),
+      memoryRevisionSchema.parse(expectedRevision)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.deleteMemoryEntry, async (_event, projectId: unknown, entryId: unknown, expectedRevision: unknown) => {
     return await context.agents.deleteMemoryEntry(
       idSchema.parse(projectId),
-      memoryScopeSchema.parse(scope),
       memoryEntryIdSchema.parse(entryId),
       memoryRevisionSchema.parse(expectedRevision)
     );
   });
 
-  handle(desktopIpc.clearMemory, async (_event, projectId: unknown, scope: unknown, expectedRevision: unknown) => {
-    return await context.agents.clearMemory(idSchema.parse(projectId), memoryScopeSchema.parse(scope), memoryRevisionSchema.parse(expectedRevision));
+  handleRecoveryGated(desktopIpc.clearMemory, async (_event, projectId: unknown, filter: unknown, expectedRevision: unknown) => {
+    return await context.agents.clearMemory(
+      idSchema.parse(projectId),
+      memoryOriginFilterSchema.parse(filter),
+      memoryRevisionSchema.parse(expectedRevision)
+    );
   });
 
-  handle(desktopIpc.compactMemory, async (_event, projectId: unknown, scope: unknown, expectedRevision: unknown) => {
-    return await context.agents.compactMemory(idSchema.parse(projectId), memoryScopeSchema.parse(scope), memoryRevisionSchema.parse(expectedRevision));
+  handleRecoveryGated(desktopIpc.compactMemory, async (_event, projectId: unknown, filter: unknown, expectedRevision: unknown, topic: unknown) => {
+    return await context.agents.compactMemory(
+      idSchema.parse(projectId),
+      memoryOriginFilterSchema.parse(filter),
+      memoryRevisionSchema.parse(expectedRevision),
+      topic === undefined ? undefined : memoryTopicSchema.parse(topic)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.memoryEmbeddingStatus, async (_event, projectId: unknown) => {
+    return await context.agents.memoryEmbeddingStatus(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.downloadMemoryEmbeddingModel, async (_event, projectId: unknown, model: unknown) => {
+    return await context.agents.downloadMemoryEmbeddingModel(
+      idSchema.parse(projectId),
+      localEmbeddingModelSchema.parse(model)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.cancelMemoryEmbeddingDownload, async (_event, projectId: unknown, model: unknown) => {
+    return await context.agents.cancelMemoryEmbeddingDownload(
+      idSchema.parse(projectId),
+      localEmbeddingModelSchema.parse(model)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.deleteMemoryEmbeddingModel, async (_event, projectId: unknown, model: unknown) => {
+    return await context.agents.deleteMemoryEmbeddingModel(
+      idSchema.parse(projectId),
+      localEmbeddingModelSchema.parse(model)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.rebuildMemoryEmbeddingIndex, async (_event, projectId: unknown) => {
+    return await context.agents.rebuildMemoryEmbeddingIndex(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.cancelMemoryEmbeddingRebuild, async (_event, projectId: unknown) => {
+    return await context.agents.cancelMemoryEmbeddingRebuild(idSchema.parse(projectId));
   });
 
   handle(desktopIpc.saveAttachment, async (_event, projectId: unknown, name: unknown, mimeType: unknown, bytes: unknown) => {
@@ -610,8 +795,9 @@ export function registerDesktopIpc(context: IpcContext): void {
     await context.state.setFilePanelWidth(z.number().finite().parse(width));
   });
 
-  handle(desktopIpc.setThemePreference, async (_event, theme: unknown) => {
-    const preference = z.enum(["system", "light", "dark"]).parse(theme);
+  handleRecoveryGated(desktopIpc.setThemePreference, async (_event, theme: unknown) => {
+    context.agents.assertNoRunningTasks("任务运行期间不能保存外观设置。");
+    const preference = themePreferenceSchema.parse(theme);
     await context.state.setThemePreference(preference);
     applyNativeThemePreference(preference);
     const window = context.getWindow();
@@ -621,8 +807,9 @@ export function registerDesktopIpc(context: IpcContext): void {
     return preference;
   });
 
-  handle(desktopIpc.setFontPreference, async (_event, font: unknown) => {
-    const parsed = z.object({ family: z.string().min(1).max(100), size: z.number().finite() }).parse(font);
+  handleRecoveryGated(desktopIpc.setFontPreference, async (_event, font: unknown) => {
+    context.agents.assertNoRunningTasks("任务运行期间不能保存外观设置。");
+    const parsed = fontPreferenceSchema.parse(font);
     const preference = { family: parsed.family, size: clampFontSize(parsed.size) };
     await context.state.setFontPreference(preference);
     return preference;

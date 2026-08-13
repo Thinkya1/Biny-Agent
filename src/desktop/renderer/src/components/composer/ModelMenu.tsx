@@ -4,7 +4,7 @@
  * 主菜单只负责搜索、按 Provider 分组和选择模型；思考级别由相邻的独立菜单负责。
  * 两个菜单都锚定在 footer 控件上，避免选择模型时把输入框或发送区重新排版。
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import type { ModelChoice } from "../../../../../llm/ModelManager.js";
 import { catalogForConnection } from "../../providerCatalog.js";
@@ -26,17 +26,22 @@ export function ModelMenu({
   currentAlias,
   open,
   onChange,
-  onConfigureModels
+  onClose,
+  onConfigureModels,
+  unsetLabel
 }: {
   anchorRef: RefObject<HTMLElement | null>;
   models: ModelChoice[];
   currentAlias?: string;
   open: boolean;
   onChange(alias: string): void;
-  onConfigureModels(): void;
+  onClose?(): void;
+  onConfigureModels?(): void;
+  unsetLabel?: string;
 }): React.JSX.Element | null {
   const presence = useClosingPresence(open);
   const [query, setQuery] = useState("");
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) {
@@ -44,13 +49,31 @@ export function ModelMenu({
     }
   }, [open]);
 
+  useEffect(() => {
+    if (!open || !onClose) return;
+    const closeOnOutsidePointer = (event: PointerEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Node) || anchorRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      onClose();
+    };
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("pointerdown", closeOnOutsidePointer);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnOutsidePointer);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [anchorRef, onClose, open]);
+
   const groups = useMemo(() => groupModels(models, query), [models, query]);
 
   if (!presence.present) return null;
 
   return (
     <ComposerPopover anchorRef={anchorRef} className={`t-dropdown composer-popover cindy-composer-popover model-menu ${presenceClass(presence.phase)}`} phase={presence.phase}>
-      <div aria-label="选择模型" className="model-menu-main" role="menu">
+      <div aria-label="选择模型" className="model-menu-main" ref={menuRef} role="menu">
         <label className="model-search">
           <Icon name="search" size={14} />
           <input
@@ -62,6 +85,27 @@ export function ModelMenu({
           />
         </label>
         <div className="model-options-scroll">
+          {unsetLabel && (!query.trim() || unsetLabel.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) ? (
+            <div className="model-group">
+              <button
+                aria-checked={currentAlias === undefined}
+                className={`menu-option model-option${currentAlias === undefined ? " is-selected" : ""}`}
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onChange("");
+                }}
+                role="menuitemradio"
+                type="button"
+              >
+                <span className="model-option-leading">
+                  <span className="model-option-brand"><Icon name="brain" size={14} /></span>
+                  <span className="model-option-copy"><strong>{unsetLabel}</strong></span>
+                </span>
+                <span className="model-option-check">{currentAlias === undefined ? <Icon name="check" size={14} /> : null}</span>
+              </button>
+            </div>
+          ) : null}
           {groups.length ? groups.map((group) => (
             <div className="model-group" key={group.key}>
               <div className="model-group-heading">{group.label}</div>
@@ -72,7 +116,11 @@ export function ModelMenu({
                     aria-checked={selected}
                     className={`menu-option model-option${selected ? " is-selected" : ""}`}
                     key={model.alias}
-                    onClick={() => onChange(model.alias)}
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onChange(model.alias);
+                    }}
                     role="menuitemradio"
                     type="button"
                   >
@@ -87,14 +135,14 @@ export function ModelMenu({
                 );
               })}
             </div>
-          )) : <div className="menu-empty">没有匹配的模型</div>}
+          )) : !unsetLabel || (query.trim() && !unsetLabel.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) ? <div className="menu-empty">没有匹配的模型</div> : null}
         </div>
-        <div className="model-menu-footer">
+        {onConfigureModels ? <div className="model-menu-footer">
           <button onClick={onConfigureModels} role="menuitem" type="button">
             <Icon name="add" size={14} />
             <span>添加或管理模型</span>
           </button>
-        </div>
+        </div> : null}
       </div>
     </ComposerPopover>
   );

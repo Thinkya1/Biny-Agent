@@ -8,7 +8,7 @@
  * 事件订阅返回取消函数，组件卸载时必须调用，否则监听器会随重新挂载不断累积。
  */
 import { contextBridge, ipcRenderer, webUtils } from "electron";
-import type { DesktopAgentEventEnvelope, DesktopApi, DesktopMenuAction, DesktopSessionHandoff, DesktopTerminalEvent } from "../../protocol.js";
+import type { DesktopAgentEventEnvelope, DesktopApi, DesktopMenuAction, DesktopSessionHandoff, DesktopSettingsCloseRequest, DesktopTerminalEvent } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 
 const api: DesktopApi = {
@@ -63,13 +63,37 @@ const api: DesktopApi = {
   personalizationOverview: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.personalizationOverview, projectId, sessionId),
   savePersonalizationSettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.savePersonalizationSettings, projectId, input),
   saveChatPersonalization: async (projectId, sessionId, input, expectedRevision) => await ipcRenderer.invoke(desktopIpc.saveChatPersonalization, projectId, sessionId, input, expectedRevision),
-  memoryOverview: async (projectId, scope) => await ipcRenderer.invoke(desktopIpc.memoryOverview, projectId, scope),
+  memoryOverview: async (projectId, filter) => await ipcRenderer.invoke(desktopIpc.memoryOverview, projectId, filter),
   saveMemorySettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.saveMemorySettings, projectId, input),
-  searchMemory: async (projectId, scope, query) => await ipcRenderer.invoke(desktopIpc.searchMemory, projectId, scope, query),
-  addMemoryEntry: async (projectId, scope, input, expectedRevision) => await ipcRenderer.invoke(desktopIpc.addMemoryEntry, projectId, scope, input, expectedRevision),
-  deleteMemoryEntry: async (projectId, scope, entryId, expectedRevision) => await ipcRenderer.invoke(desktopIpc.deleteMemoryEntry, projectId, scope, entryId, expectedRevision),
-  clearMemory: async (projectId, scope, expectedRevision) => await ipcRenderer.invoke(desktopIpc.clearMemory, projectId, scope, expectedRevision),
-  compactMemory: async (projectId, scope, expectedRevision) => await ipcRenderer.invoke(desktopIpc.compactMemory, projectId, scope, expectedRevision),
+  settingsSnapshot: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.settingsSnapshot, projectId, sessionId),
+  saveSettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.saveSettings, projectId, input),
+  stageSettingsCredential: async (secret) => await ipcRenderer.invoke(desktopIpc.stageSettingsCredential, secret),
+  completeModelLoginForSettings: async (projectId, provider, authRequestId, pastedAuthorization) => await ipcRenderer.invoke(
+    desktopIpc.completeModelLoginForSettings,
+    projectId,
+    provider,
+    authRequestId,
+    pastedAuthorization
+  ),
+  releaseSettingsCredentials: async (handles) => await ipcRenderer.invoke(desktopIpc.releaseSettingsCredentials, handles),
+  updateSettingsDraftState: async (state) => await ipcRenderer.invoke(desktopIpc.settingsDraftState, state),
+  respondSettingsCloseRequest: async (requestId, response) => await ipcRenderer.invoke(
+    desktopIpc.settingsCloseResponse,
+    requestId,
+    response
+  ),
+  searchMemory: async (projectId, filter, query) => await ipcRenderer.invoke(desktopIpc.searchMemory, projectId, filter, query),
+  addMemoryEntry: async (projectId, input, expectedRevision) => await ipcRenderer.invoke(desktopIpc.addMemoryEntry, projectId, input, expectedRevision),
+  updateMemoryEntry: async (projectId, entryId, patch, expectedRevision) => await ipcRenderer.invoke(desktopIpc.updateMemoryEntry, projectId, entryId, patch, expectedRevision),
+  deleteMemoryEntry: async (projectId, entryId, expectedRevision) => await ipcRenderer.invoke(desktopIpc.deleteMemoryEntry, projectId, entryId, expectedRevision),
+  clearMemory: async (projectId, filter, expectedRevision) => await ipcRenderer.invoke(desktopIpc.clearMemory, projectId, filter, expectedRevision),
+  compactMemory: async (projectId, filter, expectedRevision, topic) => await ipcRenderer.invoke(desktopIpc.compactMemory, projectId, filter, expectedRevision, topic),
+  memoryEmbeddingStatus: async (projectId) => await ipcRenderer.invoke(desktopIpc.memoryEmbeddingStatus, projectId),
+  downloadMemoryEmbeddingModel: async (projectId, model) => await ipcRenderer.invoke(desktopIpc.downloadMemoryEmbeddingModel, projectId, model),
+  cancelMemoryEmbeddingDownload: async (projectId, model) => await ipcRenderer.invoke(desktopIpc.cancelMemoryEmbeddingDownload, projectId, model),
+  deleteMemoryEmbeddingModel: async (projectId, model) => await ipcRenderer.invoke(desktopIpc.deleteMemoryEmbeddingModel, projectId, model),
+  rebuildMemoryEmbeddingIndex: async (projectId) => await ipcRenderer.invoke(desktopIpc.rebuildMemoryEmbeddingIndex, projectId),
+  cancelMemoryEmbeddingRebuild: async (projectId) => await ipcRenderer.invoke(desktopIpc.cancelMemoryEmbeddingRebuild, projectId),
   saveAttachment: async (projectId, name, mimeType, bytes) => await ipcRenderer.invoke(desktopIpc.saveAttachment, projectId, name, mimeType, bytes),
   // 渲染进程拿不到拖入文件的真实路径，只有 preload 里的 webUtils 能解析。
   resolveDroppedFile: (file) => webUtils.getPathForFile(file),
@@ -110,6 +134,11 @@ const api: DesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, action: DesktopMenuAction): void => listener(action);
     ipcRenderer.on(desktopIpc.menuAction, handler);
     return () => ipcRenderer.removeListener(desktopIpc.menuAction, handler);
+  },
+  onSettingsCloseRequest(listener) {
+    const handler = (_event: Electron.IpcRendererEvent, request: DesktopSettingsCloseRequest): void => listener(request);
+    ipcRenderer.on(desktopIpc.settingsCloseRequest, handler);
+    return () => ipcRenderer.removeListener(desktopIpc.settingsCloseRequest, handler);
   }
 };
 

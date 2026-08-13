@@ -48,7 +48,7 @@ export function SettingsAppearance({ theme, onThemeChange, font, onFontChange }:
     : [...fontFamilyOptions, { value: font.family, title: font.family }];
   return (
     <div className="settings-sections appearance-settings">
-      <div className="appearance-section-group">
+      <div className="appearance-section-group" id="appearance-theme" tabIndex={-1}>
         <h3>外观</h3>
         <section className="appearance-card">
           <div className="appearance-control-label">显示模式</div>
@@ -73,7 +73,7 @@ export function SettingsAppearance({ theme, onThemeChange, font, onFontChange }:
           </div>
         </section>
       </div>
-      <section className="appearance-card appearance-font-card">
+      <section className="appearance-card appearance-font-card" id="appearance-font" tabIndex={-1}>
         <div className="font-field">
           <div className="appearance-card-heading">
             <label className="font-field-label" htmlFor="appearance-font-family">界面字体</label>
