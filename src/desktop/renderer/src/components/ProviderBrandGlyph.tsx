@@ -13,24 +13,16 @@ import cohereBrand from "../assets/provider-brands/cohere.svg";
 import deepInfraBrand from "../assets/provider-brands/deepinfra.svg";
 import fireworksBrand from "../assets/provider-brands/fireworks.svg";
 import githubCopilotBrand from "../assets/provider-brands/github-copilot.svg";
-import groqBrand from "../assets/provider-brands/groq.svg";
 import huggingFaceBrand from "../assets/provider-brands/huggingface.svg";
-import lmStudioBrand from "../assets/provider-brands/lmstudio.svg";
 import localAiBrand from "../assets/provider-brands/localai.svg";
 import minimaxBrand from "../assets/provider-brands/minimax-logo-only-vertical-color-bg-white-text.svg";
 import mistralBrand from "../assets/provider-brands/mistral.svg";
 import nvidiaBrand from "../assets/provider-brands/nvidia.svg";
-import openCodeBrand from "../assets/provider-brands/opencode.svg";
 import openRouterBrand from "../assets/provider-brands/openrouter.svg";
 import stepFunBrand from "../assets/provider-brands/stepfun.svg";
 import tencentCloudBrand from "../assets/provider-brands/tencentcloud.svg";
 import togetherBrand from "../assets/provider-brands/together.svg";
-import vercelBrand from "../assets/provider-brands/vercel.svg";
 import volcengineBrand from "../assets/provider-brands/volcengine.svg";
-import xAiBrand from "../assets/provider-brands/xai.svg";
-import xiaomiMimoBrand from "../assets/provider-brands/xiaomimimo.svg";
-import zaiBrand from "../assets/provider-brands/zai.svg";
-import zenMuxBrand from "../assets/provider-brands/zenmux.svg";
 
 const providerBrandAssets: Record<string, string> = {
   alibaba: alibabaCloudBrand,
@@ -40,24 +32,16 @@ const providerBrandAssets: Record<string, string> = {
   deepinfra: deepInfraBrand,
   fireworks: fireworksBrand,
   github: githubCopilotBrand,
-  groq: groqBrand,
   huggingface: huggingFaceBrand,
-  "lm-studio": lmStudioBrand,
   localai: localAiBrand,
   minimax: minimaxBrand,
   mistral: mistralBrand,
   nvidia: nvidiaBrand,
-  opencode: openCodeBrand,
   openrouter: openRouterBrand,
   stepfun: stepFunBrand,
   tencent: tencentCloudBrand,
   together: togetherBrand,
-  vercel: vercelBrand,
-  volcengine: volcengineBrand,
-  xai: xAiBrand,
-  xiaomi: xiaomiMimoBrand,
-  zai: zaiBrand,
-  zenmux: zenMuxBrand
+  volcengine: volcengineBrand
 };
 
 // 这些静态品牌图形是从 Maka 复制进本仓库的，为的是保留精确外形，同时运行时不依赖它的源码树。
@@ -126,6 +110,73 @@ export function ProviderBrandGlyph({ type }: { type: string }): React.JSX.Elemen
           fill="currentColor"
           fillRule="evenodd"
         />
+      </svg>
+    );
+  }
+
+  if (type === "groq") {
+    return (
+      <svg aria-hidden="true" className="provider-logo" fill="currentColor" fillRule="evenodd" viewBox="0 0 24 24">
+        <path d="M12.036 2c-3.853-.035-7 3-7.036 6.781-.035 3.782 3.055 6.872 6.908 6.907h2.42v-2.566h-2.292c-2.407.028-4.38-1.866-4.408-4.23-.029-2.362 1.901-4.298 4.308-4.326h.1c2.407 0 4.358 1.915 4.365 4.278v6.305c0 2.342-1.944 4.25-4.323 4.279a4.375 4.375 0 01-3.033-1.252l-1.851 1.818A7 7 0 0012.029 22h.092c3.803-.056 6.858-3.083 6.879-6.816v-6.5C18.907 4.963 15.817 2 12.036 2z" />
+      </svg>
+    );
+  }
+
+  if (type === "lm-studio") {
+    return (
+      <svg aria-hidden="true" className="provider-logo" fill="currentColor" fillRule="evenodd" viewBox="0 0 24 24">
+        <path d="M2.84 2a1.273 1.273 0 100 2.547h14.107a1.273 1.273 0 100-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H22.04a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h14.106a1.274 1.274 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H15.38a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h14.106a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h9.698a1.273 1.273 0 100-2.547h-9.698z" fillOpacity=".3" />
+        <path d="M2.84 2a1.273 1.273 0 100 2.547h10.287a1.274 1.274 0 000-2.547H2.84zM7.935 5.33a1.273 1.273 0 000 2.548H18.22a1.274 1.274 0 000-2.547H7.935zM3.624 9.935c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 010 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM1.273 12.188a1.273 1.273 0 100 2.547H11.56a1.274 1.274 0 000-2.547H1.273zM3.624 16.792c0-.704.57-1.274 1.274-1.274h10.286a1.273 1.273 0 110 2.547H4.898c-.703 0-1.274-.57-1.274-1.273zM13.029 18.849a1.273 1.273 0 100 2.547h5.78a1.273 1.273 0 100-2.547h-5.78z" />
+      </svg>
+    );
+  }
+
+  if (type === "opencode") {
+    return (
+      <svg aria-hidden="true" className="provider-logo" fill="currentColor" fillRule="evenodd" viewBox="0 0 24 24">
+        <path d="M16 6H8v12h8V6zm4 16H4V2h16v20z" />
+      </svg>
+    );
+  }
+
+  if (type === "vercel") {
+    return (
+      <svg aria-hidden="true" className="provider-logo" fill="currentColor" fillRule="evenodd" viewBox="0 0 24 24">
+        <path d="M12 0l12 20.785H0L12 0z" />
+      </svg>
+    );
+  }
+
+  if (type === "xai") {
+    return (
+      <svg aria-hidden="true" className="provider-logo" fill="currentColor" fillRule="evenodd" viewBox="0 0 24 24">
+        <path d="M6.469 8.776L16.512 23h-4.464L2.005 8.776H6.47zm-.004 7.9l2.233 3.164L6.467 23H2l4.465-6.324zM22 2.582V23h-3.659V7.764L22 2.582zM22 1l-9.952 14.095-2.233-3.163L17.533 1H22z" />
+      </svg>
+    );
+  }
+
+  if (type === "xiaomi") {
+    return (
+      <svg aria-hidden="true" className="provider-logo" fill="currentColor" fillRule="evenodd" viewBox="0 0 24 24">
+        <path d="M.958 15.936a.459.459 0 01.459.44v2.729a.46.46 0 01-.918 0v-2.729a.459.459 0 01.459-.44zm4.814-2.035a.46.46 0 01.553.45v4.754a.458.458 0 11-.918 0V15.48L3.74 17.202a.462.462 0 01-.655.016.462.462 0 01-.065-.082L.628 14.67a.459.459 0 01.658-.637l2.124 2.187 2.127-2.188a.46.46 0 01.235-.13zm2.068.004a.46.46 0 01.458.445v4.755a.46.46 0 01-.458.458.459.459 0 01-.458-.458V14.35a.459.459 0 01.458-.445zm1.973 2.014a.46.46 0 01.46.457v2.729a.46.46 0 01-.784.324.46.46 0 01-.134-.324v-2.729a.46.46 0 01.458-.458zm.002-2.045a.458.458 0 01.328.157l2.127 2.19 2.125-2.19a.459.459 0 01.784.318v4.756a.46.46 0 01-.455.458.46.46 0 01-.458-.458V15.48l-1.667 1.723a.46.46 0 01-.65.008l-.005-.005c0-.002-.002-.002-.004-.003l-2.455-2.534a.46.46 0 01-.008-.667.461.461 0 01.338-.128zm6.797 1.206a.46.46 0 01.53.651A1.966 1.966 0 0019.81 18.4a.462.462 0 01.623.18.46.46 0 01-.181.624 2.863 2.863 0 01-1.38.353l-.142-.004a2.88 2.88 0 01-2.393-4.263.461.461 0 01.274-.21zm.864-.931a2.884 2.884 0 013.915 3.914.46.46 0 01-.402.24l-.057-.004a.458.458 0 01-.164-.055.46.46 0 01-.182-.622 1.967 1.967 0 00-2.669-2.67.459.459 0 11-.441-.803zM9.59 6.368c1.481 0 1.696 1.202 1.696 1.654v2.648h-.917v-.432c-.26.346-.792.535-1.36.535-.133 0-1.289-.03-1.384-1.136-.082-.932.675-1.61 2.053-1.61h.691c0-.563-.367-.886-.983-.886-.44.013-.864.174-1.2.458l-.36-.664c.484-.379 1.012-.567 1.764-.567zm4.427.1c1.263 0 2.082.97 2.083 2.15 0 1.181-.824 2.154-2.083 2.154-1.26 0-2.084-.972-2.084-2.152 0-1.18.82-2.153 2.084-2.153zm6.801.015c.68 0 1.202.465 1.197 1.548v2.642H21.1V8.29c0-.312-.002-.98-.63-.98s-.628.667-.628.838v2.524h-.89V8.148c0-.17-.001-.838-.63-.838-.628 0-.628.668-.628.98v2.383h-.917v-4.03h.917V7a1.22 1.22 0 01.947-.516c.398 0 .76.193.982.686a1.321 1.321 0 011.195-.686zm-18.093.872l1.457-1.772H5.32L3.311 8.07l2.14 2.602H4.24L2.725 8.796 1.21 10.672H0L2.138 8.07.13 5.583h1.138l1.458 1.772zm4.149 3.317h-.916V6.644h.916v4.028zm16.99 0h-.916V6.644h.916v4.028zM9.925 8.71c-1.055 0-1.359.412-1.326.742.032.329.324.537.757.537a1.013 1.013 0 001.014-.968l.002-.31h-.447zM14.018 7.3c-.663 0-1.184.487-1.184 1.32 0 .832.52 1.32 1.184 1.32.662 0 1.182-.49 1.182-1.32 0-.832-.52-1.32-1.182-1.32zM6.417 5.001a.568.568 0 01.587.582.588.588 0 01-1.175 0A.57.57 0 016.417 5zm16.991 0a.57.57 0 01.592.582.588.588 0 01-1.174 0 .57.57 0 01.357-.542.572.572 0 01.225-.04z" />
+      </svg>
+    );
+  }
+
+  if (type === "zai") {
+    return (
+      <svg aria-hidden="true" className="provider-logo" fill="currentColor" fillRule="evenodd" viewBox="0 0 24 24">
+        <path d="M12.105 2L9.927 4.953H.653L2.83 2h9.276zM23.254 19.048L21.078 22h-9.242l2.174-2.952h9.244zM24 2L9.264 22H0L14.736 2H24z" />
+      </svg>
+    );
+  }
+
+  if (type === "zenmux") {
+    return (
+      <svg aria-hidden="true" className="provider-logo" fill="currentColor" fillRule="evenodd" viewBox="0 0 24 24">
+        <g transform="scale(0.15)">
+          <path clipRule="evenodd" d="M76.5655 12.5465C83.6841 12.273 98.0909 13.2144 109.616 23.5631C119.071 32.0522 122.328 47.7904 120.125 59.9938C118.105 71.1802 113.346 80.3327 115.21 88.8073C117.074 97.2819 121.818 101.46 125.854 103.215C129.752 104.909 133.52 104.401 132.803 107.621C132.085 110.841 127.21 112.028 123.65 112.028C121.698 112.028 115.795 111.519 113.176 109.824C110.081 107.821 109.391 106.026 108.213 104.583C108.013 104.338 107.66 104.509 107.707 104.821C108.244 108.371 109.724 114.394 112.125 118.13C114.068 121.152 114.871 123.356 119.322 127.085C123.774 130.813 125.853 134.203 121.525 136.604C117.68 138.736 109.322 134.373 104.407 128.977C99.9829 124.12 96.9028 118.129 95.6846 114.231C95.0335 112.147 94.3811 108.562 93.7296 105.63C93.644 105.244 93.116 105.306 93.1046 105.701C92.8883 113.164 91.7152 120.291 90.0001 127.932C88.7652 133.433 85.7626 140.135 83.0508 144.203C79.7442 149.163 74.8354 150.711 71.1866 149.355C68.2684 148.27 70.3392 144.582 71.1866 141.389C72.034 138.197 73.7294 131.519 74.8712 124.203C75.9046 117.581 76.1781 111.026 75.7178 104.815C75.6893 104.436 75.1073 104.378 74.9893 104.739C74.0382 107.652 72.2455 112.481 70.9376 115.418C68.2097 121.543 66.1909 124.231 60.5977 130.672C55.5676 136.464 41.1004 144.655 39.2422 136.604C38.7338 134.401 41.3978 133.436 43.8546 131.519C47.5476 128.638 50.6336 123.525 53.5596 117.282C56.1869 111.676 57.5223 106.253 57.7266 102.791C57.746 102.457 57.3268 102.331 57.1387 102.607C55.9225 104.391 54.1317 106.805 52.1592 108.807C48.8643 112.152 45.2098 115.595 40.9717 117.282C34.1576 119.994 27.2089 118.129 27.7169 113.215C28.1415 109.109 32.725 109.959 38.4307 103.734C44.0239 97.6323 45.8876 92.8857 46.2266 87.6315C46.4975 83.428 42.3854 73.4513 40.295 68.9879C36.9616 61.8693 34.4984 41.666 44.5323 28.6491C57.0743 12.3784 72.1582 12.7159 76.5655 12.5465ZM57.0001 40.9997C52.3335 40.9997 50.0002 44.5815 50.0001 48.9997C50.0001 53.4179 52.5927 56.9997 57.0001 56.9997C61.4074 56.9996 64.0001 53.4179 64.0001 48.9997C63.9999 44.5816 61.6666 40.9997 57.0001 40.9997ZM95.0001 40.9997C90.3335 40.9997 88.0002 44.5815 88.0001 48.9997C88.0001 53.4179 90.5927 56.9997 95.0001 56.9997C99.4074 56.9996 102 53.4179 102 48.9997C102 44.5816 99.6666 40.9997 95.0001 40.9997Z" fillRule="evenodd" />
+        </g>
       </svg>
     );
   }
