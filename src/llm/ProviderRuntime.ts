@@ -7,7 +7,7 @@
 import type { AgentModel, ModelStreamContext, ModelStreamEvent, ModelStreamOptions } from "../agent/core/types.js";
 import { effectiveThinkingSelection, modelCapabilities, modelReasoningConfig, modelThinkingLevelMap, nativeReasoningEffort, normalizeModelMetadata, reasoningBudgetTokens } from "../ai/capabilities.js";
 import { fetchModelCatalogSnapshot } from "../ai/modelCatalog.js";
-import { accessPathThinkingLevelMap, lookupModelMetadata, thinkingLevelMapForEfforts, type ModelMetadata } from "../ai/modelMetadata.js";
+import { accessPathThinkingLevelMap, isOpenCodeModelEndpoint, lookupModelMetadata, thinkingLevelMapForEfforts, type ModelMetadata } from "../ai/modelMetadata.js";
 import { providerDefinition, providerProtocol } from "../ai/provider.js";
 import type { ModelCatalogEntry, ProviderDefinition } from "../ai/types.js";
 import type { AgentConfig, ModelAliasConfig, ModelApiBackend, ModelCompatibility, ProviderConfig, ThinkingLevelMap } from "../config/schema.js";
@@ -144,9 +144,15 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
 
   resolveModel(model: ModelAliasConfig): ModelAliasConfig {
     const catalog = this.mergedCatalog().find((entry) => entry.id === model.model);
-    const generated = lookupModelMetadata(this.config.type, model.model);
-    const catalogModel = catalog ? catalogEntryToModel(catalog, generated !== undefined) : undefined;
+    const generated = lookupModelMetadata(this.config.type, model.model, this.config.baseUrl);
     const generatedModel = generated ? metadataToModel(this.id, this.config.type, model.model, generated) : undefined;
+    const catalogModel = catalog
+      ? openCodeKnownModelOverride(
+        this.config.baseUrl,
+        catalogEntryToModel(catalog, generated !== undefined),
+        generatedModel
+      )
+      : undefined;
     const catalogBase = catalogModel && generatedModel
       ? mergeModelMetadata(generatedModel, catalogModel)
       : catalogModel ?? generatedModel;
@@ -480,6 +486,27 @@ function resolveSimpleThinking(
     throw new Error(`Model ${model.model} does not support ${requested} thinking effort.`);
   }
   return { enabled: true, effort: requested };
+}
+
+function openCodeKnownModelOverride(
+  baseUrl: string | undefined,
+  catalogModel: ModelAliasConfig | undefined,
+  generatedModel: ModelAliasConfig | undefined
+): ModelAliasConfig | undefined {
+  if (!isOpenCodeModelEndpoint(baseUrl) || !catalogModel || !generatedModel) return catalogModel;
+  const catalogDisablesReasoning = catalogModel.capabilities?.reasoning === false
+    && Object.keys(catalogModel.thinkingLevelMap ?? {}).length === 0;
+  if (!catalogDisablesReasoning) return catalogModel;
+  return {
+    ...catalogModel,
+    capabilities: {
+      ...catalogModel.capabilities,
+      reasoning: generatedModel.capabilities?.reasoning,
+      reasoningStream: generatedModel.capabilities?.reasoningStream,
+      reasoningSummary: generatedModel.capabilities?.reasoningSummary
+    },
+    thinkingLevelMap: undefined
+  };
 }
 
 function catalogEntryToModel(entry: ModelCatalogEntry, preferGeneratedReasoning = false): ModelAliasConfig {

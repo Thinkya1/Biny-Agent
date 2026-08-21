@@ -52,12 +52,32 @@ const openAiCodexContextWindows: Record<string, number> = {
 };
 
 /** 按 models.dev 快照的 access-path 别名查找模型事实。 */
-export function lookupModelMetadata(providerType: string, modelId: string): ModelMetadata | undefined {
+export function lookupModelMetadata(
+  providerType: string,
+  modelId: string,
+  baseUrl?: string
+): ModelMetadata | undefined {
   const provider = generatedProviderType(providerType);
-  const metadata = GENERATED_MODELS_DEV_METADATA[provider]?.[modelId.trim()];
+  const metadata = GENERATED_MODELS_DEV_METADATA[provider]?.[modelId.trim()]
+    ?? openCodeKnownModelMetadata(baseUrl, modelId);
   if (!metadata || providerType !== "openai-codex") return metadata;
   const contextWindow = openAiCodexContextWindows[modelId.trim()];
   return contextWindow === undefined ? metadata : { ...metadata, contextWindow };
+}
+
+/**
+ * OpenCode Zen/Go 的目录把托管模型统一标成 `reasoning: false` 且不带上下文窗口。
+ * 这里的已知模型事实用于纠正该 access path，不作用于普通 OpenAI 兼容端点。
+ */
+export function isOpenCodeModelEndpoint(baseUrl: string | undefined): boolean {
+  return Boolean(baseUrl && /^https:\/\/opencode\.ai\/zen(?:\/go)?\/v1\/?$/u.test(baseUrl.trim()));
+}
+
+function openCodeKnownModelMetadata(baseUrl: string | undefined, modelId: string): ModelMetadata | undefined {
+  if (!isOpenCodeModelEndpoint(baseUrl)) return undefined;
+  const normalized = modelId.trim();
+  if (normalized !== "deepseek-v4-flash" && normalized !== "deepseek-v4-pro") return undefined;
+  return GENERATED_MODELS_DEV_METADATA.deepseek?.[normalized];
 }
 
 /** 返回适合 Biny tool agent 的离线模型目录；无 tool_call 声明的模型只保留为显式配置元数据。 */

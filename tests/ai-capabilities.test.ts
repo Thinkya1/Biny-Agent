@@ -10,6 +10,7 @@ import { ModelRegistry } from "../src/llm/ModelRegistry.js";
 import { ModelResolver } from "../src/llm/ModelResolver.js";
 import { ModelRuntime } from "../src/llm/ModelRuntime.js";
 import { ProviderRegistry } from "../src/llm/ProviderRuntime.js";
+import { thinkingSelectionForModel } from "../src/llm/modelThinking.js";
 
 const config = configSchema.parse({
   ...structuredClone(defaultConfig),
@@ -33,6 +34,23 @@ const config = configSchema.parse({
 });
 
 const model = config.models.small!;
+assert.equal(thinkingSelectionForModel("high", {
+  efforts: ["low", "high"],
+  defaultThinking: "high"
+}), "high");
+assert.equal(thinkingSelectionForModel("max", {
+  efforts: ["low", "high"],
+  defaultThinking: "high"
+}), "high");
+assert.equal(thinkingSelectionForModel("off", {
+  efforts: [],
+  defaultThinking: "off"
+}), undefined);
+assert.equal(thinkingSelectionForModel("off", {
+  efforts: ["high", "max"],
+  defaultThinking: "high",
+  thinkingLevelMap: { off: "none", high: "high", max: "max" }
+}), "off");
 const budget = modelContextBudget(model, config.context.maxInputTokens, "small");
 assert.equal(budget.contextWindow, 16_384);
 assert.equal(budget.maxInputTokens, 9_728);
@@ -67,6 +85,35 @@ const explicitContextConfig = configSchema.parse({
   models: { "flash-alias": { ...deepseekUnknownAliasConfig.models["flash-alias"], contextWindow: 128_000 } }
 });
 assert.equal(new ProviderRegistry(explicitContextConfig).forModel("flash-alias").model.contextWindow, 128_000);
+
+const openCodeFlashConfig = configSchema.parse({
+  ...defaultConfig,
+  defaultModel: "opencode-flash",
+  providers: {
+    "opencode-ai": {
+      type: "openai-compatible",
+      baseUrl: "https://opencode.ai/zen/go/v1",
+      apiKey: "test-key"
+    }
+  },
+  models: {
+    "opencode-flash": { provider: "opencode-ai", model: "deepseek-v4-flash" }
+  }
+});
+const normalizedOpenCodeFlash = new ProviderRegistry(openCodeFlashConfig, [[
+  "opencode-ai",
+  [{
+    id: "deepseek-v4-flash",
+    displayName: "deepseek-v4-flash",
+    provider: "opencode-ai",
+    capabilities: { tools: true, reasoning: false, streaming: true },
+    reasoningEfforts: [],
+    thinkingLevelMap: {}
+  }]
+]]).forModel("opencode-flash").model;
+assert.equal(normalizedOpenCodeFlash.contextWindow, 1_000_000);
+assert.equal(modelCapabilities(normalizedOpenCodeFlash).reasoning, true);
+assert.deepEqual(modelReasoningConfig(normalizedOpenCodeFlash)?.efforts, ["low", "high", "max"]);
 
 const geminiFlashConfig = configSchema.parse({
   ...defaultConfig,

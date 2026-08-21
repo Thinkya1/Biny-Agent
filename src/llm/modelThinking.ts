@@ -22,3 +22,13 @@ export function modelThinkingSelections(model: ModelThinkingSelectionSource): Th
     ...model.efforts
   ];
 }
+
+/** 新模型不支持当前档位时回退到模型默认值；不支持 thinking 时返回 undefined。 */
+export function thinkingSelectionForModel(
+  current: ThinkingSelection,
+  model: Pick<ModelThinkingSelectionSource, "efforts"> & { defaultThinking: ThinkingSelection; thinkingLevelMap?: ThinkingLevelMap }
+): ThinkingSelection | undefined {
+  if (!model.efforts.length) return undefined;
+  if (current === "off" && model.thinkingLevelMap?.off !== undefined && model.thinkingLevelMap.off !== null) return "off";
+  return model.efforts.includes(current as ReasoningEffort) ? current : model.defaultThinking;
+}
