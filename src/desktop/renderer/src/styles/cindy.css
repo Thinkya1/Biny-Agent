@@ -2405,6 +2405,41 @@
   color: var(--cindy-focus);
 }
 
+.cindy-model-picker {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  border-radius: 8px;
+  background: var(--cindy-pill);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cindy-border) 70%, transparent);
+}
+
+.cindy-model-picker .composer-menu-anchor {
+  display: inline-flex;
+  height: 100%;
+}
+
+.cindy-model-picker .cindy-model-pill,
+.cindy-model-picker .cindy-thinking-pill {
+  max-width: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.cindy-model-picker .cindy-model-pill {
+  padding-right: 5px;
+  padding-left: 8px;
+  background: transparent;
+  border-radius: 8px 0 0 8px;
+}
+
+.cindy-model-picker .cindy-thinking-pill {
+  padding-right: 8px;
+  padding-left: 5px;
+  color: var(--cindy-text-secondary);
+  border-radius: 0 8px 8px 0;
+}
+
 .model-trigger-brand {
   display: inline-flex;
   width: 16px;
@@ -2417,6 +2452,11 @@
 .model-trigger-brand .provider-logo {
   width: 15px;
   height: 15px;
+}
+
+.model-trigger-thinking {
+  color: var(--cindy-text-secondary);
+  font-size: 12px;
 }
 
 .cindy-mic-button {

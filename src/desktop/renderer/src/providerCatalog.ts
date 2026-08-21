@@ -64,16 +64,42 @@ interface ApiProviderDefinition {
   supportsThinking: boolean;
   supportsVision?: boolean;
   supportsAudio?: boolean;
+  contextWindow?: number;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  thinkingLevelMap?: DesktopModelConfigurationInput["thinkingLevelMap"];
   protocol?: DesktopModelConfigurationInput["protocol"];
   apiKeyUrl?: string;
 }
 
 function apiProvider(definition: ApiProviderDefinition): ProviderCatalogItem {
-  const { modelId, modelDisplayName, supportsThinking, supportsVision, supportsAudio, apiKeyUrl, ...provider } = definition;
+  const {
+    modelId,
+    modelDisplayName,
+    supportsThinking,
+    supportsVision,
+    supportsAudio,
+    contextWindow,
+    maxInputTokens,
+    maxOutputTokens,
+    thinkingLevelMap,
+    apiKeyUrl,
+    ...provider
+  } = definition;
   return {
     ...provider,
     connectionMode: "api",
-    models: modelId ? [{ id: modelId, displayName: modelDisplayName, supportsThinking, supportsVision, supportsAudio }] : [],
+    models: modelId ? [{
+      id: modelId,
+      displayName: modelDisplayName,
+      supportsThinking,
+      supportsVision,
+      supportsAudio,
+      contextWindow,
+      maxInputTokens,
+      maxOutputTokens,
+      thinkingLevelMap
+    }] : [],
     apiKeyUrl: apiKeyUrl ?? providerApiKeyUrl(definition.id)
   };
 }
@@ -107,7 +133,7 @@ function providerApiKeyUrl(providerId: string): string | undefined {
 export const providerCatalog: ProviderCatalogItem[] = [
   apiProvider({ id: "kimi-coding-plan", value: "kimi", label: "Kimi Coding Plan", description: "月之暗面 · Anthropic 兼容", badge: "Coding", categories: ["推荐", "模型计划"], baseUrl: "https://api.kimi.com/coding/v1", requiresApiKey: true, iconTone: "moonshot", modelId: "kimi-k2.5", modelDisplayName: "Kimi K2.5", supportsThinking: true, protocol: "anthropic" }),
   apiProvider({ id: "minimax-coding-plan", value: "openai-compatible", label: "MiniMax Coding Plan", description: "MiniMax Coding 套餐 · Anthropic 兼容", badge: "Coding", categories: ["模型计划"], baseUrl: "https://api.minimax.io/anthropic", requiresApiKey: true, iconTone: "minimax", modelId: "MiniMax-M3", modelDisplayName: "MiniMax M3", supportsThinking: true, protocol: "anthropic" }),
-  apiProvider({ id: "deepseek", value: "deepseek", label: "DeepSeek", description: "DeepSeek 官方接入", badge: "API", categories: ["推荐", "API"], baseUrl: "https://api.deepseek.com", requiresApiKey: true, iconTone: "deepseek", modelId: "deepseek-v4-flash", modelDisplayName: "DeepSeek V4 Flash", supportsThinking: true }),
+  apiProvider({ id: "deepseek", value: "deepseek", label: "DeepSeek", description: "DeepSeek 官方接入", badge: "API", categories: ["推荐", "API"], baseUrl: "https://api.deepseek.com", requiresApiKey: true, iconTone: "deepseek", modelId: "deepseek-v4-flash", modelDisplayName: "DeepSeek V4 Flash", supportsThinking: true, contextWindow: 1_000_000, thinkingLevelMap: { off: "none", high: "high", max: "max" } }),
   apiProvider({ id: "moonshot", value: "kimi", label: "Moonshot", description: "Moonshot 官方接入", badge: "API", categories: ["API"], baseUrl: "https://api.moonshot.ai/v1", requiresApiKey: true, iconTone: "moonshot", modelId: "kimi-k3", modelDisplayName: "Kimi K3", supportsThinking: true }),
   apiProvider({ id: "zai-coding-plan", value: "openai-compatible", label: "Z.AI Coding Plan", description: "智谱 · OpenAI 兼容", badge: "Coding", categories: ["模型计划"], baseUrl: "https://api.z.ai/api/coding/paas/v4", requiresApiKey: true, iconTone: "zai", modelId: "glm-5", modelDisplayName: "GLM-5", supportsThinking: true }),
   apiProvider({ id: "MiniMax", value: "openai-compatible", label: "MiniMax", description: "MiniMax · Anthropic 兼容", badge: "API", categories: ["API"], baseUrl: "https://api.minimax.io/anthropic/v1", requiresApiKey: true, iconTone: "minimax", modelId: "MiniMax-M3", modelDisplayName: "MiniMax M3", supportsThinking: true, protocol: "anthropic" }),

@@ -5,6 +5,7 @@
  * 并只在服务端快照真正变化时回写根状态。
  */
 import { useCallback, type Dispatch, type RefObject, type SetStateAction } from "react";
+import type { ContextBudgetStatus } from "../../../../agent/context/types.js";
 import type { ThinkingSelection } from "../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../llm/embedding/types.js";
 import type {
@@ -21,22 +22,27 @@ import { updateRuntimeInfo } from "./desktopState.js";
 interface DesktopSettingsActionsOptions {
   projectIdRef: RefObject<string | undefined>;
   mergeProjectSnapshot(snapshot: DesktopWorkspaceSnapshot): void;
+  setContextBudget: Dispatch<SetStateAction<ContextBudgetStatus | undefined>>;
   setWorkspace: Dispatch<SetStateAction<DesktopWorkspaceSnapshot | undefined>>;
 }
 
 export function useDesktopSettingsActions({
   projectIdRef,
   mergeProjectSnapshot,
+  setContextBudget,
   setWorkspace
 }: DesktopSettingsActionsOptions) {
   const switchModel = useCallback(async (alias: string, thinking: ThinkingSelection): Promise<void> => {
     const projectId = projectIdRef.current;
     if (!projectId) return;
     const info = await window.biny.switchModel(projectId, alias, thinking);
+    // 切换模型后上一轮会话的上下文预算是旧模型的，立即作废；新模型的实际用量
+    // 会在下一轮 `context.updated` 中重新建立。
+    setContextBudget(undefined);
     setWorkspace((current) => updateRuntimeInfo(current, info));
     // 切模型可能刚创建运行时，而旧快照还没有 runtime；完整刷新可避免界面继续显示旧模型。
     mergeProjectSnapshot(await window.biny.refreshProject(projectId));
-  }, [mergeProjectSnapshot, projectIdRef, setWorkspace]);
+  }, [mergeProjectSnapshot, projectIdRef, setContextBudget, setWorkspace]);
 
   const testModelConfiguration = useCallback(async (configuration: DesktopModelConfigurationInput) => {
     return await window.biny.testModelConfiguration(requireProject(projectIdRef.current), configuration);
@@ -46,6 +52,12 @@ export function useDesktopSettingsActions({
     const fetchCatalog = window.biny.fetchModelCatalog;
     if (typeof fetchCatalog !== "function") throw new Error(desktopApiVersionMismatchMessage);
     return await fetchCatalog(requireProject(projectIdRef.current), providerAlias);
+  }, [projectIdRef]);
+
+  const fetchModelCatalogCandidate = useCallback(async (configuration: DesktopModelConfigurationInput) => {
+    const fetchCandidate = window.biny.fetchModelCatalogCandidate;
+    if (typeof fetchCandidate !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await fetchCandidate(requireProject(projectIdRef.current), configuration);
   }, [projectIdRef]);
 
   const startModelLogin = useCallback(async (provider: DesktopModelLoginProvider) => {
@@ -153,6 +165,7 @@ export function useDesktopSettingsActions({
     deleteMemoryEmbeddingModel,
     downloadMemoryEmbeddingModel,
     fetchModelCatalog,
+    fetchModelCatalogCandidate,
     loadCookieJarStatus,
     loadMemoryEmbeddingStatus,
     loadMemoryOverview,

@@ -216,7 +216,9 @@ export function updateRuntimeInfo(
         provider: info.provider,
         modelLabel: info.modelLabel,
         reasoningLabel: info.reasoningLabel,
-        thinking: info.thinking
+        thinking: info.thinking,
+        contextWindow: info.contextWindow,
+        maxInputTokens: info.maxInputTokens
       }
     }
   };

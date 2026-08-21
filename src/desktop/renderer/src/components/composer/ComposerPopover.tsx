@@ -7,7 +7,7 @@
  */
 import { createPortal } from "react-dom";
 import { useLayoutEffect, useRef, useState } from "react";
-import type { CSSProperties, ReactNode, RefObject } from "react";
+import type { CSSProperties, PointerEventHandler, ReactNode, RefObject } from "react";
 import type { PresencePhase } from "../../useClosingPresence.js";
 
 interface ComposerPopoverProps {
@@ -15,6 +15,8 @@ interface ComposerPopoverProps {
   align?: "start" | "end";
   children: ReactNode;
   className: string;
+  onPointerEnter?: PointerEventHandler<HTMLDivElement>;
+  onPointerLeave?: PointerEventHandler<HTMLDivElement>;
   phase: PresencePhase;
 }
 
@@ -24,7 +26,15 @@ interface PopoverPosition {
   top: number;
 }
 
-export function ComposerPopover({ anchorRef, align = "start", children, className, phase }: ComposerPopoverProps): React.JSX.Element | null {
+export function ComposerPopover({
+  anchorRef,
+  align = "start",
+  children,
+  className,
+  onPointerEnter,
+  onPointerLeave,
+  phase
+}: ComposerPopoverProps): React.JSX.Element | null {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<PopoverPosition>();
   // 设置中心用原生 <dialog>.showModal() 打开，dialog 会进入浏览器顶层（top layer），
@@ -105,7 +115,15 @@ export function ComposerPopover({ anchorRef, align = "start", children, classNam
   // 设置中心的菜单挂进 <dialog> 内部（顶层渲染顺序）；composer 场景仍在首帧后挂回 body，
   // 效果与之前一致，只是 portal 目标从 document.body 改成解析结果。
   return createPortal(
-    <div className={className} data-origin={position?.origin ?? (align === "end" ? "bottom-right" : "bottom-left")} data-popover-phase={phase} ref={surfaceRef} style={style}>
+    <div
+      className={className}
+      data-origin={position?.origin ?? (align === "end" ? "bottom-right" : "bottom-left")}
+      data-popover-phase={phase}
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
+      ref={surfaceRef}
+      style={style}
+    >
       {children}
     </div>,
     portalTarget ?? document.body

@@ -4,7 +4,7 @@
  * 设置壳只负责导航与页面装配；跨页草稿和补偿事务由 SettingsDraftProvider 统一管理。
  * 记忆 CRUD、连接测试、Cookie 与模型下载等一次性动作仍通过明确回调即时执行。
  */
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Dialog } from "@astryxdesign/core/Dialog";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
@@ -50,6 +50,7 @@ interface SettingsOverlayProps {
   onClose(): void;
   onTestModelConfiguration(configuration: DesktopModelConfigurationInput): Promise<DesktopModelConnectionTestResult>;
   onFetchModelCatalog(providerAlias: string): Promise<DesktopModelCatalogResult>;
+  onFetchModelCatalogCandidate(configuration: DesktopModelConfigurationInput): Promise<DesktopModelCatalogResult>;
   sessionId?: string;
   sessionRunning: boolean;
   onLoadMemoryOverview(filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview>;
@@ -146,6 +147,7 @@ function SettingsOverlayContent({
   onClose,
   onTestModelConfiguration,
   onFetchModelCatalog,
+  onFetchModelCatalogCandidate,
   sessionRunning,
   onLoadMemoryOverview,
   onSearchMemory,
@@ -274,6 +276,7 @@ function SettingsOverlayContent({
             connections={settingsDraft.snapshot?.models.connections ?? workspace?.connections ?? []}
             defaultModelAlias={defaultModelAlias}
             onFetchCatalog={onFetchModelCatalog}
+            onFetchCatalogCandidate={onFetchModelCatalogCandidate}
             onOpenExternal={onOpenExternal}
             onStartLogin={onStartModelLogin}
             onCompleteLogin={async (provider, authRequestId, pastedAuthorization) => {
@@ -602,7 +605,16 @@ function formatFetchedAt(timestamp: string): string {
   return new Date(parsed).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-function SettingsModels({ active, setupRequired, models, connections: connectionInfos, defaultModelAlias, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onStartLogin, onCompleteLogin, onCancelLogin }: {
+/**
+ * 新增连接时是否需要手填服务地址与模型 ID。内置目录里没有固定 baseUrl 的卡片
+ * （自定义兼容接口、Cloudflare）无法自动拉取目录，仍走手填流程；其余都通过
+ * 「填密钥 → 加载模型 → 勾选启用」完成。
+ */
+function isManualEndpoint(provider: ProviderCatalogItem): boolean {
+  return provider.id === "openai-compatible" || !provider.baseUrl.trim();
+}
+
+function SettingsModels({ active, setupRequired, models, connections: connectionInfos, defaultModelAlias, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onFetchCatalogCandidate, onStartLogin, onCompleteLogin, onCancelLogin }: {
   active: boolean;
   setupRequired: boolean;
   models: ModelChoice[];
@@ -615,6 +627,7 @@ function SettingsModels({ active, setupRequired, models, connections: connection
   onNotify(message: string): void;
   onOpenExternal(url: string): Promise<void>;
   onFetchCatalog(providerAlias: string): Promise<DesktopModelCatalogResult>;
+  onFetchCatalogCandidate(configuration: DesktopModelConfigurationInput): Promise<DesktopModelCatalogResult>;
   onStartLogin(provider: DesktopModelLoginProvider): Promise<DesktopModelLoginStartResult>;
   onCompleteLogin(provider: DesktopModelLoginProvider, authRequestId: string, pastedAuthorization?: string): Promise<void>;
   onCancelLogin(provider: DesktopModelLoginProvider, authRequestId: string): Promise<void>;
@@ -635,6 +648,12 @@ function SettingsModels({ active, setupRequired, models, connections: connection
   const [detailBaseUrl, setDetailBaseUrl] = useState("");
   const [detailShowKey, setDetailShowKey] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  // 新增连接时用临时密钥拉到的模型候选，以及用户在勾选列表里的选择。
+  const [connectModels, setConnectModels] = useState<CatalogModel[]>([]);
+  const [connectSelected, setConnectSelected] = useState<string[]>([]);
+  const [connectFetching, setConnectFetching] = useState(false);
+  const [connectFetchSource, setConnectFetchSource] = useState<DesktopModelCatalogResult["source"]>();
+  const connectGenerationRef = useRef(0);
   const [loginStage, setLoginStage] = useState<"idle" | "opening" | "waiting" | "submitted">("idle");
   const [loginRequest, setLoginRequest] = useState<DesktopModelLoginStartResult>();
   const [loginError, setLoginError] = useState<string>();
@@ -704,6 +723,11 @@ function SettingsModels({ active, setupRequired, models, connections: connection
     setLoginRequest(undefined);
     setLoginError(undefined);
     setAuthorizationCode("");
+    setConnectModels([]);
+    setConnectSelected([]);
+    setConnectFetching(false);
+    setConnectFetchSource(undefined);
+    connectGenerationRef.current += 1;
     loginRequestRef.current = undefined;
     loginProviderRef.current = undefined;
     loginActionRef.current = false;
@@ -756,9 +780,11 @@ function SettingsModels({ active, setupRequired, models, connections: connection
 
   const buildProviderConfiguration = (
     provider: ProviderCatalogItem,
-    options: { apiKey?: string; baseUrl?: string; modelId?: string; requireApiKey?: boolean; makeDefault?: boolean } = {}
+    options: { apiKey?: string; baseUrl?: string; modelId?: string; model?: CatalogModel; requireApiKey?: boolean; makeDefault?: boolean } = {}
   ): DesktopModelConfigurationInput | undefined => {
-    const isCustom = provider.value === "openai-compatible";
+    // 只有没有固定 baseUrl 的内置卡片需要用户手填地址和模型 ID；
+    // 其余内置服务商都有固定 baseUrl，模型列表从服务商目录勾选，不再要求手填。
+    const isCustom = isManualEndpoint(provider);
     const modelId = (options.modelId ?? (isCustom ? connectModelId : provider.models[0]?.id ?? connectModelId)).trim();
     if (!modelId) return undefined;
     const apiKey = (options.apiKey ?? connectApiKey).trim();
@@ -766,7 +792,9 @@ function SettingsModels({ active, setupRequired, models, connections: connection
     const baseUrl = (options.baseUrl ?? (connectBaseUrl.trim() || provider.baseUrl)).trim();
     if (isCustom && !baseUrl) return undefined;
     const providerAlias = providerAliasFor(provider, baseUrl);
-    const catalogModel = provider.models.find((item) => item.id === modelId);
+    // `model` 传入时（勾选列表里来自远端目录的候选）优先用它的元数据；
+    // 手填模型 ID 走内置目录查找，找不到就只带 ID 本身。
+    const catalogModel = options.model ?? provider.models.find((item) => item.id === modelId);
     return {
       alias: modelAliasFor(providerAlias, modelId),
       displayName: catalogModel?.displayName ?? modelId,
@@ -797,23 +825,125 @@ function SettingsModels({ active, setupRequired, models, connections: connection
     };
   };
 
+  /** 新增连接时用临时密钥向服务商拉取模型目录；失败时回退到内置种子模型。 */
+  const loadConnectModels = useCallback(async (provider: ProviderCatalogItem, apiKey: string, manual: boolean): Promise<void> => {
+    const generation = connectGenerationRef.current;
+    setConnectFetching(true);
+    try {
+      const baseUrl = provider.baseUrl.trim();
+      const providerAlias = providerAliasFor(provider, baseUrl);
+      const seed = provider.models[0];
+      const result = await onFetchCatalogCandidate({
+        alias: modelAliasFor(providerAlias, seed?.id ?? "probe"),
+        displayName: seed?.displayName ?? seed?.id ?? "probe",
+        providerAlias,
+        providerType: provider.value,
+        protocol: provider.protocol,
+        model: seed?.id ?? "probe",
+        baseUrl: baseUrl || undefined,
+        apiKey: apiKey || undefined,
+        requiresApiKey: provider.requiresApiKey,
+        supportsTools: true,
+        supportsThinking: seed?.supportsThinking,
+        apiBackend: seed?.apiBackend
+      });
+      if (generation !== connectGenerationRef.current) return;
+      setConnectFetchSource(result.source);
+      if (result.source === "fetched") {
+        const loaded = result.models.map(catalogModelFromEntry);
+        setConnectModels(loaded);
+        // 默认勾选内置种子模型（目录里没有时退到第一个），其余由用户勾选。
+        const seedId = seed?.id;
+        setConnectSelected([loaded.find((model) => model.id === seedId)?.id ?? loaded[0]?.id].filter((id): id is string => id !== undefined));
+        if (manual) onNotify(`已获取 ${String(loaded.length)} 个模型`);
+      } else {
+        setConnectModels(provider.models);
+        setConnectSelected(seed ? [seed.id] : []);
+        if (manual) onNotify("无法从服务商获取模型列表，已显示内置模型。");
+      }
+    } catch (error) {
+      if (generation !== connectGenerationRef.current) return;
+      setConnectFetchSource("fallback");
+      setConnectModels(provider.models);
+      setConnectSelected(provider.models[0] ? [provider.models[0].id] : []);
+      if (manual) onNotify(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (generation === connectGenerationRef.current) setConnectFetching(false);
+    }
+  }, [onFetchCatalogCandidate, onNotify]);
+
+  // 填完密钥（或服务商无需密钥）后自动加载模型列表；密钥变化时防抖重拉。
+  useEffect(() => {
+    if (view.kind !== "connect") return;
+    const provider = view.provider;
+    if (provider.connectionMode === "login" || isManualEndpoint(provider)) return;
+    const apiKey = connectApiKey.trim();
+    if (provider.requiresApiKey && !apiKey) {
+      setConnectModels([]);
+      setConnectSelected([]);
+      setConnectFetchSource(undefined);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void loadConnectModels(provider, apiKey, false);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [view, connectApiKey, loadConnectModels]);
+
+  const toggleConnectModel = (modelId: string): void => {
+    setConnectSelected((current) => (
+      current.includes(modelId) ? current.filter((id) => id !== modelId) : [...current, modelId]
+    ));
+  };
+
+  const toggleAllConnectModels = (): void => {
+    setConnectSelected((current) => (
+      connectModels.length > 0 && current.length === connectModels.length
+        ? []
+        : connectModels.map((model) => model.id)
+    ));
+  };
+
   const connectProvider = async (provider: ProviderCatalogItem): Promise<void> => {
-    const configuration = buildProviderConfiguration(provider, {
-      apiKey: connectApiKey,
-      baseUrl: connectBaseUrl.trim() || provider.baseUrl,
-      modelId: provider.value === "openai-compatible" ? connectModelId : provider.models[0]?.id,
-      requireApiKey: provider.requiresApiKey,
-      // Connecting a brand-new provider is the one place the active default
-      // should move — the user just picked this model.
-      makeDefault: true
-    });
-    if (!configuration) return;
-    await saveConfiguration(configuration);
+    if (isManualEndpoint(provider)) {
+      const configuration = buildProviderConfiguration(provider, {
+        apiKey: connectApiKey,
+        baseUrl: connectBaseUrl.trim() || provider.baseUrl,
+        modelId: connectModelId,
+        requireApiKey: provider.requiresApiKey,
+        // Connecting a brand-new provider is the one place the active default
+        // should move — the user just picked this model.
+        makeDefault: true
+      });
+      if (!configuration) return;
+      await saveConfiguration(configuration);
+      setConnectApiKey("");
+      setView({ kind: "list" });
+      // Pull the provider's real model list right away, so the connection detail
+      // opens on the live catalog instead of the single built-in seed model.
+      void refreshCatalogQuietly(configuration.providerAlias);
+      return;
+    }
+    // 内置服务商：按勾选的模型逐个写入草稿，第一个成为默认模型。
+    const candidates = connectModels.filter((model) => connectSelected.includes(model.id));
+    if (!candidates.length) return;
+    let makeDefault = true;
+    for (const model of candidates) {
+      const configuration = buildProviderConfiguration(provider, {
+        apiKey: connectApiKey,
+        baseUrl: provider.baseUrl,
+        modelId: model.id,
+        model,
+        requireApiKey: provider.requiresApiKey,
+        makeDefault
+      });
+      if (!configuration) continue;
+      await saveConfiguration(configuration);
+      makeDefault = false;
+    }
     setConnectApiKey("");
     setView({ kind: "list" });
-    // Pull the provider's real model list right away, so the connection detail
-    // opens on the live catalog instead of the single built-in seed model.
-    void refreshCatalogQuietly(configuration.providerAlias);
+    void refreshCatalogQuietly(providerAliasFor(provider, provider.baseUrl));
   };
 
   /** Post-connect catalog warm-up: best effort, never toasts. */
@@ -1199,18 +1329,36 @@ function SettingsModels({ active, setupRequired, models, connections: connection
               saving={saving}
               testing={testing}
               testResult={testResult}
-              isCustom={view.provider.value === "openai-compatible"}
+              models={connectModels}
+              selected={connectSelected}
+              fetching={connectFetching}
+              fetchSource={connectFetchSource}
+              isCustom={isManualEndpoint(view.provider)}
               onApiKey={(value) => { setConnectApiKey(value); setTestResult(undefined); }}
               onBaseUrl={(value) => { setConnectBaseUrl(value); setTestResult(undefined); }}
               onModelId={(value) => { setConnectModelId(value); setTestResult(undefined); }}
               onToggleKey={() => setShowKey((value) => !value)}
+              onLoadModels={() => void loadConnectModels(view.provider, connectApiKey, true)}
+              onSelectAll={toggleAllConnectModels}
+              onToggleModel={toggleConnectModel}
               onCancel={() => setView({ kind: "list" })}
-              onTest={() => void testProvider(buildProviderConfiguration(view.provider, {
-                apiKey: connectApiKey,
-                baseUrl: connectBaseUrl.trim() || view.provider.baseUrl,
-                modelId: view.provider.value === "openai-compatible" ? connectModelId : view.provider.models[0]?.id,
-                requireApiKey: view.provider.requiresApiKey
-              }))}
+              onTest={() => {
+                const configuration = isManualEndpoint(view.provider)
+                  ? buildProviderConfiguration(view.provider, {
+                      apiKey: connectApiKey,
+                      baseUrl: connectBaseUrl.trim() || view.provider.baseUrl,
+                      modelId: connectModelId,
+                      requireApiKey: view.provider.requiresApiKey
+                    })
+                  : buildProviderConfiguration(view.provider, {
+                      apiKey: connectApiKey,
+                      baseUrl: view.provider.baseUrl,
+                      modelId: connectSelected[0] ?? view.provider.models[0]?.id,
+                      model: connectModels.find((model) => model.id === (connectSelected[0] ?? view.provider.models[0]?.id)),
+                      requireApiKey: view.provider.requiresApiKey
+                    });
+                void testProvider(configuration);
+              }}
               onSubmit={() => void connectProvider(view.provider)}
               onOpenExternal={onOpenExternal}
             />
@@ -1526,6 +1674,7 @@ function ConnectionDetailDialog({
                 const configured = group.models.find((model) => model.model === catalogModel.id);
                 const isDefault = configured?.alias === defaultAlias;
                 const enabled = Boolean(configured);
+                const hint = modelCapabilityHint(catalogModel);
                 return (
                   <div className={`enabled-model-row${enabled ? " is-enabled" : ""}${isDefault ? " is-default" : ""}`} key={catalogModel.id}>
                     <button
@@ -1547,6 +1696,7 @@ function ConnectionDetailDialog({
                       <span className={`check-dot${enabled ? " is-on" : ""}`}><Icon name="check" size={11} /></span>
                       <span className="enabled-model-name">{catalogModel.displayName}</span>
                       {catalogModel.id !== catalogModel.displayName ? <span className="enabled-model-id">{catalogModel.id}</span> : null}
+                      {hint ? <span className="model-capability-hint">{hint}</span> : null}
                     </button>
                     {enabled && configured ? (
                       isDefault
@@ -1596,11 +1746,18 @@ function ConnectProviderDialog({
   saving,
   testing,
   testResult,
+  models,
+  selected,
+  fetching,
+  fetchSource,
   isCustom,
   onApiKey,
   onBaseUrl,
   onModelId,
   onToggleKey,
+  onLoadModels,
+  onSelectAll,
+  onToggleModel,
   onCancel,
   onTest,
   onSubmit,
@@ -1614,18 +1771,38 @@ function ConnectProviderDialog({
   saving: boolean;
   testing: boolean;
   testResult?: DesktopModelConnectionTestResult;
+  models: CatalogModel[];
+  selected: string[];
+  fetching: boolean;
+  fetchSource?: DesktopModelCatalogResult["source"];
   isCustom: boolean;
   onApiKey(value: string): void;
   onBaseUrl(value: string): void;
   onModelId(value: string): void;
   onToggleKey(): void;
+  onLoadModels(): void;
+  onSelectAll(): void;
+  onToggleModel(modelId: string): void;
   onCancel(): void;
   onTest(): void;
   onSubmit(): void;
   onOpenExternal(url: string): Promise<void>;
 }): React.JSX.Element {
-  const canSubmit = !(provider.requiresApiKey && !apiKey.trim()) && !(isCustom && (!modelId.trim() || !baseUrl.trim()));
+  const [modelQuery, setModelQuery] = useState("");
+  const keyMissing = provider.requiresApiKey && !apiKey.trim();
+  const canSubmit = !saving && !testing && !keyMissing && (isCustom ? Boolean(modelId.trim() && baseUrl.trim()) : selected.length > 0 && !fetching);
+  const canTest = !saving && !testing && !keyMissing && (isCustom ? Boolean(modelId.trim() && baseUrl.trim()) : selected.length > 0 || provider.models.length > 0);
   const apiKeyUrl = provider.apiKeyUrl;
+  const filteredModels = models.filter((model) => !modelQuery.trim()
+    || `${model.displayName} ${model.id}`.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()));
+  const allSelected = models.length > 0 && selected.length === models.length;
+  const modelHint = fetching
+    ? "正在从服务商加载模型…"
+    : models.length > 0
+      ? `已选 ${String(selected.length)} / ${String(models.length)} · ${fetchSource === "fetched" ? "已从服务商获取" : "内置列表，可点击“加载模型”刷新"}`
+      : keyMissing
+        ? "填写密钥后自动加载支持列表"
+        : "点击“加载模型”从服务商获取支持列表";
   return (
     <div className="connect-dialog" role="dialog" aria-label={`连接 ${provider.label}`}>
         <header>
@@ -1666,14 +1843,58 @@ function ConnectProviderDialog({
               <input onChange={(event) => onBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" value={baseUrl} />
             </div>
           </>
-        ) : null}
+        ) : (
+          <div className="connection-field">
+            <div className="connection-field-label">
+              <span>启用模型</span>
+              <small>{modelHint}</small>
+            </div>
+            <div className="connect-model-toolbar">
+              <label className="model-search-input">
+                <Icon name="search" size={13} />
+                <input onChange={(event) => setModelQuery(event.target.value)} placeholder="搜索模型" value={modelQuery} />
+              </label>
+              <button className="ghost-button connect-select-all-button" disabled={fetching || !models.length || saving || testing} onClick={onSelectAll} type="button">
+                {allSelected ? "取消全选" : "全选"}
+              </button>
+              <button className="ghost-button connect-load-button" disabled={fetching || keyMissing} onClick={onLoadModels} type="button">
+                <Icon name="refresh" size={13} />
+                {fetching ? "加载中…" : "加载模型"}
+              </button>
+            </div>
+            <div className="enabled-model-list" role="group" aria-label="选择要启用的模型">
+              {filteredModels.map((model) => {
+                const checked = selected.includes(model.id);
+                const hint = modelCapabilityHint(model);
+                return (
+                  <div className={`enabled-model-row${checked ? " is-enabled" : ""}`} key={model.id}>
+                    <button
+                      aria-checked={checked}
+                      className="enabled-model-toggle"
+                      disabled={saving || testing}
+                      onClick={() => onToggleModel(model.id)}
+                      role="checkbox"
+                      type="button"
+                    >
+                      <span className={`check-dot${checked ? " is-on" : ""}`}><Icon name="check" size={11} /></span>
+                      <span className="enabled-model-name">{model.displayName}</span>
+                      {model.id !== model.displayName ? <span className="enabled-model-id">{model.id}</span> : null}
+                      {hint ? <span className="model-capability-hint">{hint}</span> : null}
+                    </button>
+                  </div>
+                );
+              })}
+              {!filteredModels.length ? <div className="model-list-empty">{models.length ? "没有匹配的模型" : fetching ? "正在加载模型…" : "尚未加载模型列表"}</div> : null}
+            </div>
+          </div>
+        )}
         {testResult ? <ConnectionTestResult result={testResult} /> : null}
         <div className="connect-dialog-actions">
           <button onClick={onCancel} type="button">取消</button>
-          <button disabled={saving || testing || !canSubmit} onClick={onTest} type="button">{testing ? "测试中…" : "测试连接"}</button>
+          <button disabled={!canTest} onClick={onTest} type="button">{testing ? "测试中…" : "测试连接"}</button>
           <button
             className="is-primary"
-            disabled={saving || testing || !canSubmit}
+            disabled={!canSubmit}
             onClick={onSubmit}
             type="button"
           >
@@ -1682,6 +1903,26 @@ function ConnectProviderDialog({
         </div>
     </div>
   );
+}
+
+/** 勾选列表里的一行能力提示：思考深度与上下文窗口。 */
+function modelCapabilityHint(model: CatalogModel): string | undefined {
+  const parts: string[] = [];
+  const thinkingLevels = Object.entries(model.thinkingLevelMap ?? {})
+    .filter(([level, native]) => level !== "off" && native !== null)
+    .map(([level]) => level);
+  if (thinkingLevels.length) parts.push(thinkingLevels.join("/"));
+  else if (model.supportsThinking) parts.push("思考");
+  if (model.contextWindow) parts.push(formatContextWindow(model.contextWindow));
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+function formatContextWindow(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000;
+    return `${millions >= 10 ? Math.round(millions) : millions.toFixed(1).replace(/\.0$/, "")}M`;
+  }
+  return `${Math.round(tokens / 1_000)}K`;
 }
 
 function ConnectionTestResult({ result }: { result: DesktopModelConnectionTestResult }): React.JSX.Element {

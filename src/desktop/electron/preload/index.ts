@@ -47,6 +47,7 @@ const api: DesktopApi = {
   testModelConfiguration: async (projectId, configuration) => await ipcRenderer.invoke(desktopIpc.testModelConfiguration, projectId, configuration),
   removeModelConfiguration: async (projectId, alias) => await ipcRenderer.invoke(desktopIpc.removeModelConfiguration, projectId, alias),
   fetchModelCatalog: async (projectId, providerAlias) => await ipcRenderer.invoke(desktopIpc.fetchModelCatalog, projectId, providerAlias),
+  fetchModelCatalogCandidate: async (projectId, configuration) => await ipcRenderer.invoke(desktopIpc.fetchModelCatalogCandidate, projectId, configuration),
   startModelLogin: async (projectId, provider) => await ipcRenderer.invoke(desktopIpc.startModelLogin, projectId, provider),
   completeModelLogin: async (projectId, provider, authRequestId, pastedAuthorization) => await ipcRenderer.invoke(desktopIpc.completeModelLogin, projectId, provider, authRequestId, pastedAuthorization),
   cancelModelLogin: async (projectId, provider, authRequestId) => await ipcRenderer.invoke(desktopIpc.cancelModelLogin, projectId, provider, authRequestId),

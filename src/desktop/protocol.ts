@@ -60,6 +60,7 @@ export const desktopIpc = {
   testModelConfiguration: "desktop:model:test-configuration",
   removeModelConfiguration: "desktop:model:remove-configuration",
   fetchModelCatalog: "desktop:model:fetch-catalog",
+  fetchModelCatalogCandidate: "desktop:model:fetch-catalog-candidate",
   startModelLogin: "desktop:model:login:start",
   completeModelLogin: "desktop:model:login:complete",
   cancelModelLogin: "desktop:model:login:cancel",
@@ -235,7 +236,7 @@ export interface DesktopWorkspaceSnapshot {
   runtime?: InteractiveRuntimeSnapshot;
   runtimeError?: string;
   requiresModelConfiguration: boolean;
-  /** 普通 Composer 选择器使用的统一目录；设置页的 `models` 仍表示已启用模型。 */
+  /** 普通 Composer 选择器使用的已启用且当前可用模型；设置页的 `models` 仍表示已保存模型。 */
   pickerModels: ModelChoice[];
   models: ModelChoice[];
   connections: DesktopModelConnection[];
@@ -905,6 +906,11 @@ export interface DesktopApi {
   testModelConfiguration(projectId: string, configuration: DesktopModelConfigurationInput): Promise<DesktopModelConnectionTestResult>;
   removeModelConfiguration(projectId: string, alias: string): Promise<DesktopWorkspaceSnapshot>;
   fetchModelCatalog(projectId: string, providerAlias: string): Promise<DesktopModelCatalogResult>;
+  /**
+   * 用尚未保存的候选配置（临时密钥 + 目录地址）直接向服务商拉取模型目录，
+   * 供“新增连接”流程在提交前加载可勾选的模型列表。
+   */
+  fetchModelCatalogCandidate(projectId: string, configuration: DesktopModelConfigurationInput): Promise<DesktopModelCatalogResult>;
   startModelLogin(projectId: string, provider: DesktopModelLoginProvider): Promise<DesktopModelLoginStartResult>;
   completeModelLogin(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string, pastedAuthorization?: string): Promise<DesktopWorkspaceSnapshot>;
   cancelModelLogin(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string): Promise<void>;

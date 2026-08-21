@@ -16,6 +16,7 @@ import type { CredentialStore } from "../src/config/credentials.js";
 import { BINY_AGENT_DIR_ENV } from "../src/config/paths.js";
 import { createFileConfigStore } from "../src/config/store.js";
 import { defaultConfig } from "../src/config/schema.js";
+import type { ModelCatalogEntry } from "../src/ai/types.js";
 import { openAiCodexCatalogModels } from "../src/ai/codexModels.js";
 import { DesktopAgentManager } from "../src/desktop/electron/main/DesktopAgentManager.js";
 import { DesktopConfigStore } from "../src/desktop/electron/main/DesktopConfigStore.js";
@@ -33,7 +34,8 @@ import {
   applyUpdatesToSidebarSessions,
   applyUpdatesToWorkspace,
   replaceProjectSessionRoots,
-  replaceProjectSessions
+  replaceProjectSessions,
+  updateRuntimeInfo
 } from "../src/desktop/renderer/src/app/desktopState.js";
 import {
   canNavigateBack,
@@ -48,7 +50,8 @@ import { formatTurnCost, formatUsageCost, summarizeTimelineUsage } from "../src/
 import { reasoningDetailText } from "../src/desktop/renderer/src/reasoningPresentation.js";
 import { projectWebSearchView } from "../src/desktop/renderer/src/webSearchPresentation.js";
 import type { TimelineTool } from "../src/desktop/renderer/src/sessionTimeline.js";
-import { catalogForConnection, customCatalogEntry } from "../src/desktop/renderer/src/providerCatalog.js";
+import { catalogForConnection, customCatalogEntry, providerCatalog } from "../src/desktop/renderer/src/providerCatalog.js";
+import { thinkingLabel as composerThinkingLabel } from "../src/desktop/renderer/src/components/composer/composerLabels.js";
 import { highlightFencedCode, highlightWorkspaceFile } from "../src/desktop/renderer/src/syntaxHighlight.js";
 import { splitAttachmentReferences, withAttachmentReferences } from "../src/desktop/attachmentReferences.js";
 import { tokenizeCommand } from "../src/desktop/renderer/src/commandHighlight.js";
@@ -113,6 +116,7 @@ await testDesktopNavigationReadsDoNotPersistSelection();
 await testDesktopSidebarListsEveryProjectSession();
 await testDesktopProjectReorder();
 testProviderCatalogResolution();
+testComposerThinkingLabels();
 testModelChoicesDeduplicateEquivalentAliases();
 testHistoricalAbortProjection();
 testHistoricalUsageProjection();
@@ -246,6 +250,18 @@ function testDesktopRendererStateProjection(): void {
   assert.equal(projected.sessions[0]?.status, "blocked");
   assert.equal(projected.sessions[0]?.resumable, true);
   assert.equal(projected.runtime?.revision, 2);
+  const switched = updateRuntimeInfo(projected, {
+    modelAlias: "deepseek-v4-flash",
+    provider: "deepseek",
+    modelLabel: "deepseek-v4-flash",
+    reasoningLabel: "High",
+    thinking: "high",
+    contextWindow: 1_000_000,
+    maxInputTokens: 742_976
+  });
+  assert.equal(switched.runtime?.info.modelAlias, "deepseek-v4-flash");
+  assert.equal(switched.runtime?.info.contextWindow, 1_000_000);
+  assert.equal(switched.runtime?.info.maxInputTokens, 742_976);
 }
 
 function testDesktopRendererSidebarProjection(): void {
@@ -1506,6 +1522,23 @@ async function testDesktopModelConfiguration(): Promise<void> {
     assert.deepEqual(cleanedConfig.providers.deepseek?.headers, { "X-Provider-Route": "stable" });
     assert.equal(cleanedConfig.providers.deepseek?.modelsEndpoint, "https://api.deepseek.com/models");
     assert.deepEqual(cleanedConfig.models["deepseek-v4-flash"]?.headers, { "X-Model-Route": "flash" });
+    await agents.saveModelConfiguration(project.id, {
+      alias: "plan-flash",
+      displayName: "Plan Flash",
+      providerAlias: "plan",
+      providerType: "openai-compatible",
+      model: "deepseek-v4-flash",
+      baseUrl: "https://plan.example/v1",
+      apiKey: "plan-test-key",
+      supportsTools: true,
+      supportsThinking: true
+    });
+    const planConfig = await configStore.load();
+    assert.deepEqual(planConfig.models["plan-flash"]?.thinkingLevelMap, {
+      off: "none",
+      high: "high",
+      max: "max"
+    });
     await projects.listSessions(project, undefined, new Map());
     const attachment = await projects.saveAttachment(project, "notes.txt", "text/plain", new TextEncoder().encode("desktop only"));
     assert.match(attachment.path, /^@attachments\//);
@@ -2081,6 +2114,22 @@ async function testDesktopConnectionMetadata(): Promise<void> {
     assert.deepEqual(catalog.models.map((model) => model.id), ["cached-deepseek-model"]);
     assert.equal(catalog.providerAlias, "deepseek");
     await assert.rejects(agents.fetchModelCatalog(project.id, "missing-provider"), /missing-provider/);
+    // 候选配置（尚未保存的连接）走同一条拉取路径：端点不可达时返回 fallback 与空列表，
+    // 渲染层自行回退到内置目录，不向界面抛错。
+    const candidate = await agents.fetchModelCatalogCandidate(project.id, {
+      alias: "deepseek-candidate-model",
+      displayName: "Candidate",
+      providerAlias: "deepseek",
+      providerType: "deepseek",
+      model: "deepseek-v4-flash",
+      baseUrl: "http://127.0.0.1:1/v1",
+      apiKey: "connection-metadata-secret",
+      requiresApiKey: true,
+      supportsTools: true
+    });
+    assert.equal(candidate.source, "fallback");
+    assert.deepEqual(candidate.models, []);
+    assert.equal(candidate.providerAlias, "deepseek");
     await agents.closeAll();
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
@@ -2421,6 +2470,18 @@ function testProviderCatalogResolution(): void {
     catalogForConnection({ provider: "api-z-ai", providerType: "openai-compatible" }, "https://api.z.ai/api/paas/v4")?.id,
     "zai"
   );
+  const deepseekSeed = providerCatalog.find((provider) => provider.id === "deepseek")?.models[0];
+  assert.equal(deepseekSeed?.contextWindow, 1_000_000);
+  assert.deepEqual(deepseekSeed?.thinkingLevelMap, { off: "none", high: "high", max: "max" });
+}
+
+function testComposerThinkingLabels(): void {
+  assert.equal(composerThinkingLabel("off"), "Off");
+  assert.equal(composerThinkingLabel("low"), "Low");
+  assert.equal(composerThinkingLabel("medium"), "Medium");
+  assert.equal(composerThinkingLabel("high"), "High");
+  assert.equal(composerThinkingLabel("xhigh"), "XHigh");
+  assert.equal(composerThinkingLabel("max"), "Max");
 }
 
 function testModelChoicesDeduplicateEquivalentAliases(): void {
@@ -2454,6 +2515,34 @@ function testModelChoicesDeduplicateEquivalentAliases(): void {
     "deepseek-v4-flash",
     "deepseek-v4-pro"
   ]);
+
+  const multiProviderConfig = structuredClone(config);
+  multiProviderConfig.providers["opencode-ai"] = {
+    type: "openai-compatible",
+    baseUrl: "https://opencode.ai/zen/go/v1",
+    apiKey: "test-key"
+  };
+  multiProviderConfig.models["opencode-ai-minimax-m3"] = {
+    provider: "opencode-ai",
+    model: "minimax-m3"
+  };
+  const catalogModel: ModelCatalogEntry = {
+    id: "minimax-m2.7",
+    displayName: "MiniMax-M2.7",
+    provider: "opencode-ai",
+    contextWindow: 1_000_000,
+    maxOutputTokens: undefined,
+    capabilities: { tools: true },
+    reasoningEfforts: [],
+    reasoningEffortsSource: "declared"
+  };
+  const multiProviderChoices = listPickerModelChoices(multiProviderConfig, [["opencode-ai", [catalogModel]]]);
+  assert.deepEqual(multiProviderChoices.map((model) => model.alias), [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "opencode-ai-minimax-m3"
+  ]);
+  assert.equal(multiProviderChoices.some((model) => model.alias === "opencode-ai/minimax-m2.7"), false);
 }
 
 function testHistoricalAbortProjection(): void {

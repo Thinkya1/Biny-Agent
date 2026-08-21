@@ -237,6 +237,7 @@ export function App(): React.JSX.Element {
     deleteMemoryEmbeddingModel,
     downloadMemoryEmbeddingModel,
     fetchModelCatalog,
+    fetchModelCatalogCandidate,
     loadCookieJarStatus,
     loadMemoryEmbeddingStatus,
     loadMemoryOverview,
@@ -250,6 +251,7 @@ export function App(): React.JSX.Element {
   } = useDesktopSettingsActions({
     mergeProjectSnapshot,
     projectIdRef: projectRef,
+    setContextBudget,
     setWorkspace
   });
 
@@ -867,7 +869,6 @@ export function App(): React.JSX.Element {
       modelSetupRequired={Boolean(workspace?.requiresModelConfiguration)}
       models={workspace?.pickerModels ?? workspace?.models ?? []}
       onPermissionMode={setPermissionMode}
-      onConfigureModels={() => openSettings("模型")}
       onSaveAttachment={saveAttachment}
       onSend={sendPrompt}
       onSlashCommand={runSlashCommand}
@@ -913,6 +914,7 @@ export function App(): React.JSX.Element {
             onUpdateMemoryEntry={updateMemoryEntry}
             onExportCookies={async () => await window.biny.exportCookies()}
             onFetchModelCatalog={fetchModelCatalog}
+            onFetchModelCatalogCandidate={fetchModelCatalogCandidate}
             onFontPreference={changeFontPreference}
             onSettingsCommitted={settingsCommitted}
             onResolveCloseRequest={resolveSettingsCloseRequest}

@@ -916,7 +916,9 @@ button:disabled { opacity: 0.42; }
   z-index: 220;
   inset: 0;
   display: grid;
-  place-items: center;
+  /* 顶部对齐而不是垂直居中：弹层内容展开（如连接详情的“高级设置”）时对话框向下增长，
+     头部和关闭按钮的屏幕位置保持不动，避免用户按记忆点击关闭按钮时落空。 */
+  place-items: start center;
   padding: 24px;
   background: var(--color-overlay);
   backdrop-filter: blur(8px);
@@ -934,7 +936,19 @@ button:disabled { opacity: 0.42; }
 }
 .connection-detail-dialog { width: min(522px, 100%); }
 .connection-detail-dialog.is-advanced { width: min(522px, 100%); }
-.connect-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 16px; }
+/* 头部吸顶：对话框内部滚动时关闭按钮始终可见可点。padding-bottom 取代原来的 margin，
+   吸顶后内容滚到头部下方也不会从间距缝隙透出来。 */
+.connect-dialog > header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 16px;
+  background: var(--surface-raised);
+}
 .connect-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .connect-dialog-actions button {
   min-height: 32px;
@@ -961,6 +975,11 @@ button:disabled { opacity: 0.42; }
 .model-search-input input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--text); background: transparent; font-size: calc(12px * var(--font-scale)); }
 .model-search-input input::placeholder { color: var(--text-tertiary); }
 .model-list-empty { padding: 22px 10px; color: var(--text-tertiary); text-align: center; font-size: calc(11px * var(--font-scale)); }
+.connect-model-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.connect-model-toolbar .model-search-input { min-width: 0; flex: 1; }
+.connect-select-all-button,
+.connect-load-button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.model-capability-hint { flex: 0 0 auto; color: var(--text-tertiary); font-size: calc(10px * var(--font-scale)); font-variant-numeric: tabular-nums; }
 .connection-detail-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 3px; }
 .connection-detail-footer > div { display: flex; align-items: center; gap: 10px; }
 .text-button, .danger-text-button { min-height: 30px; padding: 0 4px; color: var(--text-secondary); font-size: calc(11.5px * var(--font-scale)); }

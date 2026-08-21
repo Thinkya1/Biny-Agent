@@ -482,6 +482,10 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.fetchModelCatalog(idSchema.parse(projectId), idSchema.parse(providerAlias));
   });
 
+  handle(desktopIpc.fetchModelCatalogCandidate, async (_event, projectId: unknown, configuration: unknown) => {
+    return await context.agents.fetchModelCatalogCandidate(idSchema.parse(projectId), modelConfigurationSchema.parse(configuration));
+  });
+
   handle(desktopIpc.startModelLogin, async (_event, projectId: unknown, provider: unknown) => {
     return await context.agents.startModelLogin(idSchema.parse(projectId), modelLoginProviderSchema.parse(provider));
   });

@@ -1,6 +1,11 @@
 /** Composer 菜单共享的标签，不包含 React 状态。 */
 import type { PermissionMode } from "../../../../../permission/PermissionManager.js";
-export { thinkingLabel } from "../../../../../llm/modelThinking.js";
+import type { ThinkingSelection } from "../../../../../llm/modelThinking.js";
+
+export function thinkingLabel(value: ThinkingSelection): string {
+  if (value === "xhigh") return "XHigh";
+  return value[0]?.toUpperCase() + value.slice(1);
+}
 
 export const permissionOptions: Array<{ mode: PermissionMode; label: string; description: string; risk?: string }> = [
   { mode: "ask", label: "每次询问", description: "写入、执行和其他敏感操作会请求确认" },

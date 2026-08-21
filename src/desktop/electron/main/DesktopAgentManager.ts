@@ -23,6 +23,7 @@ import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { thinkingLevelMapForModel } from "../../../ai/capabilities.js";
 import { providerDefinition } from "../../../ai/provider.js";
 import { builtinProviderModels } from "../../../ai/builtinModels.js";
 import { loadProjectSettings } from "../../../config/projectSettings.js";
@@ -1326,6 +1327,25 @@ export class DesktopAgentManager {
     }
   }
 
+  /**
+   * 用尚未保存的候选配置拉取模型目录：新增连接流程中用户填完密钥后，先凭临时密钥向
+   * 服务商要模型列表再勾选启用，避免用户手填模型 ID。失败时不抛错，渲染层回退到内置目录。
+   */
+  async fetchModelCatalogCandidate(projectId: string, input: DesktopModelConfigurationInput): Promise<DesktopModelCatalogResult> {
+    this.projects.requireProject(projectId);
+    const current = await this.loadProjectConfig(projectId);
+    const candidate = this.buildConfigWithModel(current, input);
+    const fetchedAt = new Date().toISOString();
+    const catalogs = await restoreProviderCatalogs(Object.keys(candidate.providers), this.modelsStore);
+    const runtime = new ModelRuntime(candidate, catalogs, undefined, this.modelsStore, this.fetcher);
+    try {
+      const models = await runtime.refreshModels(input.providerAlias);
+      return { providerAlias: input.providerAlias, source: "fetched", fetchedAt, models };
+    } catch {
+      return { providerAlias: input.providerAlias, source: "fallback", fetchedAt, models: [] };
+    }
+  }
+
   async testModelConfiguration(projectId: string, input: DesktopModelConfigurationInput): Promise<DesktopModelConnectionTestResult> {
     this.projects.requireProject(projectId);
     const current = await this.loadProjectConfig(projectId);
@@ -1465,6 +1485,11 @@ export class DesktopAgentManager {
     // the de-dup above can still strip the previous default out from under us.
     const keepsCurrentDefault = input.alias === current.defaultModel || Boolean(models[current.defaultModel]);
     const defaultModel = input.makeDefault || !keepsCurrentDefault ? input.alias : current.defaultModel;
+    const thinkingLevelMap = input.supportsThinking
+      ? input.thinkingLevelMap && Object.entries(input.thinkingLevelMap).some(([level, native]) => level !== "off" && native !== null)
+        ? input.thinkingLevelMap
+        : thinkingLevelMapForModel(input.model)
+      : input.thinkingLevelMap;
     const parsed = configSchema.parse({
       ...current,
       defaultModel,
@@ -1494,7 +1519,7 @@ export class DesktopAgentManager {
           apiBackend: input.apiBackend,
           baseUrl: sameModel ? existingModel.baseUrl : undefined,
           headers: sameModel ? existingModel.headers : undefined,
-          thinkingLevelMap: input.thinkingLevelMap,
+          thinkingLevelMap,
           compatibility: input.compatibility ?? (sameModel ? existingModel.compatibility : undefined),
           pricing: sameModel ? existingModel.pricing : undefined
         }

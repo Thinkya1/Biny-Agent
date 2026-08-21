@@ -10,7 +10,7 @@ import type { ChatComposerInputHandle } from "@astryxdesign/core/Chat";
 import { memo, useEffect, useRef, useState } from "react";
 import type { AgentSessionInfo, InteractiveAgentRunMode } from "../../../../agent/AgentSession.js";
 import type { ModelChoice } from "../../../../llm/ModelManager.js";
-import { modelThinkingSelections, type ThinkingSelection } from "../../../../llm/modelThinking.js";
+import { modelThinkingSelections, thinkingSelectionForModel, type ThinkingSelection } from "../../../../llm/modelThinking.js";
 import type { PermissionMode } from "../../../../permission/PermissionManager.js";
 import type { DesktopAttachment, DesktopProject, DesktopSlashCommand } from "../../../protocol.js";
 import { DESKTOP_SLASH_COMMANDS } from "../../../protocol.js";
@@ -18,8 +18,8 @@ import { catalogForConnection } from "../providerCatalog.js";
 import { AttachmentList } from "./composer/AttachmentList.js";
 import type { PendingAttachment } from "./composer/AttachmentList.js";
 import { ComposerActionButton } from "./composer/ComposerActionButton.js";
-import { AddMenu, PermissionMenu, ThinkingMenu } from "./composer/ComposerMenus.js";
-import { ModelMenu } from "./composer/ModelMenu.js";
+import { AddMenu, PermissionMenu } from "./composer/ComposerMenus.js";
+import { ModelPickerMenu } from "./composer/ModelPickerMenu.js";
 import { thinkingLabel } from "./composer/composerLabels.js";
 import { Icon } from "./Icon.js";
 import { ProviderBrandGlyph } from "./ProviderBrandGlyph.js";
@@ -41,7 +41,6 @@ interface ComposerProps {
   onStop(): Promise<void>;
   onPermissionMode(mode: PermissionMode): Promise<void>;
   onSwitchModel(alias: string, thinking: ThinkingSelection): Promise<void>;
-  onConfigureModels(): void;
   onSaveAttachment(file: File): Promise<DesktopAttachment>;
 }
 
@@ -50,7 +49,7 @@ export interface ContextUsage {
   maxTokens: number;
 }
 
-type ComposerMenu = "permission" | "model" | "thinking" | "add" | null;
+type ComposerMenu = "permission" | "model" | "add" | null;
 
 const MAX_COMPOSER_ATTACHMENTS = 8;
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
@@ -70,7 +69,6 @@ export const Composer = memo(function Composer({
   onStop,
   onPermissionMode,
   onSwitchModel,
-  onConfigureModels,
   onSaveAttachment
 }: ComposerProps): React.JSX.Element {
   const [input, setInput] = useState("");
@@ -88,7 +86,6 @@ export const Composer = memo(function Composer({
   const addAnchorRef = useRef<HTMLDivElement>(null);
   const permissionAnchorRef = useRef<HTMLDivElement>(null);
   const modelAnchorRef = useRef<HTMLDivElement>(null);
-  const thinkingAnchorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (focusToken) inputRef.current?.focus();
@@ -246,16 +243,27 @@ export const Composer = memo(function Composer({
   const activeModel = models.find((model) => model.alias === runtimeInfo?.modelAlias);
   const selectedModel = activeModel ?? models[0];
   const currentAlias = activeModel?.alias ?? selectedModel?.alias;
-  const currentThinking = runtimeInfo?.thinking ?? selectedModel?.defaultThinking ?? "off";
+  const runtimeThinking = runtimeInfo?.thinking ?? selectedModel?.defaultThinking ?? "off";
+  const thinkingLevels: ThinkingSelection[] = selectedModel ? modelThinkingSelections(selectedModel) : [];
+  const currentThinking = selectedModel
+    ? thinkingSelectionForModel(runtimeThinking, selectedModel)
+    : undefined;
+  const thinkingAvailable = Boolean(currentThinking && thinkingLevels.length);
   const selectedModelCatalog = selectedModel
     ? catalogForConnection(
       { provider: selectedModel.provider, providerType: selectedModel.providerType },
       selectedModel.baseUrl
     )
     : undefined;
-  const thinkingLevels: ThinkingSelection[] = selectedModel ? modelThinkingSelections(selectedModel) : [];
-  const thinkingSelectable = thinkingLevels.length > 1 || thinkingLevels.some((level) => level !== "off");
   const modelName = selectedModel?.displayName ?? runtimeInfo?.modelLabel ?? "未配置模型";
+  const chooseModel = (alias: string): void => {
+    const nextModel = models.find((model) => model.alias === alias);
+    if (!nextModel) return;
+    const nextThinking = thinkingSelectionForModel(runtimeThinking, nextModel)
+      ?? (nextModel.efforts.length ? nextModel.defaultThinking : "off");
+    setMenu(null);
+    void onSwitchModel(alias, nextThinking).catch((modelError) => setError(errorMessage(modelError)));
+  };
   const usage = formatContextUsage(contextUsage);
   const inputDisabled = activeElsewhere || busy;
   const attachmentCount = attachments.length + pendingAttachments.length;
@@ -465,36 +473,6 @@ export const Composer = memo(function Composer({
         statusPosition="bottom"
         sendActions={(
           <div className="cindy-composer-footer-end">
-            {thinkingSelectable ? (
-              <div className="composer-menu-anchor" ref={thinkingAnchorRef}>
-                <ComposerActionButton
-                  className="cindy-thinking-pill"
-                  data-composer-menu="thinking"
-                  disabled={modelSwitchDisabled}
-                  disabledReason={modelSwitchDisabled ? modelSwitchDisabledReason : undefined}
-                  active={menu === "thinking"}
-                  aria-expanded={menu === "thinking"}
-                  aria-haspopup="menu"
-                  label={`Thinking level: ${thinkingLabel(currentThinking)}`}
-                  onClick={() => setMenu(menu === "thinking" ? null : "thinking")}
-                  tooltip={menu === "thinking" ? undefined : "Adjust thinking level"}
-                >
-                  <Icon name="brain" size={13} />
-                  <span>{thinkingLabel(currentThinking)}</span>
-                  <Icon name="chevron" size={11} />
-                </ComposerActionButton>
-                <ThinkingMenu
-                  anchorRef={thinkingAnchorRef}
-                  current={currentThinking}
-                  levels={thinkingLevels}
-                  open={menu === "thinking"}
-                  onChange={(thinking) => {
-                    setMenu(null);
-                    if (currentAlias) void onSwitchModel(currentAlias, thinking).catch((modelError) => setError(errorMessage(modelError)));
-                  }}
-                />
-              </div>
-            ) : null}
             <div className="composer-menu-anchor" ref={modelAnchorRef}>
               <ComposerActionButton
                 className="cindy-model-pill"
@@ -504,29 +482,29 @@ export const Composer = memo(function Composer({
                 active={menu === "model"}
                 aria-expanded={menu === "model"}
                 aria-haspopup="menu"
-                label={modelName}
+                label={thinkingAvailable && currentThinking ? `${modelName} · ${thinkingLabel(currentThinking)}` : modelName}
                 onClick={() => setMenu(menu === "model" ? null : "model")}
-                tooltip={menu === "model" ? undefined : "切换当前会话使用的模型"}
+                tooltip={menu === "model" ? undefined : "模型与推理强度"}
               >
                 {selectedModel ? <span className="model-trigger-brand"><ProviderBrandGlyph type={selectedModelCatalog?.iconTone ?? selectedModel.providerType} /></span> : null}
                 <span>{modelName}</span>
+                {thinkingAvailable && currentThinking ? <span className="model-trigger-thinking">{thinkingLabel(currentThinking)}</span> : null}
                 <Icon name="chevron" size={11} />
               </ComposerActionButton>
-              <ModelMenu
+              <ModelPickerMenu
                 anchorRef={modelAnchorRef}
                 currentAlias={currentAlias}
+                currentModelName={modelName}
+                currentThinking={currentThinking}
                 models={models}
-                open={menu === "model"}
-                onChange={(alias) => {
-                  setMenu(null);
-                  const nextModel = models.find((model) => model.alias === alias);
-                  void onSwitchModel(alias, nextModel?.defaultThinking ?? currentThinking).catch((modelError) => setError(errorMessage(modelError)));
-                }}
                 onClose={() => setMenu(null)}
-                onConfigureModels={() => {
+                onSelectModel={chooseModel}
+                onSelectThinking={(thinking) => {
                   setMenu(null);
-                  onConfigureModels();
+                  if (currentAlias) void onSwitchModel(currentAlias, thinking).catch((modelError) => setError(errorMessage(modelError)));
                 }}
+                open={menu === "model"}
+                thinkingLevels={thinkingLevels}
               />
             </div>
             {usage ? (
