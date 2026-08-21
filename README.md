@@ -1,4 +1,4 @@
-# Biny-Agent。
+# Biny
 
 > 一个想法、半句话、一段粘贴——剩下交给 Biny。
 
@@ -25,15 +25,40 @@
 
 ## 快速开始
 
-### 桌面端调试启动
+源码运行可以按以下步骤操作。
+
+> 需要 Node.js 22.12+，项目使用 `pnpm@10.6.5`。
+
+### 1. 拉取代码
 
 ```bash
-pnpm desktop:dev
+git clone https://github.com/Thinkya1/Biny.git
+cd Biny
 ```
 
-### TUI 调试启动
+### 2. 安装依赖
 
 ```bash
+corepack enable
+corepack prepare pnpm@10.6.5 --activate
+pnpm install --frozen-lockfile
+```
+
+### 3. 初始化配置
+
+```bash
+pnpm dev -- init
+```
+
+然后在桌面端 **设置 → 模型** 中配置模型；使用 CLI/TUI 时，也可以按[配置](#配置)设置 API key。
+
+### 4. 启动
+
+```bash
+# macOS 桌面端
+pnpm desktop:dev
+
+# TUI
 pnpm dev -- tui
 ```
 
