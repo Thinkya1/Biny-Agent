@@ -268,9 +268,32 @@ export const defaultSubagentAllowedTools = [
 
 const subagentToolNameSchema = z.enum(defaultSubagentAllowedTools);
 
+const skillActivationMapSchema = z.record(z.boolean()).superRefine((value, context) => {
+  if (Object.keys(value).length > 512) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Skill 开关数量不能超过 512。" });
+  }
+});
+
+const skillProjectOverridesSchema = z.record(skillActivationMapSchema).superRefine((value, context) => {
+  if (Object.keys(value).length > 64) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Skill 项目覆盖数量不能超过 64。" });
+  }
+});
+
+const skillExtractionSchema = z.object({
+  enabled: z.boolean().default(true),
+  minToolCalls: z.number().int().min(1).max(64).default(5)
+}).strict().default({
+  enabled: true,
+  minToolCalls: 5
+});
+
 const extensionsSchema = z.object({
   mcp: z.record(mcpServerSchema).default({}),
   skills: z.array(z.string().trim().min(1)).max(32).default([...DEFAULT_PROJECT_SKILL_PATHS]),
+  skillDefaults: skillActivationMapSchema.default({}),
+  skillProjectOverrides: skillProjectOverridesSchema.default({}),
+  skillExtraction: skillExtractionSchema,
   plugins: z.array(z.string().trim().min(1)).max(32).default([]),
   subagent: z.object({
     enabled: z.boolean().default(false),
@@ -299,6 +322,12 @@ const extensionsSchema = z.object({
 }).default({
   mcp: {},
   skills: [".agents/skills", ".biny/skills"],
+  skillDefaults: {},
+  skillProjectOverrides: {},
+  skillExtraction: {
+    enabled: true,
+    minToolCalls: 5
+  },
   plugins: [],
   subagent: {
     enabled: false,
@@ -763,6 +792,12 @@ export const defaultConfig: AgentConfig = {
   extensions: {
     mcp: {},
     skills: [...DEFAULT_PROJECT_SKILL_PATHS],
+    skillDefaults: {},
+    skillProjectOverrides: {},
+    skillExtraction: {
+      enabled: true,
+      minToolCalls: 5
+    },
     plugins: [],
     subagent: {
       enabled: false,

@@ -143,9 +143,27 @@ export const desktopIpc = {
   skillCatalog: "desktop:skill:catalog",
   skillSourceImport: "desktop:skill:source-import",
   skillSourceInstall: "desktop:skill:source-install",
+  skillImportExisting: "desktop:skill:import-existing",
+  skillDiscoverySnapshot: "desktop:skill:discovery",
+  skillDiscoverySearch: "desktop:skill:discovery-search",
+  skillDiscoveryInstall: "desktop:skill:discovery-install",
+  skillRepositoryAdd: "desktop:skill:repository-add",
+  skillRepositoryRemove: "desktop:skill:repository-remove",
   skillFileRead: "desktop:skill:file-read",
   skillFileWrite: "desktop:skill:file-write",
   skillOpenDirectory: "desktop:skill:open-directory",
+  skillSettings: "desktop:skill:settings",
+  skillDrafts: "desktop:skill:drafts",
+  skillDraftApprove: "desktop:skill:draft-approve",
+  skillDraftReject: "desktop:skill:draft-reject",
+  skillDraftRetry: "desktop:skill:draft-retry",
+  skillDraftEdit: "desktop:skill:draft-edit",
+  pluginRegistry: "desktop:plugin:registry",
+  pluginRegistryRefresh: "desktop:plugin:registry-refresh",
+  pluginInstall: "desktop:plugin:install",
+  pluginSetEnabled: "desktop:plugin:set-enabled",
+  pluginUninstall: "desktop:plugin:uninstall",
+  pluginOpenDirectory: "desktop:plugin:open-directory",
   mcpSnapshot: "desktop:mcp:snapshot",
   mcpCatalog: "desktop:mcp:catalog",
   mcpRefreshCatalog: "desktop:mcp:catalog-refresh",
@@ -346,7 +364,7 @@ export type DesktopSkillEngine = "biny" | "codex" | "claude" | "pi";
 export type DesktopSkillSource = "biny" | "agents";
 
 export interface DesktopSkillDiagnostic {
-  kind: "unsupported_root" | "unsupported_symlink" | "scan_failed" | "duplicate_id";
+  kind: "unsupported_root" | "unsupported_symlink" | "scan_failed" | "invalid_metadata" | "duplicate_id";
   message: string;
   path?: string;
   ref?: string;
@@ -358,6 +376,64 @@ export interface DesktopManagedSkillSource {
   name: string;
   description: string;
   installed: boolean;
+}
+
+export interface DesktopSkillImportCandidate {
+  id: string;
+  name: string;
+  description: string;
+  foundIn: DesktopSkillEngine[];
+  path: string;
+}
+
+export interface DesktopSkillImportResult {
+  id: string;
+  name: string;
+  installedPath: string;
+  alreadyInstalled: boolean;
+}
+
+export interface DesktopSkillRepository {
+  owner: string;
+  name: string;
+  branch: string;
+  enabled: boolean;
+}
+
+export interface DesktopDiscoverableSkill {
+  key: string;
+  name: string;
+  description: string;
+  directory: string;
+  readmeUrl?: string;
+  repoOwner: string;
+  repoName: string;
+  repoBranch: string;
+  installed: boolean;
+}
+
+export interface DesktopSkillsShDiscoverableSkill {
+  key: string;
+  name: string;
+  directory: string;
+  repoOwner: string;
+  repoName: string;
+  repoBranch: string;
+  installs: number;
+  readmeUrl?: string;
+  installed: boolean;
+}
+
+export interface DesktopSkillsShSearchResult {
+  skills: DesktopSkillsShDiscoverableSkill[];
+  totalCount: number;
+  query: string;
+}
+
+export interface DesktopSkillDiscoverySnapshot {
+  repositories: DesktopSkillRepository[];
+  skills: DesktopDiscoverableSkill[];
+  warnings: string[];
 }
 
 export interface DesktopSkillFile {
@@ -386,6 +462,46 @@ export interface DesktopSkillCatalogEntry {
   shadowedBy?: string;
 }
 
+export type DesktopSkillActivationSource = "default" | "global" | "project";
+
+export interface DesktopSkillActivation {
+  ref: string;
+  id: string;
+  enabled: boolean;
+  globalEnabled: boolean;
+  projectOverride?: boolean;
+  source: DesktopSkillActivationSource;
+}
+
+export interface DesktopSkillExtractionSettings {
+  enabled: boolean;
+  minToolCalls: number;
+}
+
+export interface DesktopSkillSettings {
+  projectId: string;
+  projectKey: string;
+  globalDefaults: Record<string, boolean>;
+  projectOverrides: Record<string, boolean>;
+  extraction: DesktopSkillExtractionSettings;
+  activations: DesktopSkillActivation[];
+}
+
+export type DesktopSkillDraftStatus = "pending" | "approved" | "rejected" | "failed";
+
+export interface DesktopSkillDraft {
+  id: string;
+  name: string;
+  description: string;
+  content: string;
+  status: DesktopSkillDraftStatus;
+  toolCalls: number;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+  installedPath?: string;
+}
+
 export interface DesktopPluginSummary {
   id: string;
   name: string;
@@ -393,13 +509,42 @@ export interface DesktopPluginSummary {
   scope: "project";
   projectId: string;
   projectName: string;
-  status: "configured" | "missing";
+  status: "configured" | "missing" | "disabled" | "failed";
   moduleCount: number;
+  version?: string;
+  category?: string;
+  description?: string;
+  enabled?: boolean;
+  managed?: boolean;
+  error?: string;
+}
+
+export interface DesktopPluginMarketEntry {
+  id: string;
+  name: string;
+  version: string;
+  category: string;
+  description: string;
+  details: string;
+  downloadUrl: string;
+  sizeBytes: number;
+  sha256: string;
+  archive: "tar.gz";
+  entry?: string;
+}
+
+export interface DesktopPluginRegistrySnapshot {
+  registryUrl: string;
+  fetchedAt?: string;
+  stale: boolean;
+  loadingError?: string;
+  plugins: DesktopPluginMarketEntry[];
 }
 
 export interface DesktopSkillCatalogSnapshot {
   skills: DesktopSkillCatalogEntry[];
   inventory: DesktopSkillCatalogEntry[];
+  unmanagedSkills: DesktopSkillImportCandidate[];
   plugins: DesktopPluginSummary[];
   managedSources: DesktopManagedSkillSource[];
   warnings: string[];
@@ -913,6 +1058,7 @@ export interface DesktopSettingsSnapshot {
   memory: DesktopMemorySettings;
   webSearch: DesktopWebSearchSettings;
   models: DesktopSettingsModelsSnapshot;
+  skills: DesktopSkillSettings;
   chat?: DesktopSettingsChatSnapshot;
   pendingRecovery?: DesktopSettingsPendingRecovery;
 }
@@ -945,7 +1091,14 @@ export interface DesktopSettingsSaveInput {
   memory?: DesktopMemorySettings;
   webSearch?: DesktopWebSearchSettingsInput;
   models?: DesktopSettingsModelsInput;
+  skills?: DesktopSkillSettingsInput;
   chat?: DesktopSettingsChatInput;
+}
+
+export interface DesktopSkillSettingsInput {
+  globalDefaults: Record<string, boolean>;
+  projectOverrides: Record<string, boolean>;
+  extraction: DesktopSkillExtractionSettings;
 }
 
 export type DesktopSettingsSegment = "preferences" | "config" | "chat_metadata";
@@ -1178,12 +1331,30 @@ export interface DesktopApi {
   writeTerminal(terminalId: string, data: string): void;
   resizeTerminal(terminalId: string, cols: number, rows: number): void;
   disposeTerminal(terminalId: string): Promise<void>;
-  skillCatalog(): Promise<DesktopSkillCatalogSnapshot>;
+  skillCatalog(projectId?: string): Promise<DesktopSkillCatalogSnapshot>;
+  skillSettings(projectId: string): Promise<DesktopSkillSettings>;
+  skillDrafts(projectId: string): Promise<DesktopSkillDraft[]>;
+  approveSkillDraft(projectId: string, draftId: string): Promise<DesktopSkillDraft>;
+  rejectSkillDraft(projectId: string, draftId: string): Promise<DesktopSkillDraft>;
+  retrySkillDraft(projectId: string, draftId: string): Promise<DesktopSkillDraft>;
+  editSkillDraft(projectId: string, draftId: string, content: string): Promise<DesktopSkillDraft>;
   importSkillSource(): Promise<DesktopManagedSkillSource | undefined>;
   installSkillSource(sourceId: string): Promise<void>;
+  importExistingSkills(skillIds: string[]): Promise<DesktopSkillImportResult[]>;
+  skillDiscovery(): Promise<DesktopSkillDiscoverySnapshot>;
+  searchSkills(query: string, limit?: number, offset?: number): Promise<DesktopSkillsShSearchResult>;
+  installDiscoveredSkill(skill: DesktopDiscoverableSkill): Promise<void>;
+  addSkillRepository(repository: DesktopSkillRepository): Promise<DesktopSkillRepository[]>;
+  removeSkillRepository(owner: string, name: string): Promise<DesktopSkillRepository[]>;
   readSkillFile(skillId: string, relativePath: string): Promise<DesktopSkillFilePreview>;
   writeSkillFile(skillId: string, relativePath: string, content: string): Promise<void>;
   openSkillDirectory(skillId: string): Promise<void>;
+  pluginRegistry(projectId: string): Promise<DesktopPluginRegistrySnapshot>;
+  refreshPluginRegistry(projectId: string): Promise<DesktopPluginRegistrySnapshot>;
+  installPlugin(projectId: string, pluginId: string): Promise<DesktopPluginSummary>;
+  setPluginEnabled(projectId: string, pluginId: string, enabled: boolean): Promise<DesktopPluginSummary>;
+  uninstallPlugin(projectId: string, pluginId: string): Promise<void>;
+  openPluginDirectory(projectId: string): Promise<void>;
   mcpSnapshot(projectId?: string): Promise<DesktopMcpSnapshot>;
   mcpCatalog(): Promise<DesktopMcpCatalogState>;
   mcpRefreshCatalog(): Promise<DesktopMcpCatalogState>;

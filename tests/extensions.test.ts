@@ -433,10 +433,13 @@ async function testProgressiveSkills(workspaceRoot: string): Promise<void> {
     // 与项目技能同名的全局技能应被项目级覆盖；另一个全局技能正常加载。
     const globalOverride = path.join(globalRoot, "test-runner");
     const globalOnly = path.join(globalRoot, "release-notes");
+    const hiddenGlobal = path.join(globalRoot, ".hidden-skill");
     await mkdir(globalOverride, { recursive: true });
     await mkdir(globalOnly, { recursive: true });
+    await mkdir(hiddenGlobal, { recursive: true });
     await writeFile(path.join(globalOverride, "SKILL.md"), "---\nname: test-runner\ndescription: Global variant must lose\n---\nGlobal body.", "utf8");
     await writeFile(path.join(globalOnly, "SKILL.md"), "---\nname: release-notes\ndescription: Draft release notes from git history\n---\nGlobal release instructions.", "utf8");
+    await writeFile(path.join(hiddenGlobal, "SKILL.md"), "---\nname: hidden-skill\ndescription: Hidden skill must not load\n---\nHidden body.", "utf8");
     await mkdir(path.join(globalOnly, "references"));
     await writeFile(path.join(globalOnly, "references", "format.md"), "Nested global reference.", "utf8");
 

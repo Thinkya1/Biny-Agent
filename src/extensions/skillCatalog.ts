@@ -4,7 +4,7 @@
  * 这个模块只负责发现和安全读写本机 Skill，不负责把 Skill 注入 Agent prompt。
  * 运行时继续使用 `skills.ts` 的渐进式披露；桌面端和运行时通过同一套目录约定保持一致。
  */
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,16 +16,18 @@ import {
   type SkillRootEngine,
   type SkillRootSource
 } from "./skillRoots.js";
+import { createSkillId, createSkillRef, normalizeSkillName } from "./skillRef.js";
 
-const maxMetadataBytes = 512 * 1024;
+const maxMetadataBytes = 64 * 1024;
 const maxEditorBytes = 512 * 1024;
 const maxSkillCount = 512;
 const maxFileCount = 512;
+const maxSkillDescriptionChars = 1_024;
 
 export type SkillCatalogScope = "global" | "project";
 export type SkillCatalogEngine = "biny" | "codex" | "claude" | "pi";
 export type SkillCatalogSource = SkillRootSource;
-export type SkillCatalogDiagnosticKind = "unsupported_root" | "unsupported_symlink" | "scan_failed" | "duplicate_id";
+export type SkillCatalogDiagnosticKind = "unsupported_root" | "unsupported_symlink" | "scan_failed" | "invalid_metadata" | "duplicate_id";
 
 export interface SkillCatalogDiagnostic {
   kind: SkillCatalogDiagnosticKind;
@@ -83,6 +85,7 @@ interface SkillRoot {
   precedence: number;
   directory: string;
   projectRoot?: string;
+  allowExternalSymlinks: boolean;
 }
 
 interface DiscoveredSkill {
@@ -141,6 +144,7 @@ export async function scanSkillCatalog(options: { homeDir?: string; projectRoots
   ));
   const winners = new Map<string, GroupedSkill>();
   for (const candidate of groupedSkills) {
+    if (candidate.item.parseError !== undefined) continue;
     const key = logicalSkillKey(candidate.item);
     if (!winners.has(key)) winners.set(key, candidate);
   }
@@ -167,7 +171,7 @@ export async function scanSkillCatalog(options: { homeDir?: string; projectRoots
       shadowedBy: entry.shadowedBy
     }));
   const skills = inventory
-    .filter((entry) => entry.shadowedBy === undefined)
+    .filter((entry) => entry.shadowedBy === undefined && entry.parseError === undefined)
     .sort((left, right) => {
       if (left.scope !== right.scope) return left.scope === "global" ? -1 : 1;
       return left.name.localeCompare(right.name);
@@ -176,7 +180,15 @@ export async function scanSkillCatalog(options: { homeDir?: string; projectRoots
     skills.length = maxSkillCount;
     warnings.push(`只展示前 ${String(maxSkillCount)} 个 Skill。`);
   }
-  const diagnostics = deduplicateDiagnostics([...discoveredDiagnostics, ...duplicateDiagnostics]);
+  const metadataDiagnostics = inventory
+    .filter((entry) => entry.parseError !== undefined)
+    .map((entry): SkillCatalogDiagnostic => ({
+      kind: "invalid_metadata",
+      message: `跳过无效 Skill 元数据「${entry.name}」：${entry.parseError}`,
+      path: entry.mdPath,
+      ref: entry.ref
+    }));
+  const diagnostics = deduplicateDiagnostics([...discoveredDiagnostics, ...metadataDiagnostics, ...duplicateDiagnostics]);
   return { skills, inventory, warnings, diagnostics };
 }
 
@@ -244,9 +256,10 @@ function buildSkillRoots(homeDir: string, projectRoots: string[]): SkillRoot[] {
       scope,
       engine,
       source: convention.source,
-      precedence: PROJECT_SKILL_ROOT_CONVENTIONS.indexOf(convention),
+      precedence: (scope === "global" ? GLOBAL_SKILL_ROOT_CONVENTIONS : PROJECT_SKILL_ROOT_CONVENTIONS).indexOf(convention),
       directory,
-      projectRoot
+      projectRoot,
+      allowExternalSymlinks: scope === "global" && convention.allowExternalSymlinks === true
     });
   };
 
@@ -337,7 +350,10 @@ async function scanSkillRoot(root: SkillRoot, allowedDirectories: readonly strin
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     try {
       const absolutePath = await canonicalDirectory(path.join(root.directory, entry.name));
-      if (entry.isSymbolicLink() && !allowedDirectories.some((directory) => isPathInside(directory, absolutePath))) {
+      if (
+        entry.isSymbolicLink()
+        && (!root.allowExternalSymlinks || !allowedDirectories.some((directory) => isPathInside(directory, absolutePath)))
+      ) {
         const linkPath = path.join(root.directory, entry.name);
         diagnostics.push({
           kind: "unsupported_symlink",
@@ -385,6 +401,17 @@ async function readDiscoveredSkill(root: SkillRoot, absolutePath: string, mdPath
   }
   const nameValue = frontmatter.name;
   const name = typeof nameValue === "string" && nameValue.trim() ? nameValue.trim() : path.basename(absolutePath);
+  if (parseError === undefined && path.basename(mdPath) === "SKILL.md") {
+    if (typeof nameValue !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(name) || name.length > 64) {
+      parseError = `Skill name 无效：${String(nameValue ?? "")}。`;
+    } else if (path.basename(absolutePath) !== name) {
+      parseError = `Skill name ${name} 必须与目录名 ${path.basename(absolutePath)} 一致。`;
+    } else if (typeof frontmatter.description !== "string" || !frontmatter.description.trim()) {
+      parseError = "SKILL.md frontmatter 必须包含 description。";
+    } else if (frontmatter.description.trim().length > maxSkillDescriptionChars) {
+      parseError = `Skill description 超过 ${String(maxSkillDescriptionChars)} 个字符。`;
+    }
+  }
   return {
     root,
     absolutePath,
@@ -400,7 +427,7 @@ async function readDiscoveredSkill(root: SkillRoot, absolutePath: string, mdPath
 function toCatalogEntry(item: DiscoveredSkill, linkedEngines: SkillCatalogEngine[]): SkillCatalogEntry {
   const ref = skillRef(item);
   return {
-    id: createHash("sha256").update(ref).digest("hex").slice(0, 32),
+    id: createSkillId(ref),
     ref,
     name: item.name,
     description: item.description,
@@ -419,18 +446,16 @@ function toCatalogEntry(item: DiscoveredSkill, linkedEngines: SkillCatalogEngine
 }
 
 function skillRef(item: DiscoveredSkill): string {
-  const scope = item.root.scope === "global"
-    ? "global"
-    : `project-${createHash("sha256").update(item.root.projectRoot ?? "").digest("hex").slice(0, 12)}`;
-  return `${scope}:${item.root.source}:${normaliseSkillName(item.name)}`;
+  return createSkillRef({
+    scope: item.root.scope,
+    name: item.name,
+    projectRoot: item.root.projectRoot,
+    source: item.root.source
+  });
 }
 
 function logicalSkillKey(item: DiscoveredSkill): string {
-  return `${item.root.scope}:${item.root.projectRoot ?? "global"}:${normaliseSkillName(item.name)}`;
-}
-
-function normaliseSkillName(name: string): string {
-  return name.trim().toLocaleLowerCase();
+  return `${item.root.scope}:${item.root.projectRoot ?? "global"}:${normalizeSkillName(item.name)}`;
 }
 
 async function findSkillMarkdown(directory: string): Promise<string | undefined> {
@@ -488,10 +513,14 @@ async function canonicalDirectory(directory: string): Promise<string> {
 }
 
 async function readMetadataFile(filePath: string): Promise<string> {
-  const stat = await fs.stat(filePath);
-  if (!stat.isFile()) throw new Error(`不是文件：${filePath}`);
-  if (stat.size > maxMetadataBytes) throw new Error(`SKILL.md 超过 ${String(maxMetadataBytes)} 字节。`);
-  return await fs.readFile(filePath, "utf8");
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(maxMetadataBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxMetadataBytes, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
+  }
 }
 
 export function parseSkillDocument(content: string): { frontmatter: Record<string, unknown>; body: string } {

@@ -65,7 +65,7 @@ async function startDesktopApplication(): Promise<void> {
   // 模型配置与 CLI/TUI 共用全局目录；凭据由 config/credentials.ts 统一接入 macOS Keychain。
   const configStore = new DesktopConfigStore(globalConfigDir());
   const projects = new DesktopProjectService(state, storage, configStore);
-  const skills = new DesktopSkillService(state, configStore);
+  const skills = new DesktopSkillService(state, configStore, net.fetch.bind(net) as unknown as typeof globalThis.fetch);
   let mainWindow: BrowserWindow | undefined;
   let preparingQuit = false;
   const activity = new ActivityRecorderService({

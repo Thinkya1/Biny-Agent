@@ -217,6 +217,14 @@ const settingsSaveInputSchema = z.object({
     defaultModel: z.object({ alias: idSchema, thinking: thinkingSchema }).strict().optional(),
     oauthCredentialHandles: z.array(z.string().uuid()).max(20).optional()
   }).strict().optional(),
+  skills: z.object({
+    globalDefaults: z.record(z.boolean()).refine((value) => Object.keys(value).length <= 512, "技能全局开关不能超过 512 项。"),
+    projectOverrides: z.record(z.boolean()).refine((value) => Object.keys(value).length <= 512, "技能项目开关不能超过 512 项。"),
+    extraction: z.object({
+      enabled: z.boolean(),
+      minToolCalls: z.number().int().min(1).max(64)
+    }).strict()
+  }).strict().optional(),
   chat: z.object({
     sessionId: idSchema,
     expectedMetadataRevision: configRevisionSchema,
@@ -262,8 +270,37 @@ const settingsDraftStateSchema = z.object({
 }).strict();
 const settingsCloseResponseSchema = z.enum(["saved", "discarded", "cancelled"]);
 const skillIdSchema = z.string().trim().min(1).max(128);
+const skillProjectIdSchema = idSchema;
+const skillDraftIdSchema = z.string().uuid();
 const skillFilePathSchema = z.string().trim().min(1).max(2_000);
 const skillFileContentSchema = z.string().max(512 * 1024);
+const skillImportIdsSchema = z.array(skillIdSchema).max(256);
+const skillRepositoryOwnerSchema = z.string().trim().regex(/^[A-Za-z0-9-]{1,39}$/u);
+const skillRepositoryNameSchema = z.string().trim().regex(/^(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u);
+const skillRepositoryBranchSchema = z.string().trim().min(1).max(255).refine(
+  (value) => !value.startsWith("/") && !value.endsWith("/") && !value.includes("..") && !value.includes("//") && !/[\\#%?*^ ~:]/u.test(value) && value.split("/").every((part) => part.length > 0 && !part.startsWith(".")),
+  "Skill 仓库分支无效。"
+);
+const skillRepositorySchema = z.object({
+  owner: skillRepositoryOwnerSchema,
+  name: skillRepositoryNameSchema,
+  branch: skillRepositoryBranchSchema,
+  enabled: z.boolean()
+}).strict();
+const skillDiscoverySearchQuerySchema = z.string().trim().min(2).max(120);
+const skillDiscoverySearchLimitSchema = z.number().int().min(1).max(50).optional();
+const skillDiscoverySearchOffsetSchema = z.number().int().min(0).max(10_000).optional();
+const discoverableSkillSchema = z.object({
+  key: z.string().trim().min(1).max(512),
+  name: z.string().trim().min(1).max(160),
+  description: z.string().max(4_000),
+  directory: z.string().trim().min(1).max(1_000),
+  readmeUrl: externalUrlSchema.optional(),
+  repoOwner: skillRepositoryOwnerSchema,
+  repoName: skillRepositoryNameSchema,
+  repoBranch: skillRepositoryBranchSchema,
+  installed: z.boolean()
+}).strict();
 const mcpProjectIdSchema = idSchema.optional();
 const mcpFieldMutationSchema = z.object({
   key: z.string().trim().min(1).max(200),
@@ -860,7 +897,16 @@ export function registerDesktopIpc(context: IpcContext): void {
     if (error) throw new Error(error);
   });
 
-  handle(desktopIpc.skillCatalog, async () => await context.skills.snapshot());
+  handle(desktopIpc.skillCatalog, async (_event, projectId: unknown) => await context.skills.snapshot(
+    projectId === undefined ? undefined : skillProjectIdSchema.parse(projectId)
+  ));
+
+  handle(desktopIpc.skillSettings, async (_event, projectId: unknown) => await context.skills.settings(idSchema.parse(projectId)));
+  handle(desktopIpc.skillDrafts, async (_event, projectId: unknown) => await context.skills.drafts(idSchema.parse(projectId)));
+  handleRecoveryGated(desktopIpc.skillDraftApprove, async (_event, projectId: unknown, draftId: unknown) => await context.skills.approveDraft(idSchema.parse(projectId), skillDraftIdSchema.parse(draftId)));
+  handleRecoveryGated(desktopIpc.skillDraftReject, async (_event, projectId: unknown, draftId: unknown) => await context.skills.rejectDraft(idSchema.parse(projectId), skillDraftIdSchema.parse(draftId)));
+  handleRecoveryGated(desktopIpc.skillDraftRetry, async (_event, projectId: unknown, draftId: unknown) => await context.skills.retryDraft(idSchema.parse(projectId), skillDraftIdSchema.parse(draftId)));
+  handleRecoveryGated(desktopIpc.skillDraftEdit, async (_event, projectId: unknown, draftId: unknown, content: unknown) => await context.skills.editDraft(idSchema.parse(projectId), skillDraftIdSchema.parse(draftId), skillFileContentSchema.parse(content)));
 
   handle(desktopIpc.skillSourceImport, async () => {
     const window = context.getWindow();
@@ -881,6 +927,32 @@ export function registerDesktopIpc(context: IpcContext): void {
     await context.skills.installSource(skillIdSchema.parse(sourceId));
   });
 
+  handle(desktopIpc.skillImportExisting, async (_event, skillIds: unknown) => {
+    return await context.skills.importExistingSkills(skillImportIdsSchema.parse(skillIds));
+  });
+
+  handle(desktopIpc.skillDiscoverySnapshot, async () => await context.skills.skillDiscovery());
+
+  handle(desktopIpc.skillDiscoverySearch, async (_event, query: unknown, limit: unknown, offset: unknown) => {
+    return await context.skills.searchSkills(
+      skillDiscoverySearchQuerySchema.parse(query),
+      skillDiscoverySearchLimitSchema.parse(limit),
+      skillDiscoverySearchOffsetSchema.parse(offset)
+    );
+  });
+
+  handle(desktopIpc.skillDiscoveryInstall, async (_event, skill: unknown) => {
+    await context.skills.installDiscoveredSkill(discoverableSkillSchema.parse(skill));
+  });
+
+  handle(desktopIpc.skillRepositoryAdd, async (_event, repository: unknown) => {
+    return await context.skills.addSkillRepository(skillRepositorySchema.parse(repository));
+  });
+
+  handle(desktopIpc.skillRepositoryRemove, async (_event, owner: unknown, name: unknown) => {
+    return await context.skills.removeSkillRepository(skillRepositoryOwnerSchema.parse(owner), skillRepositoryNameSchema.parse(name));
+  });
+
   handle(desktopIpc.skillFileRead, async (_event, skillId: unknown, relativePath: unknown) => {
     return await context.skills.readFile(skillIdSchema.parse(skillId), skillFilePathSchema.parse(relativePath));
   });
@@ -895,6 +967,25 @@ export function registerDesktopIpc(context: IpcContext): void {
 
   handle(desktopIpc.skillOpenDirectory, async (_event, skillId: unknown) => {
     const error = await shell.openPath(await context.skills.directory(skillIdSchema.parse(skillId)));
+    if (error) throw new Error(error);
+  });
+
+  handle(desktopIpc.pluginRegistry, async (_event, projectId: unknown) => await context.skills.pluginRegistry(idSchema.parse(projectId)));
+  handle(desktopIpc.pluginRegistryRefresh, async (_event, projectId: unknown) => await context.skills.pluginRegistry(idSchema.parse(projectId), true));
+  handleRecoveryGated(desktopIpc.pluginInstall, async (_event, projectId: unknown, pluginId: unknown) => {
+    context.agents.assertNoRunningTasks("任务运行期间不能安装 Plugin。");
+    return await context.skills.installPlugin(idSchema.parse(projectId), idSchema.parse(pluginId));
+  });
+  handleRecoveryGated(desktopIpc.pluginSetEnabled, async (_event, projectId: unknown, pluginId: unknown, enabled: unknown) => {
+    context.agents.assertNoRunningTasks("任务运行期间不能切换 Plugin。");
+    return await context.skills.setPluginEnabled(idSchema.parse(projectId), idSchema.parse(pluginId), z.boolean().parse(enabled));
+  });
+  handleRecoveryGated(desktopIpc.pluginUninstall, async (_event, projectId: unknown, pluginId: unknown) => {
+    context.agents.assertNoRunningTasks("任务运行期间不能卸载 Plugin。");
+    await context.skills.uninstallPlugin(idSchema.parse(projectId), idSchema.parse(pluginId));
+  });
+  handle(desktopIpc.pluginOpenDirectory, async (_event, projectId: unknown) => {
+    const error = await shell.openPath(await context.skills.pluginDirectory(idSchema.parse(projectId)));
     if (error) throw new Error(error);
   });
 

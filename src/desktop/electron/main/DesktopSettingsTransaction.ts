@@ -712,6 +712,14 @@ export class DesktopSettingsTransaction {
       memory: config.memory,
       webSearch: config.webSearch,
       models: config.models,
+      skills: config.skills ?? {
+        projectId,
+        projectKey: "",
+        globalDefaults: {},
+        projectOverrides: {},
+        extraction: { enabled: true, minToolCalls: 5 },
+        activations: []
+      },
       chat,
       pendingRecovery
     };
@@ -1172,6 +1180,7 @@ function listAppliedFields(input: DesktopSettingsSaveInput): string[] {
   if (input.memory !== undefined) fields.push("memory");
   if (input.webSearch !== undefined) fields.push("webSearch");
   if (input.models !== undefined) fields.push("models");
+  if (input.skills !== undefined) fields.push("skills");
   if (input.chat !== undefined) fields.push("chat.personalization");
   return fields;
 }

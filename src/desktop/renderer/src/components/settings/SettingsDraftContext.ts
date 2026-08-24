@@ -11,6 +11,7 @@ import type {
   DesktopSettingsSaveResult,
   DesktopSettingsSnapshot,
   DesktopSettingsCredentialScope,
+  DesktopSkillSettingsInput,
   DesktopStagedSettingsCredential,
   DesktopThemePreference,
   DesktopWebSearchSettingsInput
@@ -34,6 +35,7 @@ export interface DesktopSettingsDraft {
   webSearch: DesktopWebSearchSettingsInput;
   chat?: DesktopChatPersonalizationOverride;
   models: SettingsModelDraft;
+  skills: DesktopSkillSettingsInput;
 }
 
 export interface SettingsDraftContextValue {
@@ -50,6 +52,7 @@ export interface SettingsDraftContextValue {
   setMemory(value: DesktopMemorySettings): void;
   setWebSearch(value: DesktopWebSearchSettingsInput): void;
   setChat(value: DesktopChatPersonalizationOverride): void;
+  setSkills(value: DesktopSkillSettingsInput): void;
   upsertModel(value: DesktopModelConfigurationInput): void;
   removeModel(alias: string): void;
   setDefaultModel(alias: string, thinking: ThinkingSelection): void;

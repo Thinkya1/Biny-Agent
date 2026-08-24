@@ -29,6 +29,7 @@ import { providerDefinition } from "../../../ai/provider.js";
 import { builtinProviderModels } from "../../../ai/builtinModels.js";
 import { loadProjectSettings } from "../../../config/projectSettings.js";
 import { globalConfigDir } from "../../../config/paths.js";
+import { createProjectSkillKey } from "../../../extensions/skillRef.js";
 import { synchronizeCredentialRevisions, type DeferredCredentialTransactionStatus } from "../../../config/credentials.js";
 import { configSchema, type AgentConfig, type ProviderConfig } from "../../../config/schema.js";
 import { updateConfig, type AgentConfigStore } from "../../../config/store.js";
@@ -114,6 +115,7 @@ import type {
   DesktopSettingsChatSnapshot,
   DesktopSettingsCredentialScope,
   DesktopSettingsModelsSnapshot,
+  DesktopSkillSettings,
   DesktopSettingsSaveInput,
   DesktopStagedModelLoginResult,
   DesktopStagedSettingsCredential,
@@ -161,6 +163,7 @@ export interface DesktopSettingsConfigSnapshot {
   memory: AgentConfig["context"]["memory"];
   webSearch: DesktopWebSearchSettings;
   models: DesktopSettingsModelsSnapshot;
+  skills?: DesktopSkillSettings;
 }
 
 export interface PreparedDesktopSettingsConfig {
@@ -575,7 +578,7 @@ export class DesktopAgentManager {
   async settingsConfigSnapshot(projectId: string): Promise<DesktopSettingsConfigSnapshot> {
     const project = this.projects.requireProject(projectId);
     const current = await this.requireVersionedConfig().loadVersioned!(project.path);
-    return describeSettingsConfigSnapshot(current.config, current.revision);
+    return describeSettingsConfigSnapshot(current.config, current.revision, projectId, project.path);
   }
 
   async settingsChatSnapshot(projectId: string, sessionId: string): Promise<DesktopSettingsChatSnapshot> {
@@ -606,6 +609,21 @@ export class DesktopAgentManager {
         context: {
           ...next.context,
           memory: input.memory ?? next.context.memory
+        }
+      });
+    }
+    if (input.skills !== undefined) {
+      const projectKey = createProjectSkillKey(project.path);
+      next = configSchema.parse({
+        ...next,
+        extensions: {
+          ...next.extensions,
+          skillDefaults: input.skills.globalDefaults,
+          skillProjectOverrides: {
+            ...next.extensions.skillProjectOverrides,
+            [projectKey]: input.skills.projectOverrides
+          },
+          skillExtraction: input.skills.extraction
         }
       });
     }
@@ -2345,7 +2363,7 @@ function describeWebSearchSettings(search: AgentConfig["web"]["search"]): Deskto
   };
 }
 
-function describeSettingsConfigSnapshot(config: AgentConfig, revision: string): DesktopSettingsConfigSnapshot {
+function describeSettingsConfigSnapshot(config: AgentConfig, revision: string, projectId: string, workspaceRoot: string): DesktopSettingsConfigSnapshot {
   return {
     revision,
     personalization: { ...config.personalization },
@@ -2358,6 +2376,14 @@ function describeSettingsConfigSnapshot(config: AgentConfig, revision: string): 
       embeddingModels: describeEmbeddingModels(config),
       defaultModel: config.defaultModel,
       thinking: config.thinking.enabled ? config.thinking.effort : "off"
+    },
+    skills: {
+      projectId,
+      projectKey: createProjectSkillKey(workspaceRoot),
+      globalDefaults: { ...config.extensions.skillDefaults },
+      projectOverrides: { ...config.extensions.skillProjectOverrides[createProjectSkillKey(workspaceRoot)] },
+      extraction: { ...config.extensions.skillExtraction },
+      activations: []
     }
   };
 }

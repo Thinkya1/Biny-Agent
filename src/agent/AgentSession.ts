@@ -84,6 +84,8 @@ import { LocalEmbeddingManager } from "../llm/embedding/LocalEmbeddingRuntime.js
 import type { EmbeddingModelDescriptor, EmbeddingModelRuntime, LocalEmbeddingModelId } from "../llm/embedding/types.js";
 import { readAttachment, type AgentAttachment } from "../attachments/store.js";
 import type { AttachmentReference } from "../attachments/store.js";
+import { parseSkillDocument } from "../extensions/skillCatalog.js";
+import { createSkillDraft } from "../extensions/skillDrafts.js";
 import { TodoStore } from "../session/todoStore.js";
 import { resolveRunBudget, type RunBudget } from "./runBudget.js";
 import {
@@ -1425,6 +1427,9 @@ export class AgentSession {
           personalization,
           runOptions
         ).catch(() => undefined);
+        if (!runOptions.continueFrom?.length) {
+          void this.enqueueCompletedSkillDraft(input, content, newMessages, runOptions).catch(() => undefined);
+        }
         yield { type: "status", status: "completed" };
       } else if (outcome.status === "incomplete") {
         yield { type: "status", status: "incomplete" };
@@ -1674,6 +1679,73 @@ export class AgentSession {
     return messages.some((message) => message.role === "assistant" && message.content.some(
       (part) => part.type === "toolCall" && externalTools.has(part.name)
     ));
+  }
+
+  /**
+   * 自动 Skill 抽取是成功根回合后的旁路任务。它只接受没有附件、网页、MCP、Plugin、子代理
+   * 的本地上下文；模型输出先过 frontmatter 校验再写入草稿，原回合不等待这次请求。
+   */
+  private async enqueueCompletedSkillDraft(
+    task: string,
+    answer: string,
+    messages: readonly AgentMessage[],
+    runOptions: AgentRunOptions
+  ): Promise<void> {
+    const extraction = this.activeConfig.extensions.skillExtraction;
+    if (!extraction.enabled || (runOptions.attachments?.length ?? 0) > 0) return;
+    const toolCalls = messages.reduce((total, message) => (
+      total + (message.role === "assistant" ? message.content.filter((part) => part.type === "toolCall").length : 0)
+    ), 0);
+    if (toolCalls < extraction.minToolCalls || this.usedExternalContext(messages)) return;
+    const transcript = redactSecrets(buildLocalSkillTranscript(task, answer, messages)).slice(0, 32_000);
+    if (!transcript.trim()) return;
+    const modelAlias = this.activeConfig.context.memory.extractModel;
+    const model = modelAlias === undefined
+      ? (this.options.modelManager?.getModel() ?? this.options.model)
+      : createNativeModelForConfig(this.activeConfig, modelAlias);
+    if (!model) return;
+    const prompt = [
+      "从下面这次已成功完成的本地 Agent 回合中提炼一个可复用的 Biny Skill。",
+      "只返回完整 Markdown，不要代码围栏；必须以 YAML frontmatter 开始：",
+      "---",
+      "name: lowercase-kebab-case",
+      "description: 一句话说明",
+      "---",
+      "正文写成可执行、可复用的步骤和边界。不要复制密钥、个人数据、网页内容或外部工具内容。",
+      "如果没有稳定的复用模式，仍返回一个简短、诚实的 Skill 草稿。",
+      "",
+      transcript
+    ].join("\n");
+    try {
+      const result = await generateNativeText(model, [{ role: "user", content: [{ type: "text", text: prompt }] }], {
+        maxOutputTokens: 1_500,
+        reasoning: "off",
+        timeoutMs: 20_000,
+        requestContext: { ...(this.sideModelRequestContext() ?? {}), operation: "memory" }
+      });
+      if (result.usage) this.recordModelUsage(result.usage, "memory", modelAlias);
+      const content = normalizeGeneratedSkill(result.text);
+      const parsed = parseSkillDocument(content);
+      const name = typeof parsed.frontmatter.name === "string" ? parsed.frontmatter.name.trim() : "";
+      const description = typeof parsed.frontmatter.description === "string" ? parsed.frontmatter.description.trim() : "";
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(name) || name.length > 64 || !description || description.length > 1_024) {
+        throw new Error("抽取模型返回的 Skill frontmatter 无效。");
+      }
+      await createSkillDraft({ workspaceRoot: this.options.workspaceRoot, name, description, content, toolCalls });
+    } catch (error) {
+      const name = `extracted-${randomUUID().slice(0, 8)}`;
+      const description = "自动技能提取失败，请检查草稿并重试。";
+      const content = `---\nname: ${name}\ndescription: ${description}\n---\n\n`;
+      await createSkillDraft({
+        workspaceRoot: this.options.workspaceRoot,
+        name,
+        description,
+        content,
+        toolCalls,
+        status: "failed",
+        error: errorMessage(error)
+      });
+    }
   }
 
   async compactConversation(hint?: string, signal?: AbortSignal): Promise<string> {
@@ -2322,6 +2394,34 @@ function doneEvent(outcome: AgentTurnOutcome): Extract<AgentSessionEvent, { type
     usage: outcome.usage,
     outcome
   };
+}
+
+function buildLocalSkillTranscript(task: string, answer: string, messages: readonly AgentMessage[]): string {
+  const lines = [`USER: ${task}`, `ASSISTANT: ${answer}`];
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      for (const part of message.content) {
+        if (part.type === "text" && part.text.trim()) lines.push(`ASSISTANT: ${part.text}`);
+        if (part.type === "toolCall") lines.push(`LOCAL_TOOL: ${part.name}`);
+      }
+    } else if (message.role === "toolResult") {
+      const text = message.content
+        .filter((part): part is { type: "text"; text: string } => part.type === "text")
+        .map((part) => part.text)
+        .join("\n")
+        .trim();
+      if (text) lines.push(`LOCAL_TOOL_RESULT (${message.toolName}): ${text}`);
+    }
+  }
+  return lines.join("\n\n");
+}
+
+function normalizeGeneratedSkill(value: string): string {
+  return value
+    .trim()
+    .replace(/^```(?:markdown|md)?\s*/iu, "")
+    .replace(/\s*```$/u, "")
+    .trim();
 }
 
 function nativeTurnOutcome(

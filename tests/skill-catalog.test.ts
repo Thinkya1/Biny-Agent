@@ -26,7 +26,7 @@ async function main(): Promise<void> {
 
     const binySkill = path.join(homeDir, ".biny", "skills", "biny-only");
     await mkdir(binySkill, { recursive: true });
-    await writeFile(path.join(binySkill, "skill.md"), "---\nname: biny-only\n---\n\nBiny body\n");
+    await writeFile(path.join(binySkill, "skill.md"), "---\nname: biny-only\ndescription: Biny skill\n---\n\nBiny body\n");
 
     const projectSkill = path.join(projectRoot, ".agents", "skills", "project-skill");
     await mkdir(projectSkill, { recursive: true });
@@ -78,9 +78,18 @@ async function main(): Promise<void> {
     await mkdir(externalSkill, { recursive: true });
     await writeFile(path.join(externalSkill, "SKILL.md"), "---\nname: external-skill\ndescription: External\n---\n");
     await symlink(externalSkill, path.join(agentsSkillRoot, "external-skill"), "dir");
-    const withUnsupportedLink = await scanSkillCatalog({ homeDir });
-    assert.match(withUnsupportedLink.warnings.join(" "), /非受支持根目录/);
-    assert.equal(withUnsupportedLink.diagnostics.some((diagnostic) => diagnostic.kind === "unsupported_symlink"), true);
+    const withExternalLink = await scanSkillCatalog({ homeDir });
+    assert.match(withExternalLink.warnings.join(" "), /非受支持根目录/);
+    assert.equal(withExternalLink.skills.some((skill) => skill.name === "external-skill"), false);
+
+    const projectExternalLink = path.join(root, "project-external-skill");
+    await mkdir(projectExternalLink, { recursive: true });
+    await writeFile(path.join(projectExternalLink, "SKILL.md"), "---\nname: project-external-skill\ndescription: Project external\n---\n");
+    const projectLinkRoot = path.join(projectRoot, ".agents", "skills");
+    await symlink(projectExternalLink, path.join(projectLinkRoot, "project-external-skill"), "dir");
+    const withUnsupportedProjectLink = await scanSkillCatalog({ homeDir, projectRoots: [projectRoot] });
+    assert.match(withUnsupportedProjectLink.warnings.join(" "), /非受支持根目录/);
+    assert.equal(withUnsupportedProjectLink.diagnostics.some((diagnostic) => diagnostic.kind === "unsupported_symlink"), true);
 
     await fs.link(path.join(shared.absolutePath, "SKILL.md"), path.join(shared.absolutePath, "hard-link.md"));
     const withHardLink = await scanSkillCatalog({ homeDir });

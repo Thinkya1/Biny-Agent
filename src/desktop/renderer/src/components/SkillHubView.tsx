@@ -1,8 +1,7 @@
 /**
  * Cindy 风格的本地扩展管理页。
  *
- * 页面只负责筛选、选择和编辑状态；文件发现、路径解析和保存都通过 `window.biny` 交给主进程。
- * 云端市场、压缩包导入和发布不在这个本地版本里伪装成已完成能力。
+ * 页面只负责筛选、选择和编辑状态；文件发现、路径解析、远程发现和保存都通过 `window.biny` 交给主进程。
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
@@ -14,20 +13,15 @@ import type {
   DesktopSkillFilePreview
 } from "../../../protocol.js";
 import { Icon } from "./Icon.js";
+import { SkillDiscoveryView } from "./SkillDiscoveryView.js";
+import { SkillImportDialog } from "./SkillImportDialog.js";
 
 type SkillHubTab = "plugins" | "skills";
-
-const engineLabels: Record<DesktopSkillCatalogEntry["engine"], string> = {
-  biny: "Biny",
-  codex: "Codex",
-  claude: "Claude",
-  pi: "Pi"
-};
 
 export function SkillHubView({ onError }: { onError(message: string): void }): React.JSX.Element {
   const [tab, setTab] = useState<SkillHubTab>("skills");
   const [query, setQuery] = useState("");
-  const [snapshot, setSnapshot] = useState<DesktopSkillCatalogSnapshot>({ skills: [], inventory: [], plugins: [], managedSources: [], warnings: [], diagnostics: [] });
+  const [snapshot, setSnapshot] = useState<DesktopSkillCatalogSnapshot>({ skills: [], inventory: [], unmanagedSkills: [], plugins: [], managedSources: [], warnings: [], diagnostics: [] });
   const [selectedSkillId, setSelectedSkillId] = useState<string>();
   const [selectedFilePath, setSelectedFilePath] = useState("SKILL.md");
   const [preview, setPreview] = useState<DesktopSkillFilePreview>();
@@ -37,6 +31,9 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
   const [fileLoading, setFileLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [discoveryOpen, setDiscoveryOpen] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string>();
   const requestRef = useRef(0);
 
   const loadCatalog = useCallback(async (): Promise<void> => {
@@ -46,7 +43,8 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
     try {
       const next = await window.biny.skillCatalog();
       if (request !== requestRef.current) return;
-      setSnapshot(next);
+      // 旧的已运行主进程可能暂时还没有新字段；先归一化，避免热更新期间整页白屏。
+      setSnapshot({ ...next, unmanagedSkills: next.unmanagedSkills ?? [] });
       setSelectedSkillId((current) => current && next.skills.some((skill) => skill.id === current) ? current : next.skills[0]?.id);
     } catch (error) {
       if (request === requestRef.current) onError(errorMessage(error));
@@ -65,7 +63,12 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
   );
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const diagnosticMessages = useMemo(
-    () => [...new Set([...snapshot.warnings, ...snapshot.diagnostics.map((diagnostic) => diagnostic.message)])],
+    () => [...new Set([
+      ...snapshot.warnings,
+      ...snapshot.diagnostics
+        .filter((diagnostic) => diagnostic.kind !== "duplicate_id")
+        .map((diagnostic) => diagnostic.message)
+    ])],
     [snapshot.diagnostics, snapshot.warnings]
   );
   const visibleSkills = useMemo(() => snapshot.skills.filter((skill) => {
@@ -159,6 +162,25 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
     }
   }, [loadCatalog, onError]);
 
+  const importExisting = useCallback(async (skillIds: string[]): Promise<void> => {
+    setImporting(true);
+    try {
+      const results = await window.biny.importExistingSkills(skillIds);
+      await loadCatalog();
+      setImportDialogOpen(false);
+      const importedCount = results.filter((result) => !result.alreadyInstalled).length;
+      setSuccessMessage(importedCount ? `已导入 ${String(importedCount)} 个技能，来源目录保持不变。` : "所选技能已经在 Biny 受管目录中。");
+    } catch (error) {
+      onError(errorMessage(error));
+    } finally {
+      setImporting(false);
+    }
+  }, [loadCatalog, onError]);
+
+  if (tab === "skills" && discoveryOpen) {
+    return <div className="cindy-extension-page"><SkillDiscoveryView onBack={() => setDiscoveryOpen(false)} onError={onError} onInstalled={loadCatalog} /></div>;
+  }
+
   return (
     <div className="cindy-extension-page">
       <ExtensionHeader
@@ -168,11 +190,15 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
         onQuery={setQuery}
         onRefresh={() => void loadCatalog()}
         onImport={() => void importSource()}
+        onImportExisting={() => setImportDialogOpen(true)}
+        onDiscover={() => setDiscoveryOpen(true)}
+        unmanagedCount={snapshot.unmanagedSkills.length}
         importing={importing}
         loading={loading}
       />
       <div className="cindy-extension-body">
         {diagnosticMessages.length ? <div className="cindy-extension-warning" role="status"><Icon name="warning" size={15} /><div>{diagnosticMessages.map((warning) => <div key={warning}>{warning}</div>)}</div></div> : null}
+        {successMessage ? <div className="cindy-extension-success" role="status"><Icon name="check" size={15} />{successMessage}<button aria-label="关闭提示" onClick={() => setSuccessMessage(undefined)} type="button"><Icon name="close" size={13} /></button></div> : null}
         {tab === "skills" ? (
           <SkillCatalogContent
             skills={visibleSkills}
@@ -199,6 +225,7 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
           <PluginCatalogContent plugins={visiblePlugins} loading={loading} />
         )}
       </div>
+      {importDialogOpen ? <SkillImportDialog candidates={snapshot.unmanagedSkills} importing={importing} onClose={() => setImportDialogOpen(false)} onImport={(skillIds) => void importExisting(skillIds)} /> : null}
     </div>
   );
 }
@@ -211,6 +238,9 @@ const ExtensionHeader = memo(function ExtensionHeader({
   onQuery,
   onRefresh,
   onImport,
+  onImportExisting,
+  onDiscover,
+  unmanagedCount,
   importing
 }: {
   tab: SkillHubTab;
@@ -220,6 +250,9 @@ const ExtensionHeader = memo(function ExtensionHeader({
   onQuery(query: string): void;
   onRefresh(): void;
   onImport(): void;
+  onImportExisting(): void;
+  onDiscover(): void;
+  unmanagedCount: number;
   importing: boolean;
 }): React.JSX.Element {
   return (
@@ -233,7 +266,11 @@ const ExtensionHeader = memo(function ExtensionHeader({
         <input aria-label={tab === "skills" ? "搜索技能" : "搜索插件"} onChange={(event) => onQuery(event.target.value)} placeholder={tab === "skills" ? "搜索技能" : "搜索插件"} value={query} />
         {query ? <button aria-label="清空搜索" onClick={() => onQuery("")} type="button"><Icon name="close" size={13} /></button> : null}
       </label>
-      {tab === "skills" ? <button className="cindy-extension-import" disabled={importing} onClick={onImport} type="button"><Icon name="add" size={15} />{importing ? "导入中…" : "导入 Skill"}</button> : null}
+      {tab === "skills" ? <>
+        <button className="cindy-extension-import cindy-extension-import-existing" onClick={onImportExisting} type="button"><span className="cindy-extension-import-dot" data-visible={unmanagedCount > 0} /><Icon name="archive" size={15} />导入已有</button>
+        <button className="cindy-extension-import" disabled={importing} onClick={onImport} type="button"><Icon name="add" size={15} />{importing ? "添加中…" : "添加 Skill"}</button>
+        <button className="cindy-extension-discover" onClick={onDiscover} type="button"><Icon name="spark" size={15} />发现技能</button>
+      </> : null}
       <button aria-label="刷新扩展列表" className="cindy-extension-refresh" disabled={loading} onClick={onRefresh} title="刷新" type="button"><Icon name="refresh" size={15} /></button>
     </header>
   );
@@ -290,7 +327,7 @@ const SkillCatalogContent = memo(function SkillCatalogContent({
         <span className="cindy-extension-count">本地技能 {skills.length}</span>
       </div>
       {managedSources.length ? <ManagedSkillSources sources={managedSources} onInstall={onInstallSource} /> : null}
-      {loading && !skills.length ? <ExtensionLoading /> : !skills.length ? <ExtensionEmpty icon="wand" title="还没有找到 Skill" detail="将 Skill 放入 ~/.agents/skills 或项目的 .agents/skills；外部目录请先导入 SKILL.md。" /> : (
+      {loading && !skills.length ? <ExtensionLoading /> : !skills.length ? <ExtensionEmpty icon="wand" title="还没有找到 Skill" detail="将 Skill 放入全局 Agent Skill 目录或项目的 .agents/skills；已有外部 Skill 可通过“导入已有”复制到 Biny。" /> : (
         <div className={selectedSkill ? "cindy-skill-layout has-detail" : "cindy-skill-layout"}>
           <div className="cindy-skill-card-grid">
             {skills.map((skill) => <SkillCard key={skill.id} skill={skill} selected={skill.id === selectedSkill?.id} onSelect={onSelect} />)}
@@ -325,7 +362,7 @@ const SkillCard = memo(function SkillCard({ skill, selected, onSelect }: { skill
       <span className="cindy-skill-card-icon"><Icon name="wand" size={17} /></span>
       <span className="cindy-skill-card-main">
         <span className="cindy-skill-card-title">{skill.name}</span>
-        <span className="cindy-skill-card-meta">{skill.scope === "global" ? "全局" : "项目"} · {skill.source === "biny" ? "Biny" : "Agent Skills"} · {skill.linkedEngines.map((engine) => engineLabels[engine]).join(" / ")}</span>
+        <span className="cindy-skill-card-meta">{skill.scope === "global" ? "全局" : "项目"}</span>
         <span className="cindy-skill-card-description">{skill.description}</span>
       </span>
       <Icon name="arrow-right" size={15} />
@@ -391,7 +428,7 @@ const SkillDetail = memo(function SkillDetail({
       <div className="cindy-skill-detail-header">
         <div className="cindy-skill-detail-title-row">
           <span className="cindy-skill-detail-icon"><Icon name="wand" size={18} /></span>
-          <div><h2>{skill.name}</h2><p>{skill.scope === "global" ? "全局" : "项目"} · {skill.linkedEngines.map((engine) => engineLabels[engine]).join(" / ")}</p></div>
+          <div><h2>{skill.name}</h2><p>{skill.scope === "global" ? "全局" : "项目"}</p></div>
         </div>
         <div className="cindy-skill-detail-actions">
           <button onClick={onOpenDirectory} type="button"><Icon name="folder-open" size={14} />打开目录</button>
@@ -445,7 +482,7 @@ const PluginCatalogContent = memo(function PluginCatalogContent({ plugins, loadi
         <div><h1>插件</h1><p>管理 Biny 项目配置中的本地插件模块。</p></div>
         <span className="cindy-extension-count">已配置 {plugins.length}</span>
       </div>
-      {loading && !plugins.length ? <ExtensionLoading /> : !plugins.length ? <ExtensionEmpty icon="plug" title="还没有配置插件" detail="在项目配置的 extensions.plugins 中声明 .js、.mjs 或 .cjs 文件或目录。" /> : (
+      {loading && !plugins.length ? <ExtensionLoading /> : !plugins.length ? <div className="cindy-extension-empty cindy-plugin-empty"><span><Icon name="plug" size={22} /></span><h2>还没有配置插件</h2><p>在项目配置的 extensions.plugins 中声明 .js、.mjs 或 .cjs 文件或目录。</p></div> : (
         <div className="cindy-plugin-grid">{plugins.map((plugin) => <PluginCard key={plugin.id} plugin={plugin} />)}</div>
       )}
     </>

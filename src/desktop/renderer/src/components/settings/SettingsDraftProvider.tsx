@@ -17,6 +17,7 @@ import type {
   DesktopSettingsSaveResult,
   DesktopSettingsSnapshot,
   DesktopSettingsCredentialScope,
+  DesktopSkillSettingsInput,
   DesktopStagedSettingsCredential,
   DesktopThemePreference,
   DesktopWebSearchSettings,
@@ -102,6 +103,10 @@ export function SettingsDraftProvider({
 
   const setChat = useCallback((value: DesktopChatPersonalizationOverride): void => {
     setDraft((current) => current ? { ...current, chat: value } : current);
+  }, []);
+
+  const setSkills = useCallback((value: DesktopSkillSettingsInput): void => {
+    setDraft((current) => current ? { ...current, skills: value } : current);
   }, []);
 
   const upsertModel = useCallback((value: DesktopModelConfigurationInput): void => {
@@ -266,6 +271,7 @@ export function SettingsDraftProvider({
     setMemory,
     setWebSearch,
     setChat,
+    setSkills,
     upsertModel,
     removeModel,
     setDefaultModel,
@@ -293,6 +299,7 @@ export function SettingsDraftProvider({
     setActivity,
     setThemePreference,
     setWebSearch,
+    setSkills,
     snapshot,
     stageCredential,
     upsertModel
@@ -310,7 +317,8 @@ function draftFromSnapshot(snapshot: DesktopSettingsSnapshot): DesktopSettingsDr
     memory: structuredClone(snapshot.memory),
     webSearch: webSearchInput(snapshot.webSearch),
     chat: snapshot.chat ? structuredClone(snapshot.chat.personalization) : undefined,
-    models: { upserts: [], removeAliases: [], defaultModel: undefined, oauthCredentialHandles: [] }
+    models: { upserts: [], removeAliases: [], defaultModel: undefined, oauthCredentialHandles: [] },
+    skills: skillInputFromSnapshot(snapshot.skills)
   };
 }
 
@@ -336,6 +344,7 @@ function countDirtyFields(snapshot: DesktopSettingsSnapshot, draft: DesktopSetti
   if (!sameWebSearch(draft.webSearch, snapshot.webSearch)) count += 1;
   if (draft.models.upserts.length || draft.models.removeAliases.length || draft.models.defaultModel || draft.models.oauthCredentialHandles.length) count += 1;
   if (snapshot.chat && draft.chat && !sameJson(draft.chat, snapshot.chat.personalization)) count += 1;
+  if (!sameJson(draft.skills, skillInputFromSnapshot(snapshot.skills))) count += 1;
   return count;
 }
 
@@ -354,7 +363,7 @@ function validDraft(draft: DesktopSettingsDraft): boolean {
     && value.currentWorkspace <= 1
     && value.crossWorkspace >= value.currentWorkspace
     && value.crossWorkspace <= 1
-  ));
+  )) && draft.skills.extraction.minToolCalls >= 1 && draft.skills.extraction.minToolCalls <= 64;
 }
 
 function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraft): DesktopSettingsSaveInput {
@@ -371,6 +380,7 @@ function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraf
     activity: sameJson(draft.activity, activityInputFromSnapshot(snapshot.activity)) ? undefined : draft.activity,
     memory: sameJson(draft.memory, snapshot.memory) ? undefined : draft.memory,
     webSearch: sameWebSearch(draft.webSearch, snapshot.webSearch) ? undefined : draft.webSearch,
+    skills: sameJson(draft.skills, skillInputFromSnapshot(snapshot.skills)) ? undefined : draft.skills,
     models: modelsDirty ? {
       upserts: draft.models.upserts,
       removeAliases: draft.models.removeAliases,
@@ -390,6 +400,18 @@ function activityInputFromSnapshot(value: DesktopSettingsSnapshot["activity"]): 
   return structuredClone(input);
 }
 
+function skillInputFromSnapshot(value: DesktopSettingsSnapshot["skills"] | undefined): DesktopSkillSettingsInput {
+  const skills = value ?? {
+    globalDefaults: {},
+    projectOverrides: {},
+    extraction: { enabled: true, minToolCalls: 5 }
+  };
+  return {
+    globalDefaults: { ...skills.globalDefaults },
+    projectOverrides: { ...skills.projectOverrides },
+    extraction: { ...skills.extraction }
+  };
+}
 
 function sameWebSearch(draft: DesktopWebSearchSettingsInput, snapshot: DesktopWebSearchSettings): boolean {
   return draft.enabled === snapshot.enabled

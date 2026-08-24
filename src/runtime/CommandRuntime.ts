@@ -39,6 +39,8 @@ import { DurableTaskRunStore } from "./TaskRunStore.js";
 import { AutomationStore } from "./AutomationScheduler.js";
 import { GoalGraphStore } from "./GoalGraphStore.js";
 import { CapabilityStore } from "./CapabilityStore.js";
+import { createProjectSkillKey } from "../extensions/skillRef.js";
+import { listEnabledProjectPluginPaths } from "../extensions/pluginRegistry.js";
 
 export interface CommandRuntime {
   workspaceRoot: string;
@@ -140,10 +142,16 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
       execute: async (task, context) => await executeSubagentTask(subagentOptions, task, context.signal, context.accessMode, context.agent)
     })
     : undefined;
-  let loadedPlugins: string[] = [];
+  const loadedPlugins: string[] = [];
+  const skillProjectOverrides = config.extensions.skillProjectOverrides[createProjectSkillKey(workspaceRoot)];
   try {
     // 技能扫描可能因项目内配置路径的软链/硬链问题抛错，放在清理保护内执行。
-    skills = await loadSkills({ workspaceRoot, projectPaths: config.extensions.skills });
+    skills = await loadSkills({
+      workspaceRoot,
+      projectPaths: config.extensions.skills,
+      globalDefaults: config.extensions.skillDefaults,
+      projectOverrides: skillProjectOverrides
+    });
     toolRegistry.registerUserTool(createSkillTool(() => requireSkillBundle(skills)));
     toolRegistry.registerUserTool(createSkillResourceTool(() => requireSkillBundle(skills)));
     // 先注册通用资源工具。若服务器工具归一化后撞名，connectConfiguredServers 中的
@@ -152,7 +160,18 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
       for (const tool of createMcpResourceTools(mcpHost)) toolRegistry.registerMcpTool(tool);
     }
     await mcpHost.connectConfiguredServers(workspaceRoot, config, toolRegistry);
-    loadedPlugins = await loadPlugins(workspaceRoot, config.extensions.plugins, config, toolRegistry, ai);
+    const managedPluginPaths = await listEnabledProjectPluginPaths(workspaceRoot).catch((error: unknown) => {
+      loadedPlugins.push(`managed plugins (failed: ${error instanceof Error ? error.message : String(error)})`);
+      return [];
+    });
+    for (const pluginPath of [...config.extensions.plugins, ...managedPluginPaths]) {
+      try {
+        loadedPlugins.push(...await loadPlugins(workspaceRoot, [pluginPath], config, toolRegistry, ai));
+      } catch (error) {
+        // 单个 Plugin 失败只影响它自己；主 Runtime、其它 Plugin 和内置工具仍可用。
+        loadedPlugins.push(`${pluginPath} (failed: ${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
     // 插件必须先完成 Provider/API 注册，默认模型才能使用插件提供的新类型。
     modelManager = await ModelManager.create(workspaceRoot, config, configStore, ai);
     if (config.extensions.subagent.enabled) {
@@ -285,7 +304,12 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
     listSkills: (): SkillDefinition[] => [...requireSkillBundle(skills).skills],
     expandSkillCommand: async (input: string): Promise<string> => await expandSkillCommandText(requireSkillBundle(skills), input),
     refreshSkills: async (): Promise<void> => {
-      skills = await loadSkills({ workspaceRoot, projectPaths: config.extensions.skills });
+      skills = await loadSkills({
+        workspaceRoot,
+        projectPaths: config.extensions.skills,
+        globalDefaults: config.extensions.skillDefaults,
+        projectOverrides: skillProjectOverrides
+      });
     },
     listSubagentAgents: async (): Promise<SubagentDefinition[]> => {
       subagentDefinitions = await loadAgentDefinitions();

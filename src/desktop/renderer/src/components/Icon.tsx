@@ -24,10 +24,12 @@ export type IconName =
   | "close"
   | "code"
   | "copy"
+  | "cube"
   | "cpu"
   | "database"
   | "diff"
   | "display"
+  | "download"
   | "edit"
   | "external"
   | "eye"
@@ -51,6 +53,7 @@ export type IconName =
   | "pin"
   | "person"
   | "plug"
+  | "puzzle"
   | "pull-request"
   | "refresh"
   | "remote"
@@ -121,10 +124,12 @@ function pathFor(name: IconName): React.JSX.Element {
     case "close": return <path {...common} d="m6 6 12 12M18 6 6 18" />;
     case "code": return <path {...common} d="m8.5 8-4 4 4 4M15.5 8l4 4-4 4M14 5l-4 14" />;
     case "copy": return <><rect {...common} height="12" rx="2" width="12" x="8" y="8" /><path {...common} d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>;
+    case "cube": return <><path {...common} d="m12 3 8 4.5v9L12 21l-8-4.5v-9z" /><path {...common} d="m4 7.5 8 4.5 8-4.5M12 12v9" /></>;
     case "cpu": return <><rect {...common} height="12" rx="2" width="12" x="6" y="6" /><path {...common} d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4M10 10h4v4h-4z" /></>;
     case "database": return <><ellipse {...common} cx="12" cy="5.5" rx="7.5" ry="2.8" /><path {...common} d="M4.5 5.5v6.5c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V5.5M4.5 12v6.5c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V12" /></>;
     case "diff": return <><path {...common} d="M7 4v16M17 4v16M4 8h6M14 16h6" /><path {...common} d="m17 6 2 2-2 2M17 14l-2 2 2 2" /></>;
     case "display": return <><rect {...common} height="13" rx="2" width="18" x="3" y="4" /><path {...common} d="M9 21h6M12 17v4" /></>;
+    case "download": return <><path {...common} d="M12 3v11" /><path {...common} d="m7 10 5 5 5-5" /><path {...common} d="M5 20h14" /></>;
     case "edit": return <><path {...common} d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path {...common} d="m15 5 4 4" /></>;
     case "external": return <><path {...common} d="M14 5h5v5M19 5l-8 8" /><path {...common} d="M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" /></>;
     case "eye": return <><path {...common} d="M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12Z" /><circle {...common} cx="12" cy="12" r="3" /></>;
@@ -150,6 +155,7 @@ function pathFor(name: IconName): React.JSX.Element {
     case "pin": return <path d="M12.864 3.26a3.01 3.01 0 0 1 4.576-.378l3.678 3.678a3.01 3.01 0 0 1-.378 4.576l-4.261 3.044c-.315.225-.479.55-.479.82v2.5c0 1.407-.96 2.451-2.024 2.91-1.071.462-2.497.437-3.52-.586l-2.433-2.433-4.316 4.316a1 1 0 1 1-1.414-1.414l4.316-4.316-2.433-2.434c-1.023-1.022-1.048-2.447-.586-3.519C4.049 8.959 5.093 8 6.5 8H9c.27 0 .595-.164.82-.479z" fill="currentColor" />;
     case "person": return <><circle {...common} cx="12" cy="8" r="5" /><path {...common} d="M20 21a8 8 0 0 0-16 0" /></>;
     case "plug": return <><path {...common} d="M12 22v-5" /><path {...common} d="M15 8V2" /><path {...common} d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z" /><path {...common} d="M9 8V2" /></>;
+    case "puzzle": return <path {...common} d="M9 4a2.5 2.5 0 1 1 4.8 1H19a1 1 0 0 1 1 1v5.2a2.5 2.5 0 1 0 0 4.8V20a1 1 0 0 1-1 1h-5.2a2.5 2.5 0 1 0-4.8 0H4a1 1 0 0 1-1-1v-5.2a2.5 2.5 0 1 0 0-4.8V6a1 1 0 0 1 1-1h5.2A2.5 2.5 0 0 1 9 4Z" />;
     case "pull-request": return <><circle {...common} cx="7" cy="5" r="2" /><circle {...common} cx="7" cy="19" r="2" /><circle {...common} cx="17" cy="19" r="2" /><path {...common} d="M7 7v10M14 5h1a2 2 0 0 1 2 2v10M14 2l-3 3 3 3" /></>;
     case "refresh": return <><path {...common} d="M20 11a8 8 0 1 0 1 4" /><path {...common} d="M20 5v6h-6" /></>;
     case "remote": return <><rect {...common} height="14" rx="2" width="20" x="2" y="3" /><path {...common} d="M8 21h8M12 17v4" /></>;

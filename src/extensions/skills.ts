@@ -4,7 +4,8 @@
  * 新根回合开始前只扫描 YAML frontmatter 的 name/description 并按总预算拼进 system prompt；
  * 完整指令由显式 `/skill:name` 提交或 invoke_skill 按需读取，references/scripts/assets
  * 仍由 read_skill_resource 按需读取。
- * 默认发现 Biny 受管目录和标准 .agents/skills；外部目录不会通过符号链接自动获得运行时授权。
+ * 默认发现 Biny 受管目录和各 Agent 的标准全局 Skill 根；全局入口中的已有软链会被保留，
+ * 项目 Skill 根仍禁止越界软链，避免工作区配置意外扩大运行时读取范围。
  */
 import { constants, promises as fs, type BigIntStats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
@@ -14,7 +15,10 @@ import { parseDocument } from "yaml";
 import { z } from "zod";
 import { ToolAccesses } from "../tools/access.js";
 import type { Tool } from "../tools/types.js";
-import { DEFAULT_PROJECT_SKILL_PATHS, defaultGlobalSkillRoots } from "./skillRoots.js";
+import { DEFAULT_PROJECT_SKILL_PATHS, defaultGlobalSkillRoots, GLOBAL_SKILL_ROOT_CONVENTIONS, type SkillRootSource } from "./skillRoots.js";
+import { resolveSkillActivation } from "./skillActivation.js";
+import { createSkillId, createSkillRef } from "./skillRef.js";
+import type { SkillRef } from "./skillTypes.js";
 
 const maxDiscoveredSkillCount = 256;
 const maxSkillMetadataBytes = 64 * 1024;
@@ -27,6 +31,8 @@ const maxListedSkillResources = 100;
 export type SkillScope = "project" | "global";
 
 export interface SkillDefinition {
+  ref: SkillRef;
+  id: string;
   name: string;
   description: string;
   /** Display path: project skills are workspace-relative, global skills use "~/". */
@@ -51,6 +57,8 @@ export interface LoadSkillsOptions {
   projectPaths: string[];
   /** Isolated global skill directory; omitted means official, legacy, and admin roots. */
   globalRoot?: string;
+  globalDefaults?: Readonly<Record<string, boolean>>;
+  projectOverrides?: Readonly<Record<string, boolean>>;
 }
 
 interface SkillFileSnapshot {
@@ -85,7 +93,7 @@ export async function loadSkills(options: LoadSkillsOptions): Promise<SkillBundl
         if (!absolutePath) continue;
         const files: SkillFileCandidate[] = [];
         await collectSkillFiles(repositoryRoot, absolutePath, files, seen);
-        await appendSkillDefinitions(skills, warnings, repositoryRoot, files, "project", seenNames);
+        await appendSkillDefinitions(skills, warnings, repositoryRoot, canonicalWorkspace, files, "project", seenNames, options, sourceForProjectSkill(files[0]?.path, canonicalWorkspace));
       }
       continue;
     }
@@ -93,24 +101,32 @@ export async function loadSkills(options: LoadSkillsOptions): Promise<SkillBundl
     if (!absolutePath) continue;
     const files: SkillFileCandidate[] = [];
     await collectSkillFiles(canonicalWorkspace, absolutePath, files, seen);
-    await appendSkillDefinitions(skills, warnings, canonicalWorkspace, files, "project", seenNames);
+    await appendSkillDefinitions(skills, warnings, canonicalWorkspace, canonicalWorkspace, files, "project", seenNames, options, sourceForProjectSkill(files[0]?.path, canonicalWorkspace));
   }
 
   // 显式传 globalRoot 时只扫描该目录（测试和嵌入方可隔离）；默认与 SkillHub 使用相同根目录。
   const globalRoots = options.globalRoot
     ? [options.globalRoot]
     : defaultGlobalSkillRoots(os.homedir());
-  for (const globalRoot of globalRoots) {
+  const resolvedGlobalRoots: Array<{ configuredPath: string; canonicalPath: string }> = [];
+  for (const configuredPath of globalRoots) {
+    try {
+      const canonicalPath = await resolveGlobalSkillRoot(configuredPath);
+      if (canonicalPath) resolvedGlobalRoots.push({ configuredPath, canonicalPath });
+    } catch (error) {
+      warnings.push(`Skipped skill root ${configuredPath}: ${errorMessage(error)}`);
+    }
+  }
+  const allowedGlobalDirectories = [...new Set(resolvedGlobalRoots.map(({ canonicalPath }) => canonicalPath))];
+  const globalSeen = new Set<string>();
+  for (const { configuredPath, canonicalPath } of resolvedGlobalRoots) {
     if (skills.length >= maxDiscoveredSkillCount) break;
     try {
-      const canonicalGlobalRoot = await resolveGlobalSkillRoot(globalRoot);
-      if (canonicalGlobalRoot) {
-        const globalFiles: SkillFileCandidate[] = [];
-        await collectSkillFiles(canonicalGlobalRoot, canonicalGlobalRoot, globalFiles, new Set());
-        await appendSkillDefinitions(skills, warnings, canonicalGlobalRoot, globalFiles, "global", seenNames);
-      }
+      const globalFiles: SkillFileCandidate[] = [];
+      await collectSkillFiles(canonicalPath, canonicalPath, globalFiles, globalSeen, true, allowedGlobalDirectories);
+      await appendSkillDefinitions(skills, warnings, canonicalPath, canonicalWorkspace, globalFiles, "global", seenNames, options, sourceForGlobalRoot(configuredPath));
     } catch (error) {
-      warnings.push(`Skipped skill root ${globalRoot}: ${errorMessage(error)}`);
+      warnings.push(`Skipped skill root ${canonicalPath}: ${errorMessage(error)}`);
     }
   }
 
@@ -161,14 +177,22 @@ async function appendSkillDefinitions(
   skills: SkillDefinition[],
   warnings: string[],
   rootPath: string,
+  projectRoot: string,
   files: SkillFileCandidate[],
   scope: SkillScope,
-  seenNames: Set<string>
+  seenNames: Set<string>,
+  options: LoadSkillsOptions,
+  source: SkillRootSource
 ): Promise<void> {
   for (const candidate of files.sort((left, right) => left.path.localeCompare(right.path))) {
     if (skills.length >= maxDiscoveredSkillCount) break;
     try {
-      const skill = await readSkillMetadata(rootPath, candidate, scope);
+      const skill = await readSkillMetadata(rootPath, projectRoot, candidate, scope, source);
+      if (!resolveSkillActivation({
+        ref: skill.ref,
+        globalDefaults: options.globalDefaults,
+        projectOverrides: options.projectOverrides
+      }).enabled) continue;
       const nameKey = `${scope}:${skill.name.toLocaleLowerCase()}`;
       if (seenNames.has(nameKey)) {
         warnings.push(`Skipped duplicate skill ${skill.name} at ${candidate.path}.`);
@@ -385,7 +409,7 @@ function resolveSkill(bundle: SkillBundle, requested: string, requestedPath?: st
   return selected;
 }
 
-async function readSkillMetadata(rootPath: string, candidate: SkillFileCandidate, scope: SkillScope): Promise<SkillDefinition> {
+async function readSkillMetadata(rootPath: string, projectRoot: string, candidate: SkillFileCandidate, scope: SkillScope, source: SkillRootSource): Promise<SkillDefinition> {
   const content = await readBoundedSkillFile(rootPath, candidate, maxSkillMetadataBytes);
   const standardSkill = path.basename(candidate.path) === "SKILL.md";
   let frontmatter: SkillFrontmatter = {};
@@ -413,7 +437,10 @@ async function readSkillMetadata(rootPath: string, candidate: SkillFileCandidate
   const description = truncateChars(rawDescription, maxSkillDescriptionChars);
   if (!description) throw new Error("Skill description cannot be empty.");
   const relative = path.relative(rootPath, candidate.path);
+  const ref = createSkillRef({ scope, name, projectRoot: scope === "project" ? projectRoot : undefined, source });
   return {
+    ref,
+    id: createSkillId(ref),
     name,
     description,
     path: scope === "global" ? globalDisplayPath(rootPath, relative) : relative,
@@ -428,6 +455,17 @@ function globalDisplayPath(rootPath: string, relative: string): string {
   const fromHome = path.relative(os.homedir(), rootPath);
   if (fromHome && !fromHome.startsWith("..") && !path.isAbsolute(fromHome)) return path.join("~", fromHome, relative);
   return path.join(rootPath, relative);
+}
+
+function sourceForProjectSkill(candidatePath: string | undefined, projectRoot: string): SkillRootSource {
+  if (candidatePath === undefined) return "biny";
+  const relative = path.relative(projectRoot, candidatePath).split(path.sep).join("/");
+  return relative.startsWith(".agents/skills/") || relative === ".agents/skills" ? "agents" : "biny";
+}
+
+function sourceForGlobalRoot(configuredPath: string): SkillRootSource {
+  const relative = path.relative(os.homedir(), path.resolve(configuredPath)).split(path.sep).join("/");
+  return GLOBAL_SKILL_ROOT_CONVENTIONS.find((convention) => convention.relativePath === relative)?.source ?? "agents";
 }
 
 /** SKILL.md 用上级目录名作为技能名，普通 .md 用文件名主干。 */
@@ -575,7 +613,14 @@ async function readSkillFileFresh(rootPath: string, filePath: string, maxBytes: 
   return await readBoundedSkillFile(rootPath, { path: filePath, snapshot: skillSnapshot(stat) }, maxBytes, true);
 }
 
-async function collectSkillFiles(rootPath: string, target: string, files: SkillFileCandidate[], seen: Set<string>): Promise<void> {
+async function collectSkillFiles(
+  rootPath: string,
+  target: string,
+  files: SkillFileCandidate[],
+  seen: Set<string>,
+  allowDirectDirectorySymlink = false,
+  allowedDirectorySymlinks: readonly string[] = []
+): Promise<void> {
   if (files.length >= maxDiscoveredSkillCount) return;
   let stat;
   try {
@@ -584,7 +629,17 @@ async function collectSkillFiles(rootPath: string, target: string, files: SkillF
     if (!isNotFound(error)) throw error;
     return;
   }
-  if (stat.isSymbolicLink()) return;
+  if (stat.isSymbolicLink()) {
+    // 全局 Skill 根本身是用户主动登记的入口，允许其第一层目录软链指向
+    // Claude/Codex/Cindy 等已有技能；进入技能目录后仍禁止内部软链。
+    if (!allowDirectDirectorySymlink || path.dirname(target) !== rootPath) return;
+    const canonical = await fs.realpath(target);
+    if (!allowedDirectorySymlinks.some((directory) => isPathInside(directory, canonical))) return;
+    const linkedStat = await fs.lstat(canonical, { bigint: true });
+    if (!linkedStat.isDirectory()) return;
+    await collectSkillFiles(canonical, canonical, files, seen);
+    return;
+  }
   if (await escapesRoot(rootPath, target)) throw new Error(`Skill path escapes workspace: ${target}`);
   if (stat.isFile()) {
     if (stat.nlink !== 1n) throw new Error(`Skill files cannot be hardlinks: ${target}`);
@@ -608,7 +663,7 @@ async function collectSkillFiles(rootPath: string, target: string, files: SkillF
     return;
   }
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (entry.name === "node_modules" || entry.name === ".git") continue;
+    if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === ".git") continue;
     await collectSkillFiles(rootPath, path.join(target, entry.name), files, seen);
     if (files.length >= maxDiscoveredSkillCount) return;
   }
@@ -645,6 +700,11 @@ async function resolveGlobalSkillRoot(globalRoot: string): Promise<string | unde
     if (isNotFound(error)) return undefined;
     throw error;
   }
+}
+
+function isPathInside(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === "" || !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
