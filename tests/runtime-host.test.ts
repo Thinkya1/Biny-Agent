@@ -355,6 +355,13 @@ async function main(): Promise<void> {
   assert.equal((await permissionUpdate).snapshot.permissionMode, "full-access", "权限切换必须广播给已连接的 TUI/App");
   assert.equal(client.getSnapshot().permissionMode, "full-access");
 
+  // Runtime 重建后 revision 从 0 重新开始；客户端应刷新 Host 快照并重试幂等的权限写入。
+  const staleRevision = client.getSnapshot().revision;
+  assert.notEqual(staleRevision, 0);
+  currentSnapshot = { ...currentSnapshot, revision: 0, permissionMode: "ask" };
+  await client.setPermissionMode("full-access");
+  assert.equal(client.getSnapshot().permissionMode, "full-access");
+
   assert.equal((await client.getPersonalizationState()).catalogRevision, "catalog-revision-1");
   await client.updateChatPersonalization({ personality: "friendly" }, "catalog-revision-1");
   assert.equal(chatExpectedRevision, "catalog-revision-1");

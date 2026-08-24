@@ -151,6 +151,8 @@ export class ToolExecutionCoordinator {
   private readonly duplicateToolCallIds = new Set<string>();
   private readonly duplicateExecutionCounts = new Map<string, number>();
   private permissionTail: Promise<void> = Promise.resolve();
+  /** 并行工具结果也必须按顺序占用同一份回合预算，归档 I/O 期间不能让其他结果绕过预留。 */
+  private toolResultBudgetTail: Promise<void> = Promise.resolve();
   /** Bytes actually handed back to the model this turn; drives the budget. */
   private inlineToolResultBytes = 0;
   /** Bytes tools produced this turn, archived or not; reported for diagnostics. */
@@ -661,24 +663,28 @@ export class ToolExecutionCoordinator {
    * `read_tool_result` — otherwise a long turn would still accumulate one
    * preview per step and overflow the window it was meant to protect.
    */
-  private async applyToolResultBudget(
+  private applyToolResultBudget(
     call: { id: string; name: string },
     sequence: number,
     result: unknown
   ): Promise<unknown> {
-    const budget = this.context.config.context.maxTurnToolResultBytes;
-    const output = serializeToolResult(result);
-    const resultBytes = Buffer.byteLength(output, "utf8");
-    this.producedToolResultBytes += resultBytes;
-    const remaining = Math.max(0, budget - this.inlineToolResultBytes);
-    if (resultBytes <= remaining || call.name === readToolResultToolName) {
-      this.inlineToolResultBytes += resultBytes;
-      return result;
-    }
+    const current = this.toolResultBudgetTail.then(async () => {
+      const budget = this.context.config.context.maxTurnToolResultBytes;
+      const output = serializeToolResult(result);
+      const resultBytes = Buffer.byteLength(output, "utf8");
+      this.producedToolResultBytes += resultBytes;
+      const remaining = Math.max(0, budget - this.inlineToolResultBytes);
+      if (resultBytes <= remaining || call.name === readToolResultToolName) {
+        this.inlineToolResultBytes += resultBytes;
+        return result;
+      }
 
-    const envelope = await this.archivedToolResultEnvelope(call, sequence, result, output, resultBytes, remaining);
-    this.inlineToolResultBytes += Buffer.byteLength(serializeToolResult(envelope), "utf8");
-    return envelope;
+      const envelope = await this.archivedToolResultEnvelope(call, sequence, result, output, resultBytes, remaining);
+      this.inlineToolResultBytes += Buffer.byteLength(serializeToolResult(envelope), "utf8");
+      return envelope;
+    });
+    this.toolResultBudgetTail = current.then(() => undefined, () => undefined);
+    return current;
   }
 
   private async archivedToolResultEnvelope(

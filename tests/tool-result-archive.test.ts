@@ -17,6 +17,44 @@ interface ExecutableTool {
   execute(toolCallId: string, input: Record<string, unknown>): Promise<unknown>;
 }
 
+async function testConcurrentToolResultBudget(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-tool-result-concurrent-"));
+  let recorder: SessionRecorder | undefined;
+  try {
+    await ensureAgentDirs(workspaceRoot);
+    const config = structuredClone(defaultConfig) as AgentConfig;
+    config.context.maxTurnToolResultBytes = 1_024;
+    config.permission.mode = "full-access";
+    const registry = new ToolRegistry();
+    registry.register(largeResultTool());
+    recorder = new SessionRecorder(workspaceRoot, "concurrent-archive-test");
+    const coordinator = new ToolExecutionCoordinator({
+      workspaceRoot,
+      config,
+      recorder,
+      toolRegistry: registry
+    }, new PermissionManager(config.permission), () => undefined);
+    const tool = nativeTool(coordinator, "large_result");
+
+    const results = await Promise.all([
+      tool.execute("parallel-first", {}),
+      tool.execute("parallel-second", {})
+    ]);
+    const archivedCount = results.filter((result) => {
+      if (typeof result !== "object" || result === null) return false;
+      return (result as { archived?: unknown }).archived === true;
+    }).length;
+    assert.equal(archivedCount, 1, "parallel results must reserve the shared turn budget independently");
+    assert.equal(results.filter((result) => {
+      if (typeof result !== "object" || result === null) return false;
+      return (result as { result?: unknown }).result === "x".repeat(768);
+    }).length, 1);
+  } finally {
+    await recorder?.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-tool-result-archive-"));
   try {
@@ -106,4 +144,5 @@ function nativeTool(coordinator: ToolExecutionCoordinator, name: string): Execut
   };
 }
 
+await testConcurrentToolResultBudget();
 await main();

@@ -2200,20 +2200,20 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   }
 
   async refreshModel(): Promise<ModelRuntimeInfo> {
-    return await this.request<ModelRuntimeInfo>("agent.refresh-model", { expectedRevision: this.currentRevision() });
+    return await this.requestWithRuntimeRevision<ModelRuntimeInfo>("agent.refresh-model", {});
   }
 
   async switchModel(alias: string, thinking?: ThinkingSelection): Promise<ModelRuntimeInfo> {
-    return await this.request<ModelRuntimeInfo>("agent.switch-model", { alias, thinking, expectedRevision: this.currentRevision() });
+    return await this.requestWithRuntimeRevision<ModelRuntimeInfo>("agent.switch-model", { alias, thinking });
   }
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
-    const nextMode = await this.request<PermissionMode>("agent.permission-mode", { mode, expectedRevision: this.currentRevision() });
+    const nextMode = await this.requestWithRuntimeRevision<PermissionMode>("agent.permission-mode", { mode });
     if (this.snapshot) this.snapshot = { ...this.snapshot, permissionMode: nextMode };
   }
 
   async runPermissionCommand(args: string[]): Promise<string> {
-    return await this.request<string>("agent.permission-command", { args, expectedRevision: this.currentRevision() });
+    return await this.requestWithRuntimeRevision<string>("agent.permission-command", { args });
   }
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -2300,10 +2300,7 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
 
   /** 让 owner 按指定会话或新会话重建 AgentSession。 */
   async restartRuntime(sessionId?: string): Promise<InteractiveRuntimeSnapshot> {
-    const result = await this.request<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }>("runtime.restart", {
-      sessionId,
-      expectedRevision: this.currentRevision()
-    });
+    const result = await this.requestWithRuntimeRevision<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }>("runtime.restart", { sessionId });
     this.snapshot = result.snapshot;
     this.sequence = result.sequence;
     return result.snapshot;
@@ -2611,6 +2608,25 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     }));
   }
 
+  /** Runtime 重建会重置快照 revision；这些幂等控制写入可在刷新快照后安全重试一次。 */
+  private async requestWithRuntimeRevision<T>(operation: string, payload: Record<string, unknown>): Promise<T> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.request<T>(operation, { ...payload, expectedRevision: this.currentRevision() });
+      } catch (error) {
+        if (attempt > 0 || !isRuntimeRevisionConflict(error)) throw error;
+        await this.refreshRuntimeSnapshot();
+      }
+    }
+    throw new Error("Runtime Host revision retry was exhausted.");
+  }
+
+  private async refreshRuntimeSnapshot(): Promise<void> {
+    const current = await this.request<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }>("snapshot", {});
+    this.snapshot = current.snapshot;
+    this.sequence = current.sequence;
+  }
+
   private createCompletion(runId: string): Promise<AgentRunOutcome> {
     return new Promise<AgentRunOutcome>((resolve, reject) => this.completions.set(runId, { resolve, reject }));
   }
@@ -2747,6 +2763,9 @@ function registrationMatchesCurrentEnvironment(
 }
 
 function operationLane(operation: string): OperationLane {
+  // Runtime 重建会替换快照并重置 revision。权限模式写入必须与重建共用 mutation
+  // 队列，避免在 owner 切换 runtime 的中间状态读取旧 revision。
+  if (operation === "agent.permission-mode" || operation === "agent.permission-command" || operation === "runtime.restart") return "mutation";
   // Admission 与取消/审批共享一条因果队列。这样客户端先发 submit、随后立即发
   // cancel 时，取消不会在 activeRun 建立前先执行成一个无效 no-op。
   if (
@@ -3208,6 +3227,10 @@ function isTransientHostError(error: unknown): boolean {
     || message.includes("disconnected")
     || message.includes("registration is not available")
     || message.includes("did not become ready");
+}
+
+function isRuntimeRevisionConflict(error: unknown): boolean {
+  return asError(error).message.startsWith("Runtime Host revision conflict:");
 }
 
 function readRecoveryStopReason(value: unknown): AgentRunOutcome["stopReason"] {

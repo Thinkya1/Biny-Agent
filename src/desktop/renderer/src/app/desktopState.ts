@@ -28,7 +28,8 @@ export function applyUpdatesToWorkspace(
     ...workspace,
     sessions,
     runtime,
-    permissionMode: runtime?.permissionMode ?? workspace.permissionMode
+    // 权限模式来自共享持久化配置；Runtime 快照可能仍是旧 Host 的内存状态，不能反向覆盖它。
+    permissionMode: workspace.permissionMode
   };
 }
 
