@@ -9,6 +9,10 @@ import type { ModelCapabilities, ModelContextBudget, ModelLimits, ProviderModelD
 
 export const defaultModelContextWindow = 32_768;
 export const defaultModelOutputTokens = 8_192;
+/** Codex 默认把原始窗口的 95% 视为可用于输入的有效窗口。 */
+export const defaultEffectiveContextWindowPercent = 95;
+/** Codex 默认在原始窗口达到 90% 时触发自动压缩。 */
+export const defaultAutoCompactContextWindowPercent = 90;
 const defaultToolSchemaReserveTokens = 1_024;
 const defaultSystemPromptReserveTokens = 1_024;
 const defaultProtocolSafetyMarginTokens = 512;
@@ -217,8 +221,9 @@ export function normalizeModelMetadata(
 }
 
 /**
- * 上下文预算以模型自身窗口为基准，再扣除输出、reasoning、工具 schema、system prompt
- * 和协议安全边界；`configuredMaxInputTokens` 只是用户额外设置的输入上限。
+ * 上下文预算以模型自身窗口为基准：先按 Codex 的有效窗口比例保留统一 headroom，再叠加
+ * provider 硬上限和用户额外上限。输出、reasoning、工具 schema 等字段只用于诊断与展示，
+ * 不能再次从有效窗口中重复扣除。
  */
 export function modelContextBudget(
   model: ModelAliasConfig,
@@ -250,23 +255,31 @@ export function modelContextBudget(
     ?? modelLimits?.systemPromptReserveTokens
     ?? defaultSystemPromptReserveTokens;
   const protocolSafetyMarginTokens = modelLimits?.protocolSafetyMarginTokens ?? defaultProtocolSafetyMarginTokens;
-  const fixedReserveTokens = outputReserveTokens
-    + reasoningReserveTokens
-    + toolSchemaReserveTokens
-    + systemPromptReserveTokens
-    + protocolSafetyMarginTokens;
-  // 没声明窗口时按「输入上限 + 输出预留」反推，至少给到默认窗口。
+  // 没声明窗口时按「输入上限 / 有效窗口比例」反推，至少给到默认窗口；这只是保守的
+  // 展示与组装 fallback，不把具体 provider 的旧 reserve 公式重新带回主预算。
   const contextWindow = model.contextWindow
     ?? Math.max(
       defaultModelContextWindow,
-      (model.maxInputTokens ?? configuredMaxInputTokens ?? 0) + fixedReserveTokens
+      Math.ceil(((model.maxInputTokens ?? configuredMaxInputTokens ?? 0) * 100) / defaultEffectiveContextWindowPercent)
     );
-  // maxInputTokens 是 provider 的硬上限；configuredMaxInputTokens 是用户额外上限，
-  // 两者都要在扣除输出、reasoning、工具 schema、system prompt 和协议安全边界后再取最小值。
-  const availableInputTokens = Math.max(minimumUsableInputTokens, contextWindow - fixedReserveTokens);
+  const effectiveContextWindowPercent = defaultEffectiveContextWindowPercent;
+  const effectiveContextWindow = Math.max(
+    minimumUsableInputTokens,
+    Math.floor((contextWindow * effectiveContextWindowPercent) / 100)
+  );
+  const contextReserveTokens = Math.max(0, contextWindow - effectiveContextWindow);
+  const autoCompactTokenLimit = Math.max(
+    1,
+    Math.min(
+      effectiveContextWindow,
+      Math.floor((contextWindow * defaultAutoCompactContextWindowPercent) / 100)
+    )
+  );
+  // maxInputTokens 是 provider 的硬上限与用户额外上限叠加后的可发输入预算；它不再
+  // 直接等于「模型窗口减去一组固定 reserve」。
   const providerInputLimit = model.maxInputTokens ?? modelLimits?.maxInputTokens;
   const cappedInputTokens = Math.min(
-    availableInputTokens,
+    effectiveContextWindow,
     providerInputLimit ?? Number.MAX_SAFE_INTEGER,
     configuredMaxInputTokens ?? Number.MAX_SAFE_INTEGER
   );
@@ -279,6 +292,10 @@ export function modelContextBudget(
   return {
     modelAlias,
     contextWindow,
+    effectiveContextWindow,
+    effectiveContextWindowPercent,
+    contextReserveTokens,
+    autoCompactTokenLimit,
     maxInputTokens: Math.min(contextWindow, Math.max(inputFloor, cappedInputTokens)),
     maxOutputTokens,
     outputReserveTokens,

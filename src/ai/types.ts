@@ -50,6 +50,13 @@ export interface ModelLimits {
 export interface ModelContextBudget {
   modelAlias?: string;
   contextWindow: number;
+  /** 按 Codex 模型元数据口径折算后的可用输入窗口。 */
+  effectiveContextWindow?: number;
+  effectiveContextWindowPercent?: number;
+  /** 原始模型窗口中没有计入可用输入的 headroom；它不是已使用 token。 */
+  contextReserveTokens?: number;
+  /** 默认自动压缩参考线；它与 headroom 和 provider 硬上限分别计算。 */
+  autoCompactTokenLimit?: number;
   maxInputTokens: number;
   maxOutputTokens: number | undefined;
   outputReserveTokens?: number;

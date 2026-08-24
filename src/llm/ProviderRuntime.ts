@@ -7,7 +7,7 @@
 import type { AgentModel, ModelStreamContext, ModelStreamEvent, ModelStreamOptions } from "../agent/core/types.js";
 import { effectiveThinkingSelection, modelCapabilities, modelReasoningConfig, modelThinkingLevelMap, nativeReasoningEffort, normalizeModelMetadata, reasoningBudgetTokens } from "../ai/capabilities.js";
 import { fetchModelCatalogSnapshot } from "../ai/modelCatalog.js";
-import { accessPathThinkingLevelMap, isOpenCodeModelEndpoint, lookupModelMetadata, thinkingLevelMapForEfforts, type ModelMetadata } from "../ai/modelMetadata.js";
+import { accessPathThinkingLevelMap, isOpenCodeModelEndpoint, lookupModelMetadata, openCodeThinkingLevelMap, thinkingLevelMapForEfforts, type ModelMetadata } from "../ai/modelMetadata.js";
 import { providerDefinition, providerProtocol } from "../ai/provider.js";
 import type { ModelCatalogEntry, ProviderDefinition } from "../ai/types.js";
 import type { AgentConfig, ModelAliasConfig, ModelApiBackend, ModelCompatibility, ProviderConfig, ThinkingLevelMap } from "../config/schema.js";
@@ -124,6 +124,9 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       etag = result.etag;
       lastModified = result.lastModified;
     }
+    // 空目录既可能表示账号确实没有模型，也可能是服务商响应结构发生了变化。两种情况都
+    // 不能覆盖上一份已验证目录，否则一次异常响应就会让全部客户端突然失去模型元数据。
+    if (models.length === 0) throw new Error(`Provider ${this.id} returned an empty model catalog.`);
     signal?.throwIfAborted();
     this.restoreModels(models);
     await this.modelsStore?.write(this.id, {
@@ -147,18 +150,15 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
     const generated = lookupModelMetadata(this.config.type, model.model, this.config.baseUrl);
     const generatedModel = generated ? metadataToModel(this.id, this.config.type, model.model, generated) : undefined;
     const catalogModel = catalog
-      ? openCodeKnownModelOverride(
-        this.config.baseUrl,
-        catalogEntryToModel(catalog, generated !== undefined),
-        generatedModel
-      )
+      ? catalogEntryToModel(catalog, generated !== undefined)
       : undefined;
     const catalogBase = catalogModel && generatedModel
       ? mergeModelMetadata(generatedModel, catalogModel)
       : catalogModel ?? generatedModel;
     const merged = catalogBase ? mergeModelMetadata(catalogBase, model) : model;
+    const accessPathModel = openCodeKnownModelOverride(this.config.baseUrl, merged, generatedModel);
     return normalizeModelMetadata(
-      { ...merged, compatibility: mergeCompatibility(this.config.compatibility, merged.compatibility) },
+      { ...accessPathModel, compatibility: mergeCompatibility(this.config.compatibility, accessPathModel.compatibility) },
       this.definition.modelDefaults
     );
   }
@@ -302,7 +302,11 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
 
   private normalizeCatalogEntry(entry: ModelCatalogEntry): ModelCatalogEntry {
     const model = catalogEntryToModel(entry);
-    const normalized = normalizeModelMetadata(model, this.definition.modelDefaults);
+    const generated = lookupModelMetadata(this.config.type, model.model, this.config.baseUrl);
+    const generatedModel = generated ? metadataToModel(this.id, this.config.type, model.model, generated) : undefined;
+    const metadataModel = generatedModel ? mergeModelMetadata(generatedModel, model) : model;
+    const accessPathModel = openCodeKnownModelOverride(this.config.baseUrl, metadataModel, generatedModel);
+    const normalized = normalizeModelMetadata(accessPathModel, this.definition.modelDefaults);
     const reasoning = modelReasoningConfig(normalized);
     return {
       ...entry,
@@ -490,22 +494,28 @@ function resolveSimpleThinking(
 
 function openCodeKnownModelOverride(
   baseUrl: string | undefined,
-  catalogModel: ModelAliasConfig | undefined,
+  model: ModelAliasConfig,
   generatedModel: ModelAliasConfig | undefined
-): ModelAliasConfig | undefined {
-  if (!isOpenCodeModelEndpoint(baseUrl) || !catalogModel || !generatedModel) return catalogModel;
-  const catalogDisablesReasoning = catalogModel.capabilities?.reasoning === false
-    && Object.keys(catalogModel.thinkingLevelMap ?? {}).length === 0;
-  if (!catalogDisablesReasoning) return catalogModel;
+): ModelAliasConfig {
+  if (!isOpenCodeModelEndpoint(baseUrl)) return model;
+  const hasThinkingLevels = Object.entries(model.thinkingLevelMap ?? {})
+    .some(([level, native]) => level !== "off" && native !== null);
+  if (hasThinkingLevels) return model;
+  const generatedThinkingLevelMap = generatedModel?.thinkingLevelMap;
+  const thinkingLevelMap = generatedThinkingLevelMap && Object.entries(generatedThinkingLevelMap)
+    .some(([level, native]) => level !== "off" && native !== null)
+    ? generatedThinkingLevelMap
+    : openCodeThinkingLevelMap(baseUrl, model.model);
+  if (!thinkingLevelMap) return model;
   return {
-    ...catalogModel,
+    ...model,
     capabilities: {
-      ...catalogModel.capabilities,
-      reasoning: generatedModel.capabilities?.reasoning,
-      reasoningStream: generatedModel.capabilities?.reasoningStream,
-      reasoningSummary: generatedModel.capabilities?.reasoningSummary
+      ...model.capabilities,
+      reasoning: true,
+      reasoningStream: generatedModel?.capabilities?.reasoningStream ?? true,
+      reasoningSummary: generatedModel?.capabilities?.reasoningSummary
     },
-    thinkingLevelMap: undefined
+    thinkingLevelMap
   };
 }
 

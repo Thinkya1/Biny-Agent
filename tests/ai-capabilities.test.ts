@@ -53,7 +53,11 @@ assert.equal(thinkingSelectionForModel("off", {
 }), "off");
 const budget = modelContextBudget(model, config.context.maxInputTokens, "small");
 assert.equal(budget.contextWindow, 16_384);
-assert.equal(budget.maxInputTokens, 9_728);
+assert.equal(budget.effectiveContextWindow, 15_564);
+assert.equal(budget.effectiveContextWindowPercent, 95);
+assert.equal(budget.contextReserveTokens, 820);
+assert.equal(budget.autoCompactTokenLimit, 14_745);
+assert.equal(budget.maxInputTokens, 15_564);
 assert.equal(budget.maxOutputTokens, 4_096);
 assert.equal(budget.reasoningReserveTokens, 0);
 assert.equal(budget.toolSchemaReserveTokens, 1_024);
@@ -65,7 +69,7 @@ assert.equal(nativeReasoningEffort(model, "high"), "high");
 assert.equal(reasoningBudgetTokens(model, "high"), 3_072);
 
 const reasoningBudget = modelContextBudget(model, undefined, "small", { reasoning: "high" });
-assert.equal(reasoningBudget.maxInputTokens, 6_656);
+assert.equal(reasoningBudget.maxInputTokens, 15_564);
 assert.equal(reasoningBudget.reasoningReserveTokens, 3_072);
 
 const deepseekUnknownAliasConfig = configSchema.parse({
@@ -114,6 +118,77 @@ const normalizedOpenCodeFlash = new ProviderRegistry(openCodeFlashConfig, [[
 assert.equal(normalizedOpenCodeFlash.contextWindow, 1_000_000);
 assert.equal(modelCapabilities(normalizedOpenCodeFlash).reasoning, true);
 assert.deepEqual(modelReasoningConfig(normalizedOpenCodeFlash)?.efforts, ["low", "high", "max"]);
+
+for (const modelId of ["minimax-m3", "gpt-5.6-luna", "qwen3-coder-plus"]) {
+  const openCodeGoConfig = configSchema.parse({
+    ...defaultConfig,
+    defaultModel: "opencode-go",
+    providers: {
+      "opencode-ai": {
+        type: "openai-compatible",
+        baseUrl: "https://opencode.ai/zen/go/v1",
+        apiKey: "test-key"
+      }
+    },
+    models: {
+      "opencode-go": {
+        provider: "opencode-ai",
+        model: modelId,
+        capabilities: { tools: true, reasoning: false, streaming: true },
+        thinkingLevelMap: {}
+      }
+    }
+  });
+  const normalizedOpenCodeGo = new ProviderRegistry(openCodeGoConfig).forModel("opencode-go").model;
+  assert.equal(modelCapabilities(normalizedOpenCodeGo).reasoning, true);
+  assert.deepEqual(modelReasoningConfig(normalizedOpenCodeGo)?.efforts, ["high", "max"]);
+  assert.deepEqual(modelThinkingLevelMap(normalizedOpenCodeGo), { off: "none", high: "high", max: "max" });
+
+  const listedOpenCodeGo = new ProviderRegistry(openCodeGoConfig, [[
+    "opencode-ai",
+    [{
+      id: modelId,
+      displayName: modelId,
+      provider: "opencode-ai",
+      capabilities: { tools: true, reasoning: false, streaming: true },
+      reasoningEfforts: [],
+      thinkingLevelMap: {}
+    }]
+  ]]).require("opencode-ai").getModels().find((entry) => entry.id === modelId);
+  assert.equal(listedOpenCodeGo?.capabilities.reasoning, true);
+  assert.deepEqual(listedOpenCodeGo?.reasoningEfforts, ["high", "max"]);
+  assert.deepEqual(listedOpenCodeGo?.thinkingLevelMap, { off: "none", high: "high", max: "max" });
+}
+
+const openCodeZenConfig = configSchema.parse({
+  ...defaultConfig,
+  defaultModel: "opencode-zen",
+  providers: {
+    "opencode-ai": {
+      type: "openai-compatible",
+      baseUrl: "https://opencode.ai/zen/v1",
+      apiKey: "test-key"
+    }
+  },
+  models: {
+    "opencode-zen": { provider: "opencode-ai", model: "minimax-m3" }
+  }
+});
+const listedOpenCodeZen = new ProviderRegistry(openCodeZenConfig, [[
+  "opencode-ai",
+  [{
+    id: "minimax-m3",
+    displayName: "minimax-m3",
+    provider: "opencode-ai",
+    capabilities: { tools: true, reasoning: false, streaming: true },
+    reasoningEfforts: [],
+    thinkingLevelMap: {}
+  }]
+]]).require("opencode-ai").getModels().find((entry) => entry.id === "minimax-m3");
+assert.equal(listedOpenCodeZen?.capabilities.reasoning, true);
+assert.deepEqual(listedOpenCodeZen?.reasoningEfforts, ["high", "max"]);
+assert.deepEqual(listedOpenCodeZen?.thinkingLevelMap, { off: "none", high: "high", max: "max" });
+assert.equal(listedOpenCodeZen?.contextWindow, 1_000_000);
 
 const geminiFlashConfig = configSchema.parse({
   ...defaultConfig,

@@ -52,6 +52,13 @@ export interface ContextBudgetStatus {
   maxTokens: number;
   usedTokens: number;
   contextWindow?: number;
+  /** 按模型有效窗口比例计算的可用输入窗口，不等于原始 contextWindow。 */
+  effectiveContextWindow?: number;
+  effectiveContextWindowPercent?: number;
+  /** 原始窗口中的 headroom；展示用，不计入 usedTokens。 */
+  contextReserveTokens?: number;
+  /** 默认自动压缩参考线；与 contextReserveTokens 不是同一个概念。 */
+  autoCompactTokenLimit?: number;
   maxOutputTokens?: number;
   modelAlias?: string;
   /** 本轮所有候选上下文都保留时的估算量。 */

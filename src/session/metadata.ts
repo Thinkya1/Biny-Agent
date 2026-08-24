@@ -24,6 +24,11 @@ export interface SessionContextUsage {
   maxTokens: number;
   usedTokens: number;
   contextWindow?: number;
+  /** 按模型有效窗口比例计算的可用输入窗口；历史 session 没有时按旧字段恢复。 */
+  effectiveContextWindow?: number;
+  effectiveContextWindowPercent?: number;
+  contextReserveTokens?: number;
+  autoCompactTokenLimit?: number;
   maxOutputTokens?: number;
   modelAlias?: string;
   requestedTokens?: number;

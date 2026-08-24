@@ -34,9 +34,19 @@ export interface ModelChoice {
   supportsTools?: boolean;
   capabilities?: ReturnType<typeof modelCapabilities>;
   contextWindow?: number;
+  effectiveContextWindow?: number;
+  effectiveContextWindowPercent?: number;
+  contextReserveTokens?: number;
+  autoCompactTokenLimit?: number;
   /** Provider 声明的输入硬上限；实际可发预算见 `inputBudgetTokens`。 */
   maxInputTokens?: number;
   inputBudgetTokens?: number;
+  /** 上下文窗口中为输出和运行时协议预留的 token；供桌面端展示完整占用。 */
+  outputReserveTokens?: number;
+  reasoningReserveTokens?: number;
+  toolSchemaReserveTokens?: number;
+  systemPromptReserveTokens?: number;
+  protocolSafetyMarginTokens?: number;
   maxOutputTokens?: number;
   limits?: ModelAliasConfig["limits"];
   efforts: ReasoningEffort[];
@@ -183,6 +193,9 @@ export class ModelRegistry {
     const capabilities = modelCapabilities(normalized);
     const reasoning = modelReasoningConfig(normalized);
     const thinkingLevelMap = modelThinkingLevelMap(normalized);
+    const contextBudget = modelContextBudget(normalized, this.config.context.maxInputTokens, alias, {
+      reasoning: effectiveThinkingSelection(normalized, this.config.thinking)
+    });
     return {
       alias,
       displayName: normalized.displayName ?? normalized.model,
@@ -193,11 +206,18 @@ export class ModelRegistry {
       modelKey: modelKey(normalized.provider, normalized.model),
       supportsTools: capabilities.tools,
       capabilities,
-      contextWindow: normalized.contextWindow,
+      contextWindow: contextBudget.contextWindow,
+      effectiveContextWindow: contextBudget.effectiveContextWindow,
+      effectiveContextWindowPercent: contextBudget.effectiveContextWindowPercent,
+      contextReserveTokens: contextBudget.contextReserveTokens,
+      autoCompactTokenLimit: contextBudget.autoCompactTokenLimit,
       maxInputTokens: normalized.maxInputTokens ?? normalized.limits?.maxInputTokens,
-      inputBudgetTokens: modelContextBudget(normalized, this.config.context.maxInputTokens, alias, {
-        reasoning: effectiveThinkingSelection(normalized, this.config.thinking)
-      }).maxInputTokens,
+      inputBudgetTokens: contextBudget.maxInputTokens,
+      outputReserveTokens: contextBudget.outputReserveTokens,
+      reasoningReserveTokens: contextBudget.reasoningReserveTokens,
+      toolSchemaReserveTokens: contextBudget.toolSchemaReserveTokens,
+      systemPromptReserveTokens: contextBudget.systemPromptReserveTokens,
+      protocolSafetyMarginTokens: contextBudget.protocolSafetyMarginTokens,
       maxOutputTokens: normalized.maxOutputTokens,
       limits: normalized.limits,
       efforts: [...(reasoning?.efforts ?? [])],

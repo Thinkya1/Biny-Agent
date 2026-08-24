@@ -1,7 +1,8 @@
-import { createFileConfigStore, type AgentConfigStore } from "../config/store.js";
+import { createFileConfigStore, updateConfig, type AgentConfigStore } from "../config/store.js";
 import {
   configSchema,
   type AgentConfig,
+  type ModelAliasConfig,
   type ModelPricing
 } from "../config/schema.js";
 import {
@@ -30,6 +31,10 @@ export interface ModelRuntimeInfo {
   reasoningLabel: string;
   thinking: ThinkingSelection;
   contextWindow?: number;
+  effectiveContextWindow?: number;
+  effectiveContextWindowPercent?: number;
+  contextReserveTokens?: number;
+  autoCompactTokenLimit?: number;
   maxInputTokens?: number;
   pricing?: ModelPricing;
 }
@@ -104,16 +109,14 @@ export class ModelManager {
 
     const refreshed = await this.runtime.refreshActiveCredential(signal);
     if (refreshed) {
-      const resolved = resolveModelConfig(this.config);
-      const nextConfig = configSchema.parse({
-        ...this.config,
+      const providerAlias = resolveModelConfig(this.config).providerAlias;
+      const effective = await updateConfig(this.configStore, this.workspaceRoot, (persisted) => configSchema.parse({
+        ...persisted,
         providers: {
-          ...this.config.providers,
-          [resolved.providerAlias]: refreshed
+          ...persisted.providers,
+          [providerAlias]: refreshed
         }
-      });
-      await this.configStore.save(nextConfig, this.workspaceRoot);
-      const effective = await this.configStore.load(this.workspaceRoot).catch(() => nextConfig);
+      }));
       this.applyConfig(effective);
     }
 
@@ -125,49 +128,39 @@ export class ModelManager {
   }
 
   async switchModel(alias: string, thinking?: ThinkingSelection): Promise<ModelRuntimeInfo> {
-    // 以盘上的配置为基准，而不是内存里的快照：同一份配置可能已被别的运行时改过
-    // （桌面端多项目共用配置、权限模式变更、OAuth token 刷新等），整份写回内存快照会把那些
-    // 改动覆盖掉。读不到就退回内存快照，行为与以前一致。
-    const persisted = await this.configStore.load(this.workspaceRoot).catch(() => this.config);
     const catalogs = this.runtime.catalogsSnapshot();
-    const persistedRuntime = new ModelRuntime(persisted, catalogs, this.ai, this.modelsStore);
-    // 解析允许先找到模型，再由原生模型工厂给出具体的 endpoint/credential 错误；
-    // 这样 CLI/TUI 不会把缺少哪个环境变量的信息吞掉。
-    const resolved = persistedRuntime.resolve(alias);
-    const modelAlias = resolved.alias;
-    const model = resolved.model;
-    // 只保存原始配置或动态模型的最小 alias；`resolved.model` 已包含目录/Provider 补齐的
-    // 元数据，直接写回会把自动推导的 contextWindow 伪装成用户覆盖。
-    const persistedModel = persisted.models[modelAlias] ?? {
-      provider: resolved.providerAlias,
-      model: model.model
-    };
-    const selection = resolveThinkingSelection({ ...persisted, models: { ...persisted.models, [modelAlias]: model } }, modelAlias, thinking);
-    const effort = selection === "off"
-      ? modelReasoningConfig(model)?.defaultEffort ?? persisted.thinking.effort
-      : selection;
-    const candidate = configSchema.parse({
-      ...persisted,
-      defaultModel: modelAlias,
-      models: { ...persisted.models, [modelAlias]: persistedModel },
-      thinking: { enabled: selection !== "off", effort }
-    });
+    const effective = await updateConfig(this.configStore, this.workspaceRoot, (persisted) => {
+      const persistedRuntime = new ModelRuntime(persisted, catalogs, this.ai, this.modelsStore);
+      // 解析允许先找到模型，再由原生模型工厂给出具体的 endpoint/credential 错误；
+      // 这样 CLI/TUI 不会把缺少哪个环境变量的信息吞掉。
+      const resolved = persistedRuntime.resolve(alias);
+      const modelAlias = resolved.alias;
+      const model = resolved.model;
+      // 除了修复旧的推理字段外，只保存原始配置或动态模型的最小 alias；`resolved.model` 已包含
+      // 目录/Provider 补齐的元数据，直接写回会把自动推导的 contextWindow 伪装成用户覆盖。
+      const persistedModel = persisted.models[modelAlias] ?? {
+        provider: resolved.providerAlias,
+        model: model.model
+      };
+      const candidateModel = modelConfigForSwitch(persistedModel, model);
+      const selection = resolveThinkingSelection({ ...persisted, models: { ...persisted.models, [modelAlias]: model } }, modelAlias, thinking);
+      const effort = selection === "off"
+        ? modelReasoningConfig(model)?.defaultEffort ?? persisted.thinking.effort
+        : selection;
+      const candidate = configSchema.parse({
+        ...persisted,
+        defaultModel: modelAlias,
+        models: { ...persisted.models, [modelAlias]: candidateModel },
+        thinking: { enabled: selection !== "off", effort }
+      });
 
-    // Validate endpoint and credentials before changing memory or the config file.
-    const nextRuntime = new ModelRuntime(candidate, catalogs, this.ai, this.modelsStore);
-    const nextSettings = nextRuntime.createModelSettings();
-    await this.configStore.save(candidate, this.workspaceRoot);
+      // Validate endpoint and credentials before allowing this version to be written.
+      new ModelRuntime(candidate, catalogs, this.ai, this.modelsStore).createModelSettings();
+      return candidate;
+    });
     // 项目覆盖的 defaultModel/thinking 仍然优先；保存后重新读取有效配置，避免内存状态
     // 短暂显示一个实际上被项目覆盖遮住的模型。
-    const effective = await this.configStore.load(this.workspaceRoot).catch(() => candidate);
-    if (effective === candidate) {
-      Object.assign(this.config, effective);
-      this.runtime = nextRuntime;
-      this.activeSettings = nextSettings;
-      this.observedConfigRevision = this.configStore.revision?.();
-    } else {
-      this.applyConfig(effective);
-    }
+    this.applyConfig(effective);
     return this.getInfo();
   }
 
@@ -185,6 +178,23 @@ export class ModelManager {
     this.activeSettings = nextSettings;
     this.observedConfigRevision = this.configStore.revision?.();
   }
+}
+
+/**
+ * 用户早期保存的 OpenCode Go 模型可能带有过时的 `reasoning: false` 和空档位表。
+ * 只有运行时已经确认该模型具备思考档位时才修复这两个字段，其他用户显式关闭推理的模型
+ * 仍保持原配置，不把目录推断扩散到配置文件。
+ */
+function modelConfigForSwitch(persistedModel: ModelAliasConfig, resolvedModel: ModelAliasConfig): ModelAliasConfig {
+  if (persistedModel.capabilities?.reasoning !== false || !modelReasoningConfig(resolvedModel)) return persistedModel;
+  return {
+    ...persistedModel,
+    capabilities: {
+      ...persistedModel.capabilities,
+      reasoning: true
+    },
+    thinkingLevelMap: modelThinkingLevelMap(resolvedModel)
+  };
 }
 
 export function listModelChoices(
@@ -223,6 +233,12 @@ export function modelRuntimeInfo(config: AgentConfig): ModelRuntimeInfo {
 function modelRuntimeInfoFromRuntime(config: AgentConfig, runtime: ModelRuntime): ModelRuntimeInfo {
   const resolved = runtime.resolve(config.defaultModel);
   const thinking = effectiveThinkingSelection(resolved.model, config.thinking);
+  const contextBudget = modelContextBudget(
+    resolved.model,
+    config.context.maxInputTokens,
+    resolved.alias,
+    { reasoning: thinking }
+  );
   const providerType = config.providers[resolved.providerAlias]?.type ?? resolved.providerAlias;
   return {
     modelAlias: resolved.alias,
@@ -230,14 +246,13 @@ function modelRuntimeInfoFromRuntime(config: AgentConfig, runtime: ModelRuntime)
     modelLabel: formatModelLabel(providerType, resolved.model.model),
     reasoningLabel: thinking === "off" ? "Off" : formatReasoningLabel(thinking),
     thinking,
-    contextWindow: resolved.model.contextWindow,
+    contextWindow: contextBudget.contextWindow,
+    effectiveContextWindow: contextBudget.effectiveContextWindow,
+    effectiveContextWindowPercent: contextBudget.effectiveContextWindowPercent,
+    contextReserveTokens: contextBudget.contextReserveTokens,
+    autoCompactTokenLimit: contextBudget.autoCompactTokenLimit,
     pricing: resolved.model.pricing,
-    maxInputTokens: modelContextBudget(
-      resolved.model,
-      config.context.maxInputTokens,
-      resolved.alias,
-      { reasoning: thinking }
-    ).maxInputTokens
+    maxInputTokens: contextBudget.maxInputTokens
   };
 }
 

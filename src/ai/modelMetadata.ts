@@ -9,6 +9,7 @@ import {
   GENERATED_MODELS_DEV_METADATA,
   GENERATED_MODELS_DEV_PROVIDER_ALIASES
 } from "./modelMetadata.generated.js";
+import { inferReasoningEfforts } from "./capabilities.js";
 import { openAiCodexThinkingLevelMaps } from "./codexModels.js";
 import type { ModelCapabilities, ModelCatalogEntry } from "./types.js";
 import type { ModelPricing, ReasoningEffort, ThinkingLevelMap } from "../config/schema.js";
@@ -73,11 +74,31 @@ export function isOpenCodeModelEndpoint(baseUrl: string | undefined): boolean {
   return Boolean(baseUrl && /^https:\/\/opencode\.ai\/zen(?:\/go)?\/v1\/?$/u.test(baseUrl.trim()));
 }
 
+/**
+ * OpenCode Zen/Go 的模型目录没有可靠的 reasoning 字段，已保存配置也可能因此留下空 map。
+ * 对能从模型 ID 确认推理家族的模型，恢复统一的 canonical 档位；未知模型仍保持保守关闭。
+ */
+export function openCodeThinkingLevelMap(baseUrl: string | undefined, modelId: string): ThinkingLevelMap | undefined {
+  if (!isOpenCodeModelEndpoint(baseUrl)) return undefined;
+  const metadata = openCodeKnownModelMetadata(baseUrl, modelId);
+  if (metadata?.thinkingLevelMap) return { ...metadata.thinkingLevelMap };
+  if (metadata?.reasoningEfforts.length) return thinkingLevelMapForEfforts(metadata.reasoningEfforts);
+  const efforts = inferReasoningEfforts(modelId);
+  return efforts.length
+    ? { off: "none", ...thinkingLevelMapForEfforts(efforts) }
+    : undefined;
+}
+
 function openCodeKnownModelMetadata(baseUrl: string | undefined, modelId: string): ModelMetadata | undefined {
   if (!isOpenCodeModelEndpoint(baseUrl)) return undefined;
   const normalized = modelId.trim();
-  if (normalized !== "deepseek-v4-flash" && normalized !== "deepseek-v4-pro") return undefined;
-  return GENERATED_MODELS_DEV_METADATA.deepseek?.[normalized];
+  if (normalized === "deepseek-v4-flash" || normalized === "deepseek-v4-pro") {
+    return GENERATED_MODELS_DEV_METADATA.deepseek?.[normalized];
+  }
+  if (normalized === "minimax-m3") {
+    return GENERATED_MODELS_DEV_METADATA.minimax?.["MiniMax-M3"];
+  }
+  return undefined;
 }
 
 /** 返回适合 Biny tool agent 的离线模型目录；无 tool_call 声明的模型只保留为显式配置元数据。 */

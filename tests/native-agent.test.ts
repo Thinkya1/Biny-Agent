@@ -29,6 +29,7 @@ async function main(): Promise<void> {
   await testProviderRuntimeMetadata();
   await testNoOffThinkingUsesDefaultEffort();
   await testModelSwitchRecalculatesBudget();
+  await testOpenCodeModelSwitchRepairsThinkingMetadata();
   await testModelSwitchDoesNotPersistInferredMetadata();
   await testPersistedProviderCatalog();
   await testGoogleProviderCatalog();
@@ -562,7 +563,14 @@ async function testModelSwitchRecalculatesBudget(): Promise<void> {
       stored = structuredClone(next);
       revision += 1;
     },
-    revision: () => revision
+    revision: () => revision,
+    loadVersioned: async () => ({ config: structuredClone(stored), revision: String(revision) }),
+    saveVersioned: async (next, expectedRevision) => {
+      assert.equal(expectedRevision, String(revision));
+      stored = structuredClone(next);
+      revision += 1;
+      return { config: structuredClone(stored), revision: String(revision) };
+    }
   };
   const manager = new ModelManager("/tmp/biny-model-switch-test", config, configStore);
   const largeBudget = manager.getContextBudget();
@@ -580,6 +588,55 @@ async function testModelSwitchRecalculatesBudget(): Promise<void> {
   const reloadedManager = new ModelManager("/tmp/biny-model-switch-test", stored, configStore);
   assert.equal(reloadedManager.getInfo().modelAlias, "large");
   assert.equal(reloadedManager.getInfo().thinking, "off");
+}
+
+async function testOpenCodeModelSwitchRepairsThinkingMetadata(): Promise<void> {
+  const config = configSchema.parse({
+    ...defaultConfig,
+    defaultModel: "sol",
+    providers: {
+      "opencode-ai": {
+        type: "openai-compatible",
+        baseUrl: "https://opencode.ai/zen/go/v1",
+        apiKey: "test-key"
+      }
+    },
+    models: {
+      sol: {
+        provider: "opencode-ai",
+        model: "gpt-5.6-sol",
+        capabilities: { tools: true, reasoning: true, streaming: true },
+        thinkingLevelMap: { off: "none", high: "high", max: "max" }
+      },
+      minimax: {
+        provider: "opencode-ai",
+        model: "minimax-m3",
+        capabilities: { tools: true, reasoning: false, streaming: true },
+        thinkingLevelMap: {}
+      }
+    },
+    thinking: { enabled: true, effort: "max" }
+  });
+  let stored = structuredClone(config);
+  let revision = 0;
+  const configStore: AgentConfigStore = {
+    load: async () => structuredClone(stored),
+    save: async (next) => { stored = structuredClone(next); },
+    loadVersioned: async () => ({ config: structuredClone(stored), revision: String(revision) }),
+    saveVersioned: async (next, expectedRevision) => {
+      assert.equal(expectedRevision, String(revision));
+      stored = structuredClone(next);
+      revision += 1;
+      return { config: structuredClone(stored), revision: String(revision) };
+    }
+  };
+  const manager = new ModelManager("/tmp/biny-opencode-model-switch-test", config, configStore);
+
+  await manager.switchModel("minimax", "high");
+  assert.equal(manager.getInfo().modelAlias, "minimax");
+  assert.equal(manager.getInfo().thinking, "high");
+  assert.equal(stored.models.minimax?.capabilities?.reasoning, true);
+  assert.deepEqual(stored.models.minimax?.thinkingLevelMap, { off: "none", high: "high", max: "max" });
 }
 
 async function testNoOffThinkingUsesDefaultEffort(): Promise<void> {
@@ -682,7 +739,14 @@ async function testModelSwitchDoesNotPersistInferredMetadata(): Promise<void> {
       stored = structuredClone(next);
       revision += 1;
     },
-    revision: () => revision
+    revision: () => revision,
+    loadVersioned: async () => ({ config: structuredClone(stored), revision: String(revision) }),
+    saveVersioned: async (next, expectedRevision) => {
+      assert.equal(expectedRevision, String(revision));
+      stored = structuredClone(next);
+      revision += 1;
+      return { config: structuredClone(stored), revision: String(revision) };
+    }
   };
   const manager = new ModelManager("/tmp/biny-model-switch-metadata-test", config, configStore);
 
@@ -757,6 +821,11 @@ async function testPersistedProviderCatalog(): Promise<void> {
       }) as typeof fetch;
       await assert.rejects(runtime.refreshModels("catalog"), /offline/u);
       assert.equal(runtime.listModels().some((entry) => entry.model === "cached-model"), true);
+
+      globalThis.fetch = (async () => Response.json({ data: [] })) as typeof fetch;
+      await assert.rejects(runtime.refreshModels("catalog"), /empty model catalog/u);
+      assert.equal(runtime.listModels().some((entry) => entry.model === "cached-model"), true);
+      assert.deepEqual((await secondStore.read("catalog"))?.models.map((entry) => entry.id), ["cached-model"]);
     } finally {
       globalThis.fetch = originalFetch;
     }
