@@ -13,6 +13,7 @@ import { pickThinkingMessage } from "../thinkingMessages.js";
 import { Icon } from "./Icon.js";
 import { MessageTimeline } from "./MessageTimeline.js";
 import { RuntimePanel } from "./RuntimePanel.js";
+import { WelcomeState } from "./WelcomeState.js";
 
 interface WorkspaceProps {
   project?: DesktopProject;
@@ -30,6 +31,7 @@ interface WorkspaceProps {
   runtimePanelOpen: boolean;
   onRuntimePanelOpenChange(open: boolean): void;
   thinking: boolean;
+  running: boolean;
   thinkingStartedAt?: string;
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
@@ -44,6 +46,7 @@ interface WorkspaceProps {
   onRuntimeError(error: unknown): void;
   onRuntimeMutation(operation: DesktopRuntimeMutation, payload: Record<string, unknown>): Promise<void>;
   onRuntimeRefresh(): Promise<void>;
+  onPrefillPrompt(prompt: string): void;
   children?: React.ReactNode;
 }
 
@@ -63,6 +66,7 @@ export function Workspace({
   runtimePanelOpen,
   onRuntimePanelOpenChange,
   thinking,
+  running,
   thinkingStartedAt,
   onOpenExternal,
   onResolvePermission,
@@ -77,10 +81,12 @@ export function Workspace({
   onRuntimeError,
   onRuntimeMutation,
   onRuntimeRefresh,
+  onPrefillPrompt,
   children
 }: WorkspaceProps): React.JSX.Element {
-  const streaming = turns.some((turn) => turn.status === "running" || turn.status === "waiting_permission");
+  const streaming = running || turns.some((turn) => turn.status === "running" || turn.status === "waiting_permission");
   const isHome = !loading && !runtimeError && !projectId;
+  const showWelcome = !loading && !runtimeError && !sessionId && !streaming && turns.length === 0;
 
   if (isHome) {
     return (
@@ -94,6 +100,7 @@ export function Workspace({
           projection={runtimeProjection}
         />
         <div className="cindy-home-content">
+          <WelcomeState hasProject={false} onOpenProject={onOpenProject} onPrefill={onPrefillPrompt} />
           <div className="cindy-home-composer">{children}</div>
         </div>
       </div>
@@ -133,7 +140,9 @@ export function Workspace({
           projection={runtimeProjection}
         />
         <div className="cindy-chat-body">
-          {loading ? <LoadingState /> : runtimeError ? <RuntimeError error={runtimeError} onOpenProject={onOpenProject} /> : (turns.length > 0 || thinking) && projectId ? (
+          {loading ? <LoadingState /> : runtimeError ? <RuntimeError error={runtimeError} onOpenProject={onOpenProject} /> : showWelcome ? (
+            <div className="cindy-chat-welcome"><WelcomeState hasProject={Boolean(projectId)} onOpenProject={onOpenProject} onPrefill={onPrefillPrompt} /></div>
+          ) : (turns.length > 0 || thinking) && projectId ? (
             <ChatScroll>
               <MessageTimeline
                 onCreateBranch={onCreateBranch}

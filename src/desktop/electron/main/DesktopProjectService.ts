@@ -44,6 +44,7 @@ import { resolveWorkspaceDirectory, resolveWorkspacePath, toWorkspaceRelative } 
 import { attachmentFilePath, attachmentPathPrefix, saveAttachment as saveProjectAttachment } from "../../../attachments/store.js";
 import type {
   DesktopAttachment,
+  DesktopGitBranch,
   DesktopProject,
   DesktopSessionDocument,
   DesktopSessionTreePage,
@@ -149,6 +150,65 @@ export class DesktopProjectService {
     await Promise.all(projects.map(async (project) => await this.state.upsertProject(project)));
     if (activeProjectId) await this.state.setActiveProject(activeProjectId);
     return projects;
+  }
+
+  /**
+   * 只枚举本地 refs/heads。远程跟踪分支不属于当前工作区的可直接切换列表，避免一次打开菜单
+   * 就触发网络同步或把一个并不存在的本地分支伪装成可用选项。
+   */
+  async listProjectBranches(projectIdValue: string): Promise<DesktopGitBranch[]> {
+    const project = this.requireProject(projectIdValue);
+    if (project.missing || !await directoryExists(project.path)) return [];
+    try {
+      const result = await runGit(project.path, ["for-each-ref", "--format=%(refname:short)%00%(HEAD)", "refs/heads"]);
+      return result.stdout
+        .split(/\r?\n/u)
+        .filter((line) => line.length > 0)
+        .map((line) => {
+          const [name, head] = line.split("\0");
+          return { name: name ?? "", current: head === "*" } satisfies DesktopGitBranch;
+        })
+        .filter((branch) => branch.name.length > 0);
+    } catch (error) {
+      if (isGitRepositoryMissing(error)) return [];
+      throw new Error(`读取本地 Git 分支失败：${gitErrorText(error)}`);
+    }
+  }
+
+  /** 切换已有本地分支；所有保护都在真正执行 git switch 前重新检查。 */
+  async switchProjectBranch(projectIdValue: string, branchName: string): Promise<void> {
+    const project = this.requireProject(projectIdValue);
+    const name = normalizeBranchName(branchName);
+    await assertValidBranchName(name);
+    await assertGitRepository(project);
+    await assertCleanGitWorkspace(project);
+    const branches = await this.listProjectBranches(project.id);
+    if (!branches.some((branch) => branch.name === name)) {
+      throw new Error(`本地分支不存在：${name}`);
+    }
+    try {
+      await runGit(project.path, ["switch", name], 10_000);
+    } catch (error) {
+      throw new Error(`切换分支失败：${gitErrorText(error)}`);
+    }
+  }
+
+  /** 创建并立即检出本地分支；不 stash、不 reset，也不强制覆盖工作区。 */
+  async createProjectBranch(projectIdValue: string, branchName: string): Promise<void> {
+    const project = this.requireProject(projectIdValue);
+    const name = normalizeBranchName(branchName);
+    await assertValidBranchName(name);
+    await assertGitRepository(project);
+    await assertCleanGitWorkspace(project);
+    const branches = await this.listProjectBranches(project.id);
+    if (branches.some((branch) => branch.name === name)) {
+      throw new Error(`本地分支已存在：${name}`);
+    }
+    try {
+      await runGit(project.path, ["switch", "-c", name], 10_000);
+    } catch (error) {
+      throw new Error(`创建并检出分支失败：${gitErrorText(error)}`);
+    }
   }
 
   async listModels(project: DesktopProject): Promise<ModelChoice[]> {
@@ -617,16 +677,70 @@ function desktopSessionSummary(
 
 async function gitOutput(cwd: string, args: string[]): Promise<string | undefined> {
   try {
-    return (await execFileAsync("git", [
-      "--no-pager",
-      "--no-optional-locks",
-      "-c",
-      "core.fsmonitor=false",
-      ...args
-    ], { cwd, env: gitInspectionEnvironment(), timeout: 4_000, maxBuffer: 512 * 1024 })).stdout;
+    return (await runGit(cwd, args)).stdout;
   } catch {
     return undefined;
   }
+}
+
+async function runGit(cwd: string, args: string[], timeout = 4_000): Promise<{ stdout: string; stderr: string }> {
+  return await execFileAsync("git", [
+    "--no-pager",
+    "--no-optional-locks",
+    "-c",
+    "core.fsmonitor=false",
+    ...args
+  ], { cwd, env: gitInspectionEnvironment(), timeout, maxBuffer: 512 * 1024 });
+}
+
+async function assertGitRepository(project: DesktopProject): Promise<void> {
+  if (project.missing || !await directoryExists(project.path)) throw new Error("项目目录不可用，无法操作 Git 分支。");
+  try {
+    await runGit(project.path, ["rev-parse", "--git-dir"]);
+  } catch (error) {
+    if (isGitRepositoryMissing(error)) throw new Error("当前项目不是 Git 仓库。");
+    throw new Error(`检查 Git 仓库失败：${gitErrorText(error)}`);
+  }
+}
+
+async function assertCleanGitWorkspace(project: DesktopProject): Promise<void> {
+  try {
+    const status = await runGit(project.path, ["status", "--porcelain", "--ignore-submodules=all"]);
+    if (status.stdout.trim()) throw new Error("工作区有未提交改动，不能切换分支。请先提交或清理改动。");
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("工作区有未提交改动")) throw error;
+    throw new Error(`检查工作区状态失败：${gitErrorText(error)}`);
+  }
+}
+
+async function assertValidBranchName(branchName: string): Promise<void> {
+  try {
+    await runGit(process.cwd(), ["check-ref-format", "--branch", branchName]);
+  } catch {
+    throw new Error(`分支名称不合法：${branchName}`);
+  }
+}
+
+function normalizeBranchName(branchName: string): string {
+  const normalized = branchName.trim();
+  if (!normalized) throw new Error("分支名称不能为空。");
+  return normalized;
+}
+
+function isGitRepositoryMissing(error: unknown): boolean {
+  return /not a git repository|不是 git 仓库/iu.test(gitErrorText(error));
+}
+
+function gitErrorText(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    const candidate = error as { stderr?: unknown; stdout?: unknown; message?: unknown };
+    const output = [candidate.stderr, candidate.stdout, candidate.message]
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim())
+      .find((value) => value.length > 0);
+    if (output) return output;
+  }
+  return String(error);
 }
 
 function sessionTitle(firstUserMessage: string): string {

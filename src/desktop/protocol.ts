@@ -52,6 +52,9 @@ export const desktopIpc = {
   renameProject: "desktop:project:rename",
   removeProject: "desktop:project:remove",
   refreshProject: "desktop:project:refresh",
+  listProjectBranches: "desktop:project:branches",
+  switchProjectBranch: "desktop:project:branch:switch",
+  createProjectBranch: "desktop:project:branch:create",
   revealProject: "desktop:project:reveal",
   openProjectTerminal: "desktop:project:terminal",
   startDraft: "desktop:session:draft",
@@ -206,6 +209,12 @@ export interface DesktopProject {
   pinned: boolean;
   addedAt: string;
   lastOpenedAt: string;
+}
+
+/** 项目目录中实际存在的本地 refs/heads 分支；不包含远程跟踪分支。 */
+export interface DesktopGitBranch {
+  name: string;
+  current: boolean;
 }
 
 export interface DesktopSessionSummary {
@@ -1243,6 +1252,9 @@ export interface DesktopApi {
   renameProject(projectId: string, name: string): Promise<DesktopWorkspaceSnapshot>;
   removeProject(projectId: string): Promise<DesktopBootstrap>;
   refreshProject(projectId: string): Promise<DesktopWorkspaceSnapshot>;
+  listProjectBranches(projectId: string): Promise<DesktopGitBranch[]>;
+  switchProjectBranch(projectId: string, branchName: string): Promise<DesktopWorkspaceSnapshot>;
+  createProjectBranch(projectId: string, branchName: string): Promise<DesktopWorkspaceSnapshot>;
   revealProject(projectId: string): Promise<void>;
   openProjectTerminal(projectId: string): Promise<void>;
   startDraft(projectId: string): Promise<DesktopWorkspaceSnapshot>;
@@ -1255,7 +1267,15 @@ export interface DesktopApi {
   duplicateSession(projectId: string, sessionId: string): Promise<DesktopWorkspaceSnapshot>;
   deleteSession(projectId: string, sessionId: string): Promise<DesktopWorkspaceSnapshot>;
   showSessionMenu(projectId: string, sessionId: string, pinned: boolean, archived?: boolean): Promise<DesktopSessionMenuAction | undefined>;
-  sendPrompt(projectId: string, sessionId: string | undefined, input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp"): Promise<DesktopRunReceipt>;
+  sendPrompt(
+    projectId: string,
+    sessionId: string | undefined,
+    input: string,
+    mode: InteractiveAgentRunMode,
+    attachments: DesktopAttachment[],
+    delivery?: "steer" | "followUp",
+    personalization?: DesktopChatPersonalizationOverride
+  ): Promise<DesktopRunReceipt>;
   resumeInterruptedTurn(projectId: string, sessionId: string): Promise<DesktopRunReceipt | undefined>;
   editPrompt(projectId: string, sessionId: string, userMessageIndex: number, input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[]): Promise<DesktopRunReceipt>;
   cancelRun(projectId: string, runId: string): Promise<void>;

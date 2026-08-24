@@ -54,6 +54,11 @@ interface McpDraftForm {
   headers: FieldRow[];
 }
 
+interface McpMarketInstallSelection {
+  entry: DesktopMcpCatalogEntry;
+  installation: DesktopMcpCatalogInstallation;
+}
+
 const EMPTY_DRAFT: McpDraftForm = {
   name: "",
   description: "",
@@ -89,6 +94,7 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
   const [details, setDetails] = useState<DesktopMcpServerDetails>();
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string>();
+  const [marketInstall, setMarketInstall] = useState<McpMarketInstallSelection>();
   const requestRef = useRef(0);
 
   const applySnapshot = useCallback((next: DesktopMcpSnapshot): void => {
@@ -161,9 +167,12 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
   }, []);
 
   const openMarketInstall = useCallback((entry: DesktopMcpCatalogEntry, installation: DesktopMcpCatalogInstallation): void => {
-    setTab("installed");
-    setEditingName(undefined);
-    setDraft({
+    setMarketInstall({ entry, installation });
+  }, []);
+
+  const installFromMarket = useCallback(async (entry: DesktopMcpCatalogEntry, installation: DesktopMcpCatalogInstallation, values: Record<string, string>): Promise<void> => {
+    if (!snapshot) return;
+    const nextDraft: McpDraftForm = {
       ...EMPTY_DRAFT,
       name: entry.name,
       description: entry.description,
@@ -174,15 +183,24 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
       remoteProtocol: installation.remoteProtocol ?? "streamable-http",
       env: installation.parameters.map((parameter) => ({
         key: parameter.key,
-        value: "",
+        value: values[parameter.key] ?? "",
         action: "set",
         placeholder: parameter.placeholder,
         required: parameter.required
       }))
-    });
-    setTestResult(undefined);
-    setFormOpen(true);
-  }, []);
+    };
+    try {
+      setBusyName(entry.name);
+      updateSnapshot(await window.biny.mcpUpsertServer(projectId, undefined, toProtocolDraft(nextDraft), snapshot.configRevision));
+      setMarketInstall(undefined);
+      setTab("installed");
+      onSuccess(`${entry.name} 已添加。`);
+    } catch (error) {
+      onError(errorMessage(error));
+    } finally {
+      setBusyName(undefined);
+    }
+  }, [onError, onSuccess, projectId, snapshot, updateSnapshot]);
 
   const importClipboard = useCallback(async (): Promise<void> => {
     try {
@@ -314,17 +332,7 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
   }, []);
 
   return (
-    <div className="cindy-mcp-page">
-      <header className="cindy-mcp-header">
-        <div className="cindy-mcp-title-block">
-          <span className="cindy-mcp-title-icon"><Icon name="server" size={22} /></span>
-          <div>
-            <h1>MCP 服务器</h1>
-            <p>管理模型上下文协议（MCP）服务器以扩展 AI 能力</p>
-          </div>
-        </div>
-        <button className="cindy-mcp-add-button" onClick={openNew} type="button"><Icon name="add" size={17} />添加服务器</button>
-      </header>
+    <div className="cindy-mcp-page" id="mcp-servers" tabIndex={-1}>
 
       <div className="cindy-mcp-toolbar">
         <div className="cindy-mcp-tabs" role="tablist" aria-label="MCP 服务器列表">
@@ -337,6 +345,7 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
           {query ? <button aria-label="清空搜索" onClick={() => setQuery("")} type="button"><Icon name="close" size={13} /></button> : null}
         </label>
         {tab === "market" ? <label className="cindy-mcp-category"><span className="sr-only">筛选分类</span><select aria-label="筛选分类" onChange={(event) => setCategory(event.target.value)} value={category}><option value="">所有分类</option>{catalog.categories.map((item) => <option key={item} value={item}>{item}</option>)}</select><Icon name="chevron" size={14} /></label> : null}
+        <button className="cindy-mcp-add-button cindy-mcp-toolbar-add-button" onClick={openNew} type="button"><Icon name="add" size={16} />添加服务器</button>
         <button aria-label="刷新 MCP 列表" className="cindy-mcp-icon-button" disabled={loading} onClick={() => void load(true)} title="刷新" type="button"><Icon name="refresh" size={16} /></button>
       </div>
 
@@ -371,6 +380,14 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
         saving={busyName !== undefined}
         testResult={testResult}
       /> : null}
+      {marketInstall ? <McpMarketInstallDialog
+        entry={marketInstall.entry}
+        initialInstallation={marketInstall.installation}
+        onClose={() => setMarketInstall(undefined)}
+        onOpenExternal={(url) => void window.biny.openExternal(url).catch((error) => onError(errorMessage(error)))}
+        onInstall={(installation, values) => void installFromMarket(marketInstall.entry, installation, values)}
+        saving={busyName === marketInstall.entry.name}
+      /> : null}
       {deleteTarget ? <McpDeleteDialog name={deleteTarget} onCancel={() => setDeleteTarget(undefined)} onConfirm={() => void deleteServer()} /> : null}
     </div>
   );
@@ -383,6 +400,7 @@ const McpMarketContent = memo(function McpMarketContent({ entries, loading, onIn
 });
 
 const McpMarketCard = memo(function McpMarketCard({ entry, onInstall, onOpenExternal }: { entry: DesktopMcpCatalogEntry; onInstall(entry: DesktopMcpCatalogEntry, installation: DesktopMcpCatalogInstallation): void; onOpenExternal(url: string): void }): React.JSX.Element {
+  const initialInstallation = entry.installations[0];
   return (
     <article className="cindy-mcp-market-card">
       <div className="cindy-mcp-card-topline">
@@ -391,14 +409,20 @@ const McpMarketCard = memo(function McpMarketCard({ entry, onInstall, onOpenExte
         <div className="cindy-mcp-card-badges">{entry.verified ? <span className="cindy-mcp-badge is-verified"><Icon name="check" size={12} />已验证</span> : null}{entry.featured ? <span className="cindy-mcp-badge is-featured">精选</span> : null}</div>
       </div>
       <p className="cindy-mcp-card-description">{entry.description || "暂无描述"}</p>
-      <div className="cindy-mcp-tags">{entry.tags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div>
+      <div className="cindy-mcp-tags">{entry.tags.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div>
       <div className="cindy-mcp-card-footer">
-        <div className="cindy-mcp-install-options">{entry.installations.map((installation) => <button className="cindy-mcp-install-button" key={installation.name} onClick={() => onInstall(entry, installation)} type="button"><Icon name="add" size={14} />{installation.name === "默认配置" ? "安装" : `安装 · ${installation.name}`}</button>)}</div>
+        <div className="cindy-mcp-install-options">{initialInstallation ? <button aria-label={`安装 ${entry.name}`} className="cindy-mcp-install-button" onClick={() => onInstall(entry, initialInstallation)} title={`安装 ${entry.name}`} type="button"><Icon name="download" size={14} />安装</button> : null}</div>
         {entry.repositoryUrl || entry.websiteUrl ? <button aria-label={`打开 ${entry.name} 页面`} className="cindy-mcp-link-button" onClick={() => onOpenExternal(entry.repositoryUrl ?? entry.websiteUrl ?? "")} title="打开项目页面" type="button"><Icon name="external" size={15} /></button> : null}
       </div>
     </article>
   );
 });
+
+function installationLabel(installation: DesktopMcpCatalogInstallation): string {
+  if (installation.name === "默认配置") return "默认";
+  if (installation.transport === "remote") return installation.remoteProtocol === "sse" ? "SSE" : "HTTP";
+  return installation.name;
+}
 
 const McpInstalledContent = memo(function McpInstalledContent({ servers, loading, busyName, details, detailsLoading, onDelete, onDetails, onEdit, onReconnect, onSetEnabled, onCloseDetails }: { servers: DesktopMcpServerSummary[]; loading: boolean; busyName?: string; details?: DesktopMcpServerDetails; detailsLoading: boolean; onDelete(name: string): void; onDetails(server: DesktopMcpServerSummary): void; onEdit(server: DesktopMcpServerSummary): void; onReconnect(server: DesktopMcpServerSummary): void; onSetEnabled(server: DesktopMcpServerSummary): void; onCloseDetails(): void }): React.JSX.Element {
   if (loading && !servers.length) return <McpEmpty icon="refresh" title="正在读取已安装服务器" detail="正在同步配置和运行状态…" />;
@@ -441,6 +465,55 @@ const CapabilityList = memo(function CapabilityList({ label, values }: { label: 
 
 const ResourceList = memo(function ResourceList({ resources }: { resources: DesktopMcpResourceSummary[] }): React.JSX.Element {
   return <section className="cindy-mcp-detail-section"><h3>资源 <small>{resources.length}</small></h3>{resources.length ? <ul>{resources.map((resource) => <li key={resource.uri}><strong>{resource.name ?? resource.uri}</strong><span>{resource.uri}</span></li>)}</ul> : <p>暂无资源</p>}</section>;
+});
+
+const McpMarketInstallDialog = memo(function McpMarketInstallDialog({ entry, initialInstallation, onClose, onInstall, onOpenExternal, saving }: { entry: DesktopMcpCatalogEntry; initialInstallation: DesktopMcpCatalogInstallation; onClose(): void; onInstall(installation: DesktopMcpCatalogInstallation, values: Record<string, string>): void; onOpenExternal(url: string): void; saving: boolean }): React.JSX.Element {
+  const [installationName, setInstallationName] = useState(initialInstallation.name);
+  const [values, setValues] = useState<Record<string, string>>(() => parameterValues(initialInstallation));
+  const [validationError, setValidationError] = useState<string>();
+  const installation = entry.installations.find((item) => item.name === installationName) ?? initialInstallation;
+
+  const selectInstallation = (name: string): void => {
+    const next = entry.installations.find((item) => item.name === name) ?? initialInstallation;
+    setInstallationName(next.name);
+    setValues(parameterValues(next));
+    setValidationError(undefined);
+  };
+  const submit = (event: React.FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    const missing = installation.parameters.find((parameter) => parameter.required && !values[parameter.key]?.trim());
+    if (missing) {
+      setValidationError(`请填写 ${missing.name}。`);
+      return;
+    }
+    onInstall(installation, values);
+  };
+
+  return (
+    <div aria-label={`安装 ${entry.name}`} className="cindy-mcp-dialog-backdrop is-market-install" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }} role="presentation">
+      <form aria-labelledby="mcp-market-install-title" className="cindy-mcp-install-dialog" onSubmit={submit}>
+        <section className="cindy-mcp-install-summary">
+          <div className="cindy-mcp-install-summary-icon"><Icon name="server" size={28} /></div>
+          <div className="cindy-mcp-install-summary-main">
+            <div className="cindy-mcp-install-title-row"><h2 id="mcp-market-install-title">{entry.name}</h2>{entry.verified ? <span className="cindy-mcp-badge is-verified"><Icon name="check" size={12} />已验证</span> : null}</div>
+            <p className="cindy-mcp-install-author">作者 {entry.author ?? "社区"}</p>
+            <p className="cindy-mcp-install-description">{entry.description || "暂无描述"}</p>
+            {entry.repositoryUrl || entry.websiteUrl ? <button className="cindy-mcp-install-link" onClick={() => onOpenExternal(entry.repositoryUrl ?? entry.websiteUrl ?? "")} type="button"><Icon name="external" size={18} />查看文档</button> : null}
+          </div>
+        </section>
+        <div className="cindy-mcp-install-fields">
+          <label className="cindy-mcp-install-label" htmlFor="mcp-install-method">安装方式</label>
+          <select id="mcp-install-method" onChange={(event) => selectInstallation(event.target.value)} value={installation.name}>
+            {entry.installations.map((item) => <option key={item.name} value={item.name}>{installationLabel(item)}</option>)}
+          </select>
+          {installation.tags.length ? <div className="cindy-mcp-install-prerequisites"><strong>前置条件</strong><div>{installation.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></div> : null}
+          {installation.parameters.length ? <div className="cindy-mcp-install-parameters"><span>可选参数</span>{installation.parameters.map((parameter) => <label key={parameter.key}><strong>{parameter.name}{parameter.required ? " *" : ""}</strong><input onChange={(event) => setValues((current) => ({ ...current, [parameter.key]: event.target.value }))} placeholder={parameter.placeholder} required={parameter.required} value={values[parameter.key] ?? ""} /></label>)}</div> : null}
+          {validationError ? <p className="cindy-mcp-install-validation"><Icon name="warning" size={15} />{validationError}</p> : null}
+        </div>
+        <footer className="cindy-mcp-install-footer"><button className="cindy-mcp-secondary-button" onClick={onClose} type="button">取消</button><button className="cindy-mcp-primary-button" disabled={saving} type="submit"><Icon name="download" size={16} />{saving ? "安装中…" : "安装"}</button></footer>
+      </form>
+    </div>
+  );
 });
 
 const McpServerDialog = memo(function McpServerDialog({ draft, editing, saving, testResult, onChange, onClose, onImportClipboard, onSave, onTest, onAddField, onRemoveField, onUpdateField }: { draft: McpDraftForm; editing: boolean; saving: boolean; testResult?: DesktopMcpTestResult; onChange(next: McpDraftForm): void; onClose(): void; onImportClipboard(): void; onSave(): void; onTest(): void; onAddField(location: "env" | "headers"): void; onRemoveField(location: "env" | "headers", index: number): void; onUpdateField(location: "env" | "headers", index: number, patch: Partial<FieldRow>): void }): React.JSX.Element {
@@ -529,6 +602,10 @@ function toFieldMutations(rows: FieldRow[]): DesktopMcpFieldMutation[] {
 
 function parseArguments(value: string): string[] {
   return value.split(/\r?\n/).flatMap((line) => line.trim() ? [line.trim()] : []).flatMap((line) => line.includes(" ") ? line.split(/\s+/) : [line]);
+}
+
+function parameterValues(installation: DesktopMcpCatalogInstallation): Record<string, string> {
+  return Object.fromEntries(installation.parameters.map((parameter) => [parameter.key, ""]));
 }
 
 function parseClipboardConfig(value: unknown): McpDraftForm | undefined {

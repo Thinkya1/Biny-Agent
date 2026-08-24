@@ -82,6 +82,7 @@ import type {
   DesktopAttachment,
   DesktopChatPersonalizationOverride,
   DesktopEmbeddingModelDescriptor,
+  DesktopGitBranch,
   DesktopMemoryCompactionResult,
   DesktopMemoryEntryInput,
   DesktopMemoryEntryPatch,
@@ -312,6 +313,22 @@ export class DesktopAgentManager {
     return await this.workspaceSnapshot(projectId);
   }
 
+  async listProjectBranches(projectId: string): Promise<DesktopGitBranch[]> {
+    return await this.projects.listProjectBranches(projectId);
+  }
+
+  async switchProjectBranch(projectId: string, branchName: string): Promise<DesktopWorkspaceSnapshot> {
+    this.assertProjectGitMutationIdle(projectId);
+    await this.projects.switchProjectBranch(projectId, branchName);
+    return await this.startDraft(projectId);
+  }
+
+  async createProjectBranch(projectId: string, branchName: string): Promise<DesktopWorkspaceSnapshot> {
+    this.assertProjectGitMutationIdle(projectId);
+    await this.projects.createProjectBranch(projectId, branchName);
+    return await this.startDraft(projectId);
+  }
+
   async setProjectPinned(projectId: string, pinned: boolean): Promise<DesktopWorkspaceSnapshot> {
     await this.state.setProjectPinned(projectId, pinned);
     return await this.workspaceSnapshot(projectId);
@@ -382,7 +399,8 @@ export class DesktopAgentManager {
     input: string,
     mode: InteractiveAgentRunMode,
     attachments: DesktopAttachment[],
-    delivery?: "steer" | "followUp"
+    delivery?: "steer" | "followUp",
+    personalization?: DesktopChatPersonalizationOverride
   ): Promise<DesktopRunReceipt> {
     let managed = await this.ensureRuntime(projectId);
     let runtime = managed.runtime;
@@ -419,6 +437,11 @@ export class DesktopAgentManager {
         throw new Error("The selected session is still running. Return to it or stop the task before resuming another session.");
       }
       await runtime.resumeSession(sessionId);
+    }
+    // 新建任务在第一条消息发送前没有 sessionId。先把聊天级策略写入 runtime
+    // 当前的未记录草稿，再提交回合，保证首条消息也使用用户刚选择的记忆策略。
+    if (sessionId === undefined && personalization !== undefined) {
+      await this.updateManagedChatPersonalization(managed, personalization);
     }
     const info = runtime.getSnapshot().info;
     const prompt = withAttachmentReferences(input, attachments);
@@ -1842,6 +1865,13 @@ export class DesktopAgentManager {
     return runtimeIsBusy(runtime.getSnapshot());
   }
 
+  private assertProjectGitMutationIdle(projectId: string): void {
+    this.projects.requireProject(projectId);
+    if (this.runtimeInitializations.has(projectId) || this.isProjectRunning(projectId)) {
+      throw new Error("当前项目正在运行或维护中，不能切换 Git 分支。请稍后重试。");
+    }
+  }
+
   cancelAll(): void {
     for (const { runtime } of this.runtimes.values()) runtime.cancelCurrentRun();
   }
@@ -2135,6 +2165,18 @@ export class DesktopAgentManager {
       }
     }
     throw lastError;
+  }
+
+  private async updateManagedChatPersonalization(
+    managed: ManagedRuntime,
+    personalization: DesktopChatPersonalizationOverride
+  ): Promise<void> {
+    const state = await this.readManagedPersonalizationState(managed);
+    if (managed.commands) {
+      await managed.commands.agent.updateChatPersonalization(personalization, state.catalogRevision);
+    } else {
+      await requireRemoteRuntime(managed.runtime).updateChatPersonalization(personalization, state.catalogRevision);
+    }
   }
 
   private async updateGlobalPersonalization(

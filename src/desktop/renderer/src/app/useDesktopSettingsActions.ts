@@ -12,6 +12,9 @@ import type {
   DesktopMemoryEntryInput,
   DesktopMemoryEntryPatch,
   DesktopMemoryOriginFilter,
+  DesktopBehaviorPatternReviewAction,
+  DesktopTelosDocumentInput,
+  DesktopTelosDriftResolutionAction,
   DesktopModelConfigurationInput,
   DesktopModelLoginProvider,
   DesktopWorkspaceSnapshot
@@ -126,6 +129,36 @@ export function useDesktopSettingsActions({
     return await window.biny.compactMemory(requireProject(projectIdRef.current), filter, expectedRevision, topic);
   }, [projectIdRef]);
 
+  const loadTelosOverview = useCallback(async () => {
+    const load = window.biny.telosOverview;
+    if (typeof load !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await load(requireProject(projectIdRef.current));
+  }, [projectIdRef]);
+
+  const saveTelos = useCallback(async (input: DesktopTelosDocumentInput, expectedRevision: number) => {
+    const save = window.biny.saveTelos;
+    if (typeof save !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await save(requireProject(projectIdRef.current), input, expectedRevision);
+  }, [projectIdRef]);
+
+  const reviewBehaviorPattern = useCallback(async (patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number) => {
+    const review = window.biny.reviewBehaviorPattern;
+    if (typeof review !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await review(requireProject(projectIdRef.current), patternId, action, expectedRevision);
+  }, [projectIdRef]);
+
+  const resolveTelosDrift = useCallback(async (driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number) => {
+    const resolve = window.biny.resolveTelosDrift;
+    if (typeof resolve !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await resolve(requireProject(projectIdRef.current), driftId, action, expectedRevision);
+  }, [projectIdRef]);
+
+  const snoozeTelosDrift = useCallback(async (driftId: string, until: string, expectedRevision: number) => {
+    const snooze = window.biny.snoozeTelosDrift;
+    if (typeof snooze !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await snooze(requireProject(projectIdRef.current), driftId, until, expectedRevision);
+  }, [projectIdRef]);
+
   const loadMemoryEmbeddingStatus = useCallback(async () => {
     const status = window.biny.memoryEmbeddingStatus;
     if (typeof status !== "function") throw new Error(desktopApiVersionMismatchMessage);
@@ -177,9 +210,14 @@ export function useDesktopSettingsActions({
     loadCookieJarStatus,
     loadMemoryEmbeddingStatus,
     loadMemoryOverview,
+    loadTelosOverview,
     openBrowser,
     rebuildMemoryEmbeddingIndex,
+    resolveTelosDrift,
+    reviewBehaviorPattern,
+    saveTelos,
     searchMemory,
+    snoozeTelosDrift,
     startModelLogin,
     switchModel,
     testModelConfiguration,

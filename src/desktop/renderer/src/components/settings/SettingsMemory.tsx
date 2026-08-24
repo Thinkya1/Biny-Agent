@@ -21,7 +21,11 @@ import type {
   DesktopMemoryOverview,
   DesktopMemorySearchMatch,
   DesktopModelConfigurationInput,
-  DesktopModelConnectionTestResult
+  DesktopModelConnectionTestResult,
+  DesktopBehaviorPatternReviewAction,
+  DesktopTelosDocumentInput,
+  DesktopTelosDriftResolutionAction,
+  DesktopTelosOverview
 } from "../../../../protocol.js";
 import { Icon } from "../Icon.js";
 import { ProviderBrandGlyph } from "../ProviderBrandGlyph.js";
@@ -30,6 +34,7 @@ import { catalogForConnection } from "../../providerCatalog.js";
 import { SettingsCheckbox } from "./SettingsCheckbox.js";
 import { SettingsDetailLayer } from "./SettingsDetailLayer.js";
 import { useSettingsDraft } from "./SettingsDraftContext.js";
+import { MemoryEvolutionSection } from "./MemoryEvolutionSection.js";
 
 const memoryKindOptions: Array<{ value: DesktopMemoryKind; label: string }> = [
   { value: "preference", label: "偏好" },
@@ -93,6 +98,12 @@ interface SettingsMemoryProps {
   onDeleteEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
   onClear(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
   onCompact(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
+  onLoadTelosOverview(): Promise<DesktopTelosOverview>;
+  onSaveTelos(input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
+  onReviewBehaviorPattern(patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
+  onResolveTelosDrift(driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number): Promise<DesktopTelosOverview>;
+  onSnoozeTelosDrift(driftId: string, until: string, expectedRevision: number): Promise<DesktopTelosOverview>;
+  onOpenChatDraft(input: string): void;
   onLoadEmbeddingStatus(): Promise<DesktopMemoryEmbeddingStatus>;
   onDownloadEmbeddingModel(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
   onCancelEmbeddingDownload(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingCancellationResult>;
@@ -117,6 +128,12 @@ export function SettingsMemory({
   onDeleteEntry,
   onClear,
   onCompact,
+  onLoadTelosOverview,
+  onSaveTelos,
+  onReviewBehaviorPattern,
+  onResolveTelosDrift,
+  onSnoozeTelosDrift,
+  onOpenChatDraft,
   onLoadEmbeddingStatus,
   onDownloadEmbeddingModel,
   onCancelEmbeddingDownload,
@@ -462,6 +479,18 @@ export function SettingsMemory({
           <SettingsCheckbox checked={telos.driftDetection} detail="行为模式确认后，满足 3 次观察、7 天跨度和置信度阈值才生成偏差提案" disabled={!telos.enabled} label="检测策略偏差" onChange={(driftDetection) => changeTelos({ driftDetection })} />
           <SettingsCheckbox checked={telos.proactivePrompts} detail="只在 Runtime idle 且任务结束后显示一条待处理偏差；任务运行中不会打断" disabled={!telos.enabled || !telos.driftDetection} label="主动提醒策略偏差" onChange={(proactivePrompts) => changeTelos({ proactivePrompts })} />
         </div>
+        <MemoryEvolutionSection
+          active={!hidden}
+          disabled={sessionRunning}
+          onLoad={onLoadTelosOverview}
+          onNotify={onNotify}
+          onOpenChatDraft={onOpenChatDraft}
+          onResolveDrift={onResolveTelosDrift}
+          onReviewPattern={onReviewBehaviorPattern}
+          onSave={onSaveTelos}
+          onSnoozeDrift={onSnoozeTelosDrift}
+          projectId={projectId}
+        />
       </section>
 
       <section id="memory-models" tabIndex={-1}>
@@ -533,13 +562,13 @@ export function SettingsMemory({
         <div className="section-heading-row">
           <div><h3>记忆库</h3><p>按来源查看、搜索和维护已保存的记忆。</p></div>
           <span aria-live="polite">{refreshing ? "后台同步中…" : null}</span>
-          <button className="ghost-button" disabled={immediateDisabled} onClick={() => { void refreshMemoryData(filter).catch((error: unknown) => setLoadError(errorMessage(error))); }} type="button"><Icon name="refresh" size={13} /> 刷新</button>
+          <button className="ghost-button settings-inline-action" disabled={immediateDisabled} onClick={() => { void refreshMemoryData(filter).catch((error: unknown) => setLoadError(errorMessage(error))); }} type="button"><Icon name="refresh" size={13} /> 刷新</button>
         </div>
         <div className="memory-library-toolbar">
           <div aria-label="记忆来源" className="settings-segmented memory-filter-tabs" role="tablist">
             {memoryFilters.map((option) => <button aria-selected={filter === option.value} className={filter === option.value ? "is-selected" : ""} disabled={busyAction !== undefined} key={option.value} onClick={() => setFilter(option.value)} role="tab" type="button">{option.label}</button>)}
           </div>
-          <button disabled={immediateDisabled} onClick={() => setEditor({ mode: "add" })} type="button"><Icon name="add" size={14} /> 添加记忆</button>
+          <button className="settings-inline-action" disabled={immediateDisabled} onClick={() => setEditor({ mode: "add" })} type="button"><Icon name="add" size={14} /> 添加记忆</button>
         </div>
         <p className="memory-empty-hint">最近维护：{overview.maintenance.lastFinishedAt ? formatMemoryDate(overview.maintenance.lastFinishedAt) : overview.maintenance.lastScanAt ? formatMemoryDate(overview.maintenance.lastScanAt) : "尚未执行"} · 最近重建：{embeddingStatus?.index.active?.completedAt ? formatMemoryDate(embeddingStatus.index.active.completedAt) : "尚未完成"}</p>
         <div className="setting-row">

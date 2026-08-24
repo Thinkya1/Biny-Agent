@@ -110,6 +110,13 @@ export const Composer = memo(function Composer({
     setOptimisticModel(undefined);
     modelSwitchPromiseRef.current = undefined;
     modelSwitchQueueRef.current = Promise.resolve();
+    setInput("");
+    setAttachments([]);
+    setPendingAttachments([]);
+    setMode("chat");
+    setMenu(null);
+    setSlashIndex(0);
+    setSlashDismissed(false);
   }, [project?.id]);
 
   useEffect(() => {

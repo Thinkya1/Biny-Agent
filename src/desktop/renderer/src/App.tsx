@@ -13,8 +13,10 @@ import { activeRun, pendingPermission } from "../../../runtime/agentEvents.js";
 import type {
   DesktopActiveView,
   DesktopAttachment,
+  DesktopChatPersonalizationOverride,
   DesktopPersonalizationOverview,
   DesktopFontPreference,
+  DesktopGitBranch,
   DesktopMenuAction,
   DesktopProject,
   DesktopRuntimeMutation,
@@ -58,14 +60,13 @@ import { useDesktopEventBridge } from "./app/useDesktopEventBridge.js";
 import { useDesktopSettingsActions } from "./app/useDesktopSettingsActions.js";
 import { useSidebarLayout } from "./app/useSidebarLayout.js";
 import { Composer } from "./components/Composer.js";
+import { WorkspaceContextBar } from "./components/project/WorkspaceContextBar.js";
 import { type ContextUsage } from "./usagePresentation.js";
 import { DesktopShell } from "./components/DesktopShell.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { SkillHubView } from "./components/SkillHubView.js";
-import { McpServersView } from "./components/McpServersView.js";
 import { Workspace } from "./components/Workspace.js";
 import { DesktopToast } from "./components/overlays/DesktopToast.js";
-import { DesktopWarningDialog } from "./components/overlays/DesktopWarningDialog.js";
 import { RenameOverlay } from "./components/overlays/RenameOverlay.js";
 import { SearchOverlay } from "./components/overlays/SearchOverlay.js";
 import { SlashResultOverlay } from "./components/overlays/SlashResultOverlay.js";
@@ -97,6 +98,8 @@ export function App(): React.JSX.Element {
   const [fontPreference, setFontPreference] = useState<DesktopFontPreference>(DEFAULT_FONT_PREFERENCE);
   const [focusToken, setFocusToken] = useState(0);
   const [composerDraft, setComposerDraft] = useState<string>();
+  const [projectBranches, setProjectBranches] = useState<DesktopGitBranch[]>([]);
+  const [branchesLoading, setBranchesLoading] = useState(false);
   const [deletedUserMessages, setDeletedUserMessages] = useState<Set<string>>(() => new Set());
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -106,6 +109,7 @@ export function App(): React.JSX.Element {
   const [page, setPage] = useState<DesktopPage>("chat");
   const [contextBudget, setContextBudget] = useState<ContextBudgetStatus>();
   const [personalizationOverview, setPersonalizationOverview] = useState<DesktopPersonalizationOverview>();
+  const [draftMemoryOverride, setDraftMemoryOverride] = useState<boolean>();
   const [memoryToggleBusy, setMemoryToggleBusy] = useState(false);
   const [renameTarget, setRenameTarget] = useState<RenameTarget>();
   const [slashResult, setSlashResult] = useState<DesktopSlashResult>();
@@ -116,6 +120,7 @@ export function App(): React.JSX.Element {
   const navigationRef = useRef<DesktopNavigationState>(createNavigationState());
   const [navigationState, setNavigationState] = useState<DesktopNavigationState>(() => createNavigationState());
   const loadRequestRef = useRef(0);
+  const branchRequestRef = useRef(0);
   const menuActionRef = useRef<(action: DesktopMenuAction) => void>(() => undefined);
 
   const persistSidebarWidth = useCallback((width: number): void => {
@@ -172,17 +177,6 @@ export function App(): React.JSX.Element {
     void window.biny.setActiveView("extensions").catch((error) => setWarning(errorMessage(error)));
   }, []);
 
-  const openMcp = useCallback((): void => {
-    loadRequestRef.current += 1;
-    setPage("mcp");
-    setRuntimePanelOpen(false);
-    setLoading(false);
-    setSearchOpen(false);
-    setSettingsOpen(false);
-    setSettingsTargetTab(undefined);
-    void window.biny.setActiveView("mcp").catch((error) => setWarning(errorMessage(error)));
-  }, []);
-
   useEffect(() => {
     selectedRef.current = selectedSessionId;
     projectRef.current = workspace?.project.id;
@@ -229,6 +223,35 @@ export function App(): React.JSX.Element {
       : replaceProjectSessions(current, snapshot.project.id, snapshot.sessions));
     if (projectRef.current === snapshot.project.id) setWorkspace(snapshot);
   }, []);
+
+  const loadProjectBranches = useCallback(async (projectId: string): Promise<void> => {
+    const request = branchRequestRef.current + 1;
+    branchRequestRef.current = request;
+    setBranchesLoading(true);
+    try {
+      const branches = await window.biny.listProjectBranches(projectId);
+      if (branchRequestRef.current === request) setProjectBranches(branches);
+    } catch (error) {
+      if (branchRequestRef.current === request) {
+        setProjectBranches([]);
+        setWarning(errorMessage(error));
+      }
+    } finally {
+      if (branchRequestRef.current === request) setBranchesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const projectId = workspace?.project.id;
+    branchRequestRef.current += 1;
+    if (!projectId) {
+      setProjectBranches([]);
+      setBranchesLoading(false);
+      return;
+    }
+    setProjectBranches([]);
+    void loadProjectBranches(projectId);
+  }, [loadProjectBranches, workspace?.project.id]);
 
   const refreshRuntimeProjection = useCallback(async (): Promise<void> => {
     const projectId = projectRef.current;
@@ -282,9 +305,14 @@ export function App(): React.JSX.Element {
     loadCookieJarStatus,
     loadMemoryEmbeddingStatus,
     loadMemoryOverview,
+    loadTelosOverview,
     openBrowser,
     rebuildMemoryEmbeddingIndex,
+    resolveTelosDrift,
+    reviewBehaviorPattern,
+    saveTelos,
     searchMemory,
+    snoozeTelosDrift,
     startModelLogin,
     switchModel,
     testModelConfiguration,
@@ -315,10 +343,11 @@ export function App(): React.JSX.Element {
         projectRef.current = nextWorkspace.project.id;
         mergeWorkspaceProject(nextWorkspace);
       }
-      setPage(activeView === "mcp" ? "mcp" : activeView === "extensions" ? "extensions" : "chat");
+      setPage(activeView === "extensions" ? "extensions" : "chat");
       setRuntimePanelOpen(activeView === "runtime");
       selectedRef.current = sessionId;
       setSelectedSessionId(sessionId);
+      setDraftMemoryOverride(undefined);
       // 上下文用量属于某一个会话，换会话就作废，等新会话跑出 context.updated 再显示。
       setContextBudget(undefined);
       setDocument(nextDocument);
@@ -358,9 +387,11 @@ export function App(): React.JSX.Element {
     mergeWorkspaceProject(snapshot);
     // 显式切换项目或新建任务时进入空白草稿，不沿用该项目之前保存的会话正文。
     setSelectedSessionId(undefined);
+    setDraftMemoryOverride(undefined);
     setDocument(undefined);
     setWriterConflict(undefined);
     setContextBudget(undefined);
+    setComposerDraft(undefined);
     setLoading(false);
     void window.biny.commitSelection(snapshot.project.id, undefined, "chat").catch((error) => setWarning(errorMessage(error)));
     return true;
@@ -378,6 +409,7 @@ export function App(): React.JSX.Element {
       setRuntimePanelOpen(false);
       selectedRef.current = undefined;
       setSelectedSessionId(undefined);
+      setDraftMemoryOverride(undefined);
       setDocument(undefined);
       setWriterConflict(undefined);
       setContextBudget(undefined);
@@ -421,7 +453,7 @@ export function App(): React.JSX.Element {
       setFilePanelWidth(bootstrap.filePanelWidth ?? DEFAULT_FILE_PANEL_WIDTH);
       setThemePreference(bootstrap.themePreference ?? "system");
       setFontPreference(bootstrap.fontPreference ?? DEFAULT_FONT_PREFERENCE);
-      setPage(bootstrap.activeView === "mcp" ? "mcp" : bootstrap.activeView === "extensions" ? "extensions" : "chat");
+      setPage(bootstrap.activeView === "extensions" ? "extensions" : "chat");
       setRuntimePanelOpen(bootstrap.activeView === "runtime" && Boolean(bootstrap.workspace));
       if (bootstrap.workspace) {
         mergeWorkspaceProject(bootstrap.workspace);
@@ -499,6 +531,7 @@ export function App(): React.JSX.Element {
 
   const selectProject = useCallback(async (projectId: string): Promise<void> => {
     if (projectId === projectRef.current) return;
+    setComposerDraft(undefined);
     const request = loadRequestRef.current + 1;
     loadRequestRef.current = request;
     setLoading(true);
@@ -511,6 +544,34 @@ export function App(): React.JSX.Element {
       if (loadRequestRef.current === request) setLoading(false);
     }
   }, [adoptWorkspace]);
+
+  const switchProjectBranch = useCallback(async (branchName: string): Promise<void> => {
+    const projectId = projectRef.current;
+    if (!projectId) return;
+    try {
+      const snapshot = await window.biny.switchProjectBranch(projectId, branchName);
+      mergeProjectSnapshot(snapshot);
+      setContextBudget(undefined);
+      await loadProjectBranches(projectId);
+      setToast(`已切换到分支 ${branchName}`);
+    } catch (error) {
+      setWarning(errorMessage(error));
+    }
+  }, [loadProjectBranches, mergeProjectSnapshot]);
+
+  const createProjectBranch = useCallback(async (branchName: string): Promise<void> => {
+    const projectId = projectRef.current;
+    if (!projectId) return;
+    try {
+      const snapshot = await window.biny.createProjectBranch(projectId, branchName);
+      mergeProjectSnapshot(snapshot);
+      setContextBudget(undefined);
+      await loadProjectBranches(projectId);
+      setToast(`已创建并检出分支 ${branchName}`);
+    } catch (error) {
+      setWarning(errorMessage(error));
+    }
+  }, [loadProjectBranches, mergeProjectSnapshot]);
 
   const newTask = useCallback(async (targetProjectId = projectRef.current): Promise<void> => {
     setRuntimePanelOpen(false);
@@ -641,9 +702,24 @@ export function App(): React.JSX.Element {
     if (!projectId) throw new Error("请先打开一个项目。");
     const previousSessionId = selectedRef.current;
     const previousNavigation = navigationRef.current;
+    const draftPersonalization: DesktopChatPersonalizationOverride = {
+      personality: "inherit",
+      customInstructions: { mode: "inherit", value: undefined },
+      useMemories: draftMemoryOverride ?? "inherit",
+      contributeMemories: draftMemoryOverride ?? "inherit"
+    };
     setComposerDraft(undefined);
-    const receipt = await window.biny.sendPrompt(projectId, selectedRef.current, input, mode, attachments, delivery);
+    const receipt = await window.biny.sendPrompt(
+      projectId,
+      selectedRef.current,
+      input,
+      mode,
+      attachments,
+      delivery,
+      previousSessionId === undefined && draftMemoryOverride !== undefined ? draftPersonalization : undefined
+    );
     setSelectedSessionId(receipt.sessionId);
+    setDraftMemoryOverride(undefined);
     if (receipt.sessionId !== previousSessionId) {
       const target: DesktopNavigationTarget = { projectId, sessionId: receipt.sessionId };
       const currentTarget = previousNavigation.entries[previousNavigation.index];
@@ -655,7 +731,7 @@ export function App(): React.JSX.Element {
       const summary = workspace?.sessions.find((session) => session.id === receipt.sessionId) ?? syntheticSession(projectId, receipt.sessionId, input);
       setDocument({ session: summary, events: [], liveEvents: [] });
     }
-  }, [commitNavigation, document, workspace?.sessions]);
+  }, [commitNavigation, document, draftMemoryOverride, workspace?.sessions]);
 
   const retryWriterConflict = useCallback(async (): Promise<void> => {
     const projectId = projectRef.current;
@@ -830,7 +906,7 @@ export function App(): React.JSX.Element {
       setWorkspace(bootstrap.workspace);
       setDocument(undefined);
       setSelectedSessionId(undefined);
-      setPage(bootstrap.activeView === "mcp" ? "mcp" : bootstrap.activeView === "extensions" ? "extensions" : "chat");
+      setPage(bootstrap.activeView === "extensions" ? "extensions" : "chat");
       setRuntimePanelOpen(bootstrap.activeView === "runtime" && Boolean(bootstrap.workspace));
       commitNavigation(createNavigationState());
     } catch (error) {
@@ -942,14 +1018,14 @@ export function App(): React.JSX.Element {
   const selectedThinking = selectedActiveRun?.status === "thinking";
   const activeElsewhere = Boolean(activeSessionId && selectedSessionId && activeSessionId !== selectedSessionId);
   const runtimeBusy = Boolean(workspace?.runtime && workspace.runtime.state.kind !== "idle");
-  const chatMemoryEnabled = personalizationOverview?.chat?.effective.useMemories === true;
+  const chatMemoryEnabled = selectedSessionId === undefined
+    ? draftMemoryOverride ?? personalizationOverview?.memory.useMemories === true
+    : personalizationOverview?.chat?.effective.useMemories === true;
   const memoryToggleDisabledReason = !workspace?.project
     ? "请先打开一个项目。"
-    : !selectedSessionId
-      ? "发送一条消息后才能为当前聊天切换记忆。"
-      : !personalizationOverview?.chat
-        ? "正在读取当前聊天的记忆状态…"
-        : !personalizationOverview.memory.enabled
+    : !personalizationOverview
+      ? "正在读取当前聊天的记忆状态…"
+      : !personalizationOverview.memory.enabled
           ? "全局记忆已在设置中关闭，请先开启记忆功能。"
           : runtimeBusy
             ? "当前运行或后台维护尚未结束，请稍后再切换记忆。"
@@ -962,7 +1038,14 @@ export function App(): React.JSX.Element {
     const projectId = projectRef.current;
     const sessionId = selectedRef.current;
     const current = personalizationOverview?.chat;
-    if (!projectId || !sessionId || !current || !personalizationOverview.memory.enabled || memoryToggleBusy) return;
+    if (!projectId || !personalizationOverview || !personalizationOverview.memory.enabled || memoryToggleBusy) return;
+    if (!sessionId) {
+      const enabled = !(draftMemoryOverride ?? personalizationOverview.memory.useMemories);
+      setDraftMemoryOverride(enabled);
+      setToast(enabled ? "当前新聊天已开启记忆" : "当前新聊天已关闭记忆");
+      return;
+    }
+    if (!current) return;
     const enabled = !current.effective.useMemories;
     setMemoryToggleBusy(true);
     try {
@@ -979,7 +1062,11 @@ export function App(): React.JSX.Element {
     } finally {
       setMemoryToggleBusy(false);
     }
-  }, [mergeProjectSnapshot, memoryToggleBusy, personalizationOverview]);
+  }, [draftMemoryOverride, mergeProjectSnapshot, memoryToggleBusy, personalizationOverview]);
+  const prefillComposer = useCallback((input: string): void => {
+    setComposerDraft(input);
+    setFocusToken((value) => value + 1);
+  }, []);
   const composer = (
     <Composer
       activeElsewhere={activeElsewhere}
@@ -1012,6 +1099,25 @@ export function App(): React.JSX.Element {
       runtimeInfo={workspace?.runtime?.info}
     />
   );
+  const composerWithContext = workspace?.project ? (
+    <div className="cindy-composer-stack">
+      <WorkspaceContextBar
+        branches={projectBranches}
+        branchesLoading={branchesLoading}
+        onCreateBranch={createProjectBranch}
+        onCreateProject={() => void createEmptyProject()}
+        onOpenBranches={() => {
+          const projectId = projectRef.current;
+          if (projectId) void loadProjectBranches(projectId);
+        }}
+        onSelectBranch={(branchName) => { void switchProjectBranch(branchName); }}
+        onSelectProject={(projectId) => { void selectProject(projectId); }}
+        project={workspace.project}
+        projects={projects}
+      />
+      {composer}
+    </div>
+  ) : composer;
 
   return (
     <DesktopShell
@@ -1051,10 +1157,16 @@ export function App(): React.JSX.Element {
             onLoadCookieJarStatus={loadCookieJarStatus}
             onLoadMemoryOverview={loadMemoryOverview}
             onLoadMemoryEmbeddingStatus={loadMemoryEmbeddingStatus}
+            onLoadTelosOverview={loadTelosOverview}
             onOpenBrowser={openBrowser}
+            onOpenChatDraft={(input) => { closeSettings(); prefillComposer(input); }}
             onOpenExternal={async (url) => await window.biny.openExternal(url)}
             onRebuildMemoryEmbeddingIndex={rebuildMemoryEmbeddingIndex}
+            onResolveTelosDrift={resolveTelosDrift}
+            onReviewBehaviorPattern={reviewBehaviorPattern}
+            onSaveTelos={saveTelos}
             onSearchMemory={searchMemory}
+            onSnoozeTelosDrift={snoozeTelosDrift}
             onStartModelLogin={startModelLogin}
             onTestModelConfiguration={testModelConfiguration}
             onThemePreference={changeThemePreference}
@@ -1087,8 +1199,11 @@ export function App(): React.JSX.Element {
             title={renameTarget?.kind === "project" ? "重命名项目" : "重命名会话"}
           />
           <SlashResultOverlay onClose={() => setSlashResult(undefined)} result={slashResult} />
-          <DesktopToast message={toast} onClose={clearToast} />
-          <DesktopWarningDialog message={warning} onClose={() => setWarning(undefined)} />
+          <DesktopToast
+            message={warning ?? toast}
+            onClose={warning ? () => setWarning(undefined) : clearToast}
+            type={warning ? "error" : "info"}
+          />
       </>
       )}
       rightPanel={inspector.dock}
@@ -1096,7 +1211,7 @@ export function App(): React.JSX.Element {
       sidebarLayout={sidebarLayout}
       sideNav={(
         <Sidebar
-          activeNavigation={page === "mcp" ? "mcp" : page === "extensions" ? "extensions" : runtimePanelOpen ? "runtime" : undefined}
+          activeNavigation={page === "extensions" ? "extensions" : runtimePanelOpen ? "runtime" : undefined}
           activeProjectId={workspace?.project.id}
           onCreateEmptyProject={() => void createEmptyProject()}
           onNewTask={(projectId) => void newTask(projectId)}
@@ -1115,7 +1230,6 @@ export function App(): React.JSX.Element {
           onSessionMenu={(session) => void openSessionMenu(session)}
           onSessionPin={(session) => { void toggleSessionPinned(session); }}
           onExtensions={openExtensions}
-          onMcp={openMcp}
           onSettings={() => openSettings()}
           onResizeKeyDown={onSidebarResizeKeyDown}
           onResizePointerDown={onSidebarResizePointerDown}
@@ -1135,7 +1249,7 @@ export function App(): React.JSX.Element {
       )}
       theme={themePreference}
     >
-      {page === "mcp" ? <McpServersView onError={setWarning} onSuccess={setToast} projectId={workspace?.project.id} /> : page === "extensions" ? <SkillHubView onError={setWarning} /> : <Workspace
+      {page === "extensions" ? <SkillHubView onError={setWarning} /> : <Workspace
         loading={loading}
         onCreateBranch={() => { void createBranch(); }}
         onDeleteUserMessage={deleteUserMessage}
@@ -1159,14 +1273,16 @@ export function App(): React.JSX.Element {
         sessionId={selectedSessionId}
         sessionTitle={sessionSummary?.title}
         thinking={selectedThinking}
+        running={selectedRunning}
         thinkingStartedAt={selectedActiveRun?.startedAt}
         turns={visibleTurns}
         writerConflict={writerConflict}
         onRuntimeError={reportRuntimeError}
         onRuntimeMutation={mutateRuntime}
         onRuntimeRefresh={refreshRuntimeProjection}
+        onPrefillPrompt={prefillComposer}
       >
-        {composer}
+        {composerWithContext}
       </Workspace>}
     </DesktopShell>
   );

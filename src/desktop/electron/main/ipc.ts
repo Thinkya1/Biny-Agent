@@ -59,6 +59,7 @@ const idSchema = z.string().min(1).max(240);
 const promptSchema = z.string().min(1).max(1_000_000);
 const userMessageIndexSchema = z.number().int().nonnegative();
 const titleSchema = z.string().trim().min(1).max(120);
+const branchNameSchema = z.string().trim().min(1).max(255);
 const revisionSchema = z.string().max(200).optional();
 const configRevisionSchema = z.string().min(1).max(200);
 const sessionTreePageOptionsSchema = z.object({
@@ -413,6 +414,18 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.workspaceSnapshot(idSchema.parse(projectId));
   });
 
+  handle(desktopIpc.listProjectBranches, async (_event, projectId: unknown) => {
+    return await context.agents.listProjectBranches(idSchema.parse(projectId));
+  });
+
+  handle(desktopIpc.switchProjectBranch, async (_event, projectId: unknown, branchName: unknown) => {
+    return await context.agents.switchProjectBranch(idSchema.parse(projectId), branchNameSchema.parse(branchName));
+  });
+
+  handle(desktopIpc.createProjectBranch, async (_event, projectId: unknown, branchName: unknown) => {
+    return await context.agents.createProjectBranch(idSchema.parse(projectId), branchNameSchema.parse(branchName));
+  });
+
   handle(desktopIpc.revealProject, async (_event, projectId: unknown) => {
     shell.showItemInFolder(context.projects.requireProject(idSchema.parse(projectId)).path);
   });
@@ -510,14 +523,15 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await showSessionMenu(context.getWindow(), z.boolean().parse(pinned), z.boolean().optional().default(false).parse(archived));
   });
 
-  handleRecoveryGated(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown) => {
+  handleRecoveryGated(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown, personalization: unknown) => {
     return await context.agents.sendPrompt(
       idSchema.parse(projectId),
       sessionId === undefined ? undefined : idSchema.parse(sessionId),
       promptSchema.parse(input),
       runModeSchema.parse(mode),
       z.array(attachmentSchema).max(20).parse(attachments),
-      z.enum(["steer", "followUp"]).optional().parse(delivery)
+      z.enum(["steer", "followUp"]).optional().parse(delivery),
+      chatPersonalizationSchema.optional().parse(personalization)
     );
   });
 

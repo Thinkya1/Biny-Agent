@@ -8,7 +8,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Dialog } from "@astryxdesign/core/Dialog";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
-import type { DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
   catalogForConnection,
   customCatalogEntry,
@@ -20,10 +20,12 @@ import {
   type ProviderCatalogItem,
   type ProviderCategory
 } from "../../providerCatalog.js";
-import { Icon } from "../Icon.js";
+import { Icon, type IconName } from "../Icon.js";
+import { McpServersView } from "../McpServersView.js";
 import { ProviderBrandGlyph } from "../ProviderBrandGlyph.js";
 import { SettingsAbout } from "./SettingsAbout.js";
 import { SettingsAppearance } from "./SettingsAppearance.js";
+import { SettingsActivity } from "./SettingsActivity.js";
 import { SettingsCheckbox } from "./SettingsCheckbox.js";
 import { SettingsCloseGuard } from "./SettingsCloseGuard.js";
 import { SettingsDetailLayer } from "./SettingsDetailLayer.js";
@@ -32,6 +34,7 @@ import { SettingsDraftProvider } from "./SettingsDraftProvider.js";
 import { SettingsMemory } from "./SettingsMemory.js";
 import { SettingsPageFooter } from "./SettingsPageFooter.js";
 import { SettingsPersonalizationDraft } from "./SettingsPersonalizationDraft.js";
+import { SettingsExtensionsView } from "./SettingsExtensionsView.js";
 import { searchSettings } from "./settingsSearch.js";
 
 interface SettingsOverlayProps {
@@ -61,6 +64,12 @@ interface SettingsOverlayProps {
   onDeleteMemoryEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
   onClearMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
   onCompactMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
+  onLoadTelosOverview(): Promise<DesktopTelosOverview>;
+  onSaveTelos(input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
+  onReviewBehaviorPattern(patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
+  onResolveTelosDrift(driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number): Promise<DesktopTelosOverview>;
+  onSnoozeTelosDrift(driftId: string, until: string, expectedRevision: number): Promise<DesktopTelosOverview>;
+  onOpenChatDraft(input: string): void;
   onLoadMemoryEmbeddingStatus(): Promise<DesktopMemoryEmbeddingStatus>;
   onDownloadMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
   onCancelMemoryEmbeddingDownload(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingCancellationResult>;
@@ -77,21 +86,29 @@ interface SettingsOverlayProps {
   onCancelModelLogin(provider: DesktopModelLoginProvider, authRequestId: string): Promise<void>;
 }
 
-export type SettingsTab = "外观" | "个性化" | "模型" | "记忆" | "联网搜索" | "关于";
+export type SettingsTab = "外观" | "个性化" | "模型" | "MCP 服务器" | "技能" | "插件" | "活动记录" | "记忆" | "联网搜索" | "关于";
 
-const settingsNav: Array<{ badge?: string; tab: SettingsTab; label: string }> = [
-  { tab: "外观", label: "外观" },
-  { tab: "个性化", label: "个性化" },
-  { tab: "模型", label: "模型供应商" },
-  { badge: "Beta", tab: "记忆", label: "记忆" },
-  { badge: "Beta", tab: "联网搜索", label: "联网搜索" },
-  { tab: "关于", label: "关于" }
+const settingsNav: Array<{ badge?: string; icon: IconName; tab: SettingsTab; label: string }> = [
+  { icon: "sun", tab: "外观", label: "外观" },
+  { icon: "spark", tab: "个性化", label: "个性化" },
+  { icon: "network", tab: "模型", label: "模型供应商" },
+  { icon: "plug", tab: "MCP 服务器", label: "MCP 服务器" },
+  { icon: "wand", tab: "技能", label: "技能" },
+  { icon: "puzzle", tab: "插件", label: "插件" },
+  { badge: "Beta", icon: "activity", tab: "活动记录", label: "活动记录" },
+  { badge: "Beta", icon: "brain", tab: "记忆", label: "记忆" },
+  { badge: "Beta", icon: "search", tab: "联网搜索", label: "联网搜索" },
+  { icon: "help", tab: "关于", label: "关于" }
 ];
 
 const settingsTitles: Record<SettingsTab, string> = {
   外观: "外观",
   个性化: "个性化",
   模型: "模型供应商",
+  "MCP 服务器": "MCP 服务器",
+  技能: "技能",
+  插件: "插件",
+  活动记录: "Activity Recorder",
   记忆: "记忆",
   联网搜索: "联网搜索",
   关于: "关于"
@@ -101,7 +118,11 @@ const settingsSubtitles: Record<SettingsTab, string> = {
   模型: "模型连接、API key 与默认模型管理。",
   外观: "显示模式、界面字体和字号。",
   个性化: "设置 Biny 的表达方式、长期偏好与当前聊天覆盖。",
-  记忆: "记忆检索、自动生成、整理与条目管理。",
+  "MCP 服务器": "管理可供 Agent 使用的 MCP 扩展服务。",
+  技能: "管理本机可用的 Agent Skills，并按需查看技能内容。",
+  插件: "管理当前项目的 Plugin，并从官方市场安装。",
+  活动记录: "本地记录屏幕、OCR 与输入活动，并控制隐私边界。",
+  记忆: "记忆检索、自动生成、长期策略与条目管理。",
   联网搜索: "配置联网搜索与数据来源。",
   关于: "版本与产品信息。"
 };
@@ -157,6 +178,12 @@ function SettingsOverlayContent({
   onDeleteMemoryEntry,
   onClearMemory,
   onCompactMemory,
+  onLoadTelosOverview,
+  onSaveTelos,
+  onReviewBehaviorPattern,
+  onResolveTelosDrift,
+  onSnoozeTelosDrift,
+  onOpenChatDraft,
   onLoadMemoryEmbeddingStatus,
   onDownloadMemoryEmbeddingModel,
   onCancelMemoryEmbeddingDownload,
@@ -181,6 +208,10 @@ function SettingsOverlayContent({
   const [searchQuery, setSearchQuery] = useState("");
   const [message, setMessage] = useState<string>();
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
+  const activeTabRef = useRef<SettingsTab>(tab);
+  const notifyForTab = (sourceTab: SettingsTab, nextMessage: string | undefined): void => {
+    if (activeTabRef.current === sourceTab) setMessage(nextMessage);
+  };
   useEffect(() => {
     if (open && modelSetupRequired) {
       _onNotify("当前没有可用于运行任务的模型。连接可用模型后，聊天与模型相关功能会自动恢复。");
@@ -192,7 +223,9 @@ function SettingsOverlayContent({
   // 由 Composer 直达模型设置时，在浏览器绘制前同步分页，避免先闪过上次打开的内容。
   useLayoutEffect(() => {
     if (!open) return;
+    setMessage(undefined);
     if (targetTab) {
+      activeTabRef.current = targetTab;
       setTab(targetTab);
       if (targetTab === "记忆") setMemoryVisited(true);
     }
@@ -202,7 +235,10 @@ function SettingsOverlayContent({
     ?? settingsDraft.snapshot?.models.defaultModel;
   const searchResults = searchSettings(searchQuery);
   const selectTab = (nextTab: SettingsTab): void => {
+    if (nextTab === tab) return;
+    activeTabRef.current = nextTab;
     setTab(nextTab);
+    setMessage(undefined);
     if (nextTab === "记忆") setMemoryVisited(true);
   };
   const selectSearchResult = (nextTab: SettingsTab, sectionId: string): void => {
@@ -227,6 +263,7 @@ function SettingsOverlayContent({
     setCloseGuardOpen(false);
     if (closeRequest) await onResolveCloseRequest(closeRequest.requestId, "cancelled");
   };
+  const extensionSettings = tab === "MCP 服务器" || tab === "技能" || tab === "插件";
   return (
     <Dialog
       aria-label="Biny 设置"
@@ -237,7 +274,7 @@ function SettingsOverlayContent({
       purpose="info"
       variant="fullscreen"
     >
-      <section className="settings-modal is-full-page">
+      <section className={`settings-modal is-full-page${extensionSettings ? " is-extension-settings" : ""}`}>
         <div className="settings-modal-body">
           <aside className="settings-tabs">
           <button aria-label="返回应用" className="settings-back-button" onClick={() => { void discardAndClose(); }} type="button">
@@ -262,6 +299,7 @@ function SettingsOverlayContent({
             <nav aria-label="设置分类" className="settings-nav-list">
               {settingsNav.map((item) => (
                 <button aria-current={tab === item.tab ? "page" : undefined} className={tab === item.tab ? "is-selected" : ""} key={item.tab} onClick={() => selectTab(item.tab)} type="button">
+                  <Icon name={item.icon} size={17} />
                   <span>{item.label}</span>
                   {item.badge ? <em className="settings-nav-badge">{item.badge}</em> : null}
                 </button>
@@ -269,7 +307,7 @@ function SettingsOverlayContent({
             </nav>
           )}
           </aside>
-          <main className="settings-content">
+          <main className={`settings-content${extensionSettings ? " is-extension-settings" : ""}`}>
           <header>
             <div className="settings-heading">
               <h2>{settingsTitles[tab]}</h2>
@@ -321,11 +359,11 @@ function SettingsOverlayContent({
             onCancelLogin={onCancelModelLogin}
             onChange={(alias, thinking) => {
               settingsDraft.setDefaultModel(alias, thinking);
-              setMessage("默认模型已加入草稿");
+              notifyForTab("模型", "默认模型已加入草稿");
             }}
-            onNotify={setMessage}
+            onNotify={(nextMessage) => notifyForTab("模型", nextMessage)}
             onSave={async (configuration) => {
-              setMessage(undefined);
+              notifyForTab("模型", undefined);
               try {
                 const previous = settingsDraft.draft?.models.upserts.find((item) => item.alias === configuration.alias)?.apiKeyHandle;
                 if (previous) await settingsDraft.releaseCredential(previous);
@@ -343,9 +381,9 @@ function SettingsOverlayContent({
                   apiKey: undefined,
                   apiKeyHandle: staged?.handle ?? configuration.apiKeyHandle
                 });
-                setMessage("模型配置已加入草稿");
+                notifyForTab("模型", "模型配置已加入草稿");
               } catch (error) {
-                setMessage(error instanceof Error ? error.message : String(error));
+                notifyForTab("模型", error instanceof Error ? error.message : String(error));
                 throw error;
               }
             }}
@@ -358,14 +396,14 @@ function SettingsOverlayContent({
               }
             }}
             onRemove={async (alias) => {
-              setMessage(undefined);
+              notifyForTab("模型", undefined);
               try {
                 const previous = settingsDraft.draft?.models.upserts.find((item) => item.alias === alias)?.apiKeyHandle;
                 if (previous) await settingsDraft.releaseCredential(previous);
                 settingsDraft.removeModel(alias);
-                setMessage("模型变更已加入草稿");
+                notifyForTab("模型", "模型变更已加入草稿");
               } catch (error) {
-                setMessage(error instanceof Error ? error.message : String(error));
+                notifyForTab("模型", error instanceof Error ? error.message : String(error));
                 throw error;
               }
             }}
@@ -376,6 +414,7 @@ function SettingsOverlayContent({
             font={settingsDraft.draft?.fontPreference ?? fontPreference}
             onFontChange={settingsDraft.setFontPreference}
           /> : null}
+          {tab === "活动记录" ? <SettingsActivity /> : null}
           {tab === "个性化" ? <SettingsPersonalizationDraft sessionRunning={runtimeBusy} /> : null}
           {memoryVisited ? <SettingsMemory
             embeddingModels={settingsDraft.snapshot?.models.embeddingModels ?? []}
@@ -390,6 +429,12 @@ function SettingsOverlayContent({
             onDeleteEntry={onDeleteMemoryEntry}
             onClear={onClearMemory}
             onCompact={onCompactMemory}
+            onLoadTelosOverview={onLoadTelosOverview}
+            onSaveTelos={onSaveTelos}
+            onReviewBehaviorPattern={onReviewBehaviorPattern}
+            onResolveTelosDrift={onResolveTelosDrift}
+            onSnoozeTelosDrift={onSnoozeTelosDrift}
+            onOpenChatDraft={onOpenChatDraft}
             onLoadEmbeddingStatus={onLoadMemoryEmbeddingStatus}
             onDownloadEmbeddingModel={onDownloadMemoryEmbeddingModel}
             onCancelEmbeddingDownload={onCancelMemoryEmbeddingDownload}
@@ -397,12 +442,15 @@ function SettingsOverlayContent({
             onRebuildEmbeddingIndex={onRebuildMemoryEmbeddingIndex}
             onCancelEmbeddingRebuild={onCancelMemoryEmbeddingRebuild}
             onTestModelConfiguration={onTestModelConfiguration}
-            onNotify={setMessage}
+            onNotify={(nextMessage) => notifyForTab("记忆", nextMessage)}
             sessionRunning={runtimeBusy}
           /> : null}
+          {tab === "MCP 服务器" ? <McpServersView onError={_onNotify} onSuccess={(nextMessage) => notifyForTab("MCP 服务器", nextMessage)} projectId={workspace?.project.id} /> : null}
+          {tab === "技能" ? <SettingsExtensionsView kind="skills" onError={_onNotify} projectId={workspace?.project.id} /> : null}
+          {tab === "插件" ? <SettingsExtensionsView kind="plugins" onError={_onNotify} projectId={workspace?.project.id} /> : null}
           {tab === "关于" ? <SettingsAbout version={version} /> : null}
           {tab === "联网搜索" ? <SettingsWebSearch
-            onNotify={setMessage}
+            onNotify={(nextMessage) => notifyForTab("联网搜索", nextMessage)}
             onOpenExternal={onOpenExternal}
             onLoadCookieJarStatus={onLoadCookieJarStatus}
             onOpenBrowser={onOpenBrowser}

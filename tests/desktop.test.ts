@@ -8,7 +8,7 @@ import type { AgentRunOptions, AgentSessionInfo } from "../src/agent/AgentSessio
 import type { AgentSessionEvent } from "../src/agent/types.js";
 import type { ContextStatus } from "../src/agent/context/types.js";
 import type { CommandRuntime } from "../src/runtime/CommandRuntime.js";
-import { InteractiveAgentRuntime } from "../src/runtime/InteractiveAgentRuntime.js";
+import { createInteractiveAgentHost, InteractiveAgentRuntime } from "../src/runtime/InteractiveAgentRuntime.js";
 import { startRuntimeHost } from "../src/runtime/RuntimeHost.js";
 import { executeRuntimeCommand } from "../src/runtime/commands.js";
 import { SessionLeaseStore } from "../src/runtime/SessionLease.js";
@@ -94,6 +94,7 @@ await testDesktopMessageEditFork();
 await testWorkspaceFilePreview();
 await testWorkspaceDirectoryListing();
 await testDesktopGitInspectionDisablesHelpers();
+await testDesktopGitBranches();
 testWorkspaceSyntaxHighlighting();
 testFencedCodeHighlighting();
 testAttachmentReferenceRoundTrip();
@@ -115,6 +116,7 @@ await testDesktopModelSwitchDoesNotResumeInterruptedTurn();
 await testDesktopSubagentSlashCommands();
 await testDesktopDoesNotResumePersistedIdleSession();
 await testDesktopPermissionModePersistsInIdleSnapshot();
+await testDesktopPermissionModePersistsThroughExistingHost();
 await testDesktopReconcilesPersistedPermissionWithExistingHost();
 await testDesktopCredentialsAreSeparated();
 await testDesktopWebSearchSettings();
@@ -263,6 +265,24 @@ function testDesktopRendererStateProjection(): void {
   assert.equal(projected.sessions[0]?.status, "blocked");
   assert.equal(projected.sessions[0]?.resumable, true);
   assert.equal(projected.runtime?.revision, 2);
+  const staleRuntime = applyUpdatesToWorkspace(
+    { ...workspace, permissionMode: "full-access" },
+    [{
+      projectId: project.id,
+      snapshot: { ...idleSnapshot, permissionMode: "ask" },
+      event: {
+        type: "run.blocked",
+        sessionId: "session-a",
+        runId: "run-a",
+        timestamp: "2026-08-03T10:00:05.000Z",
+        durationMs: 5_000,
+        reason: "missing_user_input",
+        summary: "Need a target",
+        resumable: true
+      }
+    }]
+  );
+  assert.equal(staleRuntime.permissionMode, "full-access");
   const switched = updateRuntimeInfo(projected, {
     modelAlias: "deepseek-v4-flash",
     provider: "deepseek",
@@ -885,6 +905,67 @@ async function testDesktopGitInspectionDisablesHelpers(): Promise<void> {
   }
 }
 
+async function testDesktopGitBranches(): Promise<void> {
+  if (process.platform === "win32") return;
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-git-branches-"));
+  const nonGitRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-non-git-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-git-branches-data-"));
+  let agents: DesktopAgentManager | undefined;
+  try {
+    await execFileAsync("git", ["init", "--quiet"], { cwd: workspaceRoot });
+    await execFileAsync("git", ["config", "user.name", "Biny Tests"], { cwd: workspaceRoot });
+    await execFileAsync("git", ["config", "user.email", "biny-tests@example.com"], { cwd: workspaceRoot });
+    await writeFile(path.join(workspaceRoot, "README.md"), "initial\n");
+    await execFileAsync("git", ["add", "README.md"], { cwd: workspaceRoot });
+    await execFileAsync("git", ["commit", "--quiet", "-m", "initial"], { cwd: workspaceRoot });
+    const initialBranch = (await execFileAsync("git", ["branch", "--show-current"], { cwd: workspaceRoot })).stdout.trim();
+    assert.ok(initialBranch);
+    await execFileAsync("git", ["branch", "feature/base"], { cwd: workspaceRoot });
+    await execFileAsync("git", ["branch", "topic/local"], { cwd: workspaceRoot });
+
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const branches = await projects.listProjectBranches(project.id);
+    assert.deepEqual(
+      branches.map((branch) => branch.name).sort(),
+      [initialBranch, "feature/base", "topic/local"].sort()
+    );
+    assert.equal(branches.find((branch) => branch.current)?.name, initialBranch);
+
+    await projects.switchProjectBranch(project.id, "feature/base");
+    assert.equal((await projects.inspectProject(project)).branch, "feature/base");
+    await projects.createProjectBranch(project.id, "feature/new");
+    assert.equal((await projects.inspectProject(project)).branch, "feature/new");
+    await assert.rejects(projects.createProjectBranch(project.id, "feature/new"), /已存在/u);
+    await assert.rejects(projects.switchProjectBranch(project.id, "missing/local"), /不存在/u);
+    await assert.rejects(projects.createProjectBranch(project.id, "bad..name"), /不合法/u);
+
+    await writeFile(path.join(workspaceRoot, "README.md"), "dirty\n");
+    await assert.rejects(projects.switchProjectBranch(project.id, initialBranch), /未提交改动/u);
+    await writeFile(path.join(workspaceRoot, "README.md"), "initial\n");
+
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const switched = await agents.switchProjectBranch(project.id, initialBranch);
+    assert.equal(switched.project.branch, initialBranch);
+    const originalIsProjectRunning = agents.isProjectRunning;
+    agents.isProjectRunning = () => true;
+    await assert.rejects(
+      agents.createProjectBranch(project.id, "blocked/new"),
+      /运行或维护中/u
+    );
+    agents.isProjectRunning = originalIsProjectRunning;
+
+    const nonGitProject = await projects.createProject(nonGitRoot);
+    assert.deepEqual(await projects.listProjectBranches(nonGitProject.id), []);
+    await assert.rejects(projects.switchProjectBranch(nonGitProject.id, "main"), /不是 Git/u);
+  } finally {
+    await agents?.closeAll();
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(nonGitRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
 function testWorkspaceSyntaxHighlighting(): void {
   const highlighted = highlightWorkspaceFile("src/index.ts", "const answer: number = 42;\n");
   assert.equal(highlighted.language, "typescript");
@@ -1229,6 +1310,10 @@ async function testDesktopActiveViewPersistence(): Promise<void> {
     const restored = new DesktopStateStore(statePath);
     await restored.load();
     assert.equal(restored.activeView(), "extensions");
+    await writeFile(statePath, `${JSON.stringify({ version: 1, activeView: "mcp" })}\n`);
+    const mcp = new DesktopStateStore(statePath);
+    await mcp.load();
+    assert.equal(mcp.activeView(), "chat");
     await writeFile(statePath, `${JSON.stringify({ version: 1, activeView: "memory" })}\n`);
     const legacy = new DesktopStateStore(statePath);
     await legacy.load();
@@ -1836,6 +1921,47 @@ async function testDesktopPermissionModePersistsInIdleSnapshot(): Promise<void> 
     assert.equal((await configStore.load()).permission.mode, "auto");
   } finally {
     await agents?.closeAll();
+    if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
+    else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopPermissionModePersistsThroughExistingHost(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-permission-existing-host-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-permission-existing-host-data-"));
+  const previousAgentRoot = process.env.BINY_AGENT_DIR;
+  const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
+  let agents: DesktopAgentManager | undefined;
+  let host: { closeOwner(): Promise<void> } | undefined;
+  try {
+    process.env.BINY_AGENT_DIR = desktopRoot;
+    process.env.BINY_RUNTIME_HOST_ENTRY = path.join(desktopRoot, "missing-runtime-host-entry.js");
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    const localHost = await createInteractiveAgentHost(project.path, {
+      persistenceRoot: dataRoot,
+      configStore,
+      attachmentRoot: projects.attachmentsRoot(project)
+    });
+    host = await startRuntimeHost(dataRoot, localHost.runtime, localHost.commands, { configDir: desktopRoot });
+
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    await agents.setPermissionMode(project.id, "full-access");
+    assert.equal(localHost.runtime.getSnapshot().permissionMode, "full-access");
+    assert.equal((await configStore.load(project.path)).permission.mode, "full-access");
+
+    await agents.closeAll();
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const restored = await agents.workspaceSnapshot(project.id);
+    assert.equal(restored.permissionMode, "full-access");
+  } finally {
+    await agents?.closeAll();
+    await host?.closeOwner();
+    if (previousAgentRoot === undefined) delete process.env.BINY_AGENT_DIR;
+    else process.env.BINY_AGENT_DIR = previousAgentRoot;
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
     await rm(workspaceRoot, { recursive: true, force: true });
