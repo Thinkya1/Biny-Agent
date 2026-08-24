@@ -22,6 +22,17 @@ import { slashCommandsForSurface, type SlashCommandDefinition } from "../runtime
 import type { SessionBranchPoint } from "../session/catalog.js";
 import type { SessionEvent } from "../session/recorder.js";
 import type { SessionRunStatus } from "../session/runLedger.js";
+import type {
+  BehaviorPattern,
+  BehaviorPatternReviewAction,
+  TelosEvidence,
+  TelosDocument,
+  TelosDocumentInput,
+  TelosDrift,
+  TelosDriftResolutionAction,
+  TelosOverview,
+  TelosScope
+} from "../agent/context/telosTypes.js";
 
 export const desktopIpc = {
   bootstrap: "desktop:bootstrap",
@@ -56,20 +67,15 @@ export const desktopIpc = {
   resolvePermission: "desktop:permission:resolve",
   setPermissionMode: "desktop:permission:mode",
   switchModel: "desktop:model:switch",
-  saveModelConfiguration: "desktop:model:save-configuration",
   testModelConfiguration: "desktop:model:test-configuration",
-  removeModelConfiguration: "desktop:model:remove-configuration",
   fetchModelCatalog: "desktop:model:fetch-catalog",
   fetchModelCatalogCandidate: "desktop:model:fetch-catalog-candidate",
   startModelLogin: "desktop:model:login:start",
-  completeModelLogin: "desktop:model:login:complete",
   cancelModelLogin: "desktop:model:login:cancel",
   compact: "desktop:agent:compact",
   runtimeProjection: "desktop:runtime:projection",
   runtimeMutation: "desktop:runtime:mutation",
   runtimeEvents: "desktop:runtime:events",
-  webSearchSettings: "desktop:web-search:settings",
-  saveWebSearchSettings: "desktop:web-search:save",
   openBrowser: "desktop:browser:open",
   cookieJarStatus: "desktop:browser:cookies:status",
   exportCookies: "desktop:browser:cookies:export",
@@ -94,6 +100,11 @@ export const desktopIpc = {
   deleteMemoryEntry: "desktop:memory:delete-entry",
   clearMemory: "desktop:memory:clear",
   compactMemory: "desktop:memory:compact",
+  telosOverview: "desktop:telos:overview",
+  saveTelos: "desktop:telos:save",
+  reviewBehaviorPattern: "desktop:telos:review-pattern",
+  resolveTelosDrift: "desktop:telos:resolve-drift",
+  snoozeTelosDrift: "desktop:telos:snooze-drift",
   memoryEmbeddingStatus: "desktop:memory:embedding-status",
   downloadMemoryEmbeddingModel: "desktop:memory:embedding-download",
   cancelMemoryEmbeddingDownload: "desktop:memory:embedding-cancel-download",
@@ -119,13 +130,24 @@ export const desktopIpc = {
   event: "desktop:agent:event",
   menuAction: "desktop:menu:action",
   skillCatalog: "desktop:skill:catalog",
+  skillSourceImport: "desktop:skill:source-import",
+  skillSourceInstall: "desktop:skill:source-install",
   skillFileRead: "desktop:skill:file-read",
   skillFileWrite: "desktop:skill:file-write",
-  skillOpenDirectory: "desktop:skill:open-directory"
+  skillOpenDirectory: "desktop:skill:open-directory",
+  mcpSnapshot: "desktop:mcp:snapshot",
+  mcpCatalog: "desktop:mcp:catalog",
+  mcpRefreshCatalog: "desktop:mcp:catalog-refresh",
+  mcpUpsertServer: "desktop:mcp:server-upsert",
+  mcpSetEnabled: "desktop:mcp:server-enabled",
+  mcpDeleteServer: "desktop:mcp:server-delete",
+  mcpTestServer: "desktop:mcp:server-test",
+  mcpReconnect: "desktop:mcp:server-reconnect",
+  mcpDetails: "desktop:mcp:server-details"
 } as const;
 
 export type DesktopThemePreference = "system" | "light" | "dark";
-export type DesktopActiveView = "chat" | "runtime" | "extensions";
+export type DesktopActiveView = "chat" | "runtime" | "extensions" | "mcp";
 
 /** 界面字体偏好。`family` 为 CSS 字体族名，"system" 表示跟随操作系统；`size` 为基准字号（px）。 */
 export interface DesktopFontPreference {
@@ -203,6 +225,13 @@ export interface DesktopSessionDocument {
   session: DesktopSessionSummary;
   events: SessionEvent[];
   liveEvents: AgentHostEvent[];
+  /** session 仍可读，但当前 Desktop 没有 writer ownership 时的只读冲突。 */
+  writerConflict?: DesktopSessionWriterConflict;
+}
+
+export interface DesktopSessionWriterConflict {
+  sessionId: string;
+  ownerSurface?: "desktop" | "tui" | "cli";
 }
 
 /** TUI 通过 `/app` 显式交给 Desktop 打开的项目会话。 */
@@ -235,6 +264,8 @@ export interface DesktopWorkspaceSnapshot {
   selectedSessionId?: string;
   runtime?: InteractiveRuntimeSnapshot;
   runtimeError?: string;
+  /** 跨 Desktop/TUI 共享的已保存权限模式；Runtime 启动时会先与这个持久化值对齐。 */
+  permissionMode: PermissionMode;
   requiresModelConfiguration: boolean;
   /** 普通 Composer 选择器使用的已启用且当前可用模型；设置页的 `models` 仍表示已保存模型。 */
   pickerModels: ModelChoice[];
@@ -300,6 +331,22 @@ export interface DesktopWorkspaceDirectory {
 
 export type DesktopSkillScope = "global" | "project";
 export type DesktopSkillEngine = "biny" | "codex" | "claude" | "pi";
+export type DesktopSkillSource = "biny" | "agents";
+
+export interface DesktopSkillDiagnostic {
+  kind: "unsupported_root" | "unsupported_symlink" | "scan_failed" | "duplicate_id";
+  message: string;
+  path?: string;
+  ref?: string;
+  shadowedBy?: string;
+}
+
+export interface DesktopManagedSkillSource {
+  id: string;
+  name: string;
+  description: string;
+  installed: boolean;
+}
 
 export interface DesktopSkillFile {
   path: string;
@@ -310,9 +357,12 @@ export interface DesktopSkillFile {
 
 export interface DesktopSkillCatalogEntry {
   id: string;
+  ref: string;
   name: string;
   description: string;
   scope: DesktopSkillScope;
+  source: DesktopSkillSource;
+  precedence: number;
   engine: DesktopSkillEngine;
   linkedEngines: DesktopSkillEngine[];
   absolutePath: string;
@@ -321,6 +371,7 @@ export interface DesktopSkillCatalogEntry {
   files: DesktopSkillFile[];
   frontmatter: Record<string, unknown>;
   parseError?: string;
+  shadowedBy?: string;
 }
 
 export interface DesktopPluginSummary {
@@ -336,8 +387,131 @@ export interface DesktopPluginSummary {
 
 export interface DesktopSkillCatalogSnapshot {
   skills: DesktopSkillCatalogEntry[];
+  inventory: DesktopSkillCatalogEntry[];
   plugins: DesktopPluginSummary[];
+  managedSources: DesktopManagedSkillSource[];
   warnings: string[];
+  diagnostics: DesktopSkillDiagnostic[];
+}
+
+export type DesktopMcpTransport = "stdio" | "remote";
+export type DesktopMcpRemoteProtocol = "streamable-http" | "sse";
+export type DesktopMcpServerState = "connected" | "disconnected" | "not-started" | "disabled";
+
+export interface DesktopMcpServerSummary {
+  name: string;
+  id?: string;
+  description?: string;
+  transport: DesktopMcpTransport;
+  remoteProtocol?: DesktopMcpRemoteProtocol;
+  commandOrUrl: string;
+  args: string[];
+  cwd?: string;
+  stderr?: "ignore" | "inherit" | "pipe";
+  timeoutMs?: number;
+  enabled: boolean;
+  state: DesktopMcpServerState;
+  toolNames: string[];
+  promptNames: string[];
+  hasResources: boolean;
+  environmentKeys: string[];
+  headerNames: string[];
+  lastError?: string;
+}
+
+export interface DesktopMcpResourceSummary {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+export interface DesktopMcpServerDetails {
+  server: DesktopMcpServerSummary;
+  resources: DesktopMcpResourceSummary[];
+}
+
+export type DesktopMcpFieldAction = "set" | "keep" | "clear";
+
+/** value 只允许出现在一次性 IPC 入参中；快照永远不返回字段正文。 */
+export interface DesktopMcpFieldMutation {
+  key: string;
+  action: DesktopMcpFieldAction;
+  value?: string;
+}
+
+export interface DesktopMcpServerDraft {
+  name: string;
+  description?: string;
+  transport: DesktopMcpTransport;
+  command?: string;
+  args: string[];
+  cwd?: string;
+  stderr?: "ignore" | "inherit" | "pipe";
+  url?: string;
+  remoteProtocol?: DesktopMcpRemoteProtocol;
+  timeoutMs?: number;
+  env: DesktopMcpFieldMutation[];
+  headers: DesktopMcpFieldMutation[];
+}
+
+export interface DesktopMcpCatalogParameter {
+  name: string;
+  key: string;
+  placeholder?: string;
+  required: boolean;
+}
+
+export interface DesktopMcpCatalogInstallation {
+  name: string;
+  transport: DesktopMcpTransport;
+  remoteProtocol?: DesktopMcpRemoteProtocol;
+  command?: string;
+  args: string[];
+  url?: string;
+  parameters: DesktopMcpCatalogParameter[];
+  tags: string[];
+}
+
+export interface DesktopMcpCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  author?: string;
+  category?: string;
+  tags: string[];
+  verified: boolean;
+  featured: boolean;
+  repositoryUrl?: string;
+  websiteUrl?: string;
+  installations: DesktopMcpCatalogInstallation[];
+}
+
+export type DesktopMcpCatalogStatus = "idle" | "loading" | "ready" | "stale" | "error";
+
+export interface DesktopMcpCatalogState {
+  status: DesktopMcpCatalogStatus;
+  source: string;
+  fetchedAt?: string;
+  entries: DesktopMcpCatalogEntry[];
+  categories: string[];
+  error?: string;
+}
+
+export interface DesktopMcpTestResult {
+  success: boolean;
+  state: "connected" | "failed";
+  toolNames: string[];
+  promptNames: string[];
+  hasResources: boolean;
+  message?: string;
+  error?: string;
+}
+
+export interface DesktopMcpSnapshot {
+  configRevision: string;
+  servers: DesktopMcpServerSummary[];
+  catalog: DesktopMcpCatalogState;
 }
 
 export interface DesktopSkillFilePreview {
@@ -406,8 +580,8 @@ export interface DesktopModelConnection {
 
 export interface DesktopModelCatalogResult {
   providerAlias: string;
-  /** `fetched` means the provider answered; `fallback` means we kept what we had. */
-  source: "fetched" | "fallback";
+  /** 只有服务商成功返回并通过校验的非空目录才会产生结果。 */
+  source: "fetched";
   fetchedAt: string;
   models: ModelCatalogEntry[];
 }
@@ -454,6 +628,15 @@ export interface DesktopWebSearchSettingsInput {
   apiKeyEnv?: string;
   timeoutMs: number;
   maxResults: number;
+}
+
+export type DesktopSettingsCredentialPurpose = "model" | "web-search";
+
+/** 临时凭据句柄的受众；句柄不能跨项目、用途或 provider 重放。 */
+export interface DesktopSettingsCredentialScope {
+  projectId: string;
+  purpose: DesktopSettingsCredentialPurpose;
+  providerAlias: string;
 }
 
 export interface DesktopStagedSettingsCredential {
@@ -631,6 +814,16 @@ export interface DesktopMemoryCompactionResult {
   revision: number;
   error?: string;
 }
+
+export type DesktopTelosScope = TelosScope;
+export type DesktopTelosDocument = TelosDocument;
+export type DesktopTelosDocumentInput = TelosDocumentInput;
+export type DesktopBehaviorPattern = BehaviorPattern;
+export type DesktopBehaviorPatternReviewAction = BehaviorPatternReviewAction;
+export type DesktopTelosEvidence = TelosEvidence;
+export type DesktopTelosDrift = TelosDrift;
+export type DesktopTelosDriftResolutionAction = TelosDriftResolutionAction;
+export type DesktopTelosOverview = TelosOverview;
 
 /** Renderer 只接收主进程计算好的 endpoint 摘要，不能为了 SHA-256 引入 Node-only agent 模块。 */
 export interface DesktopEmbeddingModelDescriptor extends EmbeddingModelDescriptor {
@@ -902,24 +1095,19 @@ export interface DesktopApi {
   resolvePermission(projectId: string, requestId: string, result: PermissionResult): Promise<void>;
   setPermissionMode(projectId: string, mode: PermissionMode): Promise<DesktopWorkspaceSnapshot>;
   switchModel(projectId: string, alias: string, thinking: ThinkingSelection): Promise<ModelRuntimeInfo>;
-  saveModelConfiguration(projectId: string, configuration: DesktopModelConfigurationInput): Promise<DesktopWorkspaceSnapshot>;
   testModelConfiguration(projectId: string, configuration: DesktopModelConfigurationInput): Promise<DesktopModelConnectionTestResult>;
-  removeModelConfiguration(projectId: string, alias: string): Promise<DesktopWorkspaceSnapshot>;
   fetchModelCatalog(projectId: string, providerAlias: string): Promise<DesktopModelCatalogResult>;
   /**
    * 用尚未保存的候选配置（临时密钥 + 目录地址）直接向服务商拉取模型目录，
    * 供“新增连接”流程在提交前加载可勾选的模型列表。
-   */
+  */
   fetchModelCatalogCandidate(projectId: string, configuration: DesktopModelConfigurationInput): Promise<DesktopModelCatalogResult>;
   startModelLogin(projectId: string, provider: DesktopModelLoginProvider): Promise<DesktopModelLoginStartResult>;
-  completeModelLogin(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string, pastedAuthorization?: string): Promise<DesktopWorkspaceSnapshot>;
   cancelModelLogin(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string): Promise<void>;
   compact(projectId: string, hint?: string): Promise<string>;
   runtimeProjection(projectId: string): Promise<DesktopRuntimeProjection>;
   runtimeMutation(projectId: string, operation: DesktopRuntimeMutation, payload?: Record<string, unknown>): Promise<unknown>;
   runtimeEvents(projectId: string, afterSequence?: number, limit?: number): Promise<unknown>;
-  webSearchSettings(projectId: string): Promise<DesktopWebSearchSettings>;
-  saveWebSearchSettings(projectId: string, input: DesktopWebSearchSettingsInput): Promise<DesktopWebSearchSettings>;
   /** 打开内嵌浏览器窗口；`url` 省略时打开首页。登录态由浏览器 partition 保存并同步给 agent 工具。 */
   openBrowser(url?: string): Promise<void>;
   cookieJarStatus(): Promise<DesktopCookieJarStatus>;
@@ -933,7 +1121,7 @@ export interface DesktopApi {
   saveMemorySettings(projectId: string, input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot>;
   settingsSnapshot(projectId: string, sessionId?: string): Promise<DesktopSettingsSnapshot>;
   saveSettings(projectId: string, input: DesktopSettingsSaveInput): Promise<DesktopSettingsSaveResult>;
-  stageSettingsCredential(secret: string): Promise<DesktopStagedSettingsCredential>;
+  stageSettingsCredential(secret: string, scope: DesktopSettingsCredentialScope): Promise<DesktopStagedSettingsCredential>;
   completeModelLoginForSettings(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string, pastedAuthorization?: string): Promise<DesktopStagedModelLoginResult>;
   releaseSettingsCredentials(handles: string[]): Promise<void>;
   updateSettingsDraftState(state: DesktopSettingsDraftState): Promise<void>;
@@ -944,6 +1132,11 @@ export interface DesktopApi {
   deleteMemoryEntry(projectId: string, entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
   clearMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
   compactMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
+  telosOverview(projectId: string): Promise<DesktopTelosOverview>;
+  saveTelos(projectId: string, input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
+  reviewBehaviorPattern(projectId: string, patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
+  resolveTelosDrift(projectId: string, driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number): Promise<DesktopTelosOverview>;
+  snoozeTelosDrift(projectId: string, driftId: string, until: string, expectedRevision: number): Promise<DesktopTelosOverview>;
   memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus>;
   downloadMemoryEmbeddingModel(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
   cancelMemoryEmbeddingDownload(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingCancellationResult>;
@@ -967,9 +1160,25 @@ export interface DesktopApi {
   resizeTerminal(terminalId: string, cols: number, rows: number): void;
   disposeTerminal(terminalId: string): Promise<void>;
   skillCatalog(): Promise<DesktopSkillCatalogSnapshot>;
+  importSkillSource(): Promise<DesktopManagedSkillSource | undefined>;
+  installSkillSource(sourceId: string): Promise<void>;
   readSkillFile(skillId: string, relativePath: string): Promise<DesktopSkillFilePreview>;
   writeSkillFile(skillId: string, relativePath: string, content: string): Promise<void>;
   openSkillDirectory(skillId: string): Promise<void>;
+  mcpSnapshot(projectId?: string): Promise<DesktopMcpSnapshot>;
+  mcpCatalog(): Promise<DesktopMcpCatalogState>;
+  mcpRefreshCatalog(): Promise<DesktopMcpCatalogState>;
+  mcpUpsertServer(
+    projectId: string | undefined,
+    originalName: string | undefined,
+    draft: DesktopMcpServerDraft,
+    expectedConfigRevision: string
+  ): Promise<DesktopMcpSnapshot>;
+  mcpSetEnabled(projectId: string | undefined, name: string, enabled: boolean, expectedConfigRevision: string): Promise<DesktopMcpSnapshot>;
+  mcpDeleteServer(projectId: string | undefined, name: string, expectedConfigRevision: string): Promise<DesktopMcpSnapshot>;
+  mcpTestServer(projectId: string | undefined, draft: DesktopMcpServerDraft): Promise<DesktopMcpTestResult>;
+  mcpReconnect(projectId: string, name: string): Promise<DesktopMcpServerSummary>;
+  mcpDetails(projectId: string, name: string): Promise<DesktopMcpServerDetails>;
   onTerminalEvent(listener: (event: DesktopTerminalEvent) => void): () => void;
   onAgentEvent(listener: (envelope: DesktopAgentEventEnvelope) => void): () => void;
   onSessionHandoff(listener: (target: DesktopSessionHandoff) => void): () => void;

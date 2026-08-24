@@ -13,6 +13,7 @@ import { desktopIpc } from "../../protocol.js";
 import { DesktopAgentManager } from "./DesktopAgentManager.js";
 import { DesktopBrowserService } from "./DesktopBrowserService.js";
 import { DesktopConfigStore } from "./DesktopConfigStore.js";
+import { DesktopMcpService } from "./DesktopMcpService.js";
 import { DesktopProjectService } from "./DesktopProjectService.js";
 import { DesktopSkillService } from "./DesktopSkillService.js";
 import { DesktopStateStore } from "./DesktopStateStore.js";
@@ -81,6 +82,12 @@ async function startDesktopApplication(): Promise<void> {
       }).show();
     }
   }, async (url) => await shell.openExternal(url), undefined, net.fetch.bind(net) as unknown as typeof globalThis.fetch);
+  const mcp = new DesktopMcpService(
+    configStore,
+    projects,
+    agents,
+    net.fetch.bind(net) as unknown as typeof globalThis.fetch
+  );
   const settings = new DesktopSettingsTransaction(state, agents);
   // 恢复检查必须早于 IPC 注册和窗口开放；无法自动恢复时保留应用可用来展示设置错误，
   // 但同一个 transaction 实例会阻止所有新工作入口。
@@ -141,8 +148,6 @@ async function startDesktopApplication(): Promise<void> {
   };
 
   const decideWindowClose = async (): Promise<WindowCloseDecision> => {
-    const settingsDecision = await settingsClose.request(mainWindow?.webContents, "window");
-    if (settingsDecision === "cancel") return "cancel";
     if (!agents.hasRunningTasks()) return "close";
     const response = await showMessage(mainWindow, {
       type: "question",
@@ -194,6 +199,7 @@ async function startDesktopApplication(): Promise<void> {
     terminals,
     browser,
     skills,
+    mcp,
     getWindow: () => mainWindow,
     bootstrap,
     updateSettingsDraftState: (draftState) => settingsClose.updateState(draftState),
@@ -222,11 +228,6 @@ async function startDesktopApplication(): Promise<void> {
     if (preparingQuit) return;
     preparingQuit = true;
     void (async () => {
-      const settingsDecision = await settingsClose.request(mainWindow?.webContents, "quit");
-      if (settingsDecision === "cancel") {
-        preparingQuit = false;
-        return;
-      }
       if (agents.hasRunningTasks()) {
         const response = await showMessage(mainWindow, {
           type: "warning",

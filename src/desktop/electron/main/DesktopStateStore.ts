@@ -1,5 +1,5 @@
 /**
- * 桌面端界面状态的持久化：项目列表、当前项目与会话、当前主界面、会话标题/置顶、
+ * 桌面端界面状态的持久化：项目列表、当前项目与会话、当前主界面、
  * 侧栏与面板宽度、主题偏好、窗口位置。
  *
  * 读取时逐字段校验并夹到合法范围，文件损坏则改名备份后回退默认值——界面状态不值得让应用
@@ -11,11 +11,6 @@ import { clampStoredFilePanelWidth, DEFAULT_FILE_PANEL_WIDTH } from "../../fileP
 import { DEFAULT_FONT_PREFERENCE, normalizeFontPreference } from "../../fontPreference.js";
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, normalizeSidebarWidth } from "../../sidebarSizing.js";
 import type { DesktopActiveView, DesktopFontPreference, DesktopProject, DesktopThemePreference } from "../../protocol.js";
-
-interface DesktopSessionMetadata {
-  title?: string;
-  pinned?: boolean;
-}
 
 export interface DesktopWindowBounds {
   x?: number;
@@ -30,7 +25,6 @@ interface PersistedDesktopState {
   activeProjectId?: string;
   selectedSessionIds: Record<string, string>;
   activeView: DesktopActiveView;
-  sessionMetadata: Record<string, DesktopSessionMetadata>;
   sidebarWidth: number;
   filePanelWidth: number;
   themePreference: DesktopThemePreference;
@@ -46,7 +40,6 @@ const defaultState: PersistedDesktopState = {
   activeProjectId: undefined,
   selectedSessionIds: {},
   activeView: "chat",
-  sessionMetadata: {},
   sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
   filePanelWidth: DEFAULT_FILE_PANEL_WIDTH,
   themePreference: "system",
@@ -70,7 +63,6 @@ export class DesktopStateStore {
         activeProjectId: typeof raw.activeProjectId === "string" ? raw.activeProjectId : undefined,
         selectedSessionIds: isRecord(raw.selectedSessionIds) ? stringRecord(raw.selectedSessionIds) : {},
         activeView: validActiveView(raw.activeView) ? raw.activeView : "chat",
-        sessionMetadata: isRecord(raw.sessionMetadata) ? metadataRecord(raw.sessionMetadata) : {},
         sidebarWidth: typeof raw.sidebarWidth === "number" ? normalizeSidebarWidth(raw.sidebarWidth) : DEFAULT_SIDEBAR_WIDTH,
         filePanelWidth: typeof raw.filePanelWidth === "number" ? clampStoredFilePanelWidth(raw.filePanelWidth) : DEFAULT_FILE_PANEL_WIDTH,
         themePreference: validThemePreference(raw.themePreference) ? raw.themePreference : "system",
@@ -107,9 +99,6 @@ export class DesktopStateStore {
   async removeProject(projectId: string): Promise<void> {
     this.state.projects = this.state.projects.filter((project) => project.id !== projectId);
     delete this.state.selectedSessionIds[projectId];
-    for (const key of Object.keys(this.state.sessionMetadata)) {
-      if (key.startsWith(`${projectId}:`)) delete this.state.sessionMetadata[key];
-    }
     if (this.state.activeProjectId === projectId) this.state.activeProjectId = this.state.projects.at(0)?.id;
     await this.save();
   }
@@ -182,37 +171,6 @@ export class DesktopStateStore {
   async setSelectedSession(projectId: string, sessionId: string | undefined): Promise<void> {
     if (sessionId === undefined) delete this.state.selectedSessionIds[projectId];
     else this.state.selectedSessionIds[projectId] = sessionId;
-    await this.save();
-  }
-
-  sessionMetadata(projectId: string, sessionId: string): DesktopSessionMetadata {
-    return { ...this.state.sessionMetadata[metadataKey(projectId, sessionId)] };
-  }
-
-  async setSessionTitle(projectId: string, sessionId: string, title: string): Promise<void> {
-    const key = metadataKey(projectId, sessionId);
-    this.state.sessionMetadata[key] = { ...this.state.sessionMetadata[key], title };
-    await this.save();
-  }
-
-  async setSessionPinned(projectId: string, sessionId: string, pinned: boolean): Promise<void> {
-    const key = metadataKey(projectId, sessionId);
-    this.state.sessionMetadata[key] = { ...this.state.sessionMetadata[key], pinned };
-    await this.save();
-  }
-
-  async copySessionMetadata(projectId: string, sourceSessionId: string, targetSessionId: string): Promise<void> {
-    const source = this.sessionMetadata(projectId, sourceSessionId);
-    this.state.sessionMetadata[metadataKey(projectId, targetSessionId)] = {
-      title: source.title ? `${source.title} 副本` : undefined,
-      pinned: false
-    };
-    await this.save();
-  }
-
-  async deleteSessionMetadata(projectId: string, sessionId: string): Promise<void> {
-    delete this.state.sessionMetadata[metadataKey(projectId, sessionId)];
-    if (this.state.selectedSessionIds[projectId] === sessionId) delete this.state.selectedSessionIds[projectId];
     await this.save();
   }
 
@@ -349,10 +307,6 @@ export class DesktopPreferenceRevisionConflictError extends Error {
   }
 }
 
-function metadataKey(projectId: string, sessionId: string): string {
-  return `${projectId}:${sessionId}`;
-}
-
 function validPreferenceRevision(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
 }
@@ -375,16 +329,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringRecord(value: Record<string, unknown>): Record<string, string> {
   return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-}
-
-function metadataRecord(value: Record<string, unknown>): Record<string, DesktopSessionMetadata> {
-  return Object.fromEntries(Object.entries(value).flatMap(([key, metadata]) => {
-    if (!isRecord(metadata)) return [];
-    return [[key, {
-      title: typeof metadata.title === "string" ? metadata.title : undefined,
-      pinned: typeof metadata.pinned === "boolean" ? metadata.pinned : undefined
-    }]];
-  }));
 }
 
 function validWindowBounds(value: unknown): value is DesktopWindowBounds {

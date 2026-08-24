@@ -19,6 +19,7 @@ import type {
   MemoryOverview,
   MemorySearchResult
 } from "../../../agent/context/memoryTypes.js";
+import { TelosStorage } from "../../../agent/context/telosStorage.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -28,9 +29,9 @@ import { providerDefinition } from "../../../ai/provider.js";
 import { builtinProviderModels } from "../../../ai/builtinModels.js";
 import { loadProjectSettings } from "../../../config/projectSettings.js";
 import { globalConfigDir } from "../../../config/paths.js";
-import type { DeferredCredentialTransactionStatus } from "../../../config/credentials.js";
+import { synchronizeCredentialRevisions, type DeferredCredentialTransactionStatus } from "../../../config/credentials.js";
 import { configSchema, type AgentConfig, type ProviderConfig } from "../../../config/schema.js";
-import type { AgentConfigStore } from "../../../config/store.js";
+import { updateConfig, type AgentConfigStore } from "../../../config/store.js";
 import { configDocumentRevision } from "../../../config/versioned.js";
 import { createNativeModelSettings, validateModelConfiguration } from "../../../llm/nativeFactory.js";
 import { ModelRuntime } from "../../../llm/ModelRuntime.js";
@@ -58,7 +59,7 @@ import {
   type RuntimeHostFactory,
   type RuntimeHostServer
 } from "../../../runtime/RuntimeHost.js";
-import { SessionLeaseError } from "../../../runtime/SessionLease.js";
+import { isSessionWriterConflictError, SessionLeaseError } from "../../../runtime/SessionLease.js";
 import {
   deleteSessionCatalogRecord,
   readSessionCatalogRecord,
@@ -99,23 +100,30 @@ import type {
   DesktopModelLoginStartResult,
   DesktopPersonalizationOverview,
   DesktopPersonalizationSettingsInput,
+  DesktopProject,
   DesktopRunReceipt,
   DesktopRuntimeMutation,
   DesktopRuntimeProjection,
   DesktopSessionDocument,
+  DesktopSessionWriterConflict,
   DesktopSessionSummary,
   DesktopSessionTreePage,
   DesktopSessionTreePageOptions,
   DesktopSlashResult,
   DesktopWebSearchSettings,
-  DesktopWebSearchSettingsInput,
   DesktopSettingsChatSnapshot,
+  DesktopSettingsCredentialScope,
   DesktopSettingsModelsSnapshot,
   DesktopSettingsSaveInput,
   DesktopStagedModelLoginResult,
   DesktopStagedSettingsCredential,
+  DesktopBehaviorPatternReviewAction,
+  DesktopTelosDocumentInput,
+  DesktopTelosDriftResolutionAction,
+  DesktopTelosOverview,
   DesktopWorkspaceSnapshot
 } from "../../protocol.js";
+import type { McpServerDetails, McpServerStatus } from "../../../extensions/mcp.js";
 import type { AutomationCreateInput } from "../../../runtime/AutomationScheduler.js";
 import type { GraphNodeInput } from "../../../runtime/GoalGraphStore.js";
 import { DesktopProjectService } from "./DesktopProjectService.js";
@@ -137,6 +145,7 @@ type StagedSettingsCredential =
       kind: "api-key";
       secret: string;
       expiresAt: number;
+      scope: DesktopSettingsCredentialScope;
     }
   | {
       kind: "oauth-login";
@@ -178,6 +187,10 @@ export class DesktopAgentManager {
   private readonly runtimeInitializations = new Map<string, Promise<ManagedRuntime>>();
   private readonly liveEvents = new Map<string, Map<string, AgentHostEvent[]>>();
   private readonly runtimeErrors = new Map<string, string>();
+  private readonly pendingSessionReads = new Map<string, {
+    initialRevision: string | undefined;
+    promise: Promise<SessionCatalogRecord>;
+  }>();
   private readonly modelLoginOperations = new Map<string, AbortController>();
   private readonly stagedSettingsCredentials = new Map<string, StagedSettingsCredential>();
   private readonly modelLogin: DesktopModelLoginService;
@@ -203,22 +216,27 @@ export class DesktopAgentManager {
     // Keep lastOpenedAt stable on select/refresh so the sidebar order does not jump.
     await this.state.upsertProject(project);
     const runtime = this.runtimes.get(projectId)?.runtime;
-    const [config, sessions, sessionPage] = await Promise.all([
+    const [config, sessionData] = await Promise.all([
       this.configStore.load(project.path).catch(() => undefined),
-      this.projects.listSessions(project, runtime?.getSnapshot(), this.projectEvents(projectId)),
-      this.projects.listSessionTreePage(project, runtime?.getSnapshot(), this.projectEvents(projectId))
+      this.projects.listWorkspaceSessions(project, runtime?.getSnapshot(), this.projectEvents(projectId))
     ]);
     const catalogs = config ? await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore) : [];
     const models = config ? listConfiguredModelChoices(config) : [];
     const pickerModels = config ? listPickerModelChoices(config, catalogs) : [];
     const runtimeProjection = runtime === undefined ? undefined : await this.runtimeProjection(projectId);
+    // 磁盘配置是跨 Desktop/TUI 共享的持久化来源；Runtime 快照只在配置不可读时兜底。
+    // 这样调试客户端重开时不会被一个仍存活的旧 Host 内存快照改回 ask。
+    const permissionMode = config?.permission.mode
+      ?? runtime?.getSnapshot().permissionMode
+      ?? "ask";
     return {
       project,
-      sessions,
-      sessionPage,
+      sessions: sessionData.sessions,
+      sessionPage: sessionData.sessionPage,
       selectedSessionId: this.state.selectedSessionId(projectId),
       runtime: runtime?.getSnapshot(),
       runtimeError: this.runtimeErrors.get(projectId),
+      permissionMode,
       // 默认模型失效不等于整个应用没有模型。只要选择器里还有一个可用模型，
       // 用户就应能继续输入并切换过去，不能被“需要配置模型”状态锁死。
       requiresModelConfiguration: !config || pickerModels.length === 0,
@@ -227,6 +245,30 @@ export class DesktopAgentManager {
       connections: config ? describeModelConnections(config) : [],
       runtimeProjection
     };
+  }
+
+  async mcpStatuses(projectId: string): Promise<McpServerStatus[] | undefined> {
+    const managed = this.runtimes.get(projectId);
+    if (!managed) return undefined;
+    if (managed.commands) return managed.commands.mcp.listServers();
+    return await requireRemoteRuntime(managed.runtime).mcpStatus();
+  }
+
+  async mcpDetails(projectId: string, serverName: string): Promise<McpServerDetails> {
+    const managed = await this.ensureRuntime(projectId);
+    if (managed.commands) return await managed.commands.mcp.describeServer(serverName);
+    return await requireRemoteRuntime(managed.runtime).mcpDetails(serverName);
+  }
+
+  async mcpReconnect(projectId: string, serverName: string): Promise<McpServerStatus> {
+    const managed = await this.ensureRuntime(projectId);
+    if (managed.commands) return await managed.commands.mcp.reconnectServer(serverName);
+    return await requireRemoteRuntime(managed.runtime).mcpReconnect(serverName);
+  }
+
+  /** MCP 配置保存后的统一刷新入口；调用方先检查全局运行态。 */
+  async refreshMcpRuntimes(): Promise<void> {
+    await this.rebuildIdleManagedRuntimes();
   }
 
   /**
@@ -278,46 +320,55 @@ export class DesktopAgentManager {
 
   async openSession(projectId: string, sessionId: string): Promise<DesktopSessionDocument> {
     const project = this.projects.requireProject(projectId);
-    const runtime = this.runtimes.get(projectId)?.runtime;
+    const managed = await this.ensureRuntime(projectId);
+    const runtime = managed.runtime;
     const document = await this.projects.openSession(project, sessionId, runtime?.getSnapshot(), this.projectEvents(projectId));
-    // markSessionRead 在锁内重读 catalog，返回的整条记录才与 revision 属于同一版本。
-    // 只拼 revision 会让并发重命名等操作产生「旧字段 + 新 revision」的伪一致快照。
-    const metadata = await this.projects.markSessionRead(project, sessionId);
+    // 已读标记只影响侧栏状态，不应阻塞会话正文首屏。后续元数据写入会先等待这次
+    // 后台更新，并把同一份 revision 传给 catalog CAS，避免用户紧接着置顶/改名时误冲突。
+    this.scheduleSessionRead(project, sessionId, document.session.metadataRevision);
+    let writerConflict: DesktopSessionWriterConflict | undefined;
+    try {
+      await runtime.claimSession(sessionId);
+    } catch (error) {
+      if (!isSessionWriterConflictError(error)) throw error;
+      writerConflict = {
+        sessionId,
+        ownerSurface: error.ownerSurface === "desktop" || error.ownerSurface === "tui" || error.ownerSurface === "cli"
+          ? error.ownerSurface
+          : undefined
+      };
+    }
     return {
       ...document,
       session: {
         ...document.session,
-        title: metadata.title ?? document.session.title,
-        pinned: metadata.pinned ?? document.session.pinned,
-        archived: metadata.archived ?? document.session.archived,
-        unread: metadata.unread ?? false,
-        labels: metadata.labels === undefined ? document.session.labels : [...metadata.labels],
-        personalization: metadata.personalization ?? document.session.personalization,
-        metadataRevision: sessionCatalogRecordRevision(metadata),
-        rootSessionId: metadata.rootSessionId,
-        parentSessionId: metadata.parentSessionId,
-        branchPoint: metadata.branchPoint
-      }
+        unread: false
+      },
+      writerConflict
     };
   }
 
   async renameSession(projectId: string, sessionId: string, title: string, expectedRevision?: string): Promise<DesktopWorkspaceSnapshot> {
-    await this.projects.updateSessionMetadata(this.projects.requireProject(projectId), sessionId, { title }, expectedRevision);
+    const revision = (await this.resolvePendingSessionRead(projectId, sessionId, expectedRevision)) ?? expectedRevision;
+    await this.projects.updateSessionMetadata(this.projects.requireProject(projectId), sessionId, { title }, revision);
     return await this.workspaceSnapshot(projectId);
   }
 
   async pinSession(projectId: string, sessionId: string, pinned: boolean, expectedRevision?: string): Promise<DesktopWorkspaceSnapshot> {
-    await this.projects.updateSessionMetadata(this.projects.requireProject(projectId), sessionId, { pinned }, expectedRevision);
+    const revision = await this.resolvePendingSessionRead(projectId, sessionId, expectedRevision);
+    await this.projects.updateSessionMetadata(this.projects.requireProject(projectId), sessionId, { pinned }, revision);
     return await this.workspaceSnapshot(projectId);
   }
 
   async archiveSession(projectId: string, sessionId: string, archived: boolean, expectedRevision?: string): Promise<DesktopWorkspaceSnapshot> {
-    await this.projects.updateSessionMetadata(this.projects.requireProject(projectId), sessionId, { archived }, expectedRevision);
+    const revision = await this.resolvePendingSessionRead(projectId, sessionId, expectedRevision);
+    await this.projects.updateSessionMetadata(this.projects.requireProject(projectId), sessionId, { archived }, revision);
     return await this.workspaceSnapshot(projectId);
   }
 
   async markSessionRead(projectId: string, sessionId: string, expectedRevision?: string): Promise<DesktopWorkspaceSnapshot> {
-    await this.projects.markSessionRead(this.projects.requireProject(projectId), sessionId, expectedRevision);
+    const revision = await this.resolvePendingSessionRead(projectId, sessionId, expectedRevision);
+    await this.projects.markSessionRead(this.projects.requireProject(projectId), sessionId, revision);
     return await this.workspaceSnapshot(projectId);
   }
 
@@ -487,26 +538,28 @@ export class DesktopAgentManager {
       // Runtime 会用默认模型初始化。默认模型凭据失效时先验证并持久化用户选中的
       // 可用模型，否则 ModelManager 在构造阶段就会被旧默认模型挡住。
       const catalogs = await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore);
-      const targetRuntime = new ModelRuntime(config, catalogs);
-      const resolved = targetRuntime.resolve(alias);
-      const candidate = configSchema.parse({
-        ...config,
-        defaultModel: resolved.alias,
-        models: {
-          ...config.models,
-          [resolved.alias]: config.models[resolved.alias] ?? {
-            provider: resolved.providerAlias,
-            model: resolved.model.model
+      const effective = await updateConfig(this.configStore, project.path, (persisted) => {
+        const targetRuntime = new ModelRuntime(persisted, catalogs);
+        const resolved = targetRuntime.resolve(alias);
+        const candidate = configSchema.parse({
+          ...persisted,
+          defaultModel: resolved.alias,
+          models: {
+            ...persisted.models,
+            [resolved.alias]: persisted.models[resolved.alias] ?? {
+              provider: resolved.providerAlias,
+              model: resolved.model.model
+            }
+          },
+          thinking: {
+            enabled: thinking !== "off",
+            effort: thinking === "off" ? persisted.thinking.effort : thinking
           }
-        },
-        thinking: {
-          enabled: thinking !== "off",
-          effort: thinking === "off" ? config.thinking.effort : thinking
-        }
+        });
+        new ModelRuntime(candidate, catalogs).createModelSettings();
+        return candidate;
       });
-      new ModelRuntime(candidate, catalogs).createModelSettings();
-      await this.configStore.save(candidate, project.path);
-      return modelRuntimeInfo(await this.configStore.load(project.path));
+      return modelRuntimeInfo(effective);
     }
     const { runtime, commands } = await this.ensureRuntime(projectId);
     if (commands) {
@@ -542,7 +595,7 @@ export class DesktopAgentManager {
     this.assertNoRunningTasks("任务运行期间不能提交全局设置。");
     const project = this.projects.requireProject(projectId);
     const current = await this.requireVersionedConfig().loadVersioned!(project.path);
-    let next = current.config;
+    let next = structuredClone(current.config);
     const credentialHandles = new Set<string>();
 
     if (input.personalization !== undefined || input.memory !== undefined) {
@@ -559,7 +612,11 @@ export class DesktopAgentManager {
       const sameProvider = input.webSearch.provider === next.web.search.provider;
       const apiKey = input.webSearch.apiKeyHandle === undefined
         ? input.webSearch.apiKey
-        : this.requireApiKeyHandle(input.webSearch.apiKeyHandle, credentialHandles);
+        : this.requireApiKeyHandle(input.webSearch.apiKeyHandle, credentialHandles, {
+            projectId,
+            purpose: "web-search",
+            providerAlias: input.webSearch.provider
+          });
       next = configSchema.parse({
         ...next,
         web: {
@@ -587,7 +644,11 @@ export class DesktopAgentManager {
       for (const upsert of input.models.upserts) {
         const apiKey = upsert.apiKeyHandle === undefined
           ? upsert.apiKey
-          : this.requireApiKeyHandle(upsert.apiKeyHandle, credentialHandles);
+          : this.requireApiKeyHandle(upsert.apiKeyHandle, credentialHandles, {
+              projectId,
+              purpose: "model",
+              providerAlias: upsert.providerAlias
+            });
         const resolved = { ...upsert, apiKey, apiKeyHandle: undefined };
         next = this.buildConfigWithModel(next, resolved);
       }
@@ -621,6 +682,8 @@ export class DesktopAgentManager {
       }
       validateModelConfiguration(next, next.defaultModel);
     }
+
+    synchronizeCredentialRevisions(next, current.config);
 
     return {
       projectId,
@@ -750,12 +813,16 @@ export class DesktopAgentManager {
     }
   }
 
-  stageSettingsCredential(secret: string): DesktopStagedSettingsCredential {
+  stageSettingsCredential(secret: string, scope: DesktopSettingsCredentialScope): DesktopStagedSettingsCredential {
     if (!secret.trim() || secret.length > 16_000) throw new Error("凭据不能为空且不能超过 16000 个字符。");
+    this.projects.requireProject(scope.projectId);
+    if (!scope.providerAlias.trim() || (scope.purpose !== "model" && scope.purpose !== "web-search")) {
+      throw new Error("暂存凭据用途无效。");
+    }
     this.pruneStagedSettingsCredentials();
     const handle = randomUUID();
     const expiresAt = Date.now() + SETTINGS_CREDENTIAL_TTL_MS;
-    this.stagedSettingsCredentials.set(handle, { kind: "api-key", secret, expiresAt });
+    this.stagedSettingsCredentials.set(handle, { kind: "api-key", secret, scope: { ...scope }, expiresAt });
     return { handle, kind: "api-key", expiresAt: new Date(expiresAt).toISOString(), provider: undefined };
   }
 
@@ -811,122 +878,10 @@ export class DesktopAgentManager {
     return await this.modelLogin.start(provider);
   }
 
-  async completeModelLogin(
-    projectId: string,
-    provider: DesktopModelLoginProvider,
-    authRequestId: string,
-    pastedAuthorization?: string
-  ): Promise<DesktopWorkspaceSnapshot> {
-    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
-    this.projects.requireProject(projectId);
-    const operation = new AbortController();
-    this.modelLoginOperations.set(authRequestId, operation);
-    try {
-      const authenticated = await this.modelLogin.complete(provider, authRequestId, pastedAuthorization);
-      operation.signal.throwIfAborted();
-      const current = await this.loadProjectConfig(projectId);
-      let discoveredModels: AuthenticatedModelLogin["models"];
-      try {
-        discoveredModels = await this.modelLogin.discoverModels(provider, authenticated.accessToken, operation.signal);
-      } catch (error) {
-        if (operation.signal.aborted) throw error;
-        // OAuth 凭据已经完成授权；模型目录是可重试的后续同步，不应回滚登录结果。
-        discoveredModels = undefined;
-      }
-      operation.signal.throwIfAborted();
-      const candidate = this.buildConfigWithAuthenticatedLogin(current, {
-        ...authenticated,
-        models: discoveredModels
-      });
-      this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
-      await this.saveProjectConfig(projectId, candidate);
-      this.runtimeErrors.delete(projectId);
-      await this.rebuildIdleManagedRuntimes();
-      return await this.workspaceSnapshot(projectId);
-    } finally {
-      this.modelLoginOperations.delete(authRequestId);
-    }
-  }
-
   async cancelModelLogin(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string): Promise<void> {
     this.projects.requireProject(projectId);
     this.modelLoginOperations.get(authRequestId)?.abort(new DOMException("OAuth authorization cancelled", "AbortError"));
     this.modelLogin.cancel(provider, authRequestId);
-  }
-
-  async saveModelConfiguration(projectId: string, input: DesktopModelConfigurationInput): Promise<DesktopWorkspaceSnapshot> {
-    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
-    this.projects.requireProject(projectId);
-    const current = await this.loadProjectConfig(projectId);
-    const next = this.buildConfigWithModel(current, input);
-    // 写入全局配置前先验证候选模型的 endpoint、协议和凭据；运行时切换还会再次经过
-    // ModelManager 的同一校验，避免设置页和 TUI/CLI 产生两套可用性规则。
-    if (input.makeDefault || next.defaultModel === input.alias) validateModelConfiguration(next, input.alias);
-    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
-    await this.saveProjectConfig(projectId, next);
-    this.runtimeErrors.delete(projectId);
-    await this.rebuildIdleManagedRuntimes();
-    return await this.workspaceSnapshot(projectId);
-  }
-
-  async removeModelConfiguration(projectId: string, alias: string): Promise<DesktopWorkspaceSnapshot> {
-    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
-    this.projects.requireProject(projectId);
-    const current = await this.loadProjectConfig(projectId);
-    const configuredAlias = resolveConfiguredModelAlias(current, alias);
-    if (!configuredAlias) throw new Error(`未知模型：${alias}`);
-    const projectSettings = await loadProjectSettings(this.projects.requireProject(projectId).path);
-    if (projectSettings.defaultModel === configuredAlias) {
-      throw new Error(`不能删除项目 .biny/settings.json 当前引用的模型：${configuredAlias}`);
-    }
-    const remaining = Object.entries(current.models).filter(([key]) => key !== configuredAlias);
-    if (!remaining.length) throw new Error("至少需要保留一个可用模型。");
-    const nextDefault = current.defaultModel === configuredAlias ? remaining[0]![0] : current.defaultModel;
-    const next = configSchema.parse({
-      ...current,
-      defaultModel: nextDefault,
-      models: Object.fromEntries(remaining)
-    });
-    this.assertNoRunningTasks("任务运行期间不能修改模型配置。");
-    await this.saveProjectConfig(projectId, next);
-    this.runtimeErrors.delete(projectId);
-    await this.rebuildIdleManagedRuntimes();
-    return await this.workspaceSnapshot(projectId);
-  }
-
-  async webSearchSettings(projectId: string): Promise<DesktopWebSearchSettings> {
-    this.projects.requireProject(projectId);
-    const config = await this.loadProjectConfig(projectId);
-    return describeWebSearchSettings(config.web.search);
-  }
-
-  async saveWebSearchSettings(projectId: string, input: DesktopWebSearchSettingsInput): Promise<DesktopWebSearchSettings> {
-    this.assertNoRunningTasks("任务运行期间不能修改联网搜索配置。");
-    this.projects.requireProject(projectId);
-    const current = await this.loadProjectConfig(projectId);
-    // 密钥槽位是各 provider 共用的：换 provider 时必须丢弃旧密钥和自定义 env 名，
-    // 否则上一家的密钥会被原样发给新服务商，并遮蔽环境变量里的正确密钥。
-    const sameProvider = input.provider === current.web.search.provider;
-    const next = configSchema.parse({
-      ...current,
-      web: {
-        ...current.web,
-        search: {
-          enabled: input.enabled,
-          provider: input.provider,
-          // undefined 保留同 provider 的已存密钥，空字符串表示清除。
-          apiKey: input.apiKey === undefined ? (sameProvider ? current.web.search.apiKey : undefined) : input.apiKey || undefined,
-          apiKeyEnv: sameProvider ? input.apiKeyEnv : undefined,
-          timeoutMs: input.timeoutMs,
-          maxResults: input.maxResults
-        }
-      }
-    });
-    this.assertNoRunningTasks("任务运行期间不能修改联网搜索配置。");
-    await this.saveProjectConfig(projectId, next);
-    // 工具注册表在 runtime 装配时读取搜索配置，关闭后下次使用即按新配置重建。
-    await this.rebuildIdleManagedRuntimes();
-    return describeWebSearchSettings(next.web.search);
   }
 
   /** 个性化总览：全局设置读取真实 global config，聊天有效值由当前 runtime 统一解析。 */
@@ -957,12 +912,13 @@ export class DesktopAgentManager {
     expectedRevision: string
   ): Promise<DesktopWorkspaceSnapshot> {
     this.assertNoRunningTasks("任务运行期间不能修改当前聊天的个性化设置。");
+    const revision = (await this.resolvePendingSessionRead(projectId, sessionId, expectedRevision)) ?? expectedRevision;
     const managed = await this.runtimeForSession(projectId, sessionId, "任务运行期间不能修改当前聊天的个性化设置。");
     this.assertNoRunningTasks("任务运行期间不能修改当前聊天的个性化设置。");
     if (managed.commands) {
-      await managed.commands.agent.updateChatPersonalization(input, expectedRevision);
+      await managed.commands.agent.updateChatPersonalization(input, revision);
     } else {
-      await requireRemoteRuntime(managed.runtime).updateChatPersonalization(input, expectedRevision);
+      await requireRemoteRuntime(managed.runtime).updateChatPersonalization(input, revision);
     }
     return await this.workspaceSnapshot(projectId);
   }
@@ -1182,6 +1138,129 @@ export class DesktopAgentManager {
     };
   }
 
+  async telosOverview(projectId: string): Promise<DesktopTelosOverview> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    if (commands) {
+      return await runtime.runExclusiveOperation(
+        "telos",
+        async () => await requireLocalTelos(commands).overview()
+      );
+    }
+    const remote = requireRemoteRuntime(runtime);
+    if (supportsTelos(remote)) return await remote.telos<DesktopTelosOverview>("overview-v1");
+    return await requireProjectTelos(this.projects.requireProject(projectId)).overview();
+  }
+
+  async saveTelos(
+    projectId: string,
+    input: DesktopTelosDocumentInput,
+    expectedRevision: number
+  ): Promise<DesktopTelosOverview> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能保存 TELOS。"
+    );
+    if (commands) {
+      await runtime.runExclusiveOperation(
+        "telos",
+        async () => await requireLocalTelos(commands).saveDocument(input, expectedRevision)
+      );
+    } else if (supportsTelos(requireRemoteRuntime(runtime))) {
+      await requireRemoteRuntime(runtime).telos("save-v1", { input, expectedRevision });
+    } else {
+      await requireProjectTelos(this.projects.requireProject(projectId)).saveDocument(input, expectedRevision);
+    }
+    return await this.telosOverview(projectId);
+  }
+
+  async reviewBehaviorPattern(
+    projectId: string,
+    patternId: string,
+    action: DesktopBehaviorPatternReviewAction,
+    expectedRevision: number
+  ): Promise<DesktopTelosOverview> {
+    this.projects.requireProject(projectId);
+    const detectDrift = (await this.currentPersonalizationState(projectId)).memory.telos?.driftDetection === true;
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能审核行为模式。"
+    );
+    if (commands) {
+      return await runtime.runExclusiveOperation(
+        "telos",
+        async () => await requireLocalTelos(commands).reviewPattern(patternId, action, expectedRevision, { detectDrift })
+      );
+    }
+    const remote = requireRemoteRuntime(runtime);
+    if (supportsTelos(remote)) {
+      return await remote.telos<DesktopTelosOverview>("review-pattern-v1", {
+        patternId,
+        reviewAction: action,
+        detectDrift,
+        expectedRevision
+      });
+    }
+    return await requireProjectTelos(this.projects.requireProject(projectId)).reviewPattern(patternId, action, expectedRevision, { detectDrift });
+  }
+
+  async resolveTelosDrift(
+    projectId: string,
+    driftId: string,
+    action: DesktopTelosDriftResolutionAction,
+    expectedRevision: number
+  ): Promise<DesktopTelosOverview> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能处理策略偏差。"
+    );
+    if (commands) {
+      return await runtime.runExclusiveOperation(
+        "telos",
+        async () => await requireLocalTelos(commands).resolveDrift(driftId, action, expectedRevision)
+      );
+    }
+    const remote = requireRemoteRuntime(runtime);
+    if (supportsTelos(remote)) {
+      return await remote.telos<DesktopTelosOverview>("resolve-drift-v1", {
+        driftId,
+        driftAction: action,
+        expectedRevision
+      });
+    }
+    return await requireProjectTelos(this.projects.requireProject(projectId)).resolveDrift(driftId, action, expectedRevision);
+  }
+
+  async snoozeTelosDrift(
+    projectId: string,
+    driftId: string,
+    until: string,
+    expectedRevision: number
+  ): Promise<DesktopTelosOverview> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能稍后处理策略偏差。"
+    );
+    if (commands) {
+      return await runtime.runExclusiveOperation(
+        "telos",
+        async () => await requireLocalTelos(commands).snoozeDrift(driftId, until, expectedRevision)
+      );
+    }
+    const remote = requireRemoteRuntime(runtime);
+    if (supportsTelos(remote)) {
+      return await remote.telos<DesktopTelosOverview>("snooze-drift-v1", {
+        driftId,
+        until,
+        expectedRevision
+      });
+    }
+    return await requireProjectTelos(this.projects.requireProject(projectId)).snoozeDrift(driftId, until, expectedRevision);
+  }
+
   async memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.ensureRuntime(projectId);
@@ -1307,42 +1386,40 @@ export class DesktopAgentManager {
   }
 
   /**
-   * 拉取服务商的实时模型目录。离线或鉴权失效时不向界面抛错，而是返回上次成功缓存的目录；
-   * 静态内置目录仍由渲染层合并，避免一次网络故障让模型选择器变空。
+   * 拉取服务商的实时模型目录。只有服务商成功返回非空目录时才算成功；失败由 Renderer
+   * 明确提示，已有目录状态保持不变，不能把缓存包装成当前账号的实时库存。
    */
   async fetchModelCatalog(projectId: string, providerAlias: string): Promise<DesktopModelCatalogResult> {
     this.projects.requireProject(projectId);
     const config = await this.loadProjectConfig(projectId);
     const provider = config.providers[providerAlias];
     if (!provider) throw new Error(`未找到服务商配置：${providerAlias}`);
-    const fetchedAt = new Date().toISOString();
     const catalogs = await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore);
     const runtime = new ModelRuntime(config, catalogs, undefined, this.modelsStore, this.fetcher);
     try {
       const models = await runtime.refreshModels(providerAlias);
-      return { providerAlias, source: "fetched", fetchedAt, models };
-    } catch {
-      const models = catalogs.find(([alias]) => alias === providerAlias)?.[1] ?? [];
-      return { providerAlias, source: "fallback", fetchedAt, models };
+      return { providerAlias, source: "fetched", fetchedAt: new Date().toISOString(), models };
+    } catch (error) {
+      throw new Error(`无法从服务商获取模型列表：${formatModelConnectionError(error)}`, { cause: error });
     }
   }
 
   /**
    * 用尚未保存的候选配置拉取模型目录：新增连接流程中用户填完密钥后，先凭临时密钥向
-   * 服务商要模型列表再勾选启用，避免用户手填模型 ID。失败时不抛错，渲染层回退到内置目录。
+   * 服务商要模型列表再勾选启用，避免用户手填模型 ID。失败时返回明确错误；渲染层可以
+   * 展示内置候选，但必须保留其静态来源，不能当成实时目录。
    */
   async fetchModelCatalogCandidate(projectId: string, input: DesktopModelConfigurationInput): Promise<DesktopModelCatalogResult> {
     this.projects.requireProject(projectId);
     const current = await this.loadProjectConfig(projectId);
     const candidate = this.buildConfigWithModel(current, input);
-    const fetchedAt = new Date().toISOString();
     const catalogs = await restoreProviderCatalogs(Object.keys(candidate.providers), this.modelsStore);
     const runtime = new ModelRuntime(candidate, catalogs, undefined, this.modelsStore, this.fetcher);
     try {
       const models = await runtime.refreshModels(input.providerAlias);
-      return { providerAlias: input.providerAlias, source: "fetched", fetchedAt, models };
-    } catch {
-      return { providerAlias: input.providerAlias, source: "fallback", fetchedAt, models: [] };
+      return { providerAlias: input.providerAlias, source: "fetched", fetchedAt: new Date().toISOString(), models };
+    } catch (error) {
+      throw new Error(`无法从服务商获取模型列表：${formatModelConnectionError(error)}`, { cause: error });
     }
   }
 
@@ -1440,9 +1517,11 @@ export class DesktopAgentManager {
     return staged;
   }
 
-  private requireApiKeyHandle(handle: string, used: Set<string>): string {
+  private requireApiKeyHandle(handle: string, used: Set<string>, scope: DesktopSettingsCredentialScope): string {
     const staged = this.requireStagedCredential(handle);
-    if (staged.kind !== "api-key") throw new Error("暂存凭据类型不匹配。");
+    if (staged.kind !== "api-key" || !sameCredentialScope(staged.scope, scope)) {
+      throw new Error("API Key 句柄与当前项目、用途或服务商不匹配。");
+    }
     used.add(handle);
     return staged.secret;
   }
@@ -1769,6 +1848,8 @@ export class DesktopAgentManager {
     for (const operation of this.modelLoginOperations.values()) operation.abort(new DOMException("Desktop is shutting down", "AbortError"));
     this.modelLoginOperations.clear();
     this.stagedSettingsCredentials.clear();
+    await Promise.allSettled([...this.pendingSessionReads.values()].map(({ promise }) => promise));
+    this.pendingSessionReads.clear();
     await Promise.allSettled(this.runtimeInitializations.values());
     const managedRuntimes = [...this.runtimes.values()];
     this.runtimes.clear();
@@ -1938,6 +2019,16 @@ export class DesktopAgentManager {
         commands = undefined;
       }
     }
+    try {
+      // Desktop 可能 attach 到上一次启动后仍存活的 Runtime Host。先把 owner 的内存策略
+      // 对齐到磁盘，再订阅历史事件，避免旧快照在首轮回放时覆盖刚恢复的权限模式。
+      await this.synchronizePersistedPermissionMode(project.path, runtime, commands);
+    } catch (error) {
+      await runtime.close().catch(() => undefined);
+      await host?.close().catch(() => undefined);
+      await terminateOwnedHost(spawnedHost);
+      throw error;
+    }
     const unsubscribe = runtime.subscribe((update) => {
       const event = update.event;
       if (event) {
@@ -1957,6 +2048,24 @@ export class DesktopAgentManager {
     this.runtimes.set(projectId, managed);
     this.runtimeErrors.delete(projectId);
     return managed;
+  }
+
+  private async synchronizePersistedPermissionMode(
+    workspaceRoot: string,
+    runtime: InteractiveRuntimeHandle,
+    commands: CommandRuntime | undefined
+  ): Promise<void> {
+    const persistedMode = (await this.configStore.load(workspaceRoot)).permission.mode;
+    const snapshot = runtime.getSnapshot();
+    if (snapshot.permissionMode === persistedMode || runtimeIsBusy(snapshot)) return;
+    if (commands) {
+      await runtime.runExclusiveOperation(
+        "permission",
+        async () => await commands.agent.setPermissionMode(persistedMode)
+      );
+      return;
+    }
+    await requireRemoteRuntime(runtime).setPermissionMode(persistedMode);
   }
 
   private async requireConfiguredModel(projectId: string): Promise<void> {
@@ -2058,22 +2167,12 @@ export class DesktopAgentManager {
       });
     }
     const remote = requireRemoteRuntime(runtime);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const snapshot = await remote.memory<{
-        overview: MemoryOverview;
-        entries: MemoryEntriesResult;
-        allEntries?: MemoryEntriesResult;
-        maintenance: MemoryMaintenanceStatus;
-      }>("overview-v3", { selector: filter });
-      if (snapshot.allEntries) return { ...snapshot, allEntries: snapshot.allEntries };
-
-      // 同协议的旧 Host 不返回 allEntries；使用其已有 list-v3 能力补齐全库统计。
-      const allEntries = await remote.memory<MemoryEntriesResult>("list-v3", { selector: "all" });
-      if (snapshot.entries.storeRevision === allEntries.storeRevision) {
-        return { ...snapshot, allEntries };
-      }
-    }
-    throw new Error("读取远程记忆库时发生连续并发写入，请稍后重试。");
+    return await remote.memory<{
+      overview: MemoryOverview;
+      entries: MemoryEntriesResult;
+      allEntries: MemoryEntriesResult;
+      maintenance: MemoryMaintenanceStatus;
+    }>("overview-v3", { selector: filter });
   }
 
   private buildConfigWithAuthenticatedLogin(current: AgentConfig, authenticated: AuthenticatedModelLogin): AgentConfig {
@@ -2146,8 +2245,38 @@ export class DesktopAgentManager {
     return await this.configStore.load(this.projects.requireProject(projectId).path);
   }
 
-  private async saveProjectConfig(projectId: string, config: AgentConfig): Promise<void> {
-    await this.configStore.save(config, this.projects.requireProject(projectId).path);
+  private scheduleSessionRead(project: DesktopProject, sessionId: string, initialRevision: string | undefined): void {
+    const key = sessionReadKey(project.id, sessionId);
+    if (this.pendingSessionReads.has(key)) return;
+    let promise: Promise<SessionCatalogRecord>;
+    try {
+      promise = this.projects.markSessionRead(project, sessionId);
+    } catch {
+      return;
+    }
+    this.pendingSessionReads.set(key, { initialRevision, promise });
+    // 保留已完成的 promise 一小段时间，让紧接着发生的置顶/改名仍能拿到后台写入后的
+    // revision；否则清理微任务和用户点击之间会出现一个很窄的 CAS 冲突窗口。
+    const cleanup = setTimeout(() => {
+      if (this.pendingSessionReads.get(key)?.promise === promise) this.pendingSessionReads.delete(key);
+    }, 30_000);
+    cleanup.unref?.();
+    void promise.then(() => undefined, () => undefined);
+  }
+
+  private async resolvePendingSessionRead(
+    projectId: string,
+    sessionId: string,
+    expectedRevision: string | undefined
+  ): Promise<string | undefined> {
+    const pending = this.pendingSessionReads.get(sessionReadKey(projectId, sessionId));
+    if (!pending) return expectedRevision;
+    const record = await pending.promise.catch(() => undefined);
+    const key = sessionReadKey(projectId, sessionId);
+    if (this.pendingSessionReads.get(key) === pending) this.pendingSessionReads.delete(key);
+    return record && expectedRevision === pending.initialRevision
+      ? sessionCatalogRecordRevision(record)
+      : expectedRevision;
   }
 
   private projectEvents(projectId: string): Map<string, AgentHostEvent[]> {
@@ -2157,6 +2286,10 @@ export class DesktopAgentManager {
     this.liveEvents.set(projectId, events);
     return events;
   }
+}
+
+function sessionReadKey(projectId: string, sessionId: string): string {
+  return `${projectId}\u0000${sessionId}`;
 }
 
 function memoryStats(entries: MemoryEntriesResult): { total: number; autoGenerated: number; manualAdded: number } {
@@ -2302,6 +2435,18 @@ function requireLocalMemory(services: CommandRuntime) {
   return services.agent.getLocalMemory();
 }
 
+function requireLocalTelos(services: CommandRuntime): TelosStorage {
+  return services.agent.getTelosStorage();
+}
+
+function requireProjectTelos(project: DesktopProject): TelosStorage {
+  return new TelosStorage(project.path);
+}
+
+function supportsTelos(runtime: RuntimeHostClient): boolean {
+  return runtime.hostInfo?.capabilities.includes("telos.v1") === true;
+}
+
 function requireRemoteRuntime(runtime: InteractiveRuntimeHandle): RuntimeHostClient {
   if (!(runtime instanceof RuntimeHostClient)) throw new Error("Remote runtime client is unavailable.");
   return runtime;
@@ -2401,6 +2546,12 @@ function requiredPayloadString(value: unknown, name: string): string {
 
 function optionalPayloadString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function sameCredentialScope(left: DesktopSettingsCredentialScope, right: DesktopSettingsCredentialScope): boolean {
+  return left.projectId === right.projectId
+    && left.purpose === right.purpose
+    && left.providerAlias === right.providerAlias;
 }
 
 function formatModelConnectionError(error: unknown): string {

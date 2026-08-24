@@ -15,7 +15,13 @@ import {
   writeSkillCatalogFile,
   type SkillCatalogEntry
 } from "../../../extensions/skillCatalog.js";
+import {
+  importManagedSkillSource,
+  installManagedSkillSource,
+  listManagedSkillSources
+} from "../../../extensions/managedSkillSources.js";
 import type {
+  DesktopManagedSkillSource,
   DesktopPluginSummary,
   DesktopSkillCatalogSnapshot,
   DesktopSkillFilePreview
@@ -32,12 +38,27 @@ export class DesktopSkillService {
 
   async snapshot(): Promise<DesktopSkillCatalogSnapshot> {
     const projectRoots = this.state.projects().filter((project) => !project.missing).map((project) => project.path);
-    const [skills, plugins] = await Promise.all([scanSkillCatalog({ projectRoots }), this.listPlugins()]);
+    const [skills, plugins, managedSources] = await Promise.all([
+      scanSkillCatalog({ projectRoots }),
+      this.listPlugins(),
+      listManagedSkillSources()
+    ]);
     return {
       skills: skills.skills,
+      inventory: skills.inventory,
       plugins: plugins.plugins,
-      warnings: [...skills.warnings, ...plugins.warnings]
+      managedSources: managedSources.sources.map(toDesktopManagedSkillSource),
+      warnings: [...skills.warnings, ...managedSources.warnings, ...plugins.warnings],
+      diagnostics: skills.diagnostics
     };
+  }
+
+  async importSource(sourceFile: string): Promise<DesktopManagedSkillSource> {
+    return toDesktopManagedSkillSource(await importManagedSkillSource({ sourceFile }));
+  }
+
+  async installSource(sourceId: string): Promise<void> {
+    await installManagedSkillSource({ sourceId });
   }
 
   async readFile(skillId: string, relativePath: string): Promise<DesktopSkillFilePreview> {
@@ -116,6 +137,20 @@ export class DesktopSkillService {
       warnings: results.flatMap((result) => result.warning === undefined ? [] : [result.warning])
     };
   }
+}
+
+function toDesktopManagedSkillSource(source: {
+  id: string;
+  name: string;
+  description: string;
+  installed: boolean;
+}): DesktopManagedSkillSource {
+  return {
+    id: source.id,
+    name: source.name,
+    description: source.description,
+    installed: source.installed
+  };
 }
 
 async function countPluginModules(target: string): Promise<number | undefined> {
