@@ -10,6 +10,7 @@ import { isTerminalRunEvent, type AgentHostEvent } from "../../../../runtime/age
 import type {
   DesktopAgentEventEnvelope,
   DesktopSessionDocument,
+  DesktopSessionWriterConflict,
   DesktopSessionSummary,
   DesktopWorkspaceSnapshot
 } from "../../../protocol.js";
@@ -23,6 +24,7 @@ interface DesktopEventBridgeOptions {
   onError(error: unknown): void;
   setContextBudget: Dispatch<SetStateAction<ContextBudgetStatus | undefined>>;
   setDocument: Dispatch<SetStateAction<DesktopSessionDocument | undefined>>;
+  setWriterConflict: Dispatch<SetStateAction<DesktopSessionWriterConflict | undefined>>;
   setSidebarSessions: Dispatch<SetStateAction<DesktopSessionSummary[]>>;
   setWorkspace: Dispatch<SetStateAction<DesktopWorkspaceSnapshot | undefined>>;
 }
@@ -34,6 +36,7 @@ export function useDesktopEventBridge({
   onError,
   setContextBudget,
   setDocument,
+  setWriterConflict,
   setSidebarSessions,
   setWorkspace
 }: DesktopEventBridgeOptions): void {
@@ -53,6 +56,7 @@ export function useDesktopEventBridge({
             const refreshedDocument = await window.biny.openSession(projectId, sessionId);
             if (activeProjectIdRef.current === projectId && selectedSessionIdRef.current === sessionId) {
               setDocument(refreshedDocument);
+              setWriterConflict(refreshedDocument.writerConflict);
             }
           }
         }).catch(onError);

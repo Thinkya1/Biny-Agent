@@ -4,7 +4,7 @@
  * 模型、记忆、联网搜索和登录都通过 preload API 执行；这里统一补上当前项目与 API 版本边界，
  * 并只在服务端快照真正变化时回写根状态。
  */
-import { useCallback, type Dispatch, type RefObject, type SetStateAction } from "react";
+import { useCallback, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
 import type { ContextBudgetStatus } from "../../../../agent/context/types.js";
 import type { ThinkingSelection } from "../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../llm/embedding/types.js";
@@ -32,16 +32,24 @@ export function useDesktopSettingsActions({
   setContextBudget,
   setWorkspace
 }: DesktopSettingsActionsOptions) {
+  const modelSwitchGenerationRef = useRef(0);
+
   const switchModel = useCallback(async (alias: string, thinking: ThinkingSelection): Promise<void> => {
     const projectId = projectIdRef.current;
     if (!projectId) return;
+    const generation = ++modelSwitchGenerationRef.current;
     const info = await window.biny.switchModel(projectId, alias, thinking);
     // 切换模型后上一轮会话的上下文预算是旧模型的，立即作废；新模型的实际用量
     // 会在下一轮 `context.updated` 中重新建立。
     setContextBudget(undefined);
-    setWorkspace((current) => updateRuntimeInfo(current, info));
-    // 切模型可能刚创建运行时，而旧快照还没有 runtime；完整刷新可避免界面继续显示旧模型。
-    mergeProjectSnapshot(await window.biny.refreshProject(projectId));
+    setWorkspace((current) => current?.project.id === projectId ? updateRuntimeInfo(current, info) : current);
+    // 切模型可能刚创建运行时；完整快照只负责补齐 Runtime/会话投影，不应阻塞
+    // 模型按钮的响应。旧请求的刷新不能覆盖后续更快完成的新切换。
+    void window.biny.refreshProject(projectId)
+      .then((snapshot) => {
+        if (modelSwitchGenerationRef.current === generation) mergeProjectSnapshot(snapshot);
+      })
+      .catch(() => undefined);
   }, [mergeProjectSnapshot, projectIdRef, setContextBudget, setWorkspace]);
 
   const testModelConfiguration = useCallback(async (configuration: DesktopModelConfigurationInput) => {

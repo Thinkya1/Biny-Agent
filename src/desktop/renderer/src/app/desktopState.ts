@@ -24,7 +24,12 @@ export function applyUpdatesToWorkspace(
   const projectUpdates = updates.filter((update) => update.projectId === workspace.project.id);
   const sessions = applyUpdatesToProjectSessions(workspace.project.id, workspace.sessions, projectUpdates);
   const runtime = projectUpdates.at(-1)?.snapshot ?? workspace.runtime;
-  return { ...workspace, sessions, runtime };
+  return {
+    ...workspace,
+    sessions,
+    runtime,
+    permissionMode: runtime?.permissionMode ?? workspace.permissionMode
+  };
 }
 
 /** 把所有项目共用的事件流投影到侧栏任务摘要，并保留未受影响项目的任务。 */
@@ -79,7 +84,21 @@ export function mergeProjectSessionPage(
   const projectSessions = new Map(
     sessions.filter((session) => session.projectId === projectId).map((session) => [session.id, session])
   );
-  for (const session of pageSessions) projectSessions.set(session.id, session);
+  for (const session of pageSessions) {
+    const existing = projectSessions.get(session.id);
+    // 打开会话返回的是单会话快照，不为此再扫描整个 catalog/run ledger 推断列表字段；
+    // 保留首屏已有的展开状态和 latestRun，避免一次打开把侧栏能力投影误清掉。
+    projectSessions.set(
+      session.id,
+      existing !== undefined && (session.hasChildren === undefined || session.latestRun === undefined)
+        ? {
+            ...session,
+            hasChildren: session.hasChildren ?? existing.hasChildren,
+            latestRun: session.latestRun ?? existing.latestRun
+          }
+        : session
+    );
+  }
   const firstProjectIndex = sessions.findIndex((session) => session.projectId === projectId);
   const remaining = sessions.filter((session) => session.projectId !== projectId);
   const insertAt = firstProjectIndex < 0 ? remaining.length : Math.min(firstProjectIndex, remaining.length);
@@ -205,9 +224,17 @@ export function updateRuntimeInfo(
   workspace: DesktopWorkspaceSnapshot | undefined,
   info: ModelRuntimeInfo
 ): DesktopWorkspaceSnapshot | undefined {
-  if (!workspace?.runtime) return workspace;
-  return {
+  if (!workspace) return workspace;
+  const nextWorkspace = {
     ...workspace,
+    // Runtime 尚未启动时没有 runtime.info；把已确认的模型移到首位，避免
+    // 清理 optimistic 状态后 Composer 又退回旧的 defaultModel 投影。
+    models: moveModelToFront(workspace.models, info.modelAlias),
+    pickerModels: moveModelToFront(workspace.pickerModels, info.modelAlias)
+  };
+  if (!workspace.runtime) return nextWorkspace;
+  return {
+    ...nextWorkspace,
     runtime: {
       ...workspace.runtime,
       info: {
@@ -222,6 +249,14 @@ export function updateRuntimeInfo(
       }
     }
   };
+}
+
+function moveModelToFront<T extends { alias: string }>(models: T[], alias: string): T[] {
+  const index = models.findIndex((model) => model.alias === alias);
+  if (index <= 0) return models;
+  const selected = models[index];
+  if (!selected) return models;
+  return [selected, ...models.slice(0, index), ...models.slice(index + 1)];
 }
 
 export function syntheticSession(projectId: string, sessionId: string, input: string): DesktopSessionSummary {

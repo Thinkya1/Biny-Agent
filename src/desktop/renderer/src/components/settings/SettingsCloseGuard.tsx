@@ -1,22 +1,20 @@
-/** 未保存草稿的关闭确认；保存、放弃和取消是三个明确结果。 */
+/** 底部“取消”放弃设置草稿前的二次确认；系统窗口关闭不经过这里。 */
+import { AppIcon } from "../AppIcon.js";
 import { SettingsDetailLayer } from "./SettingsDetailLayer.js";
 
-export function SettingsCloseGuard({ busy, onCancel, onDiscard, onSave, saveDisabled = false }: {
+export function SettingsCloseGuard({ busy, onCancel, onDiscard }: {
   busy: boolean;
   onCancel(): void;
   onDiscard(): void;
-  onSave(): void;
-  saveDisabled?: boolean;
 }): React.JSX.Element {
   return (
     <SettingsDetailLayer onClose={onCancel}>
-      <section aria-labelledby="settings-close-title" className="settings-confirm-panel" role="dialog">
-        <h3 id="settings-close-title">保存设置更改？</h3>
-        <p>你在多个分页中的修改还没有保存。放弃后，主题和字体预览也会恢复。</p>
+      <section aria-labelledby="settings-close-title" className="settings-confirm-panel settings-discard-panel" role="dialog">
+        <AppIcon className="settings-confirm-icon" size={88} />
+        <h3 id="settings-close-title">有未保存的更改，确定要关闭吗？未保存的更改将丢失。</h3>
         <div className="settings-confirm-actions">
-          <button className="ghost-button" disabled={busy} onClick={onCancel} type="button">取消</button>
-          <button className="ghost-button is-danger" disabled={busy} onClick={onDiscard} type="button">放弃更改</button>
-          <button data-settings-detail-autofocus disabled={busy || saveDisabled} onClick={onSave} type="button">保存全部</button>
+          <button className="ghost-button" disabled={busy} onClick={onCancel} type="button">Cancel</button>
+          <button data-settings-detail-autofocus disabled={busy} onClick={onDiscard} type="button">OK</button>
         </div>
       </section>
     </SettingsDetailLayer>

@@ -15,12 +15,13 @@ import type { PermissionMode } from "../../../../permission/PermissionManager.js
 import type { DesktopAttachment, DesktopProject, DesktopSlashCommand } from "../../../protocol.js";
 import { DESKTOP_SLASH_COMMANDS } from "../../../protocol.js";
 import { catalogForConnection } from "../providerCatalog.js";
+import { formatContextUsage, type ContextUsage } from "../usagePresentation.js";
 import { AttachmentList } from "./composer/AttachmentList.js";
 import type { PendingAttachment } from "./composer/AttachmentList.js";
 import { ComposerActionButton } from "./composer/ComposerActionButton.js";
 import { AddMenu, PermissionMenu } from "./composer/ComposerMenus.js";
 import { ModelPickerMenu } from "./composer/ModelPickerMenu.js";
-import { thinkingLabel } from "./composer/composerLabels.js";
+import { permissionIcon, permissionLabel, thinkingLabel } from "./composer/composerLabels.js";
 import { Icon } from "./Icon.js";
 import { ProviderBrandGlyph } from "./ProviderBrandGlyph.js";
 import { SendOrStopButton } from "./composer/SendOrStopButton.js";
@@ -32,24 +33,29 @@ interface ComposerProps {
   models: ModelChoice[];
   /** 已解析好的上下文用量；取不到真实数字时为空，此时不展示用量。 */
   contextUsage?: ContextUsage;
+  memoryEnabled: boolean;
+  memoryToggleBusy: boolean;
+  memoryToggleDisabled: boolean;
+  memoryToggleDisabledReason?: string;
   running: boolean;
+  runtimeBusy: boolean;
   activeElsewhere: boolean;
+  sessionWriterConflict: boolean;
   modelSetupRequired: boolean;
   focusToken: number;
+  prefillInput?: string;
   onSend(input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp"): Promise<void>;
   onSlashCommand(command: string): Promise<void>;
   onStop(): Promise<void>;
+  onToggleMemory(): Promise<void>;
   onPermissionMode(mode: PermissionMode): Promise<void>;
   onSwitchModel(alias: string, thinking: ThinkingSelection): Promise<void>;
   onSaveAttachment(file: File): Promise<DesktopAttachment>;
-}
-
-export interface ContextUsage {
-  usedTokens: number;
-  maxTokens: number;
+  onWarning(message: string): void;
 }
 
 type ComposerMenu = "permission" | "model" | "add" | null;
+type PendingModelSelection = { alias: string; thinking: ThinkingSelection };
 
 const MAX_COMPOSER_ATTACHMENTS = 8;
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
@@ -60,16 +66,25 @@ export const Composer = memo(function Composer({
   permissionMode,
   models,
   contextUsage,
+  memoryEnabled,
+  memoryToggleBusy,
+  memoryToggleDisabled,
+  memoryToggleDisabledReason,
   running,
+  runtimeBusy,
   activeElsewhere,
+  sessionWriterConflict,
   modelSetupRequired,
   focusToken,
+  prefillInput,
   onSend,
   onSlashCommand,
   onStop,
+  onToggleMemory,
   onPermissionMode,
   onSwitchModel,
-  onSaveAttachment
+  onSaveAttachment,
+  onWarning
 }: ComposerProps): React.JSX.Element {
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<InteractiveAgentRunMode>("chat");
@@ -78,18 +93,35 @@ export const Composer = memo(function Composer({
   const [menu, setMenu] = useState<ComposerMenu>(null);
   const [busy, setBusy] = useState(false);
   const [stopPending, setStopPending] = useState(false);
-  const [error, setError] = useState<string>();
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
+  const [optimisticModel, setOptimisticModel] = useState<PendingModelSelection>();
   const inputRef = useRef<ChatComposerInputHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const addAnchorRef = useRef<HTMLDivElement>(null);
   const permissionAnchorRef = useRef<HTMLDivElement>(null);
   const modelAnchorRef = useRef<HTMLDivElement>(null);
+  const modelSwitchQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const modelSwitchPromiseRef = useRef<Promise<void> | undefined>(undefined);
+  const modelSwitchRequestRef = useRef(0);
+
+  useEffect(() => {
+    modelSwitchRequestRef.current += 1;
+    setOptimisticModel(undefined);
+    modelSwitchPromiseRef.current = undefined;
+    modelSwitchQueueRef.current = Promise.resolve();
+  }, [project?.id]);
 
   useEffect(() => {
     if (focusToken) inputRef.current?.focus();
   }, [focusToken]);
+
+  useEffect(() => {
+    if (prefillInput === undefined) return;
+    setInput(prefillInput);
+    setSlashDismissed(false);
+    inputRef.current?.focus();
+  }, [prefillInput]);
 
   useEffect(() => {
     if (!running) setStopPending(false);
@@ -125,13 +157,12 @@ export const Composer = memo(function Composer({
   const runSlash = async (command: string): Promise<void> => {
     if (!project || busy) return;
     setInput("");
-    setError(undefined);
     setBusy(true);
     try {
       await onSlashCommand(command);
     } catch (slashError) {
       setInput(command);
-      setError(errorMessage(slashError));
+      onWarning(errorMessage(slashError));
     } finally {
       setBusy(false);
     }
@@ -149,32 +180,43 @@ export const Composer = memo(function Composer({
   const submit = async (delivery?: "steer" | "followUp", submittedInput = input): Promise<void> => {
     const value = submittedInput.trim() || (attachments.length ? "请分析这些附件。" : "");
     if (!project || !value || busy || pendingAttachments.length) return;
+    const pendingModelSwitch = modelSwitchPromiseRef.current;
+    if (pendingModelSwitch) {
+      // 斜杠命令也应看到已确认的 Runtime 状态；否则紧接着执行 `/status` 或再次切模
+      // 时，命令可能与上一轮切换并发竞争。
+      try {
+        await pendingModelSwitch;
+      } catch {
+        // startModelSwitch 已提示具体错误；保留输入，避免继续操作旧模型。
+        return;
+      }
+    }
     const [slashName] = value.split(/\s+/, 1);
     const slashCommand = DESKTOP_SLASH_COMMANDS.find((command) => command.name === slashName);
     if (slashCommand && (value === slashCommand.name || slashCommand.acceptsArgs)) {
       await runSlash(value);
       return;
     }
-    if (activeElsewhere) return;
-    setInput("");
+    if (sessionWriterConflict || activeElsewhere) return;
     const sentAttachments = attachments;
-    setAttachments([]);
-    setError(undefined);
     setBusy(true);
     try {
+      // 模型标签已经即时更新，但真正的 Runtime 切换仍需完成后才能发送，
+      // 否则用户紧接着按 Enter 时可能把消息发给旧模型。
+      setInput("");
+      setAttachments([]);
       await onSend(value, mode, sentAttachments, delivery);
     } catch (submitError) {
       setInput(value);
       setAttachments(sentAttachments);
-      setError(errorMessage(submitError));
+      onWarning(errorMessage(submitError));
     } finally {
       setBusy(false);
     }
   };
 
   const addFiles = async (files: File[]): Promise<void> => {
-    if (!project || !files.length || busy || running) return;
-    setError(undefined);
+    if (!project || !files.length || busy || running || sessionWriterConflict) return;
     setBusy(true);
     try {
       const existing = new Set([
@@ -221,9 +263,9 @@ export const Composer = memo(function Composer({
       });
       if (saved.length) setAttachments((current) => [...current, ...saved].slice(0, MAX_COMPOSER_ATTACHMENTS));
       const failed = results.flatMap((result) => "error" in result ? [result.error] : []);
-      if (failed.length) setError(failed.join("；"));
+      if (failed.length) onWarning(failed.join("；"));
     } catch (attachmentError) {
-      setError(errorMessage(attachmentError));
+      onWarning(errorMessage(attachmentError));
     } finally {
       setBusy(false);
     }
@@ -231,19 +273,18 @@ export const Composer = memo(function Composer({
 
   const requestStop = async (): Promise<void> => {
     setStopPending(true);
-    setError(undefined);
     try {
       await onStop();
     } catch (stopError) {
       setStopPending(false);
-      setError(errorMessage(stopError));
+      onWarning(errorMessage(stopError));
     }
   };
 
-  const activeModel = models.find((model) => model.alias === runtimeInfo?.modelAlias);
+  const activeModel = models.find((model) => model.alias === (optimisticModel?.alias ?? runtimeInfo?.modelAlias));
   const selectedModel = activeModel ?? models[0];
   const currentAlias = activeModel?.alias ?? selectedModel?.alias;
-  const runtimeThinking = runtimeInfo?.thinking ?? selectedModel?.defaultThinking ?? "off";
+  const runtimeThinking = optimisticModel?.thinking ?? runtimeInfo?.thinking ?? selectedModel?.defaultThinking ?? "off";
   const thinkingLevels: ThinkingSelection[] = selectedModel ? modelThinkingSelections(selectedModel) : [];
   const currentThinking = selectedModel
     ? thinkingSelectionForModel(runtimeThinking, selectedModel)
@@ -256,25 +297,49 @@ export const Composer = memo(function Composer({
     )
     : undefined;
   const modelName = selectedModel?.displayName ?? runtimeInfo?.modelLabel ?? "未配置模型";
+  const startModelSwitch = (alias: string, thinking: ThinkingSelection): void => {
+    const requestId = modelSwitchRequestRef.current + 1;
+    modelSwitchRequestRef.current = requestId;
+    setOptimisticModel({ alias, thinking });
+    const request = modelSwitchQueueRef.current
+      .catch(() => undefined)
+      .then(async () => await onSwitchModel(alias, thinking));
+    modelSwitchQueueRef.current = request.catch(() => undefined);
+    modelSwitchPromiseRef.current = request;
+    void request.then(
+      () => {
+        if (modelSwitchRequestRef.current !== requestId) return;
+        modelSwitchPromiseRef.current = undefined;
+        setOptimisticModel(undefined);
+      },
+      (modelError) => {
+        if (modelSwitchRequestRef.current !== requestId) return;
+        modelSwitchPromiseRef.current = undefined;
+        setOptimisticModel(undefined);
+        onWarning(errorMessage(modelError));
+      }
+    );
+  };
   const chooseModel = (alias: string): void => {
     const nextModel = models.find((model) => model.alias === alias);
     if (!nextModel) return;
-    const nextThinking = thinkingSelectionForModel(runtimeThinking, nextModel)
-      ?? (nextModel.efforts.length ? nextModel.defaultThinking : "off");
-    setMenu(null);
-    void onSwitchModel(alias, nextThinking).catch((modelError) => setError(errorMessage(modelError)));
+    const nextThinking = nextModel.efforts.length ? nextModel.defaultThinking : "off";
+    // 选中模型后保留模型设置面板，用户可以继续悬停“推理强度”选择档位。
+    startModelSwitch(alias, nextThinking);
   };
   const usage = formatContextUsage(contextUsage);
-  const inputDisabled = activeElsewhere || busy;
+  const inputDisabled = sessionWriterConflict || activeElsewhere || busy;
   const attachmentCount = attachments.length + pendingAttachments.length;
   const sendDisabled = running
     ? false
-    : (!input.trim() && !attachments.length) || !project || activeElsewhere || modelSetupRequired || busy || pendingAttachments.length > 0;
+    : (!input.trim() && !attachments.length) || !project || sessionWriterConflict || activeElsewhere || modelSetupRequired || busy || pendingAttachments.length > 0;
   const sendDisabledReason = !project
     ? "请先打开一个项目。"
-    : modelSetupRequired
-      ? "还没有可用的模型连接，请先配置模型。"
-      : activeElsewhere
+      : modelSetupRequired
+        ? "还没有可用的模型连接，请先配置模型。"
+        : sessionWriterConflict
+          ? "会话已在另一个应用中打开，请先在那里关闭后重试。"
+        : activeElsewhere
         ? "另一个会话正在运行，请先切回该会话。"
         : busy
           ? "当前附件或命令正在处理，请稍候。"
@@ -284,17 +349,38 @@ export const Composer = memo(function Composer({
             ? "输入消息或添加附件后发送。"
             : undefined;
   const placeholder = running ? "可以继续补充要求…" : "hi biny";
-  const modelSwitchDisabled = activeElsewhere || running || busy;
+  const modelSwitchPending = Boolean(optimisticModel);
+  const modelSwitchDisabled = sessionWriterConflict || activeElsewhere || running || runtimeBusy || busy;
   const modelSwitchDisabledReason = !project
     ? "请先打开一个项目。"
-    : activeElsewhere
+    : sessionWriterConflict
+      ? "会话已在另一个应用中打开。"
+      : activeElsewhere
       ? "另一个会话正在运行，请先切回该会话。"
       : running
         ? "当前对话正在运行，等结束后再切换模型。"
+        : runtimeBusy
+          ? "Runtime 正在处理其他操作，请稍候再切换模型。"
         : busy
           ? "当前附件或命令正在处理，请稍候。"
           : undefined;
-  const permissionDisabledReason = !project ? "请先打开一个项目。" : undefined;
+  const permissionSwitchDisabled = !project || sessionWriterConflict || activeElsewhere || runtimeBusy || busy;
+  const permissionDisabledReason = !project
+    ? "请先打开一个项目。"
+    : sessionWriterConflict
+      ? "会话已在另一个应用中打开。"
+      : activeElsewhere
+      ? "另一个会话正在运行，请先切回该会话。"
+      : running
+        ? "当前对话正在运行，请等待结束后再切换权限模式。"
+        : runtimeBusy
+          ? "Runtime 正在处理其他操作，请稍候再切换权限模式。"
+        : busy
+          ? "当前附件或命令正在处理，请稍候。"
+          : undefined;
+  useEffect(() => {
+    if (permissionSwitchDisabled && menu === "permission") setMenu(null);
+  }, [menu, permissionSwitchDisabled]);
 
   const handleInputChange = (value: string): void => {
     setInput(value);
@@ -382,17 +468,18 @@ export const Composer = memo(function Composer({
               <ComposerActionButton
                 className="cindy-permission-pill"
                 data-composer-menu="permission"
-                disabled={!project}
+                disabled={permissionSwitchDisabled}
                 disabledReason={permissionDisabledReason}
                 active={menu === "permission"}
                 aria-expanded={menu === "permission"}
                 aria-haspopup="menu"
-                label={cindyPermissionLabel(permissionMode)}
+                data-permission-mode={permissionMode}
+                label={permissionLabel(permissionMode)}
                 onClick={() => setMenu(menu === "permission" ? null : "permission")}
                 tooltip={menu === "permission" ? undefined : "选择当前会话的权限模式"}
               >
-                <Icon name="spark" size={13} />
-                <span>{cindyPermissionLabel(permissionMode)}</span>
+                <Icon name={permissionIcon(permissionMode)} size={13} />
+                <span>{permissionLabel(permissionMode)}</span>
                 <Icon name="chevron" size={11} />
               </ComposerActionButton>
               <PermissionMenu
@@ -401,7 +488,7 @@ export const Composer = memo(function Composer({
                 open={menu === "permission"}
                 onChange={(nextMode) => {
                   setMenu(null);
-                  void onPermissionMode(nextMode).catch((permissionError) => setError(errorMessage(permissionError)));
+                  void onPermissionMode(nextMode).catch((permissionError) => onWarning(permissionErrorMessage(permissionError)));
                 }}
               />
             </div>
@@ -465,20 +552,34 @@ export const Composer = memo(function Composer({
         onStop={() => void requestStop()}
         onSubmit={(value) => void submit(undefined, value)}
         placeholder={placeholder}
-        status={error
-          ? { message: error, type: "error" }
-          : running && input.trim()
-            ? { message: "按 Enter 将补充要求排入当前会话；⌘ Enter 立即转向", type: "warning" }
-            : undefined}
+        status={running && input.trim()
+          ? { message: "按 Enter 将补充要求排入当前会话；⌘ Enter 立即转向", type: "warning" }
+          : undefined}
         statusPosition="bottom"
         sendActions={(
           <div className="cindy-composer-footer-end">
+            <div className="composer-menu-anchor">
+              <ComposerActionButton
+                aria-pressed={memoryEnabled}
+                className="cindy-memory-toggle"
+                data-memory-enabled={memoryEnabled ? "true" : "false"}
+                disabled={memoryToggleDisabled}
+                disabledReason={memoryToggleDisabledReason}
+                label={memoryEnabled ? "关闭当前聊天记忆" : "开启当前聊天记忆"}
+                loading={memoryToggleBusy}
+                onClick={() => { void onToggleMemory(); }}
+                tooltip={memoryEnabled ? "隐身模式已关闭 - 点击禁用记忆功能" : "隐身模式已开启 - 点击启用记忆功能"}
+              >
+                <Icon name={memoryEnabled ? "eye" : "eye-off"} size={16} />
+              </ComposerActionButton>
+            </div>
             <div className="composer-menu-anchor" ref={modelAnchorRef}>
               <ComposerActionButton
                 className="cindy-model-pill"
                 data-composer-menu="model"
                 disabled={modelSwitchDisabled}
                 disabledReason={modelSwitchDisabledReason}
+                loading={modelSwitchPending}
                 active={menu === "model"}
                 aria-expanded={menu === "model"}
                 aria-haspopup="menu"
@@ -501,7 +602,7 @@ export const Composer = memo(function Composer({
                 onSelectModel={chooseModel}
                 onSelectThinking={(thinking) => {
                   setMenu(null);
-                  if (currentAlias) void onSwitchModel(currentAlias, thinking).catch((modelError) => setError(errorMessage(modelError)));
+                  if (currentAlias) startModelSwitch(currentAlias, thinking);
                 }}
                 open={menu === "model"}
                 thinkingLevels={thinkingLevels}
@@ -510,7 +611,11 @@ export const Composer = memo(function Composer({
             {usage ? (
               <span className="context-usage" role="status">
                 <Icon name="timer" size={12} /><span>{usage.percent}%</span>
-                <span className="context-usage-tip">上下文使用量<strong>{usage.used} / {usage.max} tokens</strong></span>
+                <span className="context-usage-tip">
+                  <span>上下文使用量</span>
+                  <strong>{usage.percent}% 已占用</strong>
+                  <strong>{usage.used} / {usage.max} tokens</strong>
+                </span>
               </span>
             ) : null}
           </div>
@@ -531,26 +636,13 @@ export const Composer = memo(function Composer({
   );
 });
 
-function cindyPermissionLabel(mode: PermissionMode): string {
-  if (mode === "auto") return "自动审批";
-  if (mode === "full-access") return "完全访问";
-  if (mode === "read-only") return "只读";
-  return "每次询问";
-}
-
-/**
- * 上下文用量展示值。`usedTokens` 是上一轮实际占用，`maxTokens` 是本模型允许注入的输入预算，
- * 超过它就会触发压缩，所以百分比按这个分母算才有意义。
- */
-function formatContextUsage(usage?: ContextUsage): { percent: number; used: string; max: string } | undefined {
-  if (!usage || usage.maxTokens <= 0 || usage.usedTokens <= 0) return undefined;
-  return {
-    percent: Math.min(100, Math.round((usage.usedTokens / usage.maxTokens) * 100)),
-    used: usage.usedTokens.toLocaleString("en-US"),
-    max: usage.maxTokens.toLocaleString("en-US")
-  };
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function permissionErrorMessage(error: unknown): string {
+  const message = errorMessage(error);
+  return message.includes("Cannot start permission update while the runtime is busy")
+    ? "当前对话正在运行，权限模式需等本轮结束后再修改。"
+    : message;
 }

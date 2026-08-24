@@ -5,17 +5,14 @@
  * 权限和文件检查器回调。页面层只负责把这些能力放到正确的视觉区域。
  */
 import type { PermissionResult } from "../../../../permission/PermissionManager.js";
-import type { UsageSummary } from "../../../../session/metadata.js";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ThinkingOrb } from "thinking-orbs";
-import type { DesktopProject, DesktopRuntimeMutation, DesktopRuntimeProjection } from "../../../protocol.js";
+import type { DesktopProject, DesktopRuntimeMutation, DesktopRuntimeProjection, DesktopSessionWriterConflict } from "../../../protocol.js";
 import type { TimelineTurn } from "../sessionTimeline.js";
 import { pickThinkingMessage } from "../thinkingMessages.js";
-import { formatCacheHitRate, formatUsageCost } from "../usagePresentation.js";
 import { Icon } from "./Icon.js";
 import { MessageTimeline } from "./MessageTimeline.js";
 import { RuntimePanel } from "./RuntimePanel.js";
-import { UsageSummaryPopover } from "./UsageSummaryPopover.js";
 
 interface WorkspaceProps {
   project?: DesktopProject;
@@ -26,7 +23,6 @@ interface WorkspaceProps {
   loading: boolean;
   runtimeError?: string;
   runtimeProjection?: DesktopRuntimeProjection;
-  sessionUsage: UsageSummary;
   onOpenProject(): void;
   onPreviewFile(path: string): void;
   inspectorOpen: boolean;
@@ -39,6 +35,8 @@ interface WorkspaceProps {
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
   onResume(): Promise<void>;
   onRetry(input: string): void;
+  onRetryWriterConflict(): Promise<void>;
+  writerConflict?: DesktopSessionWriterConflict;
   onEditUserMessage(input: string, userMessageIndex: number): Promise<void>;
   onCreateBranch(): void;
   onRollbackFiles(turn: TimelineTurn): void;
@@ -58,7 +56,6 @@ export function Workspace({
   loading,
   runtimeError,
   runtimeProjection,
-  sessionUsage,
   onOpenProject,
   onPreviewFile,
   inspectorOpen,
@@ -71,6 +68,8 @@ export function Workspace({
   onResolvePermission,
   onResume,
   onRetry,
+  onRetryWriterConflict,
+  writerConflict,
   onEditUserMessage,
   onCreateBranch,
   onRollbackFiles,
@@ -80,9 +79,6 @@ export function Workspace({
   onRuntimeRefresh,
   children
 }: WorkspaceProps): React.JSX.Element {
-  const [usageOpen, setUsageOpen] = useState(false);
-  const usageControlRef = useRef<HTMLDivElement>(null);
-  const closeUsage = useCallback(() => setUsageOpen(false), []);
   const streaming = turns.some((turn) => turn.status === "running" || turn.status === "waiting_permission");
   const isHome = !loading && !runtimeError && !projectId;
 
@@ -161,40 +157,7 @@ export function Workspace({
           )}
         </div>
         <div className="cindy-chat-composer">
-          {children}
-          <div aria-label="会话状态" aria-live="polite" className="cindy-composer-status">
-            <div className="cindy-composer-status-actions">
-              <div className="cindy-usage-control" ref={usageControlRef}>
-                <button
-                  aria-expanded={usageOpen}
-                  aria-label="查看本会话费用与缓存命中率"
-                  className={`cindy-composer-status-button${usageOpen ? " is-open" : ""}`}
-                  onClick={() => setUsageOpen((current) => !current)}
-                  title="本会话费用与缓存命中率"
-                  type="button"
-                >
-                  <Icon name="chart" size={13} />
-                  <span>
-                    {sessionUsage.calls ? formatUsageCost(sessionUsage) : "费用"}
-                    {sessionUsage.latestCacheHitRate === undefined ? "" : ` · CH ${formatCacheHitRate(sessionUsage.latestCacheHitRate)}`}
-                    {sessionUsage.sessionCacheHitRate === undefined ? "" : ` · S-CH ${formatCacheHitRate(sessionUsage.sessionCacheHitRate)}`}
-                  </span>
-                </button>
-                <UsageSummaryPopover anchorRef={usageControlRef} onClose={closeUsage} open={usageOpen} summary={sessionUsage} />
-              </div>
-              <button
-                aria-expanded={runtimePanelOpen}
-                aria-label="打开后台运行面板"
-                className={`cindy-composer-status-button${runtimePanelOpen ? " is-open" : ""}`}
-                disabled={!projectId}
-                onClick={() => onRuntimePanelOpenChange(!runtimePanelOpen)}
-                title="后台运行"
-                type="button"
-              >
-                <Icon name="activity" size={13} />
-              </button>
-            </div>
-          </div>
+          {writerConflict ? <SessionWriterConflictBanner onRetry={onRetryWriterConflict} /> : children}
         </div>
       </div>
       {streaming ? <span className="cindy-streaming-state" aria-hidden="true" /> : null}
@@ -266,6 +229,29 @@ function RuntimeError({ error, onOpenProject }: { error: string; onOpenProject()
       <p>{error}</p>
       <small>若另一个 Biny/CLI 会话正在占用项目，请先退出该会话；其他错误请检查共享配置后重试。</small>
       <button onClick={onOpenProject} type="button">打开其他项目</button>
+    </div>
+  );
+}
+
+function SessionWriterConflictBanner({ onRetry }: { onRetry(): Promise<void> }): React.JSX.Element {
+  const [retrying, setRetrying] = useState(false);
+  const retry = async (): Promise<void> => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      await onRetry();
+    } finally {
+      setRetrying(false);
+    }
+  };
+  return (
+    <div aria-live="polite" className="cindy-session-writer-conflict" role="alert">
+      <Icon name="lock" size={17} />
+      <div className="cindy-session-writer-conflict-copy">
+        <strong>已在另一个应用中打开</strong>
+        <span>请先在那边关闭会话，才能在这里继续。</span>
+      </div>
+      <button disabled={retrying} onClick={() => void retry()} type="button">{retrying ? "重试中…" : "重试"}</button>
     </div>
   );
 }

@@ -27,7 +27,7 @@ const engineLabels: Record<DesktopSkillCatalogEntry["engine"], string> = {
 export function SkillHubView({ onError }: { onError(message: string): void }): React.JSX.Element {
   const [tab, setTab] = useState<SkillHubTab>("skills");
   const [query, setQuery] = useState("");
-  const [snapshot, setSnapshot] = useState<DesktopSkillCatalogSnapshot>({ skills: [], plugins: [], warnings: [] });
+  const [snapshot, setSnapshot] = useState<DesktopSkillCatalogSnapshot>({ skills: [], inventory: [], plugins: [], managedSources: [], warnings: [], diagnostics: [] });
   const [selectedSkillId, setSelectedSkillId] = useState<string>();
   const [selectedFilePath, setSelectedFilePath] = useState("SKILL.md");
   const [preview, setPreview] = useState<DesktopSkillFilePreview>();
@@ -36,6 +36,7 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
   const [loading, setLoading] = useState(true);
   const [fileLoading, setFileLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
   const requestRef = useRef(0);
 
   const loadCatalog = useCallback(async (): Promise<void> => {
@@ -63,6 +64,10 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
     [selectedSkillId, snapshot.skills]
   );
   const normalizedQuery = query.trim().toLocaleLowerCase();
+  const diagnosticMessages = useMemo(
+    () => [...new Set([...snapshot.warnings, ...snapshot.diagnostics.map((diagnostic) => diagnostic.message)])],
+    [snapshot.diagnostics, snapshot.warnings]
+  );
   const visibleSkills = useMemo(() => snapshot.skills.filter((skill) => {
     if (!normalizedQuery) return true;
     return `${skill.name} ${skill.description} ${skill.absolutePath}`.toLocaleLowerCase().includes(normalizedQuery);
@@ -133,6 +138,27 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
     }
   }, [onError, selectedSkill]);
 
+  const importSource = useCallback(async (): Promise<void> => {
+    setImporting(true);
+    try {
+      const imported = await window.biny.importSkillSource();
+      if (imported) await loadCatalog();
+    } catch (error) {
+      onError(errorMessage(error));
+    } finally {
+      setImporting(false);
+    }
+  }, [loadCatalog, onError]);
+
+  const installSource = useCallback(async (sourceId: string): Promise<void> => {
+    try {
+      await window.biny.installSkillSource(sourceId);
+      await loadCatalog();
+    } catch (error) {
+      onError(errorMessage(error));
+    }
+  }, [loadCatalog, onError]);
+
   return (
     <div className="cindy-extension-page">
       <ExtensionHeader
@@ -141,13 +167,16 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
         onTab={setTab}
         onQuery={setQuery}
         onRefresh={() => void loadCatalog()}
+        onImport={() => void importSource()}
+        importing={importing}
         loading={loading}
       />
       <div className="cindy-extension-body">
-        {snapshot.warnings.length ? <div className="cindy-extension-warning"><Icon name="warning" size={15} /><span>{snapshot.warnings.join(" ")}</span></div> : null}
+        {diagnosticMessages.length ? <div className="cindy-extension-warning" role="status"><Icon name="warning" size={15} /><div>{diagnosticMessages.map((warning) => <div key={warning}>{warning}</div>)}</div></div> : null}
         {tab === "skills" ? (
           <SkillCatalogContent
             skills={visibleSkills}
+            managedSources={snapshot.managedSources}
             selectedSkill={selectedSkill}
             loading={loading}
             onSelect={selectSkill}
@@ -164,6 +193,7 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
             onCancelEdit={() => { setDraft(preview?.content ?? ""); setEditing(false); }}
             onDraft={setDraft}
             onSave={() => void saveFile()}
+            onInstallSource={(sourceId) => void installSource(sourceId)}
           />
         ) : (
           <PluginCatalogContent plugins={visiblePlugins} loading={loading} />
@@ -179,7 +209,9 @@ const ExtensionHeader = memo(function ExtensionHeader({
   loading,
   onTab,
   onQuery,
-  onRefresh
+  onRefresh,
+  onImport,
+  importing
 }: {
   tab: SkillHubTab;
   query: string;
@@ -187,6 +219,8 @@ const ExtensionHeader = memo(function ExtensionHeader({
   onTab(tab: SkillHubTab): void;
   onQuery(query: string): void;
   onRefresh(): void;
+  onImport(): void;
+  importing: boolean;
 }): React.JSX.Element {
   return (
     <header className="cindy-extension-header">
@@ -199,6 +233,7 @@ const ExtensionHeader = memo(function ExtensionHeader({
         <input aria-label={tab === "skills" ? "搜索技能" : "搜索插件"} onChange={(event) => onQuery(event.target.value)} placeholder={tab === "skills" ? "搜索技能" : "搜索插件"} value={query} />
         {query ? <button aria-label="清空搜索" onClick={() => onQuery("")} type="button"><Icon name="close" size={13} /></button> : null}
       </label>
+      {tab === "skills" ? <button className="cindy-extension-import" disabled={importing} onClick={onImport} type="button"><Icon name="add" size={15} />{importing ? "导入中…" : "导入 Skill"}</button> : null}
       <button aria-label="刷新扩展列表" className="cindy-extension-refresh" disabled={loading} onClick={onRefresh} title="刷新" type="button"><Icon name="refresh" size={15} /></button>
     </header>
   );
@@ -206,6 +241,7 @@ const ExtensionHeader = memo(function ExtensionHeader({
 
 const SkillCatalogContent = memo(function SkillCatalogContent({
   skills,
+  managedSources,
   selectedSkill,
   loading,
   onSelect,
@@ -221,9 +257,11 @@ const SkillCatalogContent = memo(function SkillCatalogContent({
   onEdit,
   onCancelEdit,
   onDraft,
-  onSave
+  onSave,
+  onInstallSource
 }: {
   skills: DesktopSkillCatalogEntry[];
+  managedSources: DesktopSkillCatalogSnapshot["managedSources"];
   selectedSkill?: DesktopSkillCatalogEntry;
   loading: boolean;
   onSelect(skill: DesktopSkillCatalogEntry): void;
@@ -240,17 +278,19 @@ const SkillCatalogContent = memo(function SkillCatalogContent({
   onCancelEdit(): void;
   onDraft(content: string): void;
   onSave(): void;
+  onInstallSource(sourceId: string): void;
 }): React.JSX.Element {
   return (
     <>
       <div className="cindy-extension-heading">
         <div>
           <h1>技能</h1>
-          <p>管理本机安装的本地技能。</p>
+          <p>发现标准 Agent Skills，或导入后安装到 Biny 的受管目录。</p>
         </div>
         <span className="cindy-extension-count">本地技能 {skills.length}</span>
       </div>
-      {loading && !skills.length ? <ExtensionLoading /> : !skills.length ? <ExtensionEmpty icon="wand" title="还没有找到 Skill" detail="将 Skill 放入 ~/.agents/skills、~/.codex/skills 或项目的 .agents/skills 后刷新。" /> : (
+      {managedSources.length ? <ManagedSkillSources sources={managedSources} onInstall={onInstallSource} /> : null}
+      {loading && !skills.length ? <ExtensionLoading /> : !skills.length ? <ExtensionEmpty icon="wand" title="还没有找到 Skill" detail="将 Skill 放入 ~/.agents/skills 或项目的 .agents/skills；外部目录请先导入 SKILL.md。" /> : (
         <div className={selectedSkill ? "cindy-skill-layout has-detail" : "cindy-skill-layout"}>
           <div className="cindy-skill-card-grid">
             {skills.map((skill) => <SkillCard key={skill.id} skill={skill} selected={skill.id === selectedSkill?.id} onSelect={onSelect} />)}
@@ -285,11 +325,31 @@ const SkillCard = memo(function SkillCard({ skill, selected, onSelect }: { skill
       <span className="cindy-skill-card-icon"><Icon name="wand" size={17} /></span>
       <span className="cindy-skill-card-main">
         <span className="cindy-skill-card-title">{skill.name}</span>
-        <span className="cindy-skill-card-meta">{skill.scope === "global" ? "全局" : "项目"} · {skill.linkedEngines.map((engine) => engineLabels[engine]).join(" / ")}</span>
+        <span className="cindy-skill-card-meta">{skill.scope === "global" ? "全局" : "项目"} · {skill.source === "biny" ? "Biny" : "Agent Skills"} · {skill.linkedEngines.map((engine) => engineLabels[engine]).join(" / ")}</span>
         <span className="cindy-skill-card-description">{skill.description}</span>
       </span>
       <Icon name="arrow-right" size={15} />
     </button>
+  );
+});
+
+const ManagedSkillSources = memo(function ManagedSkillSources({
+  sources,
+  onInstall
+}: {
+  sources: DesktopSkillCatalogSnapshot["managedSources"];
+  onInstall(sourceId: string): void;
+}): React.JSX.Element {
+  return (
+    <section className="cindy-skill-sources" aria-label="受管 Skill 来源">
+      <div className="cindy-skill-sources-heading"><h2>本地来源</h2><span>导入不会自动启用</span></div>
+      <div className="cindy-skill-source-grid">
+        {sources.map((source) => <article className="cindy-skill-source-card" key={source.id}>
+          <div><h3>{source.name}</h3><p>{source.description}</p></div>
+          <button disabled={source.installed} onClick={() => onInstall(source.id)} type="button">{source.installed ? "已安装" : "安装"}</button>
+        </article>)}
+      </div>
+    </section>
   );
 });
 

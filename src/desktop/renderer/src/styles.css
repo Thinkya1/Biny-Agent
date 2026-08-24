@@ -751,10 +751,17 @@ button:disabled { opacity: 0.42; }
 .memory-entry:hover .memory-entry-delete { opacity: 1; }
 .memory-empty-hint { margin: 9px 0 0; color: var(--text-tertiary); font-size: calc(11.5px * var(--font-scale)); }
 
-.setting-switch { display: inline-flex; width: 34px; height: 20px; flex: 0 0 34px; align-items: center; padding: 2px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-soft); transition: background 150ms ease, border-color 150ms ease; }
-.setting-switch-knob { width: 14px; height: 14px; border-radius: 50%; background: var(--text-tertiary); transition: transform 150ms ease, background 150ms ease; }
-.setting-switch.is-on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 85%, transparent); }
-.setting-switch.is-on .setting-switch-knob { background: var(--cindy-selection-text); transform: translateX(14px); }
+.settings-check-row { display: flex; width: 100%; min-height: 52px; align-items: flex-start; gap: 10px; padding: 10px 0; border: 0; color: var(--text); background: transparent; font: inherit; text-align: left; }
+.settings-check-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.settings-check-copy strong { font-size: calc(12px * var(--font-scale)); font-weight: 550; }
+.settings-check-copy small { color: var(--text-tertiary); font-size: calc(10.5px * var(--font-scale)); line-height: 1.45; }
+.settings-check-box,
+.check-dot { display: grid; width: 16px; height: 16px; flex: 0 0 16px; place-items: center; margin-top: 1px; border: 1px solid var(--border-strong); border-radius: 4px; color: transparent; background: var(--surface-soft); transition: border-color 150ms ease, background 150ms ease, color 150ms ease; }
+.settings-check-row.is-checked .settings-check-box,
+.check-dot.is-on { border-color: var(--accent); color: var(--cindy-selection-text); background: var(--accent); }
+.settings-check-row:not(:disabled):not(.is-checked):hover .settings-check-box { border-color: var(--text-secondary); }
+.settings-check-row:focus-visible .settings-check-box { outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 2px; }
+.settings-check-row:disabled { cursor: not-allowed; opacity: 0.48; }
 .web-search-select { min-height: 26px; padding: 0 7px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--surface); font-size: calc(11.5px * var(--font-scale)); }
 .web-search-key-status { margin: 7px 0 5px; color: var(--text-tertiary); font-size: calc(11px * var(--font-scale)); }
 .cookie-domain-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 0 2px; }
@@ -899,26 +906,12 @@ button:disabled { opacity: 0.42; }
   font-size: calc(10.5px * var(--font-scale));
 }
 .set-default-button:hover:not(:disabled) { color: var(--text); background: var(--surface-selected); }
-.check-dot {
-  display: grid;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
-  place-items: center;
-  border: 1px solid var(--border-strong);
-  border-radius: 50%;
-  color: transparent;
-}
-.check-dot.is-on { color: var(--cindy-selection-text); border-color: var(--accent); background: var(--accent); }
-
 .model-dialog-backdrop {
   position: fixed;
   z-index: 220;
   inset: 0;
   display: grid;
-  /* 顶部对齐而不是垂直居中：弹层内容展开（如连接详情的“高级设置”）时对话框向下增长，
-     头部和关闭按钮的屏幕位置保持不动，避免用户按记忆点击关闭按钮时落空。 */
-  place-items: start center;
+  place-items: center;
   padding: 24px;
   background: var(--color-overlay);
   backdrop-filter: blur(8px);

@@ -19,12 +19,15 @@ import type {
   DesktopMemoryKind,
   DesktopMemoryOriginFilter,
   DesktopMemoryOverview,
-  DesktopMemorySearchMatch
+  DesktopMemorySearchMatch,
+  DesktopModelConfigurationInput,
+  DesktopModelConnectionTestResult
 } from "../../../../protocol.js";
 import { Icon } from "../Icon.js";
 import { ProviderBrandGlyph } from "../ProviderBrandGlyph.js";
 import { ModelMenu } from "../composer/ModelMenu.js";
 import { catalogForConnection } from "../../providerCatalog.js";
+import { SettingsCheckbox } from "./SettingsCheckbox.js";
 import { SettingsDetailLayer } from "./SettingsDetailLayer.js";
 import { useSettingsDraft } from "./SettingsDraftContext.js";
 
@@ -44,9 +47,43 @@ const memoryFilters: Array<{ value: DesktopMemoryOriginFilter; label: string }> 
   { value: "other_workspaces", label: "其他项目" }
 ];
 
+// 记忆可能被其他 Host 或 TUI 修改，因此缓存只用于首屏展示，进入页面后仍会后台校验。
+// 按项目和筛选条件隔离，避免切换项目时短暂显示另一项目的记忆。
+const memoryOverviewCache = new Map<string, DesktopMemoryOverview>();
+const maxMemoryOverviewCacheSize = 16;
+
+function memoryOverviewCacheKey(projectId: string | undefined, filter: DesktopMemoryOriginFilter): string | undefined {
+  return projectId === undefined ? undefined : `${projectId}:${filter}`;
+}
+
+function readMemoryOverviewCache(projectId: string | undefined, filter: DesktopMemoryOriginFilter): DesktopMemoryOverview | undefined {
+  const key = memoryOverviewCacheKey(projectId, filter);
+  if (key === undefined) return undefined;
+  const cached = memoryOverviewCache.get(key);
+  if (cached !== undefined) {
+    memoryOverviewCache.delete(key);
+    memoryOverviewCache.set(key, cached);
+  }
+  return cached;
+}
+
+function writeMemoryOverviewCache(projectId: string | undefined, filter: DesktopMemoryOriginFilter, overview: DesktopMemoryOverview): void {
+  const key = memoryOverviewCacheKey(projectId, filter);
+  if (key === undefined) return;
+  memoryOverviewCache.delete(key);
+  memoryOverviewCache.set(key, overview);
+  while (memoryOverviewCache.size > maxMemoryOverviewCacheSize) {
+    const oldest = memoryOverviewCache.keys().next().value;
+    if (oldest === undefined) break;
+    memoryOverviewCache.delete(oldest);
+  }
+}
+
 interface SettingsMemoryProps {
   models: ModelChoice[];
   embeddingModels: DesktopEmbeddingModelDescriptor[];
+  projectId?: string;
+  hidden?: boolean;
   workspaceAvailable: boolean;
   sessionRunning: boolean;
   onLoad(filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview>;
@@ -62,12 +99,15 @@ interface SettingsMemoryProps {
   onDeleteEmbeddingModel(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingDeleteResult>;
   onRebuildEmbeddingIndex(): Promise<DesktopMemoryEmbeddingStatus>;
   onCancelEmbeddingRebuild(): Promise<DesktopMemoryEmbeddingCancellationResult>;
+  onTestModelConfiguration(configuration: DesktopModelConfigurationInput): Promise<DesktopModelConnectionTestResult>;
   onNotify(message: string): void;
 }
 
 export function SettingsMemory({
   models,
   embeddingModels,
+  projectId,
+  hidden,
   workspaceAvailable,
   sessionRunning,
   onLoad,
@@ -83,12 +123,15 @@ export function SettingsMemory({
   onDeleteEmbeddingModel,
   onRebuildEmbeddingIndex,
   onCancelEmbeddingRebuild,
+  onTestModelConfiguration,
   onNotify
 }: SettingsMemoryProps): React.JSX.Element {
   const { draft, setMemory, snapshot } = useSettingsDraft();
   const [filter, setFilter] = useState<DesktopMemoryOriginFilter>("current_workspace");
-  const [overview, setOverview] = useState<DesktopMemoryOverview>();
+  const [storedOverview, setStoredOverview] = useState<DesktopMemoryOverview | undefined>(() => readMemoryOverviewCache(projectId, "current_workspace"));
+  const [storedOverviewKey, setStoredOverviewKey] = useState<string | undefined>(() => memoryOverviewCacheKey(projectId, "current_workspace"));
   const [loadError, setLoadError] = useState<string>();
+  const [refreshing, setRefreshing] = useState(false);
   const [busyAction, setBusyAction] = useState<string>();
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<DesktopMemorySearchMatch[]>();
@@ -104,13 +147,34 @@ export function SettingsMemory({
   const [embeddingMenuOpen, setEmbeddingMenuOpen] = useState(false);
   const [embeddingQuery, setEmbeddingQuery] = useState("");
   const embeddingMenuRef = useRef<HTMLDivElement>(null);
+  const memoryLoadRequestRef = useRef(0);
+
+  const currentOverviewKey = memoryOverviewCacheKey(projectId, filter);
+  const overview = storedOverviewKey === currentOverviewKey ? storedOverview : undefined;
+
+  const applyOverview = useCallback((nextFilter: DesktopMemoryOriginFilter, next: DesktopMemoryOverview): void => {
+    writeMemoryOverviewCache(projectId, nextFilter, next);
+    setStoredOverview(next);
+    setStoredOverviewKey(memoryOverviewCacheKey(projectId, nextFilter));
+  }, [projectId]);
 
   const load = useCallback(async (nextFilter: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview> => {
-    const next = await onLoad(nextFilter);
-    setOverview(next);
-    setLoadError(undefined);
-    return next;
-  }, [onLoad]);
+    const requestId = memoryLoadRequestRef.current + 1;
+    memoryLoadRequestRef.current = requestId;
+    setRefreshing(true);
+    try {
+      const next = await onLoad(nextFilter);
+      if (memoryLoadRequestRef.current === requestId && memoryOverviewCacheKey(projectId, nextFilter) === currentOverviewKey) {
+        applyOverview(nextFilter, next);
+        setLoadError(undefined);
+      } else {
+        writeMemoryOverviewCache(projectId, nextFilter, next);
+      }
+      return next;
+    } finally {
+      if (memoryLoadRequestRef.current === requestId) setRefreshing(false);
+    }
+  }, [applyOverview, currentOverviewKey, onLoad, projectId]);
 
   const refreshEmbeddingStatus = useCallback(async (): Promise<void> => {
     try {
@@ -131,14 +195,17 @@ export function SettingsMemory({
 
   useEffect(() => {
     let cancelled = false;
+    const cached = readMemoryOverviewCache(projectId, filter);
+    setStoredOverview(cached);
+    setStoredOverviewKey(currentOverviewKey);
     setLoadError(undefined);
     setSearchResults(undefined);
     setQuery("");
-    onLoad(filter)
-      .then((next) => { if (!cancelled) setOverview(next); })
+    if (!workspaceAvailable || projectId === undefined) return () => { cancelled = true; };
+    load(filter)
       .catch((error: unknown) => { if (!cancelled) setLoadError(errorMessage(error)); });
     return () => { cancelled = true; };
-  }, [filter, onLoad]);
+  }, [currentOverviewKey, filter, load, projectId, workspaceAvailable]);
 
   useEffect(() => {
     let cancelled = false;
@@ -173,12 +240,22 @@ export function SettingsMemory({
     return () => window.clearInterval(poll);
   }, [embeddingStatus?.operation?.state, onLoadEmbeddingStatus]);
 
+  const testModel = useCallback(async (model: ModelChoice): Promise<DesktopModelConnectionTestResult> => {
+    try {
+      return await onTestModelConfiguration(modelConfigurationForChoice(model));
+    } catch (error) {
+      return { ok: false, message: errorMessage(error) };
+    }
+  }, [onTestModelConfiguration]);
+
   if (!workspaceAvailable) return <MemoryPageState detail="记忆来源和当前项目筛选需要 workspace 上下文。请先返回应用并添加或选择一个项目。" title="请先选择项目" />;
   if (!draft) return <MemoryPageState title="正在加载记忆设置…" />;
   if (loadError && !overview) return <MemoryPageState detail={loadError} title="无法加载记忆库" />;
   if (!overview) return <MemoryPageState title="正在读取单一记忆库…" />;
 
   const policy = draft.memory;
+  const effectiveMemoryModel = models.find((model) => model.alias === policy.memoryModel)
+    ?? models.find((model) => model.alias === snapshot?.models.defaultModel);
   const visibleEmbeddingModels = mergeEmbeddingModels(embeddingModels, embeddingStatus?.models ?? []);
   const activeEmbedding = visibleEmbeddingModels.find((model) => sameEmbeddingRef(model.ref, policy.embeddingModel));
   const activeThresholds = activeEmbedding === undefined
@@ -197,6 +274,13 @@ export function SettingsMemory({
   const embeddingOperation = embeddingStatus?.operation;
 
   const changePolicy = (patch: Partial<typeof policy>): void => setMemory({ ...policy, ...patch });
+  const telos = policy.telos ?? {
+    enabled: false,
+    autoObserve: false,
+    driftDetection: false,
+    proactivePrompts: false
+  };
+  const changeTelos = (patch: Partial<typeof telos>): void => changePolicy({ telos: { ...telos, ...patch } });
   const changeModel = (field: "memoryModel" | "rewriteModel" | "extractModel" | "consolidationModel", value: string): void => {
     changePolicy({ [field]: value || undefined });
   };
@@ -236,14 +320,14 @@ export function SettingsMemory({
 
   const runMutation = async (
     action: string,
-    operation: () => Promise<unknown>,
+    operation: () => Promise<DesktopMemoryOverview>,
     success: string
   ): Promise<boolean> => {
     if (immediateDisabled) return false;
     setBusyAction(action);
     try {
-      await operation();
-      await refreshMemoryData(filter);
+      const next = await operation();
+      applyOverview(filter, next);
       setSearchResults(undefined);
       setQuery("");
       onNotify(success);
@@ -335,58 +419,60 @@ export function SettingsMemory({
   };
 
   return (
-    <div className="settings-sections memory-settings-v3">
-      <section className="memory-overview-card" id="memory-overview" tabIndex={-1}>
-        <div className="memory-overview-heading">
-          <div>
-            <span className="memory-kicker">记忆</span>
-            <h2>让助手记住真正有用的事</h2>
-            <p>记忆只会用于当前对话的上下文，不会改变你的项目文件。</p>
-          </div>
-          <MemorySwitch checked={policy.enabled} detail="关闭后保留已有记忆，但暂停检索和自动生成" label="启用记忆" onChange={(enabled) => changePolicy({ enabled })} />
-        </div>
-        <div className="memory-stat-grid memory-overview-stats">
-          <MemoryStat label="记忆总数" value={overview.memoryStats.total} />
-          <MemoryStat label="自动生成" value={overview.memoryStats.autoGenerated} />
-          <MemoryStat label="手动添加" value={overview.memoryStats.manualAdded} />
-        </div>
-      </section>
-
-      <section id="memory-features" tabIndex={-1}>
-        <div className="section-heading-row">
-          <div><h3>自动记忆</h3><p>决定哪些信息会被自动读写；手动添加始终可用。</p></div>
-          <span className="settings-scope-badge">全局</span>
-        </div>
-        <MemorySwitch checked={policy.useMemories} detail="每个新回合自动检索并注入相关记忆" disabled={!policy.enabled} label="自动检索记忆" onChange={(useMemories) => changePolicy({ useMemories })} />
-        <MemorySwitch checked={policy.generateMemories} detail="从已完成的回合中提取可复用信息" disabled={!policy.enabled} label="自动生成记忆" onChange={(generateMemories) => changePolicy({ generateMemories })} />
-        <MemorySwitch checked={policy.excludeExternalContext} detail="网页、附件、MCP、插件和子代理内容不自动沉淀" disabled={!policy.enabled} label="排除外部上下文" onChange={(excludeExternalContext) => changePolicy({ excludeExternalContext })} />
+    <div className="settings-sections memory-settings-v3" hidden={hidden}>
+      <section id="memory-overview" tabIndex={-1}>
+        <h3>记忆功能</h3>
+        <SettingsCheckbox checked={policy.enabled} detail="关闭后保留已有记忆，但暂停检索和自动生成" label="启用记忆" onChange={(enabled) => changePolicy({ enabled })} />
       </section>
 
       <section id="memory-retrieval" tabIndex={-1}>
         <h3>记忆检索</h3>
-        <MemorySwitch checked={policy.queryRewrite} detail="用记忆处理模型生成更适合检索的查询；3 秒失败后使用原问题" disabled={!policy.enabled || !policy.useMemories} label="查询重写" onChange={(queryRewrite) => changePolicy({ queryRewrite })} />
-        <label className="memory-slider-field">
-          <span><strong>最大召回数：{policy.maxRecalled}</strong><small>去重后仍受 12,000 字符整条注入预算限制</small></span>
-          <input aria-label="最大召回记忆数" max={20} min={1} onChange={(event) => changePolicy({ maxRecalled: Number(event.target.value) })} type="range" value={policy.maxRecalled} />
-        </label>
-        {activeEmbedding && activeThresholds ? (
-          <div className="memory-threshold-grid">
-            <ThresholdControl label="当前项目阈值" onChange={(value) => updateThreshold("currentWorkspace", value)} value={activeThresholds.currentWorkspace} />
-            <ThresholdControl label="跨项目阈值" onChange={(value) => updateThreshold("crossWorkspace", value)} value={activeThresholds.crossWorkspace} />
-            <button className="ghost-button" onClick={() => changePolicy({ similarityThresholds: { ...policy.similarityThresholds, [activeEmbedding.fingerprint]: activeEmbedding.recommendedThresholds } })} type="button">恢复该模型推荐值</button>
-          </div>
-        ) : <p className="memory-empty-hint">未选择可用 Embedding 时使用词法检索，自动召回不会注入其他项目内容。</p>}
+        <SettingsCheckbox checked={policy.useMemories} detail="每个新回合自动检索并注入相关记忆" disabled={!policy.enabled} label="自动检索记忆" onChange={(useMemories) => changePolicy({ useMemories })} />
+        <div className="memory-mode-nested">
+          <SettingsCheckbox checked={policy.queryRewrite} detail="用记忆处理模型生成更适合检索的查询；3 秒失败后使用原问题" disabled={!policy.enabled || !policy.useMemories} label="查询重写" onChange={(queryRewrite) => changePolicy({ queryRewrite })} />
+          <label className="memory-slider-field">
+            <span><strong>最大召回数：{policy.maxRecalled}</strong><small>去重后仍受 12,000 字符整条注入预算限制</small></span>
+            <input aria-label="最大召回记忆数" max={20} min={1} onChange={(event) => changePolicy({ maxRecalled: Number(event.target.value) })} type="range" value={policy.maxRecalled} />
+          </label>
+          {activeEmbedding && activeThresholds ? (
+            <div className="memory-threshold-grid">
+              <ThresholdControl label="当前项目阈值" onChange={(value) => updateThreshold("currentWorkspace", value)} value={activeThresholds.currentWorkspace} />
+              <ThresholdControl label="跨项目阈值" onChange={(value) => updateThreshold("crossWorkspace", value)} value={activeThresholds.crossWorkspace} />
+              <button className="ghost-button" onClick={() => changePolicy({ similarityThresholds: { ...policy.similarityThresholds, [activeEmbedding.fingerprint]: activeEmbedding.recommendedThresholds } })} type="button">恢复该模型推荐值</button>
+            </div>
+          ) : <p className="memory-empty-hint">未选择可用 Embedding 时使用词法检索，自动召回不会注入其他项目内容。</p>}
+        </div>
+      </section>
+
+      <section id="memory-features" tabIndex={-1}>
+        <h3>记忆生成</h3>
+        <SettingsCheckbox checked={policy.generateMemories} detail="从已完成的回合中提取可复用信息" disabled={!policy.enabled} label="自动生成记忆" onChange={(generateMemories) => changePolicy({ generateMemories })} />
+        <div className="memory-mode-nested">
+          <SettingsCheckbox checked={policy.excludeExternalContext} detail="网页、附件、MCP、插件和子代理内容不自动沉淀" disabled={!policy.enabled} label="排除外部上下文" onChange={(excludeExternalContext) => changePolicy({ excludeExternalContext })} />
+        </div>
+      </section>
+
+      <section id="memory-strategy" tabIndex={-1}>
+        <div className="section-heading-row">
+          <div><h3>记忆进化</h3><p>这里管理长期目标、原则和行为模式；行为模式始终标记为推断，不能自动改写你的长期策略。</p></div>
+        </div>
+        <SettingsCheckbox checked={telos.enabled} detail="允许在对话中使用已确认的目标与原则指导；不影响事实记忆开关" label="使用长期策略" onChange={(enabled) => changeTelos({ enabled })} />
+        <div className="memory-mode-nested">
+          <SettingsCheckbox checked={telos.autoObserve} detail="仅从成功完成且排除外部上下文的回合生成脱敏观察；默认不追溯历史" disabled={!telos.enabled} label="自动观察行为模式" onChange={(autoObserve) => changeTelos({ autoObserve })} />
+          <SettingsCheckbox checked={telos.driftDetection} detail="行为模式确认后，满足 3 次观察、7 天跨度和置信度阈值才生成偏差提案" disabled={!telos.enabled} label="检测策略偏差" onChange={(driftDetection) => changeTelos({ driftDetection })} />
+          <SettingsCheckbox checked={telos.proactivePrompts} detail="只在 Runtime idle 且任务结束后显示一条待处理偏差；任务运行中不会打断" disabled={!telos.enabled || !telos.driftDetection} label="主动提醒策略偏差" onChange={(proactivePrompts) => changeTelos({ proactivePrompts })} />
+        </div>
       </section>
 
       <section id="memory-models" tabIndex={-1}>
         <div className="section-heading-row"><div><h3>记忆处理模型</h3><p>默认由一个主模型处理查询重写、提取和整理。</p></div></div>
-        <ModelAliasField label="主模型" models={models} onChange={(value) => changeModel("memoryModel", value)} value={policy.memoryModel} />
+        <ModelAliasField fallbackModel={effectiveMemoryModel} label="主模型" models={models} onChange={(value) => changeModel("memoryModel", value)} onTest={testModel} sessionRunning={sessionRunning} value={policy.memoryModel} />
         <button aria-expanded={advancedModels} className="ghost-button memory-advanced-toggle" onClick={() => setAdvancedModels((value) => !value)} type="button">{advancedModels ? "收起高级覆盖" : "高级覆盖"}</button>
         {advancedModels ? (
           <div className="memory-model-grid">
-            <ModelAliasField label="查询重写模型" models={models} onChange={(value) => changeModel("rewriteModel", value)} value={policy.rewriteModel} />
-            <ModelAliasField label="记忆提取模型" models={models} onChange={(value) => changeModel("extractModel", value)} value={policy.extractModel} />
-            <ModelAliasField label="记忆整理模型" models={models} onChange={(value) => changeModel("consolidationModel", value)} value={policy.consolidationModel} />
+            <ModelAliasField fallbackModel={effectiveMemoryModel} label="查询重写模型" models={models} onChange={(value) => changeModel("rewriteModel", value)} onTest={testModel} sessionRunning={sessionRunning} value={policy.rewriteModel} />
+            <ModelAliasField fallbackModel={effectiveMemoryModel} label="记忆提取模型" models={models} onChange={(value) => changeModel("extractModel", value)} onTest={testModel} sessionRunning={sessionRunning} value={policy.extractModel} />
+            <ModelAliasField fallbackModel={effectiveMemoryModel} label="记忆整理模型" models={models} onChange={(value) => changeModel("consolidationModel", value)} onTest={testModel} sessionRunning={sessionRunning} value={policy.consolidationModel} />
           </div>
         ) : null}
       </section>
@@ -430,13 +516,23 @@ export function SettingsMemory({
             <button className="ghost-button" disabled={immediateDisabled || embeddingDraftChanged || !embeddingStatus?.activeModel} onClick={() => { void runEmbeddingOperation("rebuild", onRebuildEmbeddingIndex, () => "记忆向量索引已重建"); }} type="button">立即重建</button>
           )}
         </div>
-        {embeddingDraftChanged ? <p className="settings-effective-hint is-blocked">Embedding 选择尚未保存。请先“保存全部”，提交成功后 Biny 会后台重建；也可随后手动重建。</p> : null}
+        {embeddingDraftChanged ? <p className="settings-effective-hint is-blocked">Embedding 选择尚未保存。请先点击“保存”提交；Biny 会后台重建；也可随后手动重建。</p> : null}
         <p className="memory-empty-hint">下载、删除和重建属于立即动作；任务运行期间不可执行。云端会上传全部待索引记忆，并在每次语义检索时上传查询。</p>
+      </section>
+
+      <section className="memory-statistics-section" id="memory-statistics" tabIndex={-1}>
+        <h3>统计</h3>
+        <div className="memory-stat-grid">
+          <MemoryStat label="记忆总数" value={overview.memoryStats.total} />
+          <MemoryStat label="自动生成" value={overview.memoryStats.autoGenerated} />
+          <MemoryStat label="手动添加" value={overview.memoryStats.manualAdded} />
+        </div>
       </section>
 
       <section className="memory-scope-section" id="memory-library" tabIndex={-1}>
         <div className="section-heading-row">
           <div><h3>记忆库</h3><p>按来源查看、搜索和维护已保存的记忆。</p></div>
+          <span aria-live="polite">{refreshing ? "后台同步中…" : null}</span>
           <button className="ghost-button" disabled={immediateDisabled} onClick={() => { void refreshMemoryData(filter).catch((error: unknown) => setLoadError(errorMessage(error))); }} type="button"><Icon name="refresh" size={13} /> 刷新</button>
         </div>
         <div className="memory-library-toolbar">
@@ -453,7 +549,7 @@ export function SettingsMemory({
         {compactReport ? <pre className="settings-memory-report">{compactReport}</pre> : null}
       </section>
 
-      <section>
+      <section id="memory-search" tabIndex={-1}>
         <div className="section-heading-row"><div><h3>搜索记忆</h3><p>支持语义、关键词和路径搜索。</p></div></div>
         <div className="memory-search-row">
           <input aria-label="搜索记忆" className="settings-inline-input" onChange={(event) => { setQuery(event.target.value); if (!event.target.value) setSearchResults(undefined); }} onKeyDown={(event) => { if (event.key === "Enter") void search(); }} placeholder="按语义、关键词或路径搜索…" type="search" value={query} />
@@ -484,7 +580,7 @@ export function SettingsMemory({
         ))}</div> : <p className="memory-empty-hint">{searchResults === undefined ? "当前来源还没有记忆。" : "没有匹配的记忆。"}</p>}
       </section>
 
-      {sessionRunning ? <p className="settings-effective-hint is-blocked">当前任务运行中：可以编辑记忆策略草稿；条目、整理、下载和索引动作将在任务结束后可用。</p> : <p className="settings-effective-hint">策略随“保存全部”提交；条目与维护动作会立即保存。</p>}
+      {sessionRunning ? <p className="settings-effective-hint is-blocked">当前任务运行中：可以编辑记忆策略草稿；条目、整理、下载和索引动作将在任务结束后可用。</p> : <p className="settings-effective-hint">策略通过底部“保存”提交；点击“取消”时会确认未保存草稿。条目与维护动作会立即保存。</p>}
 
       {editor ? (
         <SettingsDetailLayer onClose={() => setEditor(undefined)}>
@@ -555,50 +651,143 @@ function MemoryPageState({ title, detail }: { title: string; detail?: string }):
   return <div className="settings-sections"><section><h3>{title}</h3>{detail ? <p>{detail}</p> : null}</section></div>;
 }
 
-function MemorySwitch({ checked, detail, disabled = false, label, onChange }: {
-  checked: boolean;
-  detail: string;
-  disabled?: boolean;
-  label: string;
-  onChange(value: boolean): void;
-}): React.JSX.Element {
-  return <div className="setting-row"><span><strong>{label}</strong><small>{detail}</small></span><button aria-label={label} aria-checked={checked} className={`setting-switch${checked ? " is-on" : ""}`} disabled={disabled} onClick={() => onChange(!checked)} role="switch" type="button"><span className="setting-switch-knob" /></button></div>;
-}
-
 function ThresholdControl({ label, onChange, value }: { label: string; onChange(value: number): void; value: number }): React.JSX.Element {
   return <label className="memory-threshold-field"><span><strong>{label}</strong><em>{Math.round(value * 100)}%</em></span><input aria-label={label} max={100} min={0} onChange={(event) => onChange(Number(event.target.value) / 100)} type="range" value={Math.round(value * 100)} /></label>;
 }
 
-function ModelAliasField({ label, models, onChange, value }: { label: string; models: ModelChoice[]; onChange(value: string): void; value?: string }): React.JSX.Element {
+function ModelAliasField({ fallbackModel, label, models, onChange, onTest, sessionRunning, value }: {
+  fallbackModel?: ModelChoice;
+  label: string;
+  models: ModelChoice[];
+  onChange(value: string): void;
+  onTest(model: ModelChoice): Promise<DesktopModelConnectionTestResult>;
+  sessionRunning: boolean;
+  value?: string;
+}): React.JSX.Element {
   const [open, setOpen] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<DesktopModelConnectionTestResult>();
   const anchorRef = useRef<HTMLDivElement>(null);
   const unavailable = value !== undefined && !models.some((model) => model.alias === value);
   const selected = models.find((model) => model.alias === value);
-  const catalog = selected ? catalogForConnection({ provider: selected.provider, providerType: selected.providerType }, selected.baseUrl) : undefined;
+  const testTarget = unavailable ? undefined : selected ?? fallbackModel;
+  const triggerModel = testTarget;
+  const catalog = triggerModel ? catalogForConnection({ provider: triggerModel.provider, providerType: triggerModel.providerType }, triggerModel.baseUrl) : undefined;
+  const providerLabel = triggerModel ? modelProviderLabel(triggerModel) : undefined;
+
+  useEffect(() => {
+    setTestResult(undefined);
+  }, [fallbackModel?.alias, value]);
+
+  const runTest = async (): Promise<void> => {
+    if (!testTarget || sessionRunning || testing) return;
+    setTesting(true);
+    setTestResult(undefined);
+    try {
+      setTestResult(await onTest(testTarget));
+    } catch (error) {
+      setTestResult({ ok: false, message: errorMessage(error) });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <div className="memory-select-field">
       <span>{label}</span>
-      <div className="memory-model-picker" ref={anchorRef}>
-        <button aria-expanded={open} aria-haspopup="menu" className="memory-model-trigger" onClick={() => setOpen((current) => !current)} type="button">
-          <span className="model-trigger-brand">{selected ? <ProviderBrandGlyph type={catalog?.iconTone ?? selected.providerType} /> : <Icon name="brain" size={14} />}</span>
-          <span>{unavailable ? `当前不可用：${value}` : selected?.displayName ?? "跟随主模型或当前聊天"}</span>
-          <Icon name="chevron" size={12} />
+      <div className="memory-model-control">
+        <div className="memory-model-picker" ref={anchorRef}>
+          <button aria-expanded={open} aria-haspopup="menu" className="memory-model-trigger" onClick={() => setOpen((current) => !current)} type="button">
+            <span className="model-trigger-brand">{triggerModel ? <ProviderBrandGlyph type={catalog?.iconTone ?? triggerModel.providerType} /> : <Icon name="brain" size={14} />}</span>
+            <span className="memory-model-trigger-copy">
+              <strong>{unavailable ? `当前不可用：${value}` : triggerModel?.displayName ?? "跟随主模型或当前聊天"}</strong>
+              {!unavailable && triggerModel && !selected ? <small>（自动）</small> : null}
+              {!unavailable && providerLabel ? <em>{providerLabel}</em> : null}
+            </span>
+            <Icon name="chevron" size={12} />
+          </button>
+          <ModelMenu
+            anchorRef={anchorRef}
+            currentAlias={unavailable ? undefined : value}
+            models={models}
+            onChange={(alias) => {
+              setOpen(false);
+              onChange(alias);
+            }}
+            onClose={() => setOpen(false)}
+            open={open}
+            unsetLabel="跟随主模型或当前聊天"
+          />
+        </div>
+        <button
+          aria-label={`测试${label}`}
+          aria-busy={testing}
+          className="memory-model-test-button"
+          disabled={!testTarget || sessionRunning || testing}
+          onClick={() => { void runTest(); }}
+          title={sessionRunning ? "当前任务运行中" : `测试${label}`}
+          type="button"
+        >
+          <Icon name="flask" size={16} />
         </button>
-        <ModelMenu
-          anchorRef={anchorRef}
-          currentAlias={unavailable ? undefined : value}
-          models={models}
-          onChange={(alias) => {
-            setOpen(false);
-            onChange(alias);
-          }}
-          onClose={() => setOpen(false)}
-          open={open}
-          unsetLabel="跟随主模型或当前聊天"
-        />
       </div>
+      {testResult ? <p aria-live="polite" className={`memory-model-test-result${testResult.ok ? " is-success" : " is-error"}`} role="status">{testResult.message}</p> : null}
     </div>
   );
+}
+
+function modelConfigurationForChoice(model: ModelChoice): DesktopModelConfigurationInput {
+  const catalog = catalogForConnection({ provider: model.provider, providerType: model.providerType }, model.baseUrl);
+  return {
+    alias: model.alias,
+    displayName: model.displayName,
+    providerAlias: model.provider,
+    providerType: model.providerType as DesktopModelConfigurationInput["providerType"],
+    protocol: catalog?.protocol ?? (model.providerType === "anthropic" ? "anthropic" : "openai-compatible"),
+    model: model.model,
+    baseUrl: model.baseUrl,
+    apiKey: undefined,
+    apiKeyHandle: undefined,
+    apiKeyEnv: undefined,
+    requiresApiKey: catalog?.requiresApiKey,
+    supportsTools: model.supportsTools !== false,
+    supportsThinking: model.efforts.length > 0,
+    parallelToolCalls: model.capabilities?.parallelToolCalls,
+    reasoningStream: model.capabilities?.reasoningStream,
+    reasoningSummary: model.capabilities?.reasoningSummary,
+    supportsVision: model.capabilities?.vision,
+    supportsAudio: model.capabilities?.audio,
+    contextWindow: model.contextWindow,
+    maxInputTokens: model.maxInputTokens,
+    maxOutputTokens: model.maxOutputTokens,
+    limits: model.limits,
+    apiBackend: model.apiBackend,
+    thinkingLevelMap: model.thinkingLevelMap,
+    compatibility: model.compatibility,
+    makeDefault: false
+  };
+}
+
+function modelProviderLabel(model: ModelChoice): string {
+  const catalog = catalogForConnection({ provider: model.provider, providerType: model.providerType }, model.baseUrl);
+  const label = catalog?.label ?? providerLabel(model.provider);
+  return label.toLocaleLowerCase() === model.provider.toLocaleLowerCase() ? label : `${label} · ${model.provider}`;
+}
+
+function providerLabel(provider: string): string {
+  const labels: Record<string, string> = {
+    anthropic: "Anthropic",
+    deepseek: "DeepSeek",
+    gemini: "Google Gemini",
+    kimi: "Kimi",
+    moonshot: "Moonshot",
+    ollama: "Ollama",
+    openai: "OpenAI",
+    "openai-compatible": "OpenAI Compatible",
+    "openai-codex": "OpenAI Codex",
+    qwen: "Qwen"
+  };
+  return labels[provider.toLocaleLowerCase()] ?? provider;
 }
 
 function EmbeddingSelector({

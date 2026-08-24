@@ -24,12 +24,13 @@ import { Icon } from "../Icon.js";
 import { ProviderBrandGlyph } from "../ProviderBrandGlyph.js";
 import { SettingsAbout } from "./SettingsAbout.js";
 import { SettingsAppearance } from "./SettingsAppearance.js";
+import { SettingsCheckbox } from "./SettingsCheckbox.js";
 import { SettingsCloseGuard } from "./SettingsCloseGuard.js";
 import { SettingsDetailLayer } from "./SettingsDetailLayer.js";
 import { useSettingsDraft } from "./SettingsDraftContext.js";
 import { SettingsDraftProvider } from "./SettingsDraftProvider.js";
-import { SettingsPageFooter } from "./SettingsPageFooter.js";
 import { SettingsMemory } from "./SettingsMemory.js";
+import { SettingsPageFooter } from "./SettingsPageFooter.js";
 import { SettingsPersonalizationDraft } from "./SettingsPersonalizationDraft.js";
 import { searchSettings } from "./settingsSearch.js";
 
@@ -100,7 +101,7 @@ const settingsSubtitles: Record<SettingsTab, string> = {
   模型: "模型连接、API key 与默认模型管理。",
   外观: "显示模式、界面字体和字号。",
   个性化: "设置 Biny 的表达方式、长期偏好与当前聊天覆盖。",
-  记忆: "记忆检索、自动总结、整理与条目管理。",
+  记忆: "记忆检索、自动生成、整理与条目管理。",
   联网搜索: "配置联网搜索与数据来源。",
   关于: "版本与产品信息。"
 };
@@ -176,32 +177,41 @@ function SettingsOverlayContent({
   const settingsDraft = useSettingsDraft();
   const runtimeBusy = sessionRunning || settingsDraft.snapshot?.hasRunningTasks === true;
   const [tab, setTab] = useState<SettingsTab>("外观");
+  const [memoryVisited, setMemoryVisited] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [message, setMessage] = useState<string>();
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
+  useEffect(() => {
+    if (open && modelSetupRequired) {
+      _onNotify("当前没有可用于运行任务的模型。连接可用模型后，聊天与模型相关功能会自动恢复。");
+    }
+  }, [_onNotify, modelSetupRequired, open]);
   useEffect(() => {
     if (closeRequest) setCloseGuardOpen(true);
   }, [closeRequest]);
   // 由 Composer 直达模型设置时，在浏览器绘制前同步分页，避免先闪过上次打开的内容。
   useLayoutEffect(() => {
     if (!open) return;
-    if (targetTab) setTab(targetTab);
+    if (targetTab) {
+      setTab(targetTab);
+      if (targetTab === "记忆") setMemoryVisited(true);
+    }
   }, [open, targetTab]);
   const settingsModels = stagedModelChoices(settingsDraft.snapshot?.models.configured ?? workspace?.models ?? [], settingsDraft.draft?.models.upserts ?? [], settingsDraft.draft?.models.removeAliases ?? []);
   const defaultModelAlias = settingsDraft.draft?.models.defaultModel?.alias
     ?? settingsDraft.snapshot?.models.defaultModel;
   const searchResults = searchSettings(searchQuery);
-  const selectSearchResult = (nextTab: SettingsTab, sectionId: string): void => {
+  const selectTab = (nextTab: SettingsTab): void => {
     setTab(nextTab);
+    if (nextTab === "记忆") setMemoryVisited(true);
+  };
+  const selectSearchResult = (nextTab: SettingsTab, sectionId: string): void => {
+    selectTab(nextTab);
     window.requestAnimationFrame(() => {
       const section = document.getElementById(sectionId);
       section?.scrollIntoView({ behavior: "smooth", block: "start" });
       section?.focus({ preventScroll: true });
     });
-  };
-  const dismiss = (): void => {
-    if (settingsDraft.dirtyCount > 0) setCloseGuardOpen(true);
-    else onClose();
   };
   const discardAndClose = async (): Promise<void> => {
     await settingsDraft.discard();
@@ -209,12 +219,9 @@ function SettingsOverlayContent({
     if (closeRequest) await onResolveCloseRequest(closeRequest.requestId, "discarded");
     else onClose();
   };
-  const saveAndClose = async (): Promise<void> => {
-    const result = await settingsDraft.saveAll();
-    if (result?.status !== "committed") return;
-    setCloseGuardOpen(false);
-    if (closeRequest) await onResolveCloseRequest(closeRequest.requestId, "saved");
-    else onClose();
+  const requestCancel = (): void => {
+    if (settingsDraft.dirtyCount > 0) setCloseGuardOpen(true);
+    else void discardAndClose();
   };
   const cancelClose = async (): Promise<void> => {
     setCloseGuardOpen(false);
@@ -225,7 +232,7 @@ function SettingsOverlayContent({
       aria-label="Biny 设置"
       className="desktop-settings-dialog"
       isOpen={open}
-      onOpenChange={(isOpen) => { if (!isOpen) dismiss(); }}
+      onOpenChange={(isOpen) => { if (!isOpen) void discardAndClose(); }}
       padding={0}
       purpose="info"
       variant="fullscreen"
@@ -233,7 +240,7 @@ function SettingsOverlayContent({
       <section className="settings-modal is-full-page">
         <div className="settings-modal-body">
           <aside className="settings-tabs">
-          <button aria-label="返回应用" className="settings-back-button" onClick={dismiss} type="button">
+          <button aria-label="返回应用" className="settings-back-button" onClick={() => { void discardAndClose(); }} type="button">
             <Icon name="arrow-left" size={16} />
             <strong>设置</strong>
           </button>
@@ -254,7 +261,7 @@ function SettingsOverlayContent({
           ) : (
             <nav aria-label="设置分类" className="settings-nav-list">
               {settingsNav.map((item) => (
-                <button aria-current={tab === item.tab ? "page" : undefined} className={tab === item.tab ? "is-selected" : ""} key={item.tab} onClick={() => setTab(item.tab)} type="button">
+                <button aria-current={tab === item.tab ? "page" : undefined} className={tab === item.tab ? "is-selected" : ""} key={item.tab} onClick={() => selectTab(item.tab)} type="button">
                   <span>{item.label}</span>
                   {item.badge ? <em className="settings-nav-badge">{item.badge}</em> : null}
                 </button>
@@ -268,10 +275,13 @@ function SettingsOverlayContent({
               <h2>{settingsTitles[tab]}</h2>
               <p>{settingsSubtitles[tab]}</p>
             </div>
+            {settingsDraft.dirtyCount > 0 ? <span aria-live="polite" className="settings-header-unsaved" role="status">
+              <span>未保存的更改</span>
+              <span aria-hidden="true" className="settings-unsaved-dot" />
+            </span> : null}
           </header>
           {tab === "模型" ? <SettingsModels
             active={open}
-            setupRequired={modelSetupRequired}
             models={settingsModels}
             connections={settingsDraft.snapshot?.models.connections ?? workspace?.connections ?? []}
             defaultModelAlias={defaultModelAlias}
@@ -319,7 +329,15 @@ function SettingsOverlayContent({
               try {
                 const previous = settingsDraft.draft?.models.upserts.find((item) => item.alias === configuration.alias)?.apiKeyHandle;
                 if (previous) await settingsDraft.releaseCredential(previous);
-                const staged = configuration.apiKey ? await settingsDraft.stageCredential(configuration.apiKey) : undefined;
+                const currentProjectId = workspace?.project.id;
+                if (configuration.apiKey && currentProjectId === undefined) throw new Error("暂存模型密钥前必须先选择项目。");
+                const staged = configuration.apiKey && currentProjectId !== undefined
+                  ? await settingsDraft.stageCredential(configuration.apiKey, {
+                      projectId: currentProjectId,
+                      purpose: "model",
+                      providerAlias: configuration.providerAlias
+                    })
+                  : undefined;
                 settingsDraft.upsertModel({
                   ...configuration,
                   apiKey: undefined,
@@ -359,9 +377,11 @@ function SettingsOverlayContent({
             onFontChange={settingsDraft.setFontPreference}
           /> : null}
           {tab === "个性化" ? <SettingsPersonalizationDraft sessionRunning={runtimeBusy} /> : null}
-          {tab === "记忆" ? <SettingsMemory
+          {memoryVisited ? <SettingsMemory
             embeddingModels={settingsDraft.snapshot?.models.embeddingModels ?? []}
             models={settingsModels}
+            projectId={workspace?.project.id}
+            hidden={tab !== "记忆"}
             workspaceAvailable={workspace !== undefined}
             onLoad={onLoadMemoryOverview}
             onSearch={onSearchMemory}
@@ -376,6 +396,7 @@ function SettingsOverlayContent({
             onDeleteEmbeddingModel={onDeleteMemoryEmbeddingModel}
             onRebuildEmbeddingIndex={onRebuildMemoryEmbeddingIndex}
             onCancelEmbeddingRebuild={onCancelMemoryEmbeddingRebuild}
+            onTestModelConfiguration={onTestModelConfiguration}
             onNotify={setMessage}
             sessionRunning={runtimeBusy}
           /> : null}
@@ -397,7 +418,7 @@ function SettingsOverlayContent({
         <SettingsPageFooter
           dirtyCount={settingsDraft.dirtyCount}
           disabled={settingsDraft.invalid || settingsDraft.draft === undefined || runtimeBusy}
-          onClose={dismiss}
+          onCancel={requestCancel}
           onSave={() => { void settingsDraft.saveAll(); }}
           state={settingsDraft.saveState}
         />
@@ -407,8 +428,6 @@ function SettingsOverlayContent({
           busy={settingsDraft.saveState === "saving" || settingsDraft.saveState === "rolling_back"}
           onCancel={() => { void cancelClose(); }}
           onDiscard={() => { void discardAndClose(); }}
-          onSave={() => { void saveAndClose(); }}
-          saveDisabled={runtimeBusy || settingsDraft.invalid || closeRequest?.canSave === false || settingsDraft.saveState === "recovery_required"}
         />
       ) : null}
     </Dialog>
@@ -551,6 +570,8 @@ interface LiveCatalogState {
   source: DesktopModelCatalogResult["source"];
 }
 
+type ModelCatalogViewSource = DesktopModelCatalogResult["source"] | "static";
+
 /** Short status line for one connection, or null when nothing needs attention. */
 function connectionStatus(connection: DesktopModelConnection | undefined): { label: string; tone: "warn" | "error" } | null {
   if (!connection) return null;
@@ -614,9 +635,8 @@ function isManualEndpoint(provider: ProviderCatalogItem): boolean {
   return provider.id === "openai-compatible" || !provider.baseUrl.trim();
 }
 
-function SettingsModels({ active, setupRequired, models, connections: connectionInfos, defaultModelAlias, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onFetchCatalogCandidate, onStartLogin, onCompleteLogin, onCancelLogin }: {
+function SettingsModels({ active, models, connections: connectionInfos, defaultModelAlias, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onFetchCatalogCandidate, onStartLogin, onCompleteLogin, onCancelLogin }: {
   active: boolean;
-  setupRequired: boolean;
   models: ModelChoice[];
   connections: DesktopModelConnection[];
   defaultModelAlias?: string;
@@ -652,7 +672,7 @@ function SettingsModels({ active, setupRequired, models, connections: connection
   const [connectModels, setConnectModels] = useState<CatalogModel[]>([]);
   const [connectSelected, setConnectSelected] = useState<string[]>([]);
   const [connectFetching, setConnectFetching] = useState(false);
-  const [connectFetchSource, setConnectFetchSource] = useState<DesktopModelCatalogResult["source"]>();
+  const [connectFetchSource, setConnectFetchSource] = useState<ModelCatalogViewSource>();
   const connectGenerationRef = useRef(0);
   const [loginStage, setLoginStage] = useState<"idle" | "opening" | "waiting" | "submitted">("idle");
   const [loginRequest, setLoginRequest] = useState<DesktopModelLoginStartResult>();
@@ -753,10 +773,6 @@ function SettingsModels({ active, setupRequired, models, connections: connection
     setFetchingCatalog(true);
     try {
       const result = await onFetchCatalog(providerAlias);
-      if (result.source === "fallback") {
-        onNotify("无法从服务商获取模型列表，已保留当前列表。请检查密钥与服务地址。");
-        return;
-      }
       setLiveCatalog((current) => ({
         ...current,
         [providerAlias]: { models: result.models.map(catalogModelFromEntry), fetchedAt: result.fetchedAt, source: result.source }
@@ -849,23 +865,19 @@ function SettingsModels({ active, setupRequired, models, connections: connection
       });
       if (generation !== connectGenerationRef.current) return;
       setConnectFetchSource(result.source);
-      if (result.source === "fetched") {
-        const loaded = result.models.map(catalogModelFromEntry);
-        setConnectModels(loaded);
-        // 默认勾选内置种子模型（目录里没有时退到第一个），其余由用户勾选。
-        const seedId = seed?.id;
-        setConnectSelected([loaded.find((model) => model.id === seedId)?.id ?? loaded[0]?.id].filter((id): id is string => id !== undefined));
-        if (manual) onNotify(`已获取 ${String(loaded.length)} 个模型`);
-      } else {
-        setConnectModels(provider.models);
-        setConnectSelected(seed ? [seed.id] : []);
-        if (manual) onNotify("无法从服务商获取模型列表，已显示内置模型。");
-      }
+      const loaded = result.models.map(catalogModelFromEntry);
+      setConnectModels(loaded);
+      // 默认勾选内置种子模型（目录里没有时退到第一个），其余由用户勾选。
+      const seedId = seed?.id;
+      setConnectSelected([loaded.find((model) => model.id === seedId)?.id ?? loaded[0]?.id].filter((id): id is string => id !== undefined));
+      if (manual) onNotify(`已获取 ${String(loaded.length)} 个模型`);
     } catch (error) {
       if (generation !== connectGenerationRef.current) return;
-      setConnectFetchSource("fallback");
+      setConnectFetchSource("static");
       setConnectModels(provider.models);
-      setConnectSelected(provider.models[0] ? [provider.models[0].id] : []);
+      // 静态目录只是候选建议。实时目录失败后不代替用户勾选，避免把账号未开放的模型
+      // 自动保存为默认模型。
+      setConnectSelected([]);
       if (manual) onNotify(error instanceof Error ? error.message : String(error));
     } finally {
       if (generation === connectGenerationRef.current) setConnectFetching(false);
@@ -950,7 +962,6 @@ function SettingsModels({ active, setupRequired, models, connections: connection
   const refreshCatalogQuietly = async (providerAlias: string): Promise<void> => {
     try {
       const result = await onFetchCatalog(providerAlias);
-      if (result.source !== "fetched") return;
       setLiveCatalog((current) => ({
         ...current,
         [providerAlias]: { models: result.models.map(catalogModelFromEntry), fetchedAt: result.fetchedAt, source: result.source }
@@ -1225,12 +1236,6 @@ function SettingsModels({ active, setupRequired, models, connections: connection
   return (
     <>
       <div className="settings-sections model-settings">
-      {setupRequired ? (
-        <div className="settings-inline-notice is-warning" role="status">
-          <strong>当前没有可用于运行任务的模型</strong>
-          <span>你仍可正常使用和修改其他设置；连接可用模型后，聊天与模型相关功能会自动恢复。</span>
-        </div>
-      ) : null}
       <section className="connection-section" id="models-connections" tabIndex={-1}>
         <div className="section-heading-row">
           <div>
@@ -1774,7 +1779,7 @@ function ConnectProviderDialog({
   models: CatalogModel[];
   selected: string[];
   fetching: boolean;
-  fetchSource?: DesktopModelCatalogResult["source"];
+  fetchSource?: ModelCatalogViewSource;
   isCustom: boolean;
   onApiKey(value: string): void;
   onBaseUrl(value: string): void;
@@ -1799,7 +1804,7 @@ function ConnectProviderDialog({
   const modelHint = fetching
     ? "正在从服务商加载模型…"
     : models.length > 0
-      ? `已选 ${String(selected.length)} / ${String(models.length)} · ${fetchSource === "fetched" ? "已从服务商获取" : "内置列表，可点击“加载模型”刷新"}`
+      ? `已选 ${String(selected.length)} / ${String(models.length)} · ${fetchSource === "fetched" ? "已从服务商获取" : "内置候选，需手动选择；可点击“加载模型”刷新"}`
       : keyMissing
         ? "填写密钥后自动加载支持列表"
         : "点击“加载模型”从服务商获取支持列表";
@@ -2049,10 +2054,7 @@ function SettingsWebSearch({ onNotify, onOpenExternal, onLoadCookieJarStatus, on
     <div className="settings-sections">
       <section id="web-search-provider" tabIndex={-1}>
         <h3>联网搜索</h3>
-        <div className="setting-row">
-          <span><strong>启用 web_search 工具</strong><small>关闭后 Agent 将无法搜索公网信息</small></span>
-          <button aria-label="启用联网搜索" aria-checked={webSearch.enabled} className={`setting-switch${webSearch.enabled ? " is-on" : ""}`} onClick={() => setWebSearch({ ...webSearch, enabled: !webSearch.enabled })} role="switch" type="button"><span className="setting-switch-knob" /></button>
-        </div>
+        <SettingsCheckbox checked={webSearch.enabled} detail="关闭后 Agent 将无法搜索公网信息" label="启用 web_search 工具" onChange={(enabled) => setWebSearch({ ...webSearch, enabled })} />
       </section>
       <section>
         <h3>搜索服务</h3>

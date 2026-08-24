@@ -4,13 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { AgentSession } from "../src/agent/AgentSession.js";
 import { loadConfig, saveConfig } from "../src/config/loader.js";
-import { createFileConfigStore } from "../src/config/store.js";
+import { createFileConfigStore, type AgentConfigStore } from "../src/config/store.js";
 import { configSchema, defaultConfig } from "../src/config/schema.js";
+import { ModelManager } from "../src/llm/ModelManager.js";
 import { PermissionManager, type PermissionRequestContext } from "../src/permission/PermissionManager.js";
 import { subagentAccessMode } from "../src/runtime/subagentAccess.js";
 import { SessionRecorder } from "../src/session/recorder.js";
 import { ensureAgentDirs } from "../src/session/store.js";
 import { ToolRegistry } from "../src/tools/registry.js";
+import { permissionIcon, permissionLabel, permissionOptions } from "../src/desktop/renderer/src/components/composer/composerLabels.js";
 
 const baseRequest: PermissionRequestContext = {
   toolName: "write_file",
@@ -25,7 +27,11 @@ async function main(): Promise<void> {
   testEvaluationOrder();
   testScopedGrants();
   testSubagentAccessInheritsMode();
+  testDesktopPermissionOptions();
   await testPermissionModeWriteKeepsOtherSettings();
+  await testModelSwitchKeepsPermissionMode();
+  await testCredentialRefreshKeepsConcurrentPermissionMode();
+  await testConcurrentModelAndPermissionUpdates();
 }
 
 function testEvaluationOrder(): void {
@@ -90,6 +96,15 @@ function testSubagentAccessInheritsMode(): void {
   assert.equal(subagentAccessMode(manager), "workspace");
 }
 
+function testDesktopPermissionOptions(): void {
+  assert.deepEqual(permissionOptions.map((option) => option.mode), ["ask", "auto", "full-access"]);
+  assert.equal(permissionLabel("read-only"), "只读");
+  assert.equal(permissionIcon("ask"), "shield");
+  assert.equal(permissionIcon("auto"), "wand");
+  assert.equal(permissionIcon("full-access"), "warning");
+  assert.equal(permissionIcon("read-only"), "eye");
+}
+
 /**
  * 改权限模式不能把配置文件里别处的改动写回旧值。
  *
@@ -134,6 +149,138 @@ async function testPermissionModeWriteKeepsOtherSettings(): Promise<void> {
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(globalRoot, { recursive: true, force: true });
   }
+}
+
+async function testModelSwitchKeepsPermissionMode(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-model-permission-config-"));
+  const globalRoot = await mkdtemp(path.join(os.tmpdir(), "biny-model-permission-global-"));
+  const apiKeyEnv = "BINY_TEST_MODEL_PERMISSION_API_KEY";
+  const previousApiKey = process.env[apiKeyEnv];
+  process.env[apiKeyEnv] = "test-key";
+  try {
+    await ensureAgentDirs(workspaceRoot);
+    const onDisk = modelPermissionConfig(apiKeyEnv, "full-access");
+    await saveConfig(workspaceRoot, onDisk, { globalDir: globalRoot });
+    const configStore = createFileConfigStore(workspaceRoot, { globalDir: globalRoot });
+    const staleSnapshot = configSchema.parse({
+      ...onDisk,
+      permission: { ...onDisk.permission, mode: "ask" }
+    });
+    const manager = new ModelManager(workspaceRoot, staleSnapshot, configStore);
+
+    await manager.switchModel("second", "off");
+
+    const persisted = await loadConfig(workspaceRoot, { globalDir: globalRoot });
+    assert.equal(persisted.defaultModel, "second");
+    assert.equal(persisted.permission.mode, "full-access");
+  } finally {
+    if (previousApiKey === undefined) delete process.env[apiKeyEnv];
+    else process.env[apiKeyEnv] = previousApiKey;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(globalRoot, { recursive: true, force: true });
+  }
+}
+
+async function testConcurrentModelAndPermissionUpdates(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-concurrent-model-permission-"));
+  const globalRoot = await mkdtemp(path.join(os.tmpdir(), "biny-concurrent-model-permission-global-"));
+  const apiKeyEnv = "BINY_TEST_CONCURRENT_MODEL_PERMISSION_API_KEY";
+  const previousApiKey = process.env[apiKeyEnv];
+  process.env[apiKeyEnv] = "test-key";
+  let agent: AgentSession | undefined;
+  try {
+    await ensureAgentDirs(workspaceRoot);
+    const onDisk = modelPermissionConfig(apiKeyEnv, "ask");
+    await saveConfig(workspaceRoot, onDisk, { globalDir: globalRoot });
+    const configStore = createFileConfigStore(workspaceRoot, { globalDir: globalRoot });
+    const staleSnapshot = configSchema.parse({ ...onDisk });
+    const manager = new ModelManager(workspaceRoot, configSchema.parse({ ...staleSnapshot }), configStore);
+    agent = new AgentSession({
+      workspaceRoot,
+      config: configSchema.parse({ ...staleSnapshot }),
+      configStore,
+      toolRegistry: new ToolRegistry(),
+      permissionManager: new PermissionManager(staleSnapshot.permission),
+      recorder: new SessionRecorder(workspaceRoot)
+    });
+
+    await Promise.all([
+      agent.setPermissionMode("full-access"),
+      manager.switchModel("second", "off")
+    ]);
+
+    const persisted = await loadConfig(workspaceRoot, { globalDir: globalRoot });
+    assert.equal(persisted.defaultModel, "second");
+    assert.equal(persisted.permission.mode, "full-access");
+  } finally {
+    await agent?.close();
+    if (previousApiKey === undefined) delete process.env[apiKeyEnv];
+    else process.env[apiKeyEnv] = previousApiKey;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(globalRoot, { recursive: true, force: true });
+  }
+}
+
+/** OAuth 刷新只能写回当前 provider，不能把内存快照里的旧权限模式一并覆盖。 */
+async function testCredentialRefreshKeepsConcurrentPermissionMode(): Promise<void> {
+  const onDisk = configSchema.parse({
+    ...defaultConfig,
+    defaultModel: "active-model",
+    providers: {
+      active: { type: "openai", apiKey: "test-key", baseUrl: "https://api.openai.com/v1" }
+    },
+    models: {
+      "active-model": { provider: "active", model: "active-model" }
+    },
+    permission: { ...defaultConfig.permission, mode: "full-access" }
+  });
+  let stored = structuredClone(onDisk);
+  let revision = 0;
+  const configStore: AgentConfigStore = {
+    load: async () => structuredClone(stored),
+    save: async () => { throw new Error("OAuth refresh must use saveVersioned."); },
+    loadVersioned: async () => ({ config: structuredClone(stored), revision: String(revision) }),
+    saveVersioned: async (candidate, expectedRevision) => {
+      assert.equal(expectedRevision, String(revision));
+      stored = structuredClone(candidate);
+      revision += 1;
+      return { config: structuredClone(stored), revision: String(revision) };
+    }
+  };
+  const staleSnapshot = configSchema.parse({
+    ...onDisk,
+    permission: { ...onDisk.permission, mode: "ask" }
+  });
+  const manager = new ModelManager("/tmp/biny-oauth-permission-refresh", staleSnapshot, configStore);
+  const refreshed = { ...onDisk.providers.active!, timeoutMs: 12_345 };
+  const runtime = manager as unknown as {
+    runtime: { refreshActiveCredential(): Promise<typeof refreshed | undefined> };
+  };
+  runtime.runtime.refreshActiveCredential = async () => refreshed;
+
+  await manager.preparePrompt();
+
+  assert.equal(stored.permission.mode, "full-access");
+  assert.equal(stored.providers.active?.timeoutMs, 12_345);
+}
+
+function modelPermissionConfig(apiKeyEnv: string, permissionMode: "ask" | "full-access") {
+  return configSchema.parse({
+    ...defaultConfig,
+    defaultModel: "first",
+    providers: {
+      active: {
+        type: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        apiKeyEnv
+      }
+    },
+    models: {
+      first: { provider: "active", model: "first" },
+      second: { provider: "active", model: "second" }
+    },
+    permission: { ...defaultConfig.permission, mode: permissionMode }
+  });
 }
 
 await main();

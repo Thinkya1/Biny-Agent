@@ -15,13 +15,13 @@ import type {
   DesktopSettingsSaveInput,
   DesktopSettingsSaveResult,
   DesktopSettingsSnapshot,
+  DesktopSettingsCredentialScope,
   DesktopStagedSettingsCredential,
   DesktopThemePreference,
   DesktopWebSearchSettings,
   DesktopWebSearchSettingsInput
 } from "../../../../protocol.js";
-import type { SettingsSaveState } from "./SettingsPageFooter.js";
-import { SettingsDraftContext, type DesktopSettingsDraft, type SettingsDraftContextValue } from "./SettingsDraftContext.js";
+import { SettingsDraftContext, type DesktopSettingsDraft, type SettingsDraftContextValue, type SettingsSaveState } from "./SettingsDraftContext.js";
 
 export function SettingsDraftProvider({
   active,
@@ -143,8 +143,8 @@ export function SettingsDraftProvider({
     } : current);
   }, []);
 
-  const stageCredential = useCallback(async (secret: string): Promise<DesktopStagedSettingsCredential> => {
-    const staged = await window.biny.stageSettingsCredential(secret);
+  const stageCredential = useCallback(async (secret: string, scope: DesktopSettingsCredentialScope): Promise<DesktopStagedSettingsCredential> => {
+    const staged = await window.biny.stageSettingsCredential(secret, scope);
     credentialHandlesRef.current.add(staged.handle);
     return staged;
   }, []);
@@ -226,7 +226,6 @@ export function SettingsDraftProvider({
         adoptSnapshot(result.snapshot);
         await window.biny.updateSettingsDraftState({ dirty: false, canSave: false, open: active }).catch(() => undefined);
         onCommitted(result.snapshot);
-        onNotify("设置已全部保存");
       } else if (result.status === "rolled_back") {
         // 后端已验证补偿完成；只更新 CAS 基线，用户的草稿值继续保留以便处理冲突后重试。
         setSnapshot(result.snapshot);

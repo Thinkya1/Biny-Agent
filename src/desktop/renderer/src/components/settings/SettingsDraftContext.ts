@@ -9,11 +9,13 @@ import type {
   DesktopPersonalizationSettings,
   DesktopSettingsSaveResult,
   DesktopSettingsSnapshot,
+  DesktopSettingsCredentialScope,
   DesktopStagedSettingsCredential,
   DesktopThemePreference,
   DesktopWebSearchSettingsInput
 } from "../../../../protocol.js";
-import type { SettingsSaveState } from "./SettingsPageFooter.js";
+
+export type SettingsSaveState = "clean" | "dirty" | "invalid" | "saving" | "rolling_back" | "recovery_required";
 
 export interface SettingsModelDraft {
   upserts: DesktopModelConfigurationInput[];
@@ -48,7 +50,7 @@ export interface SettingsDraftContextValue {
   upsertModel(value: DesktopModelConfigurationInput): void;
   removeModel(alias: string): void;
   setDefaultModel(alias: string, thinking: ThinkingSelection): void;
-  stageCredential(secret: string): Promise<DesktopStagedSettingsCredential>;
+  stageCredential(secret: string, scope: DesktopSettingsCredentialScope): Promise<DesktopStagedSettingsCredential>;
   addOauthCredentialHandle(handle: string): void;
   releaseCredential(handle: string): Promise<void>;
   discard(): Promise<void>;

@@ -1,5 +1,6 @@
 /** 统一设置草稿中的个性化分页；不直接持久化。 */
 import type { DesktopChatPersonalizationOverride, DesktopPersonality } from "../../../../protocol.js";
+import { SettingsCheckbox } from "./SettingsCheckbox.js";
 import { useSettingsDraft } from "./SettingsDraftContext.js";
 
 const personalityOptions: Array<{ value: DesktopPersonality; label: string; detail: string }> = [
@@ -25,10 +26,7 @@ export function SettingsPersonalizationDraft({ sessionRunning }: { sessionRunnin
           <div><h3>全局默认</h3><p>应用到所有项目和新聊天；修改会与其他设置一起保存。</p></div>
           <span className="settings-scope-badge">全局</span>
         </div>
-        <div className="setting-row">
-          <span><strong>启用个性化</strong><small>将人格与自定义指令加入每个新根回合的系统上下文</small></span>
-          <button aria-label="启用个性化" aria-checked={settings.enabled} className={`setting-switch${settings.enabled ? " is-on" : ""}`} onClick={() => setPersonalization({ ...settings, enabled: !settings.enabled })} role="switch" type="button"><span className="setting-switch-knob" /></button>
-        </div>
+        <SettingsCheckbox checked={settings.enabled} detail="将人格与自定义指令加入每个新根回合的系统上下文" label="启用个性化" onChange={(enabled) => setPersonalization({ ...settings, enabled })} />
       </section>
 
       <section>

@@ -13,11 +13,13 @@ import { activeRun, pendingPermission } from "../../../runtime/agentEvents.js";
 import type {
   DesktopActiveView,
   DesktopAttachment,
+  DesktopPersonalizationOverview,
   DesktopFontPreference,
   DesktopMenuAction,
   DesktopProject,
   DesktopRuntimeMutation,
   DesktopSessionDocument,
+  DesktopSessionWriterConflict,
   DesktopSessionSummary,
   DesktopSessionTreePage,
   DesktopSettingsCloseRequest,
@@ -55,13 +57,15 @@ import {
 import { useDesktopEventBridge } from "./app/useDesktopEventBridge.js";
 import { useDesktopSettingsActions } from "./app/useDesktopSettingsActions.js";
 import { useSidebarLayout } from "./app/useSidebarLayout.js";
-import { Composer, type ContextUsage } from "./components/Composer.js";
-import { summarizeTimelineUsage } from "./usagePresentation.js";
+import { Composer } from "./components/Composer.js";
+import { type ContextUsage } from "./usagePresentation.js";
 import { DesktopShell } from "./components/DesktopShell.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { SkillHubView } from "./components/SkillHubView.js";
+import { McpServersView } from "./components/McpServersView.js";
 import { Workspace } from "./components/Workspace.js";
 import { DesktopToast } from "./components/overlays/DesktopToast.js";
+import { DesktopWarningDialog } from "./components/overlays/DesktopWarningDialog.js";
 import { RenameOverlay } from "./components/overlays/RenameOverlay.js";
 import { SearchOverlay } from "./components/overlays/SearchOverlay.js";
 import { SlashResultOverlay } from "./components/overlays/SlashResultOverlay.js";
@@ -84,6 +88,7 @@ export function App(): React.JSX.Element {
   const [sidebarSessions, setSidebarSessions] = useState<DesktopSessionSummary[]>([]);
   const [workspace, setWorkspace] = useState<DesktopWorkspaceSnapshot>();
   const [document, setDocument] = useState<DesktopSessionDocument>();
+  const [writerConflict, setWriterConflict] = useState<DesktopSessionWriterConflict>();
   const [selectedSessionId, setSelectedSessionId] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [filePanelWidth, setFilePanelWidth] = useState(DEFAULT_FILE_PANEL_WIDTH);
@@ -91,6 +96,7 @@ export function App(): React.JSX.Element {
   const [themePreference, setThemePreference] = useState<DesktopThemePreference>("system");
   const [fontPreference, setFontPreference] = useState<DesktopFontPreference>(DEFAULT_FONT_PREFERENCE);
   const [focusToken, setFocusToken] = useState(0);
+  const [composerDraft, setComposerDraft] = useState<string>();
   const [deletedUserMessages, setDeletedUserMessages] = useState<Set<string>>(() => new Set());
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -99,9 +105,12 @@ export function App(): React.JSX.Element {
   const [runtimePanelOpen, setRuntimePanelOpen] = useState(false);
   const [page, setPage] = useState<DesktopPage>("chat");
   const [contextBudget, setContextBudget] = useState<ContextBudgetStatus>();
+  const [personalizationOverview, setPersonalizationOverview] = useState<DesktopPersonalizationOverview>();
+  const [memoryToggleBusy, setMemoryToggleBusy] = useState(false);
   const [renameTarget, setRenameTarget] = useState<RenameTarget>();
   const [slashResult, setSlashResult] = useState<DesktopSlashResult>();
   const [toast, setToast] = useState<string>();
+  const [warning, setWarning] = useState<string>();
   const selectedRef = useRef<string | undefined>(undefined);
   const projectRef = useRef<string | undefined>(undefined);
   const navigationRef = useRef<DesktopNavigationState>(createNavigationState());
@@ -160,13 +169,45 @@ export function App(): React.JSX.Element {
     setSearchOpen(false);
     setSettingsOpen(false);
     setSettingsTargetTab(undefined);
-    void window.biny.setActiveView("extensions").catch((error) => setToast(errorMessage(error)));
+    void window.biny.setActiveView("extensions").catch((error) => setWarning(errorMessage(error)));
+  }, []);
+
+  const openMcp = useCallback((): void => {
+    loadRequestRef.current += 1;
+    setPage("mcp");
+    setRuntimePanelOpen(false);
+    setLoading(false);
+    setSearchOpen(false);
+    setSettingsOpen(false);
+    setSettingsTargetTab(undefined);
+    void window.biny.setActiveView("mcp").catch((error) => setWarning(errorMessage(error)));
   }, []);
 
   useEffect(() => {
     selectedRef.current = selectedSessionId;
     projectRef.current = workspace?.project.id;
   }, [selectedSessionId, workspace?.project.id]);
+
+  const selectedSession = workspace?.sessions.find((session) => session.id === selectedSessionId);
+  const selectedSessionMetadataRevision = selectedSession?.metadataRevision;
+
+  useEffect(() => {
+    let active = true;
+    const projectId = workspace?.project.id;
+    if (!projectId) {
+      setPersonalizationOverview(undefined);
+      return () => { active = false; };
+    }
+    void window.biny.personalizationOverview(projectId, selectedSessionId)
+      .then((overview) => {
+        if (active) setPersonalizationOverview(overview);
+      })
+      .catch(() => {
+        // 记忆开关是聊天的辅助状态，读取失败不应遮挡主聊天界面；点击时会再次给出具体错误。
+        if (active) setPersonalizationOverview(undefined);
+      });
+    return () => { active = false; };
+  }, [selectedSessionId, selectedSessionMetadataRevision, workspace?.project.id]);
 
   const commitNavigation = useCallback((next: DesktopNavigationState): void => {
     navigationRef.current = next;
@@ -204,7 +245,7 @@ export function App(): React.JSX.Element {
   }, [refreshRuntimeProjection]);
 
   const reportRuntimeError = useCallback((error: unknown): void => {
-    setToast(errorMessage(error));
+    setWarning(errorMessage(error));
   }, []);
 
   const loadSessionChildren = useCallback(async (
@@ -223,7 +264,7 @@ export function App(): React.JSX.Element {
   }, []);
 
   const reportEventError = useCallback((error: unknown): void => {
-    setToast(errorMessage(error));
+    setWarning(errorMessage(error));
   }, []);
 
   const {
@@ -274,13 +315,14 @@ export function App(): React.JSX.Element {
         projectRef.current = nextWorkspace.project.id;
         mergeWorkspaceProject(nextWorkspace);
       }
-      setPage("chat");
+      setPage(activeView === "mcp" ? "mcp" : activeView === "extensions" ? "extensions" : "chat");
       setRuntimePanelOpen(activeView === "runtime");
       selectedRef.current = sessionId;
       setSelectedSessionId(sessionId);
       // 上下文用量属于某一个会话，换会话就作废，等新会话跑出 context.updated 再显示。
       setContextBudget(undefined);
       setDocument(nextDocument);
+      setWriterConflict(nextDocument.writerConflict);
       setSidebarSessions((current) => mergeProjectSessionPage(current, projectId, [nextDocument.session]));
       setWorkspace((current) => current?.project.id === projectId
         ? {
@@ -290,7 +332,7 @@ export function App(): React.JSX.Element {
           }
         : current);
       // 读取成功且仍持有最新请求后才提交持久化选择；失败或过期请求不会触碰主进程状态。
-      void window.biny.commitSelection(projectId, sessionId, activeView).catch((error) => setToast(errorMessage(error)));
+      void window.biny.commitSelection(projectId, sessionId, activeView).catch((error) => setWarning(errorMessage(error)));
       return true;
     } catch (error) {
       if (loadRequestRef.current !== request) return false;
@@ -317,9 +359,10 @@ export function App(): React.JSX.Element {
     // 显式切换项目或新建任务时进入空白草稿，不沿用该项目之前保存的会话正文。
     setSelectedSessionId(undefined);
     setDocument(undefined);
+    setWriterConflict(undefined);
     setContextBudget(undefined);
     setLoading(false);
-    void window.biny.commitSelection(snapshot.project.id, undefined, "chat").catch((error) => setToast(errorMessage(error)));
+    void window.biny.commitSelection(snapshot.project.id, undefined, "chat").catch((error) => setWarning(errorMessage(error)));
     return true;
   }, [mergeWorkspaceProject, openSession]);
 
@@ -336,6 +379,7 @@ export function App(): React.JSX.Element {
       selectedRef.current = undefined;
       setSelectedSessionId(undefined);
       setDocument(undefined);
+      setWriterConflict(undefined);
       setContextBudget(undefined);
       setWorkspace((current) => current?.project.id === target.projectId
         ? { ...current, selectedSessionId: undefined }
@@ -377,7 +421,7 @@ export function App(): React.JSX.Element {
       setFilePanelWidth(bootstrap.filePanelWidth ?? DEFAULT_FILE_PANEL_WIDTH);
       setThemePreference(bootstrap.themePreference ?? "system");
       setFontPreference(bootstrap.fontPreference ?? DEFAULT_FONT_PREFERENCE);
-      setPage(bootstrap.activeView === "extensions" ? "extensions" : "chat");
+      setPage(bootstrap.activeView === "mcp" ? "mcp" : bootstrap.activeView === "extensions" ? "extensions" : "chat");
       setRuntimePanelOpen(bootstrap.activeView === "runtime" && Boolean(bootstrap.workspace));
       if (bootstrap.workspace) {
         mergeWorkspaceProject(bootstrap.workspace);
@@ -402,7 +446,7 @@ export function App(): React.JSX.Element {
     }).catch((error) => {
       if (!active) return;
       setLoading(false);
-      setToast(`Biny 启动失败：${errorMessage(error)}`);
+      setWarning(`Biny 启动失败：${errorMessage(error)}`);
     });
     return () => { active = false; };
   }, [commitNavigation, hydrateSidebarWidth, mergeWorkspaceProject, openSession]);
@@ -414,12 +458,13 @@ export function App(): React.JSX.Element {
     onError: reportEventError,
     setContextBudget,
     setDocument,
+    setWriterConflict,
     setSidebarSessions,
     setWorkspace
   });
 
   useEffect(() => window.biny.onSessionHandoff((target) => {
-    void openNavigationTarget(target).catch((error) => setToast(errorMessage(error)));
+    void openNavigationTarget(target).catch((error) => setWarning(errorMessage(error)));
   }), [openNavigationTarget]);
 
   useEffect(() => window.biny.onMenuAction((action) => menuActionRef.current(action)), []);
@@ -436,7 +481,7 @@ export function App(): React.JSX.Element {
         await adoptWorkspace(snapshot);
       }
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [adoptWorkspace]);
 
@@ -448,7 +493,7 @@ export function App(): React.JSX.Element {
         setFocusToken((value) => value + 1);
       }
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [adoptWorkspace]);
 
@@ -461,7 +506,7 @@ export function App(): React.JSX.Element {
       const snapshot = await window.biny.selectProject(projectId);
       if (loadRequestRef.current === request) await adoptWorkspace(snapshot, undefined, request);
     } catch (error) {
-      if (loadRequestRef.current === request) setToast(errorMessage(error));
+      if (loadRequestRef.current === request) setWarning(errorMessage(error));
     } finally {
       if (loadRequestRef.current === request) setLoading(false);
     }
@@ -479,13 +524,13 @@ export function App(): React.JSX.Element {
     try {
       if (await openNavigationTarget(target)) commitNavigation(pushNavigation(previousNavigation, target));
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [commitNavigation, openNavigationTarget, openProject]);
 
   const openRuntimePanel = useCallback((): void => {
     if (!projectRef.current) {
-      setToast("请先打开项目，再查看自动化与后台运行。");
+      setWarning("请先打开项目，再查看自动化与后台运行。");
       return;
     }
     loadRequestRef.current += 1;
@@ -493,12 +538,12 @@ export function App(): React.JSX.Element {
     setSearchOpen(false);
     setLoading(false);
     setRuntimePanelOpen(true);
-    void window.biny.setActiveView("runtime").catch((error) => setToast(errorMessage(error)));
+    void window.biny.setActiveView("runtime").catch((error) => setWarning(errorMessage(error)));
   }, []);
 
   const changeRuntimePanelOpen = useCallback((open: boolean): void => {
     setRuntimePanelOpen(open);
-    void window.biny.setActiveView(open ? "runtime" : "chat").catch((error) => setToast(errorMessage(error)));
+    void window.biny.setActiveView(open ? "runtime" : "chat").catch((error) => setWarning(errorMessage(error)));
   }, []);
 
   const navigateToSession = useCallback(async (projectId: string, sessionId: string): Promise<void> => {
@@ -507,7 +552,7 @@ export function App(): React.JSX.Element {
     try {
       if (await openNavigationTarget(target)) commitNavigation(pushNavigation(previousNavigation, target));
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [commitNavigation, openNavigationTarget]);
 
@@ -518,7 +563,7 @@ export function App(): React.JSX.Element {
     try {
       if (await openNavigationTarget(nextNavigation.target)) commitNavigation(nextNavigation.state);
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [commitNavigation, openNavigationTarget]);
 
@@ -526,7 +571,7 @@ export function App(): React.JSX.Element {
     try {
       mergeProjectSnapshot(await window.biny.pinSession(session.projectId, session.id, pinned, session.metadataRevision));
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [mergeProjectSnapshot]);
 
@@ -576,7 +621,7 @@ export function App(): React.JSX.Element {
         mergeProjectSnapshot(snapshot);
       }
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [adoptWorkspace, commitNavigation, mergeProjectSnapshot, toggleSessionPinned]);
 
@@ -596,6 +641,7 @@ export function App(): React.JSX.Element {
     if (!projectId) throw new Error("请先打开一个项目。");
     const previousSessionId = selectedRef.current;
     const previousNavigation = navigationRef.current;
+    setComposerDraft(undefined);
     const receipt = await window.biny.sendPrompt(projectId, selectedRef.current, input, mode, attachments, delivery);
     setSelectedSessionId(receipt.sessionId);
     if (receipt.sessionId !== previousSessionId) {
@@ -611,13 +657,24 @@ export function App(): React.JSX.Element {
     }
   }, [commitNavigation, document, workspace?.sessions]);
 
+  const retryWriterConflict = useCallback(async (): Promise<void> => {
+    const projectId = projectRef.current;
+    const sessionId = selectedRef.current;
+    if (!projectId || !sessionId) return;
+    try {
+      await openSession(projectId, sessionId, false);
+    } catch (error) {
+      setWarning(errorMessage(error));
+    }
+  }, [openSession]);
+
   const resumeInterruptedTurn = useCallback(async (): Promise<void> => {
     const projectId = projectRef.current;
     const sessionId = selectedRef.current;
     if (!projectId || !sessionId) return;
     const receipt = await window.biny.resumeInterruptedTurn(projectId, sessionId);
     if (!receipt) {
-      setToast("当前会话没有可恢复的在途回合。");
+      setWarning("当前会话没有可恢复的在途回合。");
       return;
     }
     setSelectedSessionId(receipt.sessionId);
@@ -691,7 +748,7 @@ export function App(): React.JSX.Element {
     const projectId = projectRef.current;
     const sessionId = selectedRef.current;
     if (!projectId || !sessionId) {
-      setToast("当前草稿还没有可创建的分支");
+      setWarning("当前草稿还没有可创建的分支");
       return;
     }
     const previousNavigation = navigationRef.current;
@@ -701,13 +758,13 @@ export function App(): React.JSX.Element {
       if (snapshot.selectedSessionId) commitNavigation(pushNavigation(previousNavigation, { projectId, sessionId: snapshot.selectedSessionId }));
       setToast("已创建会话分支");
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [adoptWorkspace, commitNavigation]);
 
   const rollbackFiles = useCallback((turn: TimelineTurn): void => {
     const files = listChangedFiles(turn);
-    setToast(files.length ? "当前消息的文件变更没有安全快照，暂不自动回滚" : "当前消息没有可回滚的文件");
+    setWarning(files.length ? "当前消息的文件变更没有安全快照，暂不自动回滚" : "当前消息没有可回滚的文件");
   }, []);
 
   useEffect(() => {
@@ -736,14 +793,17 @@ export function App(): React.JSX.Element {
     setFontPreference(snapshot.fontPreference);
     void window.biny.refreshProject(snapshot.projectId)
       .then(mergeProjectSnapshot)
-      .catch((error: unknown) => setToast(errorMessage(error)));
+      .catch((error: unknown) => setWarning(errorMessage(error)));
+    void window.biny.personalizationOverview(snapshot.projectId, selectedRef.current)
+      .then(setPersonalizationOverview)
+      .catch((error: unknown) => setWarning(errorMessage(error)));
   }, [mergeProjectSnapshot]);
 
   const toggleProjectPinned = useCallback(async (projectId: string, pinned: boolean): Promise<void> => {
     try {
       mergeProjectSnapshot(await window.biny.setProjectPinned(projectId, pinned));
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [mergeProjectSnapshot]);
 
@@ -770,11 +830,11 @@ export function App(): React.JSX.Element {
       setWorkspace(bootstrap.workspace);
       setDocument(undefined);
       setSelectedSessionId(undefined);
-      setPage(bootstrap.activeView === "extensions" ? "extensions" : "chat");
+      setPage(bootstrap.activeView === "mcp" ? "mcp" : bootstrap.activeView === "extensions" ? "extensions" : "chat");
       setRuntimePanelOpen(bootstrap.activeView === "runtime" && Boolean(bootstrap.workspace));
       commitNavigation(createNavigationState());
     } catch (error) {
-      setToast(errorMessage(error));
+      setWarning(errorMessage(error));
     }
   }, [commitNavigation]);
 
@@ -812,7 +872,7 @@ export function App(): React.JSX.Element {
   const openWorkspaceFile = useCallback((path: string): void => {
     const projectId = projectRef.current;
     if (!projectId) return;
-    void window.biny.openWorkspaceFile(projectId, path).catch((error) => setToast(errorMessage(error)));
+    void window.biny.openWorkspaceFile(projectId, path).catch((error) => setWarning(errorMessage(error)));
   }, []);
 
   const inspector = useWorkspaceInspector({
@@ -834,21 +894,41 @@ export function App(): React.JSX.Element {
   });
 
   const turns = useMemo(() => document ? buildSessionTimeline(document.events, document.liveEvents) : [], [document]);
-  const sessionUsage = useMemo(() => summarizeTimelineUsage(turns), [turns]);
   const messageScope = `${workspace?.project.id ?? "none"}:${document?.session.id ?? "draft"}`;
   const visibleTurns = useMemo(() => turns
     .map((turn) => deletedUserMessages.has(`${messageScope}:${turn.id}`) ? { ...turn, user: "" } : turn)
     .filter((turn) => turn.user || turn.assistant || turn.tools.length || turn.error), [deletedUserMessages, messageScope, turns]);
-  // 上下文用量：优先用运行时刚上报的实时值；重开会话或刚启动时运行时还没跑过一轮，
-  // 就退回会话里最后一次 provider 报告的输入 token 数——和运行时的 usedTokens 是同一个口径。
+  // 原始模型窗口只作为主展示分母；实际输入、有效输入预算和 Codex 风格 headroom 分开
+  // 投影，不能把预留伪装成已使用。优先使用当前运行时预算，重开会话或刚启动时再回退到
+  // Runtime 信息和模型目录。
   const contextUsage = useMemo<ContextUsage | undefined>(() => {
     const info = workspace?.runtime?.info;
     const models = workspace?.models ?? [];
     const selectedModel = models.find((model) => model.alias === info?.modelAlias) ?? models[0];
-    const maxTokens = contextBudget?.maxTokens ?? info?.maxInputTokens ?? selectedModel?.inputBudgetTokens;
+    const contextWindow = contextBudget?.contextWindow ?? info?.contextWindow ?? selectedModel?.contextWindow;
+    const inputBudgetTokens = contextBudget?.maxTokens ?? info?.maxInputTokens ?? selectedModel?.inputBudgetTokens;
     const usedTokens = contextBudget?.usedTokens ?? lastReportedInputTokens(document);
-    if (!maxTokens || !usedTokens) return undefined;
-    return { usedTokens, maxTokens };
+    const displayContextWindow = contextWindow ?? inputBudgetTokens;
+    if (!displayContextWindow || !usedTokens) return undefined;
+    const effectiveContextWindow = contextBudget?.effectiveContextWindow
+      ?? info?.effectiveContextWindow
+      ?? selectedModel?.effectiveContextWindow
+      ?? inputBudgetTokens
+      ?? displayContextWindow;
+    const reservedTokens = contextBudget?.contextReserveTokens
+      ?? info?.contextReserveTokens
+      ?? selectedModel?.contextReserveTokens
+      ?? Math.max(0, displayContextWindow - effectiveContextWindow);
+    const toolTokens = contextBudget?.toolSchemaReserveTokens ?? selectedModel?.toolSchemaReserveTokens;
+    const otherTokens = Math.max(0, reservedTokens - Math.min(reservedTokens, toolTokens ?? 0));
+    return {
+      usedTokens,
+      contextWindow: displayContextWindow,
+      inputBudgetTokens,
+      reservedTokens,
+      toolTokens,
+      otherTokens
+    };
   }, [contextBudget, document, workspace?.models, workspace?.runtime?.info]);
   const clearToast = useCallback(() => setToast(undefined), []);
   const sessionSummary = workspace?.sessions.find((session) => session.id === selectedSessionId) ?? document?.session;
@@ -861,11 +941,56 @@ export function App(): React.JSX.Element {
   const selectedRunning = Boolean(activeSessionId && activeSessionId === selectedSessionId);
   const selectedThinking = selectedActiveRun?.status === "thinking";
   const activeElsewhere = Boolean(activeSessionId && selectedSessionId && activeSessionId !== selectedSessionId);
+  const runtimeBusy = Boolean(workspace?.runtime && workspace.runtime.state.kind !== "idle");
+  const chatMemoryEnabled = personalizationOverview?.chat?.effective.useMemories === true;
+  const memoryToggleDisabledReason = !workspace?.project
+    ? "请先打开一个项目。"
+    : !selectedSessionId
+      ? "发送一条消息后才能为当前聊天切换记忆。"
+      : !personalizationOverview?.chat
+        ? "正在读取当前聊天的记忆状态…"
+        : !personalizationOverview.memory.enabled
+          ? "全局记忆已在设置中关闭，请先开启记忆功能。"
+          : runtimeBusy
+            ? "当前运行或后台维护尚未结束，请稍后再切换记忆。"
+            : activeElsewhere
+              ? "另一个会话正在运行，请先切回该会话。"
+              : memoryToggleBusy
+                ? "正在更新当前聊天的记忆状态…"
+                : undefined;
+  const toggleChatMemory = useCallback(async (): Promise<void> => {
+    const projectId = projectRef.current;
+    const sessionId = selectedRef.current;
+    const current = personalizationOverview?.chat;
+    if (!projectId || !sessionId || !current || !personalizationOverview.memory.enabled || memoryToggleBusy) return;
+    const enabled = !current.effective.useMemories;
+    setMemoryToggleBusy(true);
+    try {
+      const nextOverride = {
+        ...current.override,
+        useMemories: enabled,
+        contributeMemories: enabled
+      };
+      mergeProjectSnapshot(await window.biny.saveChatPersonalization(projectId, sessionId, nextOverride, current.metadataRevision));
+      setPersonalizationOverview(await window.biny.personalizationOverview(projectId, sessionId));
+      setToast(enabled ? "当前聊天已开启记忆" : "当前聊天已关闭记忆");
+    } catch (error) {
+      setWarning(errorMessage(error));
+    } finally {
+      setMemoryToggleBusy(false);
+    }
+  }, [mergeProjectSnapshot, memoryToggleBusy, personalizationOverview]);
   const composer = (
     <Composer
       activeElsewhere={activeElsewhere}
+      sessionWriterConflict={writerConflict !== undefined}
+      memoryEnabled={chatMemoryEnabled}
+      memoryToggleBusy={memoryToggleBusy}
+      memoryToggleDisabled={memoryToggleDisabledReason !== undefined}
+      memoryToggleDisabledReason={memoryToggleDisabledReason}
       contextUsage={contextUsage}
       focusToken={focusToken}
+      prefillInput={composerDraft}
       modelSetupRequired={Boolean(workspace?.requiresModelConfiguration)}
       models={workspace?.pickerModels ?? workspace?.models ?? []}
       onPermissionMode={setPermissionMode}
@@ -877,10 +1002,13 @@ export function App(): React.JSX.Element {
         if (!projectId || !selectedRunId) throw new Error("当前运行已结束或状态尚未同步，未发送取消请求。");
         await window.biny.cancelRun(projectId, selectedRunId);
       }}
+      onToggleMemory={toggleChatMemory}
       onSwitchModel={switchModel}
-      permissionMode={workspace?.runtime?.permissionMode ?? "ask"}
+      onWarning={setWarning}
+      permissionMode={workspace?.permissionMode ?? workspace?.runtime?.permissionMode ?? "ask"}
       project={workspace?.project}
       running={selectedRunning}
+      runtimeBusy={runtimeBusy}
       runtimeInfo={workspace?.runtime?.info}
     />
   );
@@ -919,7 +1047,7 @@ export function App(): React.JSX.Element {
             onSettingsCommitted={settingsCommitted}
             onResolveCloseRequest={resolveSettingsCloseRequest}
             onImportCookies={async () => await window.biny.importCookies()}
-            onNotify={setToast}
+            onNotify={setWarning}
             onLoadCookieJarStatus={loadCookieJarStatus}
             onLoadMemoryOverview={loadMemoryOverview}
             onLoadMemoryEmbeddingStatus={loadMemoryEmbeddingStatus}
@@ -960,6 +1088,7 @@ export function App(): React.JSX.Element {
           />
           <SlashResultOverlay onClose={() => setSlashResult(undefined)} result={slashResult} />
           <DesktopToast message={toast} onClose={clearToast} />
+          <DesktopWarningDialog message={warning} onClose={() => setWarning(undefined)} />
       </>
       )}
       rightPanel={inspector.dock}
@@ -967,25 +1096,26 @@ export function App(): React.JSX.Element {
       sidebarLayout={sidebarLayout}
       sideNav={(
         <Sidebar
-          activeNavigation={page === "extensions" ? "extensions" : runtimePanelOpen ? "runtime" : undefined}
+          activeNavigation={page === "mcp" ? "mcp" : page === "extensions" ? "extensions" : runtimePanelOpen ? "runtime" : undefined}
           activeProjectId={workspace?.project.id}
           onCreateEmptyProject={() => void createEmptyProject()}
           onNewTask={(projectId) => void newTask(projectId)}
           onOpenProject={() => void openProject()}
           onOpenRuntime={openRuntimePanel}
-          onOpenTerminalProject={(projectId) => { void window.biny.openProjectTerminal(projectId).catch((error) => setToast(errorMessage(error))); }}
+          onOpenTerminalProject={(projectId) => { void window.biny.openProjectTerminal(projectId).catch((error) => setWarning(errorMessage(error))); }}
           onProjectPinned={(projectId, pinned) => void toggleProjectPinned(projectId, pinned)}
-          onRefreshProject={(projectId) => { void window.biny.refreshProject(projectId).then(mergeProjectSnapshot).catch((error) => setToast(errorMessage(error))); }}
+          onRefreshProject={(projectId) => { void window.biny.refreshProject(projectId).then(mergeProjectSnapshot).catch((error) => setWarning(errorMessage(error))); }}
           onRemoveProject={(projectId) => void removeProject(projectId)}
           onRenameProject={renameProject}
           onReorderProjects={(projectIds) => void reorderProjects(projectIds)}
-          onRevealProject={(projectId) => { void window.biny.revealProject(projectId).catch((error) => setToast(errorMessage(error))); }}
+          onRevealProject={(projectId) => { void window.biny.revealProject(projectId).catch((error) => setWarning(errorMessage(error))); }}
           onSearch={openSearch}
           onSelectSession={(projectId, sessionId) => void navigateToSession(projectId, sessionId)}
           onLoadSessionChildren={loadSessionChildren}
           onSessionMenu={(session) => void openSessionMenu(session)}
           onSessionPin={(session) => { void toggleSessionPinned(session); }}
           onExtensions={openExtensions}
+          onMcp={openMcp}
           onSettings={() => openSettings()}
           onResizeKeyDown={onSidebarResizeKeyDown}
           onResizePointerDown={onSidebarResizePointerDown}
@@ -1005,19 +1135,20 @@ export function App(): React.JSX.Element {
       )}
       theme={themePreference}
     >
-      {page === "extensions" ? <SkillHubView onError={setToast} /> : <Workspace
+      {page === "mcp" ? <McpServersView onError={setWarning} onSuccess={setToast} projectId={workspace?.project.id} /> : page === "extensions" ? <SkillHubView onError={setWarning} /> : <Workspace
         loading={loading}
         onCreateBranch={() => { void createBranch(); }}
         onDeleteUserMessage={deleteUserMessage}
         onEditUserMessage={editUserMessage}
-        onOpenExternal={(url) => void window.biny.openExternal(url).catch((error) => setToast(errorMessage(error)))}
+        onOpenExternal={(url) => void window.biny.openExternal(url).catch((error) => setWarning(errorMessage(error)))}
         onOpenProject={() => void openProject()}
         onPreviewFile={inspector.previewFile}
         inspectorOpen={inspector.open}
         onResolvePermission={resolvePermission}
         onResume={resumeInterruptedTurn}
         onRollbackFiles={rollbackFiles}
-        onRetry={(input) => void sendPrompt(input, "chat", []).catch((error) => setToast(errorMessage(error)))}
+        onRetry={(input) => void sendPrompt(input, "chat", []).catch((error) => setWarning(errorMessage(error)))}
+        onRetryWriterConflict={retryWriterConflict}
         onToggleInspector={inspector.toggleInspector}
         onRuntimePanelOpenChange={changeRuntimePanelOpen}
         project={workspace?.project}
@@ -1027,10 +1158,10 @@ export function App(): React.JSX.Element {
         runtimeProjection={workspace?.runtimeProjection}
         sessionId={selectedSessionId}
         sessionTitle={sessionSummary?.title}
-        sessionUsage={sessionUsage}
         thinking={selectedThinking}
         thinkingStartedAt={selectedActiveRun?.startedAt}
         turns={visibleTurns}
+        writerConflict={writerConflict}
         onRuntimeError={reportRuntimeError}
         onRuntimeMutation={mutateRuntime}
         onRuntimeRefresh={refreshRuntimeProjection}

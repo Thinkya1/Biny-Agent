@@ -9,6 +9,7 @@ import type { AgentSessionEvent } from "../src/agent/types.js";
 import type { ContextStatus } from "../src/agent/context/types.js";
 import type { CommandRuntime } from "../src/runtime/CommandRuntime.js";
 import { InteractiveAgentRuntime } from "../src/runtime/InteractiveAgentRuntime.js";
+import { startRuntimeHost } from "../src/runtime/RuntimeHost.js";
 import { executeRuntimeCommand } from "../src/runtime/commands.js";
 import { SessionLeaseStore } from "../src/runtime/SessionLease.js";
 import { isTerminalRunEvent, pendingPermission, type AgentHostEvent } from "../src/runtime/agentEvents.js";
@@ -28,7 +29,14 @@ import { DesktopUserDataStore } from "../src/desktop/electron/main/DesktopUserDa
 import { clampFilePanelWidth, DEFAULT_FILE_PANEL_WIDTH, MAX_FILE_PANEL_WIDTH, MIN_FILE_PANEL_WIDTH } from "../src/desktop/filePanelSizing.js";
 import { clampSidebarResizeWidth, clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, isCompactSidebarWidth, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, normalizeSidebarWidth, SIDEBAR_RAIL_THRESHOLD, SIDEBAR_RAIL_WIDTH } from "../src/desktop/sidebarSizing.js";
 import { adjustSidebarWithKeyboard, commitSidebarResize, normalizeSidebarExpandedWidth, previewSidebarResize, resolveSidebarLayout, sidebarResizeStart } from "../src/desktop/sidebarLayout.js";
-import type { DesktopAgentEventEnvelope, DesktopProject, DesktopSessionSummary, DesktopWorkspaceSnapshot } from "../src/desktop/protocol.js";
+import type {
+  DesktopAgentEventEnvelope,
+  DesktopProject,
+  DesktopSessionSummary,
+  DesktopSettingsSaveInput,
+  DesktopSettingsSnapshot,
+  DesktopWorkspaceSnapshot
+} from "../src/desktop/protocol.js";
 import {
   applyProjectOrder,
   applyUpdatesToSidebarSessions,
@@ -46,7 +54,7 @@ import {
   replaceNavigation
 } from "../src/desktop/renderer/src/navigationHistory.js";
 import { activeTimelineTool, buildSessionTimeline, listChangedFiles, listTimelineFiles, liveTimelineEvents, timelineToolEntries, type TimelineTurn } from "../src/desktop/renderer/src/sessionTimeline.js";
-import { formatTurnCost, formatUsageCost, summarizeTimelineUsage } from "../src/desktop/renderer/src/usagePresentation.js";
+import { formatContextUsage, formatTurnCost, formatUsageCost, summarizeTimelineUsage } from "../src/desktop/renderer/src/usagePresentation.js";
 import { reasoningDetailText } from "../src/desktop/renderer/src/reasoningPresentation.js";
 import { projectWebSearchView } from "../src/desktop/renderer/src/webSearchPresentation.js";
 import type { TimelineTool } from "../src/desktop/renderer/src/sessionTimeline.js";
@@ -79,6 +87,8 @@ await testInteractiveRuntimeTerminalStatuses();
 await testDraftSessionsDoNotReachTheSessionList();
 await testDesktopRestoresPersistedTerminalStatus();
 await testDesktopPinAfterOpeningSessionUsesFreshRevision();
+await testDesktopOpenSessionSkipsGlobalSessionScan();
+await testDesktopOpenSessionReturnsWriterConflictReadOnlyDocument();
 await testDesktopOpenSessionReturnsConsistentMetadataSnapshot();
 await testDesktopMessageEditFork();
 await testWorkspaceFilePreview();
@@ -104,6 +114,8 @@ await testDesktopModelConfiguration();
 await testDesktopModelSwitchDoesNotResumeInterruptedTurn();
 await testDesktopSubagentSlashCommands();
 await testDesktopDoesNotResumePersistedIdleSession();
+await testDesktopPermissionModePersistsInIdleSnapshot();
+await testDesktopReconcilesPersistedPermissionWithExistingHost();
 await testDesktopCredentialsAreSeparated();
 await testDesktopWebSearchSettings();
 await testDesktopPersonalizationCasAndChatOverride();
@@ -188,6 +200,7 @@ function testDesktopRendererStateProjection(): void {
     selectedSessionId: undefined,
     runtime: undefined,
     runtimeError: undefined,
+    permissionMode: "ask",
     requiresModelConfiguration: false,
     pickerModels: [],
     models: [],
@@ -257,11 +270,27 @@ function testDesktopRendererStateProjection(): void {
     reasoningLabel: "High",
     thinking: "high",
     contextWindow: 1_000_000,
-    maxInputTokens: 742_976
+    maxInputTokens: 950_000
   });
   assert.equal(switched.runtime?.info.modelAlias, "deepseek-v4-flash");
   assert.equal(switched.runtime?.info.contextWindow, 1_000_000);
-  assert.equal(switched.runtime?.info.maxInputTokens, 742_976);
+  assert.equal(switched.runtime?.info.maxInputTokens, 950_000);
+
+  const withoutRuntime: DesktopWorkspaceSnapshot = {
+    ...workspace,
+    models: [{ alias: "old-model" }, { alias: "deepseek-v4-flash" }] as DesktopWorkspaceSnapshot["models"],
+    pickerModels: [{ alias: "old-model" }, { alias: "deepseek-v4-flash" }] as DesktopWorkspaceSnapshot["pickerModels"]
+  };
+  const switchedBeforeRuntime = updateRuntimeInfo(withoutRuntime, {
+    modelAlias: "deepseek-v4-flash",
+    provider: "deepseek",
+    modelLabel: "deepseek-v4-flash",
+    reasoningLabel: "High",
+    thinking: "high"
+  });
+  assert.equal(switchedBeforeRuntime.runtime, undefined);
+  assert.equal(switchedBeforeRuntime.models[0]?.alias, "deepseek-v4-flash");
+  assert.equal(switchedBeforeRuntime.pickerModels[0]?.alias, "deepseek-v4-flash");
 }
 
 function testDesktopRendererSidebarProjection(): void {
@@ -651,13 +680,73 @@ async function testDesktopPinAfterOpeningSessionUsesFreshRevision(): Promise<voi
 
     const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
     const document = await agents.openSession(project.id, "running-session");
-    assert.ok(document.session.metadataRevision, "opening a session must return the revision created by mark-read");
+    assert.equal(document.session.unread, false, "opening a session should clear unread state optimistically");
     await agents.pinSession(project.id, "running-session", true, document.session.metadataRevision);
 
     const pinned = (await projects.listSessions(project, undefined, new Map())).find((session) => session.id === "running-session");
     assert.equal(pinned?.pinned, true);
     await agents.closeAll();
   } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopOpenSessionSkipsGlobalSessionScan(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-open-single-session-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-open-single-session-data-"));
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    await ensureAgentDirs(dataRoot);
+    const recorder = new SessionRecorder(dataRoot, "single-session");
+    recorder.record({ type: "user_message", content: "只打开目标会话" });
+    await recorder.close();
+
+    projects.listSessions = async () => {
+      throw new Error("openSession must not scan every session");
+    };
+    const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const document = await agents.openSession(project.id, recorder.sessionId);
+    assert.equal(document.session.id, recorder.sessionId);
+    await agents.markSessionRead(project.id, recorder.sessionId, document.session.metadataRevision);
+    await agents.closeAll();
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopOpenSessionReturnsWriterConflictReadOnlyDocument(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-open-writer-conflict-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-open-writer-conflict-data-"));
+  let owner: SessionLeaseStore | undefined;
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    await ensureAgentDirs(dataRoot);
+    const recorder = new SessionRecorder(dataRoot, "writer-conflict-session");
+    recorder.record({ type: "user_message", content: "仍然可以读取历史" });
+    recorder.record({ type: "assistant_message", content: "只读正文" });
+    await recorder.close();
+
+    owner = await SessionLeaseStore.open(dataRoot);
+    owner.acquire(recorder.sessionId);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const conflictDocument = await agents.openSession(project.id, recorder.sessionId);
+    assert.equal(conflictDocument.writerConflict?.sessionId, recorder.sessionId);
+    assert.equal(conflictDocument.events.some((event) => event.type === "assistant_message"), true);
+
+    owner.close();
+    owner = undefined;
+    const retriedDocument = await agents.openSession(project.id, recorder.sessionId);
+    assert.equal(retriedDocument.writerConflict, undefined);
+  } finally {
+    await agents?.closeAll();
+    owner?.close();
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(desktopRoot, { recursive: true, force: true });
   }
@@ -694,14 +783,17 @@ async function testDesktopOpenSessionReturnsConsistentMetadataSnapshot(): Promis
 
     const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
     const document = await agents.openSession(project.id, recorder.sessionId);
+    assert.equal(document.session.title, "旧标题");
+    assert.equal(document.session.pinned, false);
+    assert.equal(document.session.unread, false);
+    await agents.markSessionRead(project.id, recorder.sessionId, document.session.metadataRevision);
     const current = (await projects.listSessions(project, undefined, new Map()))
       .find((session) => session.id === recorder.sessionId);
     assert.ok(current);
-    assert.equal(document.session.title, "并发新标题");
-    assert.equal(document.session.pinned, true);
-    assert.equal(document.session.unread, false);
-    assert.deepEqual(document.session.labels, ["新标签"]);
-    assert.equal(document.session.metadataRevision, current.metadataRevision);
+    assert.equal(current.title, "并发新标题");
+    assert.equal(current.pinned, true);
+    assert.equal(current.unread, false);
+    assert.deepEqual(current.labels, ["新标签"]);
     await agents.closeAll();
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
@@ -1137,6 +1229,10 @@ async function testDesktopActiveViewPersistence(): Promise<void> {
     const restored = new DesktopStateStore(statePath);
     await restored.load();
     assert.equal(restored.activeView(), "extensions");
+    await writeFile(statePath, `${JSON.stringify({ version: 1, activeView: "memory" })}\n`);
+    const legacy = new DesktopStateStore(statePath);
+    await legacy.load();
+    assert.equal(legacy.activeView(), "chat");
     await writeFile(statePath, `${JSON.stringify({ version: 1, activeView: "unknown" })}\n`);
     const migrated = new DesktopStateStore(statePath);
     await migrated.load();
@@ -1350,7 +1446,7 @@ async function testDesktopSettingsCredentialLifecycle(): Promise<void> {
     const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
     const project = await projects.createProject(workspaceRoot);
     agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
-    const released = agents.stageSettingsCredential("released-secret");
+    const released = agents.stageSettingsCredential("released-secret", { projectId: project.id, purpose: "model", providerAlias: "released" });
     agents.releaseSettingsCredentials([released.handle]);
     const current = await agents.settingsConfigSnapshot(project.id);
     await assert.rejects(
@@ -1373,7 +1469,29 @@ async function testDesktopSettingsCredentialLifecycle(): Promise<void> {
       /不存在或已过期/u
     );
 
-    const expired = agents.stageSettingsCredential("expired-secret");
+    const mismatched = agents.stageSettingsCredential("mismatched-secret", { projectId: project.id, purpose: "model", providerAlias: "scoped" });
+    await assert.rejects(
+      agents.prepareSettingsConfig(project.id, {
+        expectedPreferenceRevision: 0,
+        expectedConfigRevision: current.revision,
+        models: {
+          upserts: [{
+            alias: "mismatched-model",
+            displayName: "Mismatched model",
+            providerAlias: "different",
+            providerType: "openai-compatible",
+            model: "mismatched-model",
+            apiKeyHandle: mismatched.handle,
+            supportsTools: true
+          }],
+          removeAliases: []
+        }
+      }),
+      /句柄与当前项目、用途或服务商不匹配/u
+    );
+    agents.releaseSettingsCredentials([mismatched.handle]);
+
+    const expired = agents.stageSettingsCredential("expired-secret", { projectId: project.id, purpose: "model", providerAlias: "expired" });
     const stagedCredentials = (agents as unknown as {
       stagedSettingsCredentials: Map<string, { expiresAt: number }>;
     }).stagedSettingsCredentials;
@@ -1398,7 +1516,7 @@ async function testDesktopSettingsCredentialLifecycle(): Promise<void> {
       /不存在或已过期/u
     );
 
-    const staged = agents.stageSettingsCredential("one-shot-secret");
+    const staged = agents.stageSettingsCredential("one-shot-secret", { projectId: project.id, purpose: "model", providerAlias: "staged" });
     const transaction = new DesktopSettingsTransaction(state, agents);
     const snapshot = await transaction.snapshot(project.id);
     const saved = await transaction.save(project.id, {
@@ -1455,6 +1573,7 @@ async function testDesktopModelConfiguration(): Promise<void> {
   try {
     const initialConfig = structuredClone(defaultConfig);
     initialConfig.models["deepseek-deepseek-v4-flash"] = { ...initialConfig.models["deepseek-v4-flash"] };
+    initialConfig.providers.deepseek!.apiKey = "test-key";
     initialConfig.providers.deepseek!.headers = { "X-Provider-Route": "stable" };
     initialConfig.providers.deepseek!.modelsEndpoint = "https://api.deepseek.com/models";
     initialConfig.models["deepseek-v4-flash"]!.headers = { "X-Model-Route": "flash" };
@@ -1462,41 +1581,52 @@ async function testDesktopModelConfiguration(): Promise<void> {
     await configStore.save(initialConfig);
     const project = await projects.createProject(workspaceRoot);
     const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const settings = new DesktopSettingsTransaction(state, agents);
     // Enabling an extra model must not hijack the active default — that is what
     // the settings "启用模型" toggles do on every click.
-    const enabledOnly = await agents.saveModelConfiguration(project.id, {
-      alias: "local-qwen-extra",
-      displayName: "本地 Qwen 备用",
-      providerAlias: "local",
-      providerType: "ollama",
-      model: "qwen3:4b",
-      baseUrl: "http://127.0.0.1:11434/v1",
-      apiKeyEnv: undefined,
-      apiKey: undefined,
-      supportsTools: true,
-      supportsThinking: false
+    const enabledOnly = await commitDesktopSettings(settings, project.id, {
+      models: {
+        upserts: [{
+          alias: "local-qwen-extra",
+          displayName: "本地 Qwen 备用",
+          providerAlias: "local",
+          providerType: "ollama",
+          model: "qwen3:4b",
+          baseUrl: "http://127.0.0.1:11434/v1",
+          apiKeyEnv: undefined,
+          apiKey: undefined,
+          supportsTools: true,
+          supportsThinking: false
+        }],
+        removeAliases: []
+      }
     });
     assert.equal((await configStore.load()).defaultModel, "deepseek-v4-flash");
-    assert.equal(enabledOnly.models.some((model) => model.alias === "local-qwen-extra"), true);
+    assert.equal(enabledOnly.models.configured.some((model) => model.alias === "local-qwen-extra"), true);
 
-    const snapshot = await agents.saveModelConfiguration(project.id, {
-      alias: "local-qwen",
-      displayName: "本地 Qwen",
-      providerAlias: "local",
-      providerType: "ollama",
-      model: "qwen3:8b",
-      baseUrl: "http://127.0.0.1:11434/v1",
-      apiKeyEnv: undefined,
-      apiKey: undefined,
-      supportsTools: true,
-      supportsThinking: false,
-      makeDefault: true
+    const snapshot = await commitDesktopSettings(settings, project.id, {
+      models: {
+        upserts: [{
+          alias: "local-qwen",
+          displayName: "本地 Qwen",
+          providerAlias: "local",
+          providerType: "ollama",
+          model: "qwen3:8b",
+          baseUrl: "http://127.0.0.1:11434/v1",
+          apiKeyEnv: undefined,
+          apiKey: undefined,
+          supportsTools: true,
+          supportsThinking: false,
+          makeDefault: true
+        }],
+        removeAliases: []
+      }
     });
     const config = await configStore.load();
     assert.equal(config.defaultModel, "local-qwen");
     assert.equal(config.providers.local?.type, "ollama");
     assert.equal(config.models["local-qwen"]?.model, "qwen3:8b");
-    assert.equal(snapshot.models.some((model) => model.alias === "local-qwen"), true);
+    assert.equal(snapshot.models.configured.some((model) => model.alias === "local-qwen"), true);
     const modelManager = new ModelManager(desktopRoot, config, configStore);
     const externallyUpdatedConfig = structuredClone(config);
     externallyUpdatedConfig.defaultModel = "local-qwen-next";
@@ -1504,17 +1634,22 @@ async function testDesktopModelConfiguration(): Promise<void> {
     await configStore.save(externallyUpdatedConfig);
     const refreshedInfo = await modelManager.refreshFromDisk();
     assert.equal(refreshedInfo.modelAlias, "local-qwen-next");
-    await agents.saveModelConfiguration(project.id, {
-      alias: "deepseek-v4-flash",
-      displayName: "DeepSeek V4 Flash",
-      providerAlias: "deepseek",
-      providerType: "deepseek",
-      model: "deepseek-v4-flash",
-      baseUrl: "https://api.deepseek.com",
-      apiKeyEnv: undefined,
-      apiKey: undefined,
-      supportsTools: true,
-      supportsThinking: true
+    await commitDesktopSettings(settings, project.id, {
+      models: {
+        upserts: [{
+          alias: "deepseek-v4-flash",
+          displayName: "DeepSeek V4 Flash",
+          providerAlias: "deepseek",
+          providerType: "deepseek",
+          model: "deepseek-v4-flash",
+          baseUrl: "https://api.deepseek.com",
+          apiKeyEnv: undefined,
+          apiKey: undefined,
+          supportsTools: true,
+          supportsThinking: true
+        }],
+        removeAliases: []
+      }
     });
     const cleanedConfig = await configStore.load();
     assert.equal(cleanedConfig.models["deepseek-deepseek-v4-flash"], undefined);
@@ -1522,16 +1657,21 @@ async function testDesktopModelConfiguration(): Promise<void> {
     assert.deepEqual(cleanedConfig.providers.deepseek?.headers, { "X-Provider-Route": "stable" });
     assert.equal(cleanedConfig.providers.deepseek?.modelsEndpoint, "https://api.deepseek.com/models");
     assert.deepEqual(cleanedConfig.models["deepseek-v4-flash"]?.headers, { "X-Model-Route": "flash" });
-    await agents.saveModelConfiguration(project.id, {
-      alias: "plan-flash",
-      displayName: "Plan Flash",
-      providerAlias: "plan",
-      providerType: "openai-compatible",
-      model: "deepseek-v4-flash",
-      baseUrl: "https://plan.example/v1",
-      apiKey: "plan-test-key",
-      supportsTools: true,
-      supportsThinking: true
+    await commitDesktopSettings(settings, project.id, {
+      models: {
+        upserts: [{
+          alias: "plan-flash",
+          displayName: "Plan Flash",
+          providerAlias: "plan",
+          providerType: "openai-compatible",
+          model: "deepseek-v4-flash",
+          baseUrl: "https://plan.example/v1",
+          apiKey: "plan-test-key",
+          supportsTools: true,
+          supportsThinking: true
+        }],
+        removeAliases: []
+      }
     });
     const planConfig = await configStore.load();
     assert.deepEqual(planConfig.models["plan-flash"]?.thinkingLevelMap, {
@@ -1672,6 +1812,84 @@ async function testDesktopDoesNotResumePersistedIdleSession(): Promise<void> {
   }
 }
 
+async function testDesktopPermissionModePersistsInIdleSnapshot(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-permission-mode-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-permission-mode-data-"));
+  const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    // 让测试稳定覆盖同进程 owner；重点验证的是配置持久化后的 Desktop 首屏投影。
+    process.env.BINY_RUNTIME_HOST_ENTRY = path.join(desktopRoot, "missing-runtime-host-entry.js");
+    const project = await projects.createProject(workspaceRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+
+    const selected = await agents.setPermissionMode(project.id, "auto");
+    assert.equal(selected.runtime?.permissionMode, "auto");
+    await agents.closeAll();
+
+    // 新一轮 Desktop 尚未创建 runtime 时，也必须从共享配置展示上次选择，而不是回退到 ask。
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const restored = await agents.workspaceSnapshot(project.id);
+    assert.equal(restored.runtime, undefined);
+    assert.equal(restored.permissionMode, "auto");
+    assert.equal((await configStore.load()).permission.mode, "auto");
+  } finally {
+    await agents?.closeAll();
+    if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
+    else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopReconcilesPersistedPermissionWithExistingHost(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-permission-host-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-permission-host-data-"));
+  const previousAgentRoot = process.env.BINY_AGENT_DIR;
+  const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
+  let agents: DesktopAgentManager | undefined;
+  let host: { closeOwner(): Promise<void> } | undefined;
+  try {
+    // DesktopAgentManager 生产环境通过 globalConfigDir() 发现 Host；测试把两端显式
+    // 放到同一临时配置根，模拟“调试客户端重开时 attach 到旧 Host”的真实路径。
+    process.env.BINY_AGENT_DIR = desktopRoot;
+    process.env.BINY_RUNTIME_HOST_ENTRY = path.join(desktopRoot, "missing-runtime-host-entry.js");
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    const commands = fakeCommandRuntime();
+    let hostPermissionMode: "ask" | "read-only" | "auto" | "full-access" = "ask";
+    commands.agent.getPermissionMode = () => hostPermissionMode;
+    commands.agent.setPermissionMode = async (mode) => {
+      hostPermissionMode = mode;
+    };
+    const runtime = new InteractiveAgentRuntime(commands);
+    host = await startRuntimeHost(dataRoot, runtime, commands, { configDir: desktopRoot });
+
+    const persisted = await configStore.load(project.path);
+    persisted.permission.mode = "full-access";
+    await configStore.save(persisted, project.path);
+
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    // 任意需要 Runtime 的入口都会 attach 到上面的旧 Host；切模型本身不应改变权限，
+    // 只用来触发“客户端进入后接管已有 Runtime”的启动链路。
+    await agents.switchModel(project.id, "test-model", "off");
+    assert.equal(hostPermissionMode, "full-access");
+    assert.equal(runtime.getSnapshot().permissionMode, "full-access");
+    assert.equal((await configStore.load(project.path)).permission.mode, "full-access");
+  } finally {
+    await agents?.closeAll();
+    await host?.closeOwner();
+    if (previousAgentRoot === undefined) delete process.env.BINY_AGENT_DIR;
+    else process.env.BINY_AGENT_DIR = previousAgentRoot;
+    if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
+    else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
 async function testDesktopCredentialsAreSeparated(): Promise<void> {
   const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-credentials-"));
   try {
@@ -1700,58 +1918,69 @@ async function testDesktopWebSearchSettings(): Promise<void> {
     const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
     const project = await projects.createProject(workspaceRoot);
     const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const settings = new DesktopSettingsTransaction(state, agents);
 
-    const initial = await agents.webSearchSettings(project.id);
-    assert.equal(initial.enabled, false);
-    assert.equal(initial.provider, "anysearch");
-    assert.equal(initial.hasApiKey, false);
+    const initial = await settings.snapshot(project.id);
+    assert.equal(initial.webSearch.enabled, false);
+    assert.equal(initial.webSearch.provider, "anysearch");
+    assert.equal(initial.webSearch.hasApiKey, false);
 
-    const saved = await agents.saveWebSearchSettings(project.id, {
-      enabled: true,
-      provider: "tavily",
-      apiKey: "tvly-test-secret",
-      apiKeyEnv: undefined,
-      timeoutMs: 8_000,
-      maxResults: 6
-    });
+    const stagedKey = agents.stageSettingsCredential("tvly-test-secret", { projectId: project.id, purpose: "web-search", providerAlias: "tavily" });
+    const saved = (await commitDesktopSettings(settings, project.id, {
+      webSearch: {
+        enabled: true,
+        provider: "tavily",
+        apiKey: undefined,
+        apiKeyHandle: stagedKey.handle,
+        apiKeyEnv: undefined,
+        timeoutMs: 8_000,
+        maxResults: 6
+      }
+    })).webSearch;
     assert.equal(saved.provider, "tavily");
     assert.equal(saved.hasApiKey, true);
     assert.equal(saved.envKeyName, "TAVILY_API_KEY");
     assert.equal(saved.maxResults, 6);
 
     // 同 provider 重新保存且未传 apiKey：已存密钥保留。
-    const kept = await agents.saveWebSearchSettings(project.id, {
-      enabled: true,
-      provider: "tavily",
-      apiKey: undefined,
-      apiKeyEnv: undefined,
-      timeoutMs: 8_000,
-      maxResults: 6
-    });
+    const kept = (await commitDesktopSettings(settings, project.id, {
+      webSearch: {
+        enabled: true,
+        provider: "tavily",
+        apiKey: undefined,
+        apiKeyEnv: undefined,
+        timeoutMs: 8_000,
+        maxResults: 6
+      }
+    })).webSearch;
     assert.equal(kept.hasApiKey, true);
 
     // 切换 provider 且未提供新密钥：旧密钥必须被清除，不能带给新服务商。
-    const switched = await agents.saveWebSearchSettings(project.id, {
-      enabled: true,
-      provider: "brave",
-      apiKey: undefined,
-      apiKeyEnv: undefined,
-      timeoutMs: 8_000,
-      maxResults: 6
-    });
+    const switched = (await commitDesktopSettings(settings, project.id, {
+      webSearch: {
+        enabled: true,
+        provider: "brave",
+        apiKey: undefined,
+        apiKeyEnv: undefined,
+        timeoutMs: 8_000,
+        maxResults: 6
+      }
+    })).webSearch;
     assert.equal(switched.provider, "brave");
     assert.equal(switched.hasApiKey, false);
     assert.equal(switched.envKeyName, "BRAVE_SEARCH_API_KEY");
     assert.equal((await configStore.load()).web.search.apiKey, undefined);
 
-    const google = await agents.saveWebSearchSettings(project.id, {
-      enabled: true,
-      provider: "google",
-      apiKey: undefined,
-      apiKeyEnv: undefined,
-      timeoutMs: 8_000,
-      maxResults: 6
-    });
+    const google = (await commitDesktopSettings(settings, project.id, {
+      webSearch: {
+        enabled: true,
+        provider: "google",
+        apiKey: undefined,
+        apiKeyEnv: undefined,
+        timeoutMs: 8_000,
+        maxResults: 6
+      }
+    })).webSearch;
     assert.equal(google.provider, "google");
     assert.equal(google.hasApiKey, false);
     assert.equal(google.envKeyName, undefined);
@@ -1808,7 +2037,9 @@ async function testDesktopPersonalizationCasAndChatOverride(): Promise<void> {
     );
 
     const document = await agents.openSession(project.id, recorder.sessionId);
-    assert.ok(document.session.metadataRevision);
+    const markedWorkspace = await agents.markSessionRead(project.id, recorder.sessionId, document.session.metadataRevision);
+    const markedSummary = markedWorkspace.sessions.find((session) => session.id === recorder.sessionId);
+    assert.ok(markedSummary?.metadataRevision);
     const override = {
       personality: "pragmatic" as const,
       customInstructions: { mode: "replace" as const, value: "本聊天只列出可执行步骤。" },
@@ -1819,11 +2050,11 @@ async function testDesktopPersonalizationCasAndChatOverride(): Promise<void> {
       project.id,
       recorder.sessionId,
       override,
-      document.session.metadataRevision
+      markedSummary.metadataRevision
     );
     const summary = workspace.sessions.find((session) => session.id === recorder.sessionId);
     assert.deepEqual(summary?.personalization, override);
-    assert.notEqual(summary?.metadataRevision, document.session.metadataRevision);
+    assert.notEqual(summary?.metadataRevision, markedSummary.metadataRevision);
 
     const current = await agents.personalizationOverview(project.id, recorder.sessionId);
     assert.deepEqual(current.chat?.override, override);
@@ -1831,7 +2062,7 @@ async function testDesktopPersonalizationCasAndChatOverride(): Promise<void> {
     assert.equal(current.chat?.effective.useMemories, false);
     assert.equal(current.chat?.effective.contributeMemories, false);
     await assert.rejects(
-      agents.saveChatPersonalization(project.id, recorder.sessionId, override, document.session.metadataRevision),
+      agents.saveChatPersonalization(project.id, recorder.sessionId, override, markedSummary.metadataRevision),
       /Session catalog revision conflict/u
     );
   } finally {
@@ -2092,8 +2323,7 @@ async function testDesktopConnectionMetadata(): Promise<void> {
     assert.equal(subscription?.oauthProvider, "claude-code");
     assert.equal(subscription?.oauthExpiresAt, 1_900_000_000_000);
 
-    // An unreachable provider degrades to `fallback` instead of throwing, so the
-    // settings dialog keeps showing the models it already had.
+    // 刷新失败必须作为失败返回，缓存保持不变，不能伪装成当前账号刚返回的实时目录。
     const unreachable = structuredClone(config);
     unreachable.providers.deepseek!.baseUrl = "http://127.0.0.1:1/v1";
     unreachable.providers.deepseek!.retry = { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
@@ -2109,27 +2339,28 @@ async function testDesktopConnectionMetadata(): Promise<void> {
         reasoningEfforts: []
       }]
     });
-    const catalog = await agents.fetchModelCatalog(project.id, "deepseek");
-    assert.equal(catalog.source, "fallback");
-    assert.deepEqual(catalog.models.map((model) => model.id), ["cached-deepseek-model"]);
-    assert.equal(catalog.providerAlias, "deepseek");
+    await assert.rejects(
+      agents.fetchModelCatalog(project.id, "deepseek"),
+      /无法从服务商获取模型列表/u
+    );
+    assert.deepEqual((await modelsStore.read("deepseek"))?.models.map((model) => model.id), ["cached-deepseek-model"]);
     await assert.rejects(agents.fetchModelCatalog(project.id, "missing-provider"), /missing-provider/);
-    // 候选配置（尚未保存的连接）走同一条拉取路径：端点不可达时返回 fallback 与空列表，
-    // 渲染层自行回退到内置目录，不向界面抛错。
-    const candidate = await agents.fetchModelCatalogCandidate(project.id, {
-      alias: "deepseek-candidate-model",
-      displayName: "Candidate",
-      providerAlias: "deepseek",
-      providerType: "deepseek",
-      model: "deepseek-v4-flash",
-      baseUrl: "http://127.0.0.1:1/v1",
-      apiKey: "connection-metadata-secret",
-      requiresApiKey: true,
-      supportsTools: true
-    });
-    assert.equal(candidate.source, "fallback");
-    assert.deepEqual(candidate.models, []);
-    assert.equal(candidate.providerAlias, "deepseek");
+    // 尚未保存的候选配置遵循同一语义：Renderer 可以显示静态候选，但后端不会返回
+    // 一个假的成功目录。
+    await assert.rejects(
+      agents.fetchModelCatalogCandidate(project.id, {
+        alias: "deepseek-candidate-model",
+        displayName: "Candidate",
+        providerAlias: "deepseek",
+        providerType: "deepseek",
+        model: "deepseek-v4-flash",
+        baseUrl: "http://127.0.0.1:1/v1",
+        apiKey: "connection-metadata-secret",
+        requiresApiKey: true,
+        supportsTools: true
+      }),
+      /无法从服务商获取模型列表/u
+    );
     await agents.closeAll();
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
@@ -2235,15 +2466,19 @@ async function testDesktopOAuthCommitSurvivesCatalogFailure(): Promise<void> {
 
     const started = await agents.startModelLogin(project.id, "openai-codex");
     const authorizationUrl = new URL(openedUrls[0]!);
-    const completing = agents.completeModelLogin(project.id, "openai-codex", started.authRequestId);
+    const completing = agents.completeModelLoginForSettings(project.id, "openai-codex", started.authRequestId);
     const callbackResponse = await originalFetch(
       `http://localhost:1455/auth/callback?code=authorization-code&state=${encodeURIComponent(authorizationUrl.searchParams.get("state") ?? "")}`
     );
     assert.equal(callbackResponse.status, 200);
-    const snapshot = await completing;
+    const staged = await completing;
+    const settings = new DesktopSettingsTransaction(state, agents);
+    const snapshot = await commitDesktopSettings(settings, project.id, {
+      models: { upserts: [], removeAliases: [], oauthCredentialHandles: [staged.handle] }
+    });
     const configured = await configStore.load(project.path);
     assert.equal(configured.providers["openai-codex"]?.type, "openai-codex");
-    assert.equal(snapshot.connections.find((connection) => connection.providerAlias === "openai-codex")?.authMode, "oauth-bearer");
+    assert.equal(snapshot.models.connections.find((connection) => connection.providerAlias === "openai-codex")?.authMode, "oauth-bearer");
     assert.match(configured.defaultModel, /^openai-codex-/u);
     assert.deepEqual(
       Object.values(configured.models)
@@ -2446,6 +2681,23 @@ async function createDesktopTestServices(root: string): Promise<{
   return { configStore, projects: new DesktopProjectService(state, storage, configStore), state };
 }
 
+async function commitDesktopSettings(
+  settings: DesktopSettingsTransaction,
+  projectId: string,
+  input: Omit<DesktopSettingsSaveInput, "expectedPreferenceRevision" | "expectedConfigRevision">
+): Promise<DesktopSettingsSnapshot> {
+  const current = await settings.snapshot(projectId);
+  const result = await settings.save(projectId, {
+    ...input,
+    expectedPreferenceRevision: current.preferenceRevision,
+    expectedConfigRevision: current.configRevision
+  });
+  if (result.status !== "committed") {
+    throw new Error(`Expected settings commit, received ${result.status}: ${result.message ?? ""}`);
+  }
+  return result.snapshot;
+}
+
 function testProviderCatalogResolution(): void {
   // A relay / self-hosted gateway matches no catalog vendor. It used to fall
   // back to "the first openai-compatible entry", which branded a grok endpoint
@@ -2510,6 +2762,11 @@ function testModelChoicesDeduplicateEquivalentAliases(): void {
     "deepseek-v4-flash",
     "deepseek-v4-pro"
   ]);
+  const deepseekChoice = listPickerModelChoices(config).find((model) => model.alias === "deepseek-v4-flash");
+  assert.equal(deepseekChoice?.contextWindow, 1_000_000);
+  assert.equal(deepseekChoice?.toolSchemaReserveTokens, 1_024);
+  assert.equal(deepseekChoice?.outputReserveTokens, 250_000);
+  assert.equal(deepseekChoice?.systemPromptReserveTokens, 1_024);
   const legacyHostChoices = listModelChoices(config).map((model) => ({ ...model, showInPicker: undefined }));
   assert.deepEqual(filterPickerModelChoices(legacyHostChoices).map((model) => model.alias), [
     "deepseek-v4-flash",
@@ -2542,6 +2799,9 @@ function testModelChoicesDeduplicateEquivalentAliases(): void {
     "deepseek-v4-pro",
     "opencode-ai-minimax-m3"
   ]);
+  assert.equal(multiProviderChoices.find((model) => model.alias === "opencode-ai-minimax-m3")?.capabilities?.reasoning, true);
+  assert.deepEqual(multiProviderChoices.find((model) => model.alias === "opencode-ai-minimax-m3")?.efforts, ["high", "max"]);
+  assert.equal(multiProviderChoices.find((model) => model.alias === "opencode-ai-minimax-m3")?.defaultThinking, "high");
   assert.equal(multiProviderChoices.some((model) => model.alias === "opencode-ai/minimax-m2.7"), false);
 }
 
@@ -2614,6 +2874,24 @@ function testDesktopUsagePresentation(): void {
   assert.equal(mixedSummary.unpricedCalls, 1);
   assert.equal(formatUsageCost(mixedSummary), "未知");
   assert.equal(formatTurnCost(unpricedUsage), "费用未知");
+
+  assert.deepEqual(formatContextUsage({
+    usedTokens: 5_561,
+    contextWindow: 1_000_000,
+    inputBudgetTokens: 950_000,
+    reservedTokens: 50_000,
+    toolTokens: 1_024,
+    otherTokens: 48_976
+  }), {
+    percent: 1,
+    used: "5,561",
+    max: "1,000,000",
+    actual: "5,561",
+    available: "944,439",
+    reserved: "50,000",
+    tool: "1,024",
+    other: "48,976"
+  });
 
   const replayedTurnUsage: SessionUsage = {
     ...unpricedUsage,

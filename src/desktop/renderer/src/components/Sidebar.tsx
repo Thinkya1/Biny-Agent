@@ -21,7 +21,7 @@ type SidebarSectionName = "pinned" | "projects" | "dialogue";
 type ProjectSort = "priority" | "recent" | "manual";
 type ProjectDragPlacement = "before" | "after";
 type FloatingMenuAnchor = { readonly current: HTMLElement | null };
-type SidebarNavAction = "newTask" | "runtime" | "extensions" | "settings" | "search";
+type SidebarNavAction = "newTask" | "runtime" | "extensions" | "mcp" | "settings" | "search";
 
 const SIDEBAR_NAV_ITEMS: ReadonlyArray<{
   action: SidebarNavAction;
@@ -31,6 +31,7 @@ const SIDEBAR_NAV_ITEMS: ReadonlyArray<{
   { action: "newTask", icon: "edit", label: "新建任务" },
   { action: "runtime", icon: "activity", label: "自动化" },
   { action: "extensions", icon: "plug", label: "技能" },
+  { action: "mcp", icon: "server", label: "MCP 服务器" },
   { action: "search", icon: "search", label: "搜索" }
 ];
 
@@ -67,6 +68,7 @@ interface SidebarProps {
   onRemoveProject(projectId: string): void;
   onOpenRuntime(): void;
   onExtensions(): void;
+  onMcp(): void;
   onSearch(): void;
   onSettings(): void;
   onResizeKeyDown: React.KeyboardEventHandler<HTMLDivElement>;
@@ -104,6 +106,7 @@ export const Sidebar = memo(function Sidebar({
   onRemoveProject,
   onOpenRuntime,
   onExtensions,
+  onMcp,
   onSearch,
   onSettings,
   onResizeKeyDown,
@@ -268,6 +271,7 @@ export const Sidebar = memo(function Sidebar({
     newTask: createTask,
     runtime: onOpenRuntime,
     extensions: onExtensions,
+    mcp: onMcp,
     search: onSearch,
     settings: onSettings
   };

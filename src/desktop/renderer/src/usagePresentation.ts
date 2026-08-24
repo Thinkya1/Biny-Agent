@@ -8,6 +8,20 @@ import { summarizeUsage } from "../../../observability/usage.js";
 import type { SessionUsage, UsageSummary } from "../../../session/metadata.js";
 import type { TimelineTurn } from "./sessionTimeline.js";
 
+export interface ContextUsage {
+  usedTokens: number;
+  /** 模型官方声明的完整上下文窗口，用于主展示分母。 */
+  contextWindow: number;
+  /** 按模型有效窗口比例与 provider/用户上限收敛后的可用输入预算。 */
+  inputBudgetTokens?: number;
+  /** 原始窗口中的 Codex 风格 headroom；不计入已使用 token。 */
+  reservedTokens?: number;
+  /** 工具 schema 的解释性预留，不计入已使用 token。 */
+  toolTokens?: number;
+  /** 除工具 schema 外的解释性预留，不计入已使用 token。 */
+  otherTokens?: number;
+}
+
 export function summarizeTimelineUsage(turns: readonly TimelineTurn[]): UsageSummary {
   const records: SessionUsage[] = [];
   for (const turn of turns) {
@@ -30,6 +44,37 @@ export function formatTurnCost(usage: Pick<SessionUsage, "costUsd" | "pricingKno
 
 export function formatTokenCount(tokens: number): string {
   return tokens.toLocaleString("zh-CN");
+}
+
+export function formatContextUsage(usage?: ContextUsage): {
+  percent: number;
+  used: string;
+  max: string;
+  actual: string;
+  available: string;
+  reserved?: string;
+  tool?: string;
+  other?: string;
+} | undefined {
+  if (!usage || usage.contextWindow <= 0 || usage.usedTokens <= 0) return undefined;
+  const inputBudgetTokens = Math.max(1, Math.min(
+    usage.contextWindow,
+    usage.inputBudgetTokens ?? usage.contextWindow
+  ));
+  const usedTokens = Math.max(0, usage.usedTokens);
+  const reservedTokens = Math.max(0, usage.reservedTokens ?? usage.contextWindow - inputBudgetTokens);
+  const toolTokens = Math.min(reservedTokens, Math.max(0, usage.toolTokens ?? 0));
+  const otherTokens = Math.max(0, Math.min(reservedTokens - toolTokens, usage.otherTokens ?? reservedTokens - toolTokens));
+  return {
+    percent: Math.min(100, Math.round((usedTokens / inputBudgetTokens) * 100)),
+    used: usedTokens.toLocaleString("en-US"),
+    max: usage.contextWindow.toLocaleString("en-US"),
+    actual: usedTokens.toLocaleString("en-US"),
+    available: Math.max(0, inputBudgetTokens - usedTokens).toLocaleString("en-US"),
+    reserved: reservedTokens > 0 ? reservedTokens.toLocaleString("en-US") : undefined,
+    tool: toolTokens > 0 ? toolTokens.toLocaleString("en-US") : undefined,
+    other: otherTokens > 0 ? otherTokens.toLocaleString("en-US") : undefined
+  };
 }
 
 export function formatCacheHitRate(rate: number | undefined): string {

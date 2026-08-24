@@ -46,10 +46,13 @@ export function PermissionMenu({ anchorRef, mode, open, onChange }: {
       <div role="menu">
         <div className="popover-heading">权限模式</div>
         {permissionOptions.map((option) => (
-          <button className={`menu-option${option.mode === mode ? " is-selected" : ""}`} key={option.mode} onClick={() => onChange(option.mode)} role="menuitemradio" type="button">
-            <span className="menu-check">{option.mode === mode ? <Icon name="check" size={14} /> : null}</span>
-            <span className="menu-option-copy"><strong>{option.label}</strong><small>{option.description}</small></span>
-            {option.risk ? <span className="risk-label">{option.risk}</span> : null}
+          <button aria-checked={option.mode === mode} className={`menu-option permission-option permission-option-${option.mode}${option.mode === mode ? " is-selected" : ""}`} key={option.mode} onClick={() => onChange(option.mode)} role="menuitemradio" type="button">
+            <span className={`permission-option-icon is-${option.mode}`}><Icon name={option.icon} size={18} /></span>
+            <span className="menu-option-copy permission-option-copy"><strong>{option.label}</strong><small>{option.description}</small></span>
+            <span className="permission-option-trailing">
+              {option.risk ? <span className="risk-label">{option.risk}</span> : null}
+              <span className="permission-option-check"><Icon name="check" size={16} /></span>
+            </span>
           </button>
         ))}
       </div>

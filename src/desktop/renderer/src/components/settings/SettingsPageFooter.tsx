@@ -1,16 +1,16 @@
 /** 设置中心固定底栏：统一展示草稿状态并提交整个设置事务。 */
-export type SettingsSaveState = "clean" | "dirty" | "invalid" | "saving" | "rolling_back" | "recovery_required";
+import type { SettingsSaveState } from "./SettingsDraftContext.js";
 
 export function SettingsPageFooter({
   dirtyCount,
   disabled,
-  onClose,
+  onCancel,
   onSave,
   state
 }: {
   dirtyCount: number;
   disabled: boolean;
-  onClose(): void;
+  onCancel(): void;
   onSave(): void;
   state: SettingsSaveState;
 }): React.JSX.Element {
@@ -19,13 +19,13 @@ export function SettingsPageFooter({
     <footer className="settings-page-footer">
       <span aria-live="polite" className={`settings-save-status is-${state}`} role="status">{status}</span>
       <span className="settings-footer-actions">
-        <button className="ghost-button" disabled={state === "saving" || state === "rolling_back"} onClick={onClose} type="button">关闭</button>
+        <button className="ghost-button" disabled={state === "saving" || state === "rolling_back"} onClick={onCancel} type="button">取消</button>
         <button
           disabled={disabled || dirtyCount === 0 || state === "invalid" || state === "saving" || state === "rolling_back" || state === "recovery_required"}
           onClick={onSave}
           type="button"
         >
-          {state === "saving" ? "保存中…" : state === "rolling_back" ? "回滚中…" : "保存全部"}
+          {state === "saving" ? "保存中…" : state === "rolling_back" ? "回滚中…" : "保存"}
         </button>
       </span>
     </footer>
@@ -37,6 +37,6 @@ function settingsSaveStatus(state: SettingsSaveState, dirtyCount: number): strin
   if (state === "saving") return "保存中…";
   if (state === "rolling_back") return "回滚中…";
   if (state === "recovery_required") return "需要恢复设置后才能继续";
-  if (state === "dirty" || dirtyCount > 0) return `${String(dirtyCount)} 项未保存`;
-  return "所有设置已保存";
+  if (state === "dirty" || dirtyCount > 0) return "未保存的更改";
+  return "所有更改已保存";
 }

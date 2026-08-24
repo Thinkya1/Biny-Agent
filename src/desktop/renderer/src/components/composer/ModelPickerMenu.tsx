@@ -12,14 +12,13 @@ import type { ThinkingSelection } from "../../../../../llm/modelThinking.js";
 import { catalogForConnection } from "../../providerCatalog.js";
 import { useClosingPresence } from "../../useClosingPresence.js";
 import { Icon } from "../Icon.js";
-import { ProviderBrandGlyph } from "../ProviderBrandGlyph.js";
 
 type PickerSection = "model" | "thinking";
 
 interface ModelGroup {
-  iconTone: string;
   key: string;
   label: string;
+  providerAlias: string;
   models: ModelChoice[];
 }
 
@@ -33,8 +32,8 @@ interface ParentPosition extends SubmenuPosition {
 }
 
 const VIEWPORT_PADDING = 8;
-const SUBMENU_GAP = 6;
-const SUBMENU_MAX_HEIGHT = 460;
+const SUBMENU_GAP = 2;
+const SUBMENU_MAX_HEIGHT = 400;
 
 export function ModelPickerMenu({
   anchorRef,
@@ -46,7 +45,8 @@ export function ModelPickerMenu({
   onSelectModel,
   onSelectThinking,
   open,
-  thinkingLevels
+  thinkingLevels,
+  unsetLabel
 }: {
   anchorRef: RefObject<HTMLElement | null>;
   currentAlias?: string;
@@ -58,9 +58,10 @@ export function ModelPickerMenu({
   onSelectThinking(thinking: ThinkingSelection): void;
   open: boolean;
   thinkingLevels: ThinkingSelection[];
+  unsetLabel?: string;
 }): React.JSX.Element | null {
   const presence = useClosingPresence(open);
-  const [activeSection, setActiveSection] = useState<PickerSection>("model");
+  const [activeSection, setActiveSection] = useState<PickerSection>();
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
   const [parentPosition, setParentPosition] = useState<ParentPosition>();
   const [submenuPosition, setSubmenuPosition] = useState<SubmenuPosition>();
@@ -74,11 +75,10 @@ export function ModelPickerMenu({
     setPortalTarget(anchorRef.current?.closest("dialog") ?? document.body);
   }, [anchorRef]);
 
-  useEffect(() => {
-    if (open) {
-      setActiveSection("model");
-      return;
-    }
+  useLayoutEffect(() => {
+    if (!open) return;
+    // 在浏览器绘制新一轮菜单前清空上一次的子菜单，避免重新打开时先闪过模型列表。
+    setActiveSection(undefined);
     setParentPosition(undefined);
     setSubmenuPosition(undefined);
   }, [open]);
@@ -120,8 +120,8 @@ export function ModelPickerMenu({
       const surfaceRect = surface?.getBoundingClientRect();
       const gap = 8;
       // 首帧菜单还没有完成布局时使用 CSS 的稳定尺寸，避免因为 width/height 为 0
-      // 把菜单永久留在 -10000px；这也是模型目录较长时父面板偶发消失的根因。
-      const width = surface?.offsetWidth || surfaceRect?.width || 288;
+      // 让定位计算失去参照；完成定位前由 parentStyle 隐藏面板。
+      const width = surface?.offsetWidth || surfaceRect?.width || 232;
       const height = surface?.offsetHeight || surfaceRect?.height || 96;
       const roomAbove = anchorRect.top - gap;
       const roomBelow = window.innerHeight - anchorRect.bottom - gap;
@@ -160,10 +160,12 @@ export function ModelPickerMenu({
       window.removeEventListener("scroll", updatePosition, true);
       resizeObserver?.disconnect();
     };
-  }, [anchorRef, portalTarget, presence.present, thinkingLevels.length]);
+  }, [anchorRef, open, portalTarget, presence.present, thinkingLevels.length]);
 
   useLayoutEffect(() => {
-    if (!presence.present || !activeSection) {
+    // 一级菜单还没有完成定位时，不给子菜单计算临时坐标；否则子菜单会被 clamp
+    // 到视口左上角，并在关闭退场时出现一次错误闪烁。
+    if (!presence.present || !parentPosition || !activeSection) {
       setSubmenuPosition(undefined);
       return;
     }
@@ -177,7 +179,7 @@ export function ModelPickerMenu({
       const submenuRect = submenu.getBoundingClientRect();
       const width = submenu.offsetWidth || submenuRect.width;
       // Portal 根节点在 fixed + max-height 的首帧可能报告内容总高度，而真正可见区域
-      // 已由 CSS 限制为 460px；定位必须使用可见高度，否则 maxTop 会退化成 8px。
+      // 已由 CSS 限制为 400px；定位必须使用可见高度，否则 maxTop 会退化成 8px。
       const measuredHeight = submenu.offsetHeight || submenuRect.height || SUBMENU_MAX_HEIGHT;
       const height = Math.min(measuredHeight, SUBMENU_MAX_HEIGHT, window.innerHeight - VIEWPORT_PADDING * 2);
       if (!width || !height) return;
@@ -187,14 +189,9 @@ export function ModelPickerMenu({
       const rightLeft = parentRect.right + SUBMENU_GAP;
       const leftLeft = parentRect.left - SUBMENU_GAP - width;
       const preferredLeft = rightLeft <= maxLeft || leftLeft < VIEWPORT_PADDING ? rightLeft : leftLeft;
-      const roomAbove = parentRect.top - SUBMENU_GAP;
-      const roomBelow = window.innerHeight - parentRect.bottom - SUBMENU_GAP;
-      const placeAbove = roomAbove >= height || roomAbove >= roomBelow;
-      // 子菜单优先贴在父面板上方/下方，而不是垂直居中。长列表放不下时只夹到视口
-      // 边界并在自身内部滚动，避免出现截图中“父面板在底部、列表跑到顶部”的断裂。
-      const preferredTop = placeAbove
-        ? parentRect.top - height - SUBMENU_GAP
-        : parentRect.bottom + SUBMENU_GAP;
+      // 子菜单与一级菜单顶部对齐；组合定位已经为它们预留了共同的垂直空间，长列表
+      // 只在自身内部滚动，避免出现截图中“父面板在底部、列表跑到顶部”的断裂。
+      const preferredTop = parentRect.top;
       setSubmenuPosition((current) => {
         const next = {
           left: clamp(preferredLeft, VIEWPORT_PADDING, maxLeft),
@@ -225,25 +222,27 @@ export function ModelPickerMenu({
       window.removeEventListener("scroll", updatePosition, true);
       resizeObserver?.disconnect();
     };
-  }, [activeSection, groups, models, parentPosition, portalTarget, presence.present, thinkingLevels]);
+  }, [activeSection, models, open, parentPosition, portalTarget, presence.present, thinkingLevels]);
 
   if (typeof document === "undefined" || !presence.present) return null;
 
   const parentStyle: CSSProperties = {
     bottom: "auto",
-    left: parentPosition?.left ?? -10000,
+    left: parentPosition?.left,
     maxHeight: "calc(100vh - 16px)",
     maxWidth: "calc(100vw - 16px)",
     position: "fixed",
     right: "auto",
-    top: parentPosition?.top ?? -10000,
+    top: parentPosition?.top,
     visibility: parentPosition ? "visible" : "hidden",
     zIndex: 160
   };
   const submenuStyle: CSSProperties = {
-    left: submenuPosition?.left ?? -10000,
+    bottom: "auto",
+    left: submenuPosition?.left,
     position: "fixed",
-    top: submenuPosition?.top ?? -10000,
+    right: "auto",
+    top: submenuPosition?.top,
     visibility: submenuPosition ? "visible" : "hidden",
     zIndex: 161
   };
@@ -255,69 +254,118 @@ export function ModelPickerMenu({
           className={`composer-popover cindy-composer-popover model-picker-popover ${presenceClass(presence.phase)}`}
           data-origin={parentPosition?.origin ?? "bottom-left"}
           data-popover-phase={presence.phase}
-        ref={parentSurfaceRef}
+          ref={parentSurfaceRef}
           style={parentStyle}
         >
           <div aria-label="模型与推理强度" className="model-picker-primary" ref={primaryRef} role="menu">
-            <button
+            <div
               aria-expanded={activeSection === "model"}
               aria-haspopup="menu"
               className={`model-picker-entry${activeSection === "model" ? " is-active" : ""}`}
-              onFocus={() => setActiveSection("model")}
-              onClick={() => setActiveSection("model")}
-              type="button"
+              onMouseEnter={() => setActiveSection("model")}
+              role="menuitem"
             >
               <span className="model-picker-entry-label">模型</span>
               <span className="model-picker-entry-value">{currentModelName}</span>
               <Icon name="chevron" size={12} />
-            </button>
+            </div>
             {thinkingLevels.length ? (
-              <button
+              <div
                 aria-expanded={activeSection === "thinking"}
                 aria-haspopup="menu"
                 className={`model-picker-entry${activeSection === "thinking" ? " is-active" : ""}`}
-                onFocus={() => setActiveSection("thinking")}
-                onClick={() => setActiveSection("thinking")}
-                type="button"
+                onMouseEnter={() => setActiveSection("thinking")}
+                role="menuitem"
               >
                 <span className="model-picker-entry-label">推理强度</span>
                 <span className="model-picker-entry-value">{currentThinking ?? "默认"}</span>
                 <Icon name="chevron" size={12} />
-              </button>
+              </div>
             ) : null}
           </div>
         </div>,
         portalTarget ?? document.body
       )}
-      {createPortal(
-        <div
-          aria-label={activeSection === "model" ? "选择模型" : "选择推理强度"}
-          className={`composer-popover model-picker-submenu-portal ${presenceClass(presence.phase)}`}
-          data-composer-menu="model"
-          data-popover-phase={presence.phase}
-          ref={submenuRef}
-          role="menu"
-          style={submenuStyle}
-        >
-          {activeSection === "model" ? (
-            <ModelSubmenu currentAlias={currentAlias} groups={groups} onSelect={onSelectModel} />
-          ) : (
-            <ThinkingSubmenu current={currentThinking} levels={thinkingLevels} onSelect={onSelectThinking} />
-          )}
-        </div>,
-        portalTarget ?? document.body
-      )}
+      {activeSection
+        ? createPortal(
+            <div
+              aria-label={activeSection === "model" ? "选择模型" : "选择推理强度"}
+              className={`composer-popover cindy-composer-popover model-picker-submenu-portal ${presenceClass(presence.phase)}`}
+              data-composer-menu="model"
+              data-popover-phase={presence.phase}
+              ref={submenuRef}
+              role="menu"
+              style={submenuStyle}
+            >
+              {activeSection === "model" ? (
+                <ModelSubmenu currentAlias={currentAlias} groups={groups} onSelect={onSelectModel} unsetLabel={unsetLabel} />
+              ) : (
+                <ThinkingSubmenu current={currentThinking} levels={thinkingLevels} onSelect={onSelectThinking} />
+              )}
+            </div>,
+            portalTarget ?? document.body
+          )
+        : null}
     </>
   );
 }
 
-function ModelSubmenu({ currentAlias, groups, onSelect }: { currentAlias?: string; groups: ModelGroup[]; onSelect(alias: string): void }): React.JSX.Element {
+function ModelSubmenu({ currentAlias, groups, onSelect, unsetLabel }: { currentAlias?: string; groups: ModelGroup[]; onSelect(alias: string): void; unsetLabel?: string }): React.JSX.Element {
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const filteredGroups = useMemo(() => filterModelGroups(groups, query), [groups, query]);
+  const duplicateLabels = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const group of groups) counts.set(group.label, (counts.get(group.label) ?? 0) + 1);
+    return new Set([...counts].filter(([, count]) => count > 1).map(([label]) => label));
+  }, [groups]);
+
+  useEffect(() => {
+    window.requestAnimationFrame(() => searchRef.current?.focus());
+  }, []);
+
   return (
     <div className="model-picker-submenu">
       <div className="model-picker-submenu-heading">模型</div>
-      {groups.length ? groups.map((group) => (
+      <label className="model-search model-picker-search">
+        <Icon name="search" size={13} />
+        <input
+          aria-label="搜索模型"
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="搜索模型…"
+          ref={searchRef}
+          type="search"
+          value={query}
+        />
+      </label>
+      {unsetLabel ? (
+        <button
+          aria-checked={currentAlias === undefined}
+          className={`model-picker-submenu-option${currentAlias === undefined ? " is-selected" : ""}`}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            event.stopPropagation();
+            onSelect("");
+          }}
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onSelect("");
+          }}
+          role="menuitemradio"
+          type="button"
+        >
+          <span className="model-picker-option-label"><strong>{unsetLabel}</strong></span>
+          {currentAlias === undefined ? <Icon name="check" size={14} /> : null}
+        </button>
+      ) : null}
+      {filteredGroups.map((group) => (
         <div className="model-picker-submenu-group" key={group.key}>
-          <div className="model-picker-group-heading">{group.label}</div>
+          <div className="model-picker-group-heading">
+            <span>{group.label}</span>
+            {duplicateLabels.has(group.label) ? <small>{group.providerAlias}</small> : null}
+          </div>
           {group.models.map((model) => {
             const selected = model.alias === currentAlias;
             return (
@@ -339,19 +387,14 @@ function ModelSubmenu({ currentAlias, groups, onSelect }: { currentAlias?: strin
                 role="menuitemradio"
                 type="button"
               >
-                <span className="model-picker-option-copy">
-                  <span className="model-picker-option-brand"><ProviderBrandGlyph type={group.iconTone} /></span>
-                  <span className="model-picker-option-label">
-                    <strong>{model.displayName}</strong>
-                    {modelMetadataLabel(model) ? <small>{modelMetadataLabel(model)}</small> : null}
-                  </span>
-                </span>
+                <span className="model-picker-option-label"><strong>{model.displayName}</strong></span>
                 {selected ? <Icon name="check" size={14} /> : null}
               </button>
             );
           })}
         </div>
-      )) : <div className="model-picker-submenu-empty">没有可用模型</div>}
+      ))}
+      {!filteredGroups.length ? <div className="model-picker-submenu-empty">{groups.length ? "没有匹配的模型" : "没有可用模型"}</div> : null}
     </div>
   );
 }
@@ -398,15 +441,28 @@ function groupModels(models: ModelChoice[]): ModelGroup[] {
     );
     const key = `${model.providerType}:${model.provider}:${model.baseUrl ?? ""}`;
     const group = groups.get(key) ?? {
-      iconTone: catalog?.iconTone ?? model.providerType,
       key,
       label: catalog?.label ?? providerLabel(model.provider),
+      providerAlias: model.provider,
       models: []
     };
     group.models.push(model);
     groups.set(key, group);
   }
   return [...groups.values()];
+}
+
+function filterModelGroups(groups: ModelGroup[], query: string): ModelGroup[] {
+  const normalized = query.trim().toLocaleLowerCase();
+  if (!normalized) return groups;
+  return groups.flatMap((group) => {
+    const providerText = `${group.label} ${group.providerAlias}`.toLocaleLowerCase();
+    if (providerText.includes(normalized)) return [group];
+    const filteredModels = group.models.filter((model) => (
+      `${model.displayName} ${model.alias} ${model.model}`.toLocaleLowerCase().includes(normalized)
+    ));
+    return filteredModels.length ? [{ ...group, models: filteredModels }] : [];
+  });
 }
 
 function providerLabel(provider: string): string {
@@ -423,21 +479,6 @@ function providerLabel(provider: string): string {
     qwen: "Qwen"
   };
   return labels[provider.toLocaleLowerCase()] ?? provider;
-}
-
-function modelMetadataLabel(model: ModelChoice): string | undefined {
-  const parts: string[] = [];
-  if (model.contextWindow) parts.push(formatContextWindow(model.contextWindow));
-  if (model.efforts.length) parts.push(model.efforts.join("/"));
-  return parts.length ? parts.join(" · ") : undefined;
-}
-
-function formatContextWindow(tokens: number): string {
-  if (tokens >= 1_000_000) {
-    const millions = tokens / 1_000_000;
-    return `${millions >= 10 ? Math.round(millions) : millions.toFixed(1).replace(/\.0$/u, "")}M`;
-  }
-  return `${Math.round(tokens / 1_000)}K`;
 }
 
 function clamp(value: number, min: number, max: number): number {
