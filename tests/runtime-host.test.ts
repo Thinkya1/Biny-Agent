@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { promises as fs } from "node:fs";
+import { cp, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AgentRuntimeUpdate, InteractiveRuntimeSnapshot } from "../src/runtime/agentEvents.js";
@@ -130,6 +131,8 @@ async function main(): Promise<void> {
       return true;
     },
     answerPermission: () => undefined,
+    claimSession: async () => undefined,
+    releaseSessionClaim: async () => undefined,
     resumeSession: async () => { throw new Error("not used"); },
     runExclusiveOperation: async (operation, execute) => {
       exclusiveOperations.push(operation);
@@ -166,6 +169,13 @@ async function main(): Promise<void> {
           thinking: nextThinking
         };
       },
+      setPermissionMode: async (mode: InteractiveRuntimeSnapshot["permissionMode"]) => {
+        currentSnapshot = {
+          ...currentSnapshot,
+          revision: currentSnapshot.revision + 1,
+          permissionMode: mode
+        };
+      },
       getPersonalizationState: async () => personalizationState(),
       updateChatPersonalization: async (_patch: unknown, expectedRevision: string) => {
         chatExpectedRevision = expectedRevision;
@@ -197,15 +207,9 @@ async function main(): Promise<void> {
           entryCount: 0,
           candidateCount: 0,
           indexChars: 0,
-          origins: { user: 0, currentWorkspace: 0, otherWorkspaces: 0 },
-          scopes: {
-            global: { scope: "global", revision: 3, entryCount: 0, candidateCount: 0, indexChars: 0 },
-            project: { scope: "project", revision: 7, entryCount: 0, candidateCount: 0, indexChars: 0 }
-          },
-          revision: { global: 3, project: 7 }
+          origins: { user: 0, currentWorkspace: 0, otherWorkspaces: 0 }
         }),
-        listMemoryEntries: async () => ({ entries: [], storeRevision: 7, revision: { global: 7, project: 7 } }),
-        listStoredEntries: async () => ({ entries: [], revision: { global: 3, project: 7 } }),
+        listMemoryEntries: async () => ({ entries: [], storeRevision: 7 }),
         writeEntry: async (_entry: unknown, options: { expectedRevision: number }) => {
           memoryExpectedRevision = options.expectedRevision;
           return { written: true, revision: options.expectedRevision + 1, entry: { id: "memory-entry-1" } };
@@ -229,7 +233,17 @@ async function main(): Promise<void> {
       cancelMemoryEmbeddingRebuild: () => true
     }
   } as unknown as CommandRuntime;
+  const hostPaths = runtimeHostPaths(workspace);
+  const attackerRegistration = path.join(workspace, "attacker-registration.json");
+  await fs.mkdir(path.dirname(hostPaths.registrationPath), { recursive: true });
+  await fs.writeFile(attackerRegistration, "attacker-registration\n");
+  await symlink(attackerRegistration, hostPaths.registrationPath);
   const host = await startRuntimeHost(workspace, runtime, commands);
+  assert.equal(await readFile(attackerRegistration, "utf8"), "attacker-registration\n", "registration writes must replace a symlink, not follow it");
+  const hostDirectory = await fs.lstat(path.dirname(hostPaths.endpoint));
+  assert.equal(hostDirectory.mode & 0o077, 0, "Runtime Host directory must not be group/world accessible");
+  const hostSocket = await fs.lstat(hostPaths.endpoint);
+  assert.equal(hostSocket.mode & 0o077, 0, "Runtime Host socket must not be group/world accessible");
   assert.equal(interruptedStarts, 0, "普通 Host 启动不得自动恢复中断回合");
   const client = await connectRuntimeHost(workspace, { clientId: "test-client", surface: "tui" });
   assert.ok(client);
@@ -238,6 +252,7 @@ async function main(): Promise<void> {
   assert.equal(client.hostInfo?.hostEpoch, host.info.hostEpoch);
   assert.equal(client.hostInfo?.capabilities.includes("personalization"), true);
   assert.equal(client.hostInfo?.capabilities.includes("memory.v3"), true);
+  assert.equal(client.hostInfo?.capabilities.includes("telos.v1"), true);
   assert.equal(client.hostInfo?.capabilities.includes("memory.v2"), false);
 
   const isolatedAgentRoot = path.join(workspace, "isolated-agent");
@@ -328,6 +343,18 @@ async function main(): Promise<void> {
   assert.equal((await modelUpdate).snapshot.info.thinking, "max", "模型切换必须广播给已连接的 TUI/App");
   assert.equal(client.getSnapshot().info.thinking, "max");
 
+  const permissionUpdate = new Promise<AgentRuntimeUpdate>((resolve) => {
+    const unsubscribe = client.subscribe((update) => {
+      if (update.snapshot.permissionMode === "full-access") {
+        unsubscribe();
+        resolve(update);
+      }
+    });
+  });
+  await client.setPermissionMode("full-access");
+  assert.equal((await permissionUpdate).snapshot.permissionMode, "full-access", "权限切换必须广播给已连接的 TUI/App");
+  assert.equal(client.getSnapshot().permissionMode, "full-access");
+
   assert.equal((await client.getPersonalizationState()).catalogRevision, "catalog-revision-1");
   await client.updateChatPersonalization({ personality: "friendly" }, "catalog-revision-1");
   assert.equal(chatExpectedRevision, "catalog-revision-1");
@@ -399,6 +426,12 @@ async function main(): Promise<void> {
   const secondClient = await connectRuntimeHost(workspace, { clientId: "test-client-2", surface: "desktop" });
   assert.ok(secondClient);
   assert.equal(secondClient.getSnapshot().info.sessionId, "session-host-test");
+  await client.claimSession("session-host-test");
+  await assert.rejects(
+    secondClient.claimSession("session-host-test"),
+    /already open in another tui client/u
+  );
+  await client.releaseSessionClaim("session-host-test");
   const replayedTypes: string[] = [];
   const unsubscribeReplay = secondClient.subscribe((replayed) => {
     if (replayed.event) replayedTypes.push(replayed.event.type);
@@ -414,6 +447,25 @@ async function main(): Promise<void> {
   await waitUntil(() => embeddingRebuilds === 3);
   await explicitResumeHost.close();
   assert.equal(await connectRuntimeHost(workspace, { clientId: "after-close", surface: "tui" }), undefined);
+
+  const incompatibleRegistration = {
+    protocolVersion: 2,
+    endpoint: hostPaths.endpoint,
+    rootHash: hostPaths.rootHash,
+    persistenceRoot: workspace,
+    hostEpoch: "old-host-epoch",
+    token: "old-host-token",
+    pid: process.pid,
+    createdAt: new Date().toISOString()
+  };
+  await fs.writeFile(hostPaths.registrationPath, JSON.stringify(incompatibleRegistration), { mode: 0o600 });
+  await fs.chmod(hostPaths.registrationPath, 0o600);
+  await assert.rejects(
+    connectRuntimeHost(workspace, { clientId: "incompatible-client", surface: "tui" }),
+    /protocol 2 is incompatible with 3/u
+  );
+  assert.deepEqual(JSON.parse(await readFile(hostPaths.registrationPath, "utf8")), incompatibleRegistration);
+  await fs.rm(hostPaths.registrationPath);
 
   const spawnedWorkspace = await mkdtemp(path.join(os.tmpdir(), "biny-runtime-host-process-test-"));
   const configDir = path.join(spawnedWorkspace, "config");

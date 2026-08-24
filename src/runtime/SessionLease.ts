@@ -41,14 +41,44 @@ interface LeaseRecord {
   createdAt: string;
 }
 
-export class SessionLeaseError extends Error {
+/**
+ * session 已经被另一个 surface/process 以 writer 身份持有。
+ *
+ * 这个错误在 Runtime Host 和本地 SessionLease 两条路径上共用，
+ * 让 Desktop/TUI 不需要解析一段不稳定的自然语言错误。
+ */
+export class SessionWriterConflictError extends Error {
+  readonly code = "session_writer_conflict" as const;
+
+  constructor(
+    readonly sessionId: string,
+    readonly ownerPid?: number,
+    readonly ownerSurface?: string,
+    message = `Session ${sessionId} is already owned by another writer.`
+  ) {
+    super(message);
+    this.name = "SessionWriterConflictError";
+  }
+}
+
+export class SessionLeaseError extends SessionWriterConflictError {
   constructor(
     readonly pid: number,
     readonly sessionId: string
   ) {
-    super(`Session ${sessionId} is already owned by process ${String(pid)}.`);
+    super(
+      sessionId,
+      pid,
+      undefined,
+      `Session ${sessionId} is already owned by process ${String(pid)}.`
+    );
     this.name = "SessionLeaseError";
   }
+}
+
+export function isSessionWriterConflictError(error: unknown): error is SessionWriterConflictError {
+  return error instanceof SessionWriterConflictError
+    || (error instanceof Error && "code" in error && error.code === "session_writer_conflict");
 }
 
 export class SessionLease {

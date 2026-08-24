@@ -15,7 +15,7 @@ import {
   cloneChatPersonalizationOverride,
   type ChatPersonalizationOverride
 } from "../personalization/index.js";
-import { listSessionSummaries, type SessionSummary } from "./events.js";
+import { listSessionSummaries, readSessionSummary, type SessionSummary } from "./events.js";
 import { ensureAgentDirs } from "./store.js";
 
 const catalogVersion = 1 as const;
@@ -180,23 +180,26 @@ export async function updateSessionCatalogMetadata(
 ): Promise<SessionCatalogRecord> {
   assertSessionId(sessionId);
   const directory = await ensureCatalogDirectory(workspaceRoot);
-  const item = (await listSessionCatalog(workspaceRoot)).find((candidate) => candidate.id === sessionId);
   const target = catalogFilePath(directory, sessionId);
   return await withCatalogRecordLock(directory, sessionId, async () => {
     // expectedRevision 的校验和 patch 合并必须基于锁内重读的版本，否则两个 Desktop
     // 进程可能同时通过校验，再用各自在锁外读到的旧对象互相覆盖。
     const existing = await readCatalogFile(target);
     assertExpectedRevision(sessionId, existing, expectedRevision);
-    if (!item && !existing) throw new Error(`Session not found: ${sessionId}`);
+    const summary = existing === undefined
+      ? await readSessionSummary(workspaceRoot, sessionId).catch((error: unknown) => {
+          if (isNotFound(error)) return undefined;
+          throw error;
+        })
+      : undefined;
+    if (!summary && !existing) throw new Error(`Session not found: ${sessionId}`);
     const now = new Date().toISOString();
     const base = existing ?? {
       version: catalogVersion,
       sessionId,
-      rootSessionId: item?.rootSessionId ?? sessionId,
-      parentSessionId: item?.parentSessionId,
-      branchPoint: item?.branchPoint,
-      createdAt: item?.summary.createdAt ?? now,
-      updatedAt: item?.summary.updatedAt ?? now
+      rootSessionId: sessionId,
+      createdAt: summary?.createdAt ?? now,
+      updatedAt: summary?.updatedAt ?? now
     } satisfies SessionCatalogRecord;
     const next: SessionCatalogRecord = {
       ...base,
@@ -286,8 +289,15 @@ export async function querySessionCatalog(
   workspaceRoot: string,
   options: SessionCatalogQuery = {}
 ): Promise<SessionCatalogPage> {
+  return querySessionCatalogItems(await listSessionCatalog(workspaceRoot), options);
+}
+
+/** 对已经加载的 catalog 做分页，供 workspace 首屏复用同一份 catalog 快照。 */
+export function querySessionCatalogItems(
+  all: readonly SessionCatalogItem[],
+  options: SessionCatalogQuery = {}
+): SessionCatalogPage {
   const limit = normalizePageSize(options.limit);
-  const all = await listSessionCatalog(workspaceRoot);
   const filtered = options.parentSessionId === undefined
     ? all
     : all.filter((item) => item.parentSessionId === options.parentSessionId);

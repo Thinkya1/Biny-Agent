@@ -169,7 +169,32 @@ export class SessionRunLedger {
   }
 
   async latestSessionRun(sessionId: string): Promise<SessionRunRecord | undefined> {
-    return (await this.listSessionRuns(sessionId))[0];
+    return (await this.latestSessionRuns([sessionId])).get(sessionId);
+  }
+
+  /** 一次读取 ledger 目录并返回指定 session 的最新 run，避免列表按 session 重复 readdir。 */
+  async latestSessionRuns(sessionIds: readonly string[]): Promise<Map<string, SessionRunRecord>> {
+    const wanted = new Set(sessionIds);
+    const latest = new Map<string, SessionRunRecord>();
+    if (!wanted.size) return latest;
+    const directory = await this.ensureDirectory();
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const filePath = path.join(directory, entry.name);
+      try {
+        const parsed: unknown = JSON.parse(await fs.readFile(filePath, "utf8"));
+        if (!isSessionRunRecord(parsed) || !wanted.has(parsed.sessionId)) continue;
+        const reconciled = await this.reconcileStale(parsed, filePath);
+        const current = latest.get(reconciled.sessionId);
+        if (current === undefined || compareRunStart(reconciled, current) < 0) {
+          latest.set(reconciled.sessionId, reconciled);
+        }
+      } catch {
+        // 一个坏 ledger 条目不能让整个 session 列表不可用；JSONL 仍是恢复真相。
+      }
+    }
+    return latest;
   }
 
   /** 删除某个 session 的所有运行投影；其它 session 的 ledger 不受影响。 */
@@ -280,6 +305,10 @@ export class SessionRunLedger {
 
 function runFileName(runId: string): string {
   return `${encodeURIComponent(runId)}.json`;
+}
+
+function compareRunStart(left: SessionRunRecord, right: SessionRunRecord): number {
+  return Date.parse(right.startedAt) - Date.parse(left.startedAt) || right.runId.localeCompare(left.runId);
 }
 
 function isSessionRunRecord(value: unknown): value is SessionRunRecord {

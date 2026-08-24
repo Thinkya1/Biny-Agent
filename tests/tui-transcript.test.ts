@@ -24,7 +24,6 @@ import {
 } from "../src/tui/components/chrome.js";
 import {
   ctrlCAction,
-  isCardCapableCommand,
   isDoubleCtrlC,
   memoryPolicyOptionForOverride,
   memoryPolicySelectOptions,
@@ -150,7 +149,6 @@ async function main(): Promise<void> {
   testDoubleCtrlCGuard();
   testAutocompleteEnterOnlyConfirmsSkillSelection();
   await testSlashAutocompleteInsertsSingleSlash();
-  testCardCapableCommandDetection();
   testThemeTokensResolveToAnsi();
   testTranscriptViewSyncsIncrementally();
   testAssistantMarkdownRendersBlocks();
@@ -220,22 +218,6 @@ function testAutocompleteEnterOnlyConfirmsSkillSelection(): void {
   assert.equal(shouldConfirmAutocompleteOnEnter("\r", true, "/model"), false);
   assert.equal(shouldConfirmAutocompleteOnEnter("\r", false, "/skill:demo"), false);
   assert.equal(shouldConfirmAutocompleteOnEnter("\t", true, "/skill:demo"), false);
-}
-
-function testCardCapableCommandDetection(): void {
-  assert.equal(isCardCapableCommand("/status", []), true);
-  assert.equal(isCardCapableCommand("/usage", []), true);
-  assert.equal(isCardCapableCommand("/skills", []), true);
-  assert.equal(isCardCapableCommand("/plugins", []), true);
-  assert.equal(isCardCapableCommand("/mcp", []), true);
-  // /mcp reconnect 和 /subagent 的任务/取消路径不产出卡片。
-  assert.equal(isCardCapableCommand("/mcp", ["reconnect", "server"]), false);
-  assert.equal(isCardCapableCommand("/subagent", ["status"]), true);
-  assert.equal(isCardCapableCommand("/subagent", ["agents"]), true);
-  assert.equal(isCardCapableCommand("/subagent", ["--", "inspect"]), false);
-  assert.equal(isCardCapableCommand("/subagent", ["cancel", "task-1"]), false);
-  assert.equal(isCardCapableCommand("/tasks", []), false);
-  assert.equal(isCardCapableCommand("/compact", []), false);
 }
 
 function testModelThinkingOptionsUseModelCapabilities(): void {
@@ -386,9 +368,11 @@ function testStatusReportUsesRuntimeAndContextFields(): void {
     memoryEnabled: false,
     memoryTopics: [],
     memoryRecall: {
-      included: { global: 1, project: 2 },
-      trimmed: { global: 0, project: 1 },
-      omitted: [{ scope: "project", id: "entry-3", reason: "budget" }],
+      origins: {
+        included: { user: 1, currentWorkspace: 2, otherWorkspaces: 0 },
+        trimmed: { user: 0, currentWorkspace: 1, otherWorkspaces: 0 }
+      },
+      omitted: [{ origin: { kind: "workspace", workspaceId: "a".repeat(24), workspaceName: "workspace" }, id: "entry-3", reason: "budget" }],
       budgetOmission: { maxChars: 12_000, usedChars: 11_500, omitted: 1 }
     }
   };
@@ -414,7 +398,7 @@ function testStatusReportUsesRuntimeAndContextFields(): void {
   assert.match(report, /Input budget: 12,345 \/ 981,056/u);
   assert.match(report, /Input measurement: estimated 12,600; provider 12,345; delta -255/u);
   assert.match(report, /Instructions: 1 loaded/u);
-  assert.match(report, /Memory recall: included global=1, project=2; trimmed global=0, project=1; omitted global=0, project=1/u);
+  assert.match(report, /Memory recall: included user=1, current=2, other=0; trimmed user=0, current=1, other=0; omitted=1/u);
   assert.match(report, /Memory budget: 11,500\/12,000 chars; 1 omitted/u);
   assert.doesNotMatch(report, /^Context$/mu);
 }

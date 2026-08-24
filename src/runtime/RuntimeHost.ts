@@ -7,14 +7,20 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { constants, promises as fs, type Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentAttachment, AgentRunMode, ResumedAgentSession } from "../agent/AgentSession.js";
-import type { ContextStatus, MemoryEntry as LegacyMemoryEntry } from "../agent/context/types.js";
+import type { ContextStatus } from "../agent/context/types.js";
+import type {
+  BehaviorPatternReviewAction,
+  TelosDocumentInput,
+  TelosDriftResolutionAction,
+  TelosScope
+} from "../agent/context/telosTypes.js";
 import type {
   MemoryEntryInput,
   MemoryEntryPatch,
@@ -67,8 +73,9 @@ import { executeRuntimeCommand } from "./commands.js";
 import { listSessionSummaries } from "../session/events.js";
 import { ensureAgentDirs, sessionIdFromFile } from "../session/store.js";
 import { TurnStore } from "../session/turnStore.js";
+import { SessionWriterConflictError } from "./SessionLease.js";
 
-const protocolVersion = 2;
+const protocolVersion = 3;
 const eventHistoryLimit = 4_000;
 const maxFrameBytes = 8 * 1024 * 1024;
 const reconnectDelayMs = 250;
@@ -76,6 +83,7 @@ const maxUnixSocketPathLength = 90;
 const hostStartupTimeoutMs = 8_000;
 const hostJournalFile = "runtime-host-events.jsonl";
 const memoryMaintenanceIntervalMs = 60 * 60 * 1_000;
+const runtimeHostDirectoryName = "biny-runtime-host";
 
 const hostCapabilities = [
   "runtime.authority",
@@ -88,7 +96,8 @@ const hostCapabilities = [
   "agent.graph",
   "capability.channel",
   "personalization",
-  "memory.v3"
+  "memory.v3",
+  "telos.v1"
 ] as const;
 
 type OperationLane = "query" | "mutation" | "admission" | "control" | "run";
@@ -143,7 +152,7 @@ interface HostHelloFrame {
   agentRoot: string;
   clientId: string;
   surface: HostSurface;
-  capabilities?: string[];
+  capabilities: string[];
 }
 
 interface HostRequestFrame {
@@ -159,6 +168,8 @@ interface HostResponseFrame {
   ok: boolean;
   result?: unknown;
   error?: string;
+  errorCode?: string;
+  errorData?: unknown;
 }
 
 interface HostEventFrame {
@@ -279,11 +290,12 @@ export function runtimeHostPaths(persistenceRoot: string): RuntimeHostPaths {
   const rootHash = createHash("sha256").update(resolvedRoot).digest("hex").slice(0, 24);
   const baseName = `biny-${rootHash}`;
   const temporaryRoot = os.tmpdir();
-  const preferred = path.join(temporaryRoot, `${baseName}.sock`);
+  const preferredDirectory = path.join(temporaryRoot, runtimeHostDirectoryName);
+  const fallbackDirectory = path.join("/tmp", runtimeHostDirectoryName);
+  const preferred = path.join(preferredDirectory, `${baseName}.sock`);
   // macOS 的临时目录有时很深，Unix socket 路径过长会直接返回 ENAMETOOLONG。
-  const endpoint = preferred.length <= maxUnixSocketPathLength
-    ? preferred
-    : path.join("/tmp", `${baseName}.sock`);
+  const directory = preferred.length <= maxUnixSocketPathLength ? preferredDirectory : fallbackDirectory;
+  const endpoint = path.join(directory, `${baseName}.sock`);
   return {
     endpoint,
     registrationPath: `${endpoint}.json`,
@@ -299,8 +311,19 @@ export async function connectRuntimeHost(
 ): Promise<RuntimeHostClient | undefined> {
   if (process.platform === "win32") return undefined;
   const paths = runtimeHostPaths(persistenceRoot);
+  await ensureRuntimeHostDirectory(path.dirname(paths.endpoint));
   const registration = await readRegistration(paths);
   if (!registration) return undefined;
+  if (registration.protocolVersion !== protocolVersion) {
+    if (isProcessAlive(registration.pid)) {
+      throw new Error(
+        `Runtime Host protocol ${String(registration.protocolVersion)} is incompatible with ${String(protocolVersion)}. `
+        + "Quit the running Biny Desktop/TUI process before starting this version."
+      );
+    }
+    await removeStaleRegistration(registration);
+    return undefined;
+  }
   const identityMatches = registrationMatchesCurrentEnvironment(registration, options.spawnOptions);
   if (!identityMatches && options.spawnOptions === undefined) return undefined;
   try {
@@ -313,8 +336,8 @@ export async function connectRuntimeHost(
     });
     if (identityMatches) return client;
     try {
-      // 旧 owner 可能来自另一个 BINY_AGENT_DIR。先通过只读 snapshot 确认空闲，
-      // 再沿同一 endpoint 完成替换，保证运行账本始终只有一个 writer。
+      // 已连接的 owner 来自另一个配置环境时，先通过只读 snapshot 确认空闲，
+      // 再沿同一 endpoint 完成接管，保证运行账本始终只有一个 writer。
       await client.restartOwner();
       return client;
     } catch (error) {
@@ -434,6 +457,7 @@ export async function startRuntimeHost(
 ): Promise<RuntimeHostServer> {
   if (process.platform === "win32") throw new Error("Runtime Host currently requires Unix domain sockets.");
   const paths = runtimeHostPaths(persistenceRoot);
+  await ensureRuntimeHostDirectory(path.dirname(paths.endpoint));
   const lock = await acquireHostLock(paths, persistenceRoot);
   const hostEpoch = randomUUID();
   const token = randomUUID();
@@ -474,6 +498,8 @@ export async function startRuntimeHost(
 export class RuntimeHostServer {
   private readonly server = net.createServer((socket) => this.accept(socket));
   private readonly connections = new Set<HostConnection>();
+  /** 一个 owner Runtime 只能同时切换一条 live session；ownership 绑定到具体 client。 */
+  private readonly sessionWriterOwners = new Map<string, { clientId: string; surface: HostSurface }>();
   private readonly history: Array<{ sequence: number; update: AgentRuntimeUpdate }> = [];
   private readonly journalPath: string;
   private sequence = 0;
@@ -623,8 +649,10 @@ export class RuntimeHostServer {
       };
       const onListening = (): void => {
         this.server.off("error", onError);
-        this.listening = true;
-        resolve();
+        void secureRuntimeSocket(this.registration.endpoint).then(() => {
+          this.listening = true;
+          resolve();
+        }, reject);
       };
       this.server.once("error", onError);
       this.server.once("listening", onListening);
@@ -644,6 +672,8 @@ export class RuntimeHostServer {
       if (this.memoryEmbeddingRebuildTimer) clearTimeout(this.memoryEmbeddingRebuildTimer);
       this.memoryEmbeddingRebuildTimer = undefined;
       for (const connection of this.connections) connection.socket.destroy();
+      await Promise.all([...this.sessionWriterOwners.keys()].map(async (sessionId) => await this.runtime.releaseSessionClaim(sessionId)));
+      this.sessionWriterOwners.clear();
       this.connections.clear();
       if (this.listening) {
         await new Promise<void>((resolve) => this.server.close(() => resolve()));
@@ -671,10 +701,12 @@ export class RuntimeHostServer {
     socket.once("close", () => {
       this.connections.delete(connection);
       if (connection.clientId) this.commands.capabilities?.releaseOwner(connection.clientId);
+      void this.releaseSessionWriters(connection.clientId);
     });
     socket.once("error", () => {
       this.connections.delete(connection);
       if (connection.clientId) this.commands.capabilities?.releaseOwner(connection.clientId);
+      void this.releaseSessionWriters(connection.clientId);
     });
   }
 
@@ -803,7 +835,9 @@ export class RuntimeHostServer {
         kind: "response",
         requestId: frame.requestId,
         ok: false,
-        error: publicError(error)
+        error: publicError(error),
+        errorCode: publicErrorCode(error),
+        errorData: publicErrorData(error)
       });
     }
   }
@@ -869,8 +903,15 @@ export class RuntimeHostServer {
             ? this.runtime.steer(input, attachments, ids)
             : this.runtime.followUp(input, attachments, ids);
         });
+      case "session.claim":
+        await this.claimSessionWriter(connection, requiredString(payload.session, "session"));
+        return undefined;
+      case "session.release":
+        await this.releaseSessionWriter(connection, optionalString(payload.session));
+        return undefined;
       case "resume":
         this.assertRevision(payload);
+        await this.claimSessionWriter(connection, requiredString(payload.session, "session"));
         return await this.runtime.resumeSession(requiredString(payload.session, "session"));
       case "start-interrupted": {
         this.assertRevision(payload);
@@ -1177,13 +1218,19 @@ export class RuntimeHostServer {
           "permission",
           async () => await this.commands.agent.setPermissionMode(readPermissionMode(payload.mode))
         );
+        // 权限模式是跨端共享的配置状态；模型切换后已有广播，权限切换也必须让其它
+        // 已连接的 Desktop/TUI 立即收到同一份快照。
+        this.publishSnapshot();
         return this.runtime.getSnapshot().permissionMode;
-      case "agent.permission-command":
+      case "agent.permission-command": {
         this.assertRevision(payload);
-        return await this.runtime.runExclusiveOperation(
+        const permissionCommandResult = await this.runtime.runExclusiveOperation(
           "permission",
           async () => await this.commands.agent.runPermissionCommand(readStringArray(payload.args, "args"))
         );
+        this.publishSnapshot();
+        return permissionCommandResult;
+      }
       case "agent.sessions":
         return await this.commands.agent.listSessions();
       case "personalization.get":
@@ -1214,11 +1261,26 @@ export class RuntimeHostServer {
         return this.commands.listSkills();
       case "skills.expand":
         return await this.commands.expandSkillCommand(requiredString(payload.input, "input"));
+      case "mcp.status":
+        return this.commands.mcp.listServers();
+      case "mcp.details":
+        return await this.commands.mcp.describeServer(requiredString(payload.server, "server"));
+      case "mcp.reconnect":
+        return await this.runtime.runExclusiveOperation(
+          "mcp",
+          async () => await this.commands.mcp.reconnectServer(requiredString(payload.server, "server"))
+        );
       case "memory":
         // 记忆写入与整理不能和活动回合竞争同一 AgentSession。
         return await this.runtime.runExclusiveOperation(
           "memory",
           async () => await this.executeMemory(payload)
+        );
+      case "telos":
+        // TELOS 与事实记忆共用同一个 runtime 独占边界，但使用独立存储和 revision。
+        return await this.runtime.runExclusiveOperation(
+          "telos",
+          async () => await this.executeTelos(payload)
         );
       case "memory.embedding.status-v3":
         return await this.commands.agent.memoryEmbeddingStatus();
@@ -1258,7 +1320,17 @@ export class RuntimeHostServer {
         };
       case "runtime.restart":
         this.assertRevision(payload);
-        return await this.restartRuntime(optionalString(payload.sessionId));
+        {
+          const sessionId = optionalString(payload.sessionId);
+          // 编辑历史消息会先重建对应 AgentSession；它和 resume 一样必须先取得
+          // writer claim，否则第二个 surface 可能在重建后悄悄接管同一份 transcript。
+          if (sessionId !== undefined) await this.claimSessionWriter(connection, sessionId);
+          const result = await this.restartRuntime(sessionId);
+          if (sessionId !== undefined) {
+            this.sessionWriterOwners.set(sessionId, { clientId: connection.clientId, surface: connection.surface });
+          }
+          return result;
+        }
       case "host.info":
         return this.info;
       default:
@@ -1396,6 +1468,47 @@ export class RuntimeHostServer {
     return { hostEpoch: this.registration.hostEpoch, snapshot: this.runtime.getSnapshot(), sequence: this.sequence, replayed, capabilities: hostCapabilities };
   }
 
+  private async claimSessionWriter(connection: HostConnection, session: string): Promise<void> {
+    const sessionId = sessionIdFromFile(session);
+    const foreignOwner = [...this.sessionWriterOwners.entries()].find(([, owner]) => owner.clientId !== connection.clientId);
+    if (foreignOwner) {
+      throw new SessionWriterConflictError(
+        sessionId,
+        this.registration.pid,
+        foreignOwner[1].surface,
+        `Session ${sessionId} is already open in another ${foreignOwner[1].surface} client.`
+      );
+    }
+    const currentOwner = this.sessionWriterOwners.get(sessionId);
+    if (currentOwner?.clientId === connection.clientId) return;
+    await this.releaseSessionWriters(connection.clientId);
+    await this.runtime.claimSession(sessionId);
+    this.sessionWriterOwners.set(sessionId, { clientId: connection.clientId, surface: connection.surface });
+  }
+
+  private async releaseSessionWriter(connection: HostConnection, session?: string): Promise<void> {
+    if (session === undefined) {
+      await this.releaseSessionWriters(connection.clientId);
+      return;
+    }
+    const sessionId = sessionIdFromFile(session);
+    const owner = this.sessionWriterOwners.get(sessionId);
+    if (!owner || owner.clientId !== connection.clientId) return;
+    this.sessionWriterOwners.delete(sessionId);
+    await this.runtime.releaseSessionClaim(sessionId);
+  }
+
+  private async releaseSessionWriters(clientId: string): Promise<void> {
+    if (!clientId) return;
+    const owned = [...this.sessionWriterOwners.entries()]
+      .filter(([, owner]) => owner.clientId === clientId)
+      .map(([sessionId]) => sessionId);
+    for (const sessionId of owned) {
+      this.sessionWriterOwners.delete(sessionId);
+      await this.runtime.releaseSessionClaim(sessionId);
+    }
+  }
+
   private canReplay(afterSequence: number): boolean {
     if (afterSequence >= this.sequence) return true;
     const first = this.history[0]?.sequence;
@@ -1525,17 +1638,44 @@ export class RuntimeHostServer {
       if (result.revision !== expectedRevision) this.scheduleMemoryEmbeddingRebuild();
       return result;
     }
-    if (action !== "list" && action !== "search") this.assertRevision(payload);
-    if (action === "list") return await memory.listEntries();
-    if (action === "search") return await memory.findRelevant(requiredString(payload.query, "query"), [], 8);
-    if (action === "write") return await memory.write(readMemoryEntry(payload.entry));
-    if (action === "delete") return await memory.deleteEntry(requiredString(payload.topic, "topic"), requiredInteger(payload.index, "index"));
-    if (action === "clear") {
-      for (const topic of await memory.listTopics()) await memory.forgetTopic(topic);
-      return undefined;
-    }
-    if (action === "compact") return await memory.compactTopics();
     throw new Error(`Unknown memory operation: ${action}`);
+  }
+
+  private async executeTelos(payload: Record<string, unknown>): Promise<unknown> {
+    const storage = this.commands.agent.getTelosStorage();
+    const action = requiredString(payload.action, "action");
+    if (action === "overview-v1") return await storage.overview();
+    if (action === "save-v1") {
+      return await storage.saveDocument(
+        readTelosDocumentInput(payload.input),
+        requiredInteger(payload.expectedRevision, "expectedRevision")
+      );
+    }
+    if (action === "review-pattern-v1") {
+      return await storage.reviewPattern(
+        requiredString(payload.patternId, "patternId"),
+        readTelosPatternAction(payload.reviewAction),
+        requiredInteger(payload.expectedRevision, "expectedRevision"),
+        { detectDrift: payload.detectDrift !== false }
+      );
+    }
+    if (action === "resolve-drift-v1") {
+      return await storage.resolveDrift(
+        requiredString(payload.driftId, "driftId"),
+        readTelosDriftAction(payload.driftAction),
+        requiredInteger(payload.expectedRevision, "expectedRevision")
+      );
+    }
+    if (action === "snooze-drift-v1") {
+      const until = requiredString(payload.until, "until");
+      if (Number.isNaN(Date.parse(until))) throw new Error("Runtime Host TELOS snooze date is invalid.");
+      return await storage.snoozeDrift(
+        requiredString(payload.driftId, "driftId"),
+        until,
+        requiredInteger(payload.expectedRevision, "expectedRevision")
+      );
+    }
+    throw new Error(`Unknown TELOS operation: ${action}`);
   }
 
   private assertRevision(payload: Record<string, unknown>): void {
@@ -1569,6 +1709,7 @@ export class RuntimeHostServer {
     this.unsubscribe = next.runtime.subscribe((update) => this.handleRuntimeUpdate(update));
     this.commands.graphs.recoverRunningNodes(this.commands.taskRuns);
     await previous.close();
+    this.sessionWriterOwners.clear();
     this.history.splice(0);
     this.publish({ snapshot: this.runtime.getSnapshot() });
     return { snapshot: this.runtime.getSnapshot(), sequence: this.sequence };
@@ -1988,6 +2129,14 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     void this.request("permission", { requestId, result, expectedRevision: this.currentRevision() }).catch((error) => this.reportError(error));
   }
 
+  async claimSession(session: string): Promise<void> {
+    await this.request("session.claim", { session });
+  }
+
+  async releaseSessionClaim(session?: string): Promise<void> {
+    await this.request("session.release", { session });
+  }
+
   async resumeSession(session: string): Promise<ResumedAgentSession> {
     return await this.request<ResumedAgentSession>("resume", { session, expectedRevision: this.currentRevision() });
   }
@@ -2035,10 +2184,6 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   }
 
   async executeCommand(input: string, source: HostSurface): Promise<RuntimeCommandResult | undefined> {
-    const command = input.trim().replace(/^\/+/, "/").split(/\s+/, 1)[0];
-    if (command === "/personality" || command === "/memories") {
-      await this.ensureOwnerCapability("personalization");
-    }
     return await this.request<RuntimeCommandResult | undefined>("command", { input, source, expectedRevision: this.currentRevision() });
   }
 
@@ -2059,20 +2204,12 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   }
 
   async switchModel(alias: string, thinking?: ThinkingSelection): Promise<ModelRuntimeInfo> {
-    try {
-      return await this.request<ModelRuntimeInfo>("agent.switch-model", { alias, thinking, expectedRevision: this.currentRevision() });
-    } catch (error) {
-      // 旧版 detached Host 可能仍在运行；它的协议版本相同，但 thinking schema
-      // 不认识新加入的 max。桌面/TUI 具备 spawn composition root 时，空闲状态下
-      // 先替换 owner，再用同一请求重试，避免让用户手动寻找并结束旧进程。
-      if (!isRuntimeHostThinkingSelectionError(error) || this.options.spawnOptions === undefined) throw error;
-      await this.restartOwner();
-      return await this.request<ModelRuntimeInfo>("agent.switch-model", { alias, thinking, expectedRevision: this.currentRevision() });
-    }
+    return await this.request<ModelRuntimeInfo>("agent.switch-model", { alias, thinking, expectedRevision: this.currentRevision() });
   }
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
-    await this.request("agent.permission-mode", { mode, expectedRevision: this.currentRevision() });
+    const nextMode = await this.request<PermissionMode>("agent.permission-mode", { mode, expectedRevision: this.currentRevision() });
+    if (this.snapshot) this.snapshot = { ...this.snapshot, permissionMode: nextMode };
   }
 
   async runPermissionCommand(args: string[]): Promise<string> {
@@ -2084,33 +2221,21 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   }
 
   async getPersonalizationState(): Promise<AgentPersonalizationState> {
-    return await this.requestWithOwnerCompatibility(
-      "personalization.get",
-      {},
-      "personalization"
-    );
+    return await this.request("personalization.get", {});
   }
 
   async updateChatPersonalization(
     patch: ChatPersonalizationOverridePatch,
     expectedRevision: string
   ): Promise<AgentPersonalizationState> {
-    return await this.requestWithOwnerCompatibility(
-      "personalization.update-chat",
-      { patch, expectedRevision },
-      "personalization"
-    );
+    return await this.request("personalization.update-chat", { patch, expectedRevision });
   }
 
   async updateGlobalPersonalization(
     update: GlobalPersonalizationUpdate,
     expectedRevision: string
   ): Promise<AgentPersonalizationState> {
-    return await this.requestWithOwnerCompatibility(
-      "personalization.update-global",
-      { update, expectedRevision },
-      "personalization"
-    );
+    return await this.request("personalization.update-global", { update, expectedRevision });
   }
 
   async listSkills(): Promise<Awaited<ReturnType<CommandRuntime["listSkills"]>>> {
@@ -2121,37 +2246,40 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     return await this.request<string>("skills.expand", { input });
   }
 
+  async mcpStatus(): Promise<Awaited<ReturnType<CommandRuntime["mcp"]["listServers"]>>> {
+    return await this.request("mcp.status", {});
+  }
+
+  async mcpDetails(server: string): Promise<Awaited<ReturnType<CommandRuntime["mcp"]["describeServer"]>>> {
+    return await this.request("mcp.details", { server });
+  }
+
+  async mcpReconnect(server: string): Promise<Awaited<ReturnType<CommandRuntime["mcp"]["reconnectServer"]>>> {
+    return await this.request("mcp.reconnect", { server });
+  }
+
   async memory<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
     const v3 = action.endsWith("-v3");
-    return await this.requestWithOwnerCompatibility<T>(
+    return await this.request<T>(
       "memory",
-      v3 ? { action, ...payload } : { action, ...payload, expectedRevision: this.currentRevision() },
-      "memory.v3"
+      v3 ? { action, ...payload } : { action, ...payload, expectedRevision: this.currentRevision() }
     );
+  }
+
+  async telos<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
+    return await this.request<T>("telos", { action, ...payload });
   }
 
   async memoryEmbeddingStatus(): Promise<MemoryEmbeddingRuntimeStatus> {
-    return await this.requestWithOwnerCompatibility(
-      "memory.embedding.status-v3",
-      {},
-      "memory.v3"
-    );
+    return await this.request("memory.embedding.status-v3", {});
   }
 
   async downloadMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<MemoryEmbeddingRuntimeStatus> {
-    return await this.requestWithOwnerCompatibility(
-      "memory.embedding.download-v3",
-      { model },
-      "memory.v3"
-    );
+    return await this.request("memory.embedding.download-v3", { model });
   }
 
   async cancelMemoryEmbeddingDownload(model: LocalEmbeddingModelId): Promise<{ cancelled: boolean; status: MemoryEmbeddingRuntimeStatus }> {
-    return await this.requestWithOwnerCompatibility(
-      "memory.embedding.cancel-download-v3",
-      { model },
-      "memory.v3"
-    );
+    return await this.request("memory.embedding.cancel-download-v3", { model });
   }
 
   async deleteMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<{
@@ -2159,34 +2287,19 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     bytesFreed: number;
     status: MemoryEmbeddingRuntimeStatus;
   }> {
-    return await this.requestWithOwnerCompatibility(
-      "memory.embedding.delete-v3",
-      { model },
-      "memory.v3"
-    );
+    return await this.request("memory.embedding.delete-v3", { model });
   }
 
   async rebuildMemoryEmbeddingIndex(): Promise<MemoryEmbeddingRuntimeStatus> {
-    return await this.requestWithOwnerCompatibility(
-      "memory.embedding.rebuild-v3",
-      {},
-      "memory.v3"
-    );
+    return await this.request("memory.embedding.rebuild-v3", {});
   }
 
   async cancelMemoryEmbeddingRebuild(): Promise<{ cancelled: boolean; status: MemoryEmbeddingRuntimeStatus }> {
-    return await this.requestWithOwnerCompatibility(
-      "memory.embedding.cancel-rebuild-v3",
-      {},
-      "memory.v3"
-    );
+    return await this.request("memory.embedding.cancel-rebuild-v3", {});
   }
 
   /** 让 owner 按指定会话或新会话重建 AgentSession。 */
   async restartRuntime(sessionId?: string): Promise<InteractiveRuntimeSnapshot> {
-    // 新会话会重新读取当前配置。旧 Host 虽能通过 protocol v2 握手，却无法解析
-    // Memory v3 字段，因此必须在它触碰配置前按能力替换空闲 owner。
-    await this.ensureOwnerCapability("memory.v3");
     const result = await this.request<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }>("runtime.restart", {
       sessionId,
       expectedRevision: this.currentRevision()
@@ -2196,7 +2309,7 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     return result.snapshot;
   }
 
-  /** 在运行时空闲时替换驻留 owner，供协议兼容修复和桌面恢复使用。 */
+  /** 在运行时空闲时接管另一个配置环境的 owner，保证持久化根仍只有一个 writer。 */
   async restartOwner(): Promise<void> {
     if (this.ownerRestartPromise) return await this.ownerRestartPromise;
     const replacement = this.replaceOwner();
@@ -2210,10 +2323,10 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
 
   private async open(): Promise<void> {
     await this.openSocket();
-    const result = await this.request<{ hostEpoch: string; persistenceRoot: string; snapshot: InteractiveRuntimeSnapshot; sequence: number; capabilities?: string[] }>("subscribe", { afterSequence: undefined });
+    const result = await this.request<{ hostEpoch: string; persistenceRoot: string; snapshot: InteractiveRuntimeSnapshot; sequence: number; capabilities: string[] }>("subscribe", { afterSequence: undefined });
     this.hostEpoch = result.hostEpoch;
     this.sequence = result.sequence;
-    this.capabilities = result.capabilities ?? [];
+    this.capabilities = result.capabilities;
     this.snapshot = result.snapshot;
     if (!this.snapshot) {
       const snapshot = await this.request<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }>("snapshot", {});
@@ -2280,10 +2393,10 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
         resolve: (value) => {
           settled = true;
           this.environmentTakeoverHandshake = false;
-          const result = value as { hostEpoch: string; persistenceRoot: string; sequence: number; capabilities?: string[] };
+          const result = value as { hostEpoch: string; persistenceRoot: string; sequence: number; capabilities: string[] };
           this.hostEpoch = result.hostEpoch;
           this.sequence = result.sequence;
-          this.capabilities = result.capabilities ?? [];
+          this.capabilities = result.capabilities;
           resolve();
         },
         reject: fail
@@ -2319,14 +2432,14 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     const previousHostEpoch = this.hostEpoch;
     this.options.registration = registration;
     await this.openSocket();
-    const result = await this.request<{ hostEpoch: string; snapshot: InteractiveRuntimeSnapshot; sequence: number; replayed: boolean; capabilities?: string[] }>("subscribe", {
+    const result = await this.request<{ hostEpoch: string; snapshot: InteractiveRuntimeSnapshot; sequence: number; replayed: boolean; capabilities: string[] }>("subscribe", {
       afterSequence: this.sequence,
       afterHostEpoch: previousHostEpoch
     });
     this.hostEpoch = result.hostEpoch;
     this.snapshot = result.snapshot;
     this.sequence = result.sequence;
-    this.capabilities = result.capabilities ?? [];
+    this.capabilities = result.capabilities;
     await this.recoverCompletions();
   }
 
@@ -2448,7 +2561,7 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
       if (!pending) return;
       this.pending.delete(frame.requestId);
       if (frame.ok) pending.resolve(frame.result);
-      else pending.reject(new Error(frame.error ?? "Runtime Host request failed."));
+      else pending.reject(errorFromHostFrame(frame));
       return;
     }
     if (isEventFrame(frame)) {
@@ -2496,24 +2609,6 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
       }
       this.send(socket, { kind: "request", requestId, operation, payload });
     }));
-  }
-
-  private async requestWithOwnerCompatibility<T>(operation: string, payload: unknown, capability: string): Promise<T> {
-    await this.ensureOwnerCapability(capability);
-    try {
-      return await this.request<T>(operation, payload);
-    } catch (error) {
-      // 同 protocol 的旧 detached Host 不认识新增 operation；具备 composition root
-      // 的 Desktop/TUI 可以在空闲时替换 owner，再无损重试一次。
-      if (this.options.spawnOptions === undefined || !isRuntimeHostUnknownOperationError(error, operation)) throw error;
-      await this.restartOwner();
-      return await this.request<T>(operation, payload);
-    }
-  }
-
-  private async ensureOwnerCapability(capability: string): Promise<void> {
-    if (this.options.spawnOptions === undefined || this.capabilities.includes(capability)) return;
-    await this.restartOwner();
   }
 
   private createCompletion(runId: string): Promise<AgentRunOutcome> {
@@ -2631,6 +2726,8 @@ function isHelloFrame(value: unknown): value is HostHelloFrame {
     && typeof record.configRoot === "string"
     && typeof record.agentRoot === "string"
     && typeof record.clientId === "string"
+    && Array.isArray(record.capabilities)
+    && record.capabilities.every((capability) => typeof capability === "string")
     && isSurface(record.surface);
 }
 
@@ -2675,6 +2772,8 @@ function operationLane(operation: string): OperationLane {
     || operation === "personalization.get"
     || operation === "memory.embedding.status-v3"
     || operation === "skills.list"
+    || operation === "mcp.status"
+    || operation === "mcp.details"
     || operation === "run.inspect"
     || operation === "run.list"
     || operation === "runtime.events"
@@ -2775,21 +2874,64 @@ function readStringArray(value: unknown, name: string): string[] {
   return value;
 }
 
-function readMemoryEntry(value: unknown): LegacyMemoryEntry {
-  const record = asRecord(value);
-  return {
-    topic: requiredString(record.topic, "entry.topic"),
-    title: requiredString(record.title, "entry.title"),
-    summary: requiredString(record.summary, "entry.summary"),
-    decisions: readStringArray(record.decisions, "entry.decisions"),
-    paths: readStringArray(record.paths, "entry.paths"),
-    keywords: readStringArray(record.keywords, "entry.keywords")
-  };
-}
-
 function readMemoryOriginSelector(value: unknown, allowAll: boolean): MemoryOriginSelector {
   if (value === "current_workspace" || value === "user" || value === "other_workspaces" || (allowAll && value === "all")) return value;
   throw new Error(`Runtime Host memory selector must be ${allowAll ? "all, " : ""}current_workspace, user, or other_workspaces.`);
+}
+
+function readTelosDocumentInput(value: unknown): TelosDocumentInput {
+  const record = asRecord(value);
+  return {
+    scope: readTelosScope(record.scope),
+    mission: requiredString(record.mission, "input.mission"),
+    goals: record.goals === undefined ? undefined : readTelosGoals(record.goals),
+    principles: record.principles === undefined ? undefined : readTelosRules(record.principles, "input.principles"),
+    constraints: record.constraints === undefined ? undefined : readTelosRules(record.constraints, "input.constraints"),
+    antiGoals: record.antiGoals === undefined ? undefined : readTelosRules(record.antiGoals, "input.antiGoals")
+  };
+}
+
+function readTelosScope(value: unknown): TelosScope {
+  if (value === "universal" || value === "workspace") return value;
+  throw new Error("Runtime Host TELOS scope is invalid.");
+}
+
+function readTelosGoals(value: unknown): TelosDocumentInput["goals"] {
+  if (!Array.isArray(value)) throw new Error("Runtime Host TELOS goals must be an array.");
+  return value.map((item, index) => {
+    const record = asRecord(item);
+    const status = record.status;
+    if (status !== "active" && status !== "paused" && status !== "completed") {
+      throw new Error(`Runtime Host TELOS goal ${String(index)} status is invalid.`);
+    }
+    return {
+      id: requiredString(record.id, `input.goals[${String(index)}].id`),
+      text: requiredString(record.text, `input.goals[${String(index)}].text`),
+      status,
+      horizon: optionalString(record.horizon)
+    };
+  });
+}
+
+function readTelosRules(value: unknown, name: string): TelosDocumentInput["principles"] {
+  if (!Array.isArray(value)) throw new Error(`Runtime Host ${name} must be an array.`);
+  return value.map((item, index) => {
+    const record = asRecord(item);
+    return {
+      id: requiredString(record.id, `${name}[${String(index)}].id`),
+      text: requiredString(record.text, `${name}[${String(index)}].text`)
+    };
+  });
+}
+
+function readTelosPatternAction(value: unknown): BehaviorPatternReviewAction {
+  if (value === "confirm" || value === "reject" || value === "expire") return value;
+  throw new Error("Runtime Host TELOS pattern action is invalid.");
+}
+
+function readTelosDriftAction(value: unknown): TelosDriftResolutionAction {
+  if (value === "adjust_telos" || value === "adjust_behavior" || value === "dismiss" || value === "resolve") return value;
+  throw new Error("Runtime Host TELOS drift action is invalid.");
 }
 
 function readMemoryEntryInput(value: unknown): MemoryEntryInput {
@@ -2926,6 +3068,7 @@ function readAutomationCreateInput(payload: Record<string, unknown>): Automation
   }
   const mode = template.mode;
   if (mode !== undefined && mode !== "chat" && mode !== "plan") throw new Error("Automation mode is invalid.");
+  assertAllowedKeys(template, ["prompt", "sessionId", "mode"], "Automation execution template");
   const intervalMs = schedule.intervalMs;
   if (intervalMs !== undefined && !Number.isSafeInteger(intervalMs)) throw new Error("Automation intervalMs is invalid.");
   const jitterMs = schedule.jitterMs;
@@ -2945,10 +3088,7 @@ function readAutomationCreateInput(payload: Record<string, unknown>): Automation
     executionTemplate: {
       prompt: requiredString(template.prompt, "executionTemplate.prompt"),
       sessionId: optionalString(template.sessionId),
-      mode,
-      modelAlias: optionalString(template.modelAlias),
-      permissionMode: optionalString(template.permissionMode),
-      workspaceRoot: optionalString(template.workspaceRoot)
+      mode
     },
     maxFires: maxFires as number | undefined,
     expiresAt: optionalString(payload.expiresAt)
@@ -3032,6 +3172,32 @@ function publicError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function publicErrorCode(error: unknown): string | undefined {
+  return error instanceof SessionWriterConflictError ? error.code : undefined;
+}
+
+function publicErrorData(error: unknown): unknown {
+  if (!(error instanceof SessionWriterConflictError)) return undefined;
+  return {
+    sessionId: error.sessionId,
+    ownerPid: error.ownerPid,
+    ownerSurface: error.ownerSurface
+  };
+}
+
+function errorFromHostFrame(frame: HostResponseFrame): Error {
+  if (frame.errorCode === "session_writer_conflict") {
+    const data = asRecord(frame.errorData);
+    return new SessionWriterConflictError(
+      typeof data.sessionId === "string" ? data.sessionId : "unknown",
+      typeof data.ownerPid === "number" ? data.ownerPid : undefined,
+      typeof data.ownerSurface === "string" ? data.ownerSurface : undefined,
+      frame.error ?? "Session is already open in another application."
+    );
+  }
+  return new Error(frame.error ?? "Runtime Host request failed.");
+}
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -3065,10 +3231,12 @@ function readRecoveryStopReason(value: unknown): AgentRunOutcome["stopReason"] {
 
 async function readRegistration(paths: RuntimeHostPaths): Promise<HostRegistration | undefined> {
   try {
-    const parsed = JSON.parse(await fs.readFile(paths.registrationPath, "utf8")) as unknown;
+    const raw = await readPrivateHostFile(paths.registrationPath);
+    if (raw === undefined) return undefined;
+    const parsed = JSON.parse(raw) as unknown;
     const registration = asRecord(parsed);
     if (
-      registration.protocolVersion !== protocolVersion
+      !Number.isSafeInteger(registration.protocolVersion)
       || registration.endpoint !== paths.endpoint
       || registration.rootHash !== paths.rootHash
       || typeof registration.token !== "string"
@@ -3077,7 +3245,7 @@ async function readRegistration(paths: RuntimeHostPaths): Promise<HostRegistrati
       || !Number.isSafeInteger(registration.pid)
     ) return undefined;
     return {
-      protocolVersion,
+      protocolVersion: registration.protocolVersion as number,
       endpoint: paths.endpoint,
       registrationPath: paths.registrationPath,
       lockPath: paths.lockPath,
@@ -3096,14 +3264,27 @@ async function readRegistration(paths: RuntimeHostPaths): Promise<HostRegistrati
 }
 
 async function writeRegistration(registration: HostRegistration): Promise<void> {
-  await fs.writeFile(registration.registrationPath, `${JSON.stringify(registration)}\n`, { mode: 0o600 });
-  await fs.chmod(registration.registrationPath, 0o600);
+  const temporary = `${registration.registrationPath}.${randomUUID()}.tmp`;
+  let handle: FileHandle | undefined;
+  try {
+    handle = await fs.open(temporary, hostWriteNewFlags(), 0o600);
+    await handle.writeFile(`${JSON.stringify(registration)}\n`, "utf8");
+    await handle.chmod(0o600);
+    await handle.sync();
+    await fs.rename(temporary, registration.registrationPath);
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+  }
 }
 
 async function acquireHostLock(paths: RuntimeHostPaths, persistenceRoot: string): Promise<FileHandle> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      return await fs.open(paths.lockPath, "wx", 0o600);
+      const handle = await fs.open(paths.lockPath, hostWriteNewFlags(), 0o600);
+      await handle.chmod(0o600);
+      await handle.sync();
+      return handle;
     } catch (error) {
       if (!isAlreadyExists(error)) throw error;
       const registration = await readRegistration(paths);
@@ -3149,10 +3330,79 @@ async function removeRegistration(registration: HostRegistration): Promise<void>
 
 async function removeSocketIfStale(endpoint: string): Promise<void> {
   try {
-    await fs.rm(endpoint, { force: true });
+    const stat = await fs.lstat(endpoint);
+    if (stat.isSymbolicLink()) {
+      await fs.unlink(endpoint);
+      return;
+    }
+    if (!stat.isSocket() || !isOwnedByCurrentUser(stat)) {
+      throw new Error("Runtime Host endpoint must be an owned Unix socket.");
+    }
+    await fs.unlink(endpoint);
   } catch (error) {
     if (!isNotFound(error)) throw error;
   }
+}
+
+async function ensureRuntimeHostDirectory(directory: string): Promise<void> {
+  let stat: Stats;
+  try {
+    stat = await fs.lstat(directory);
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    stat = await fs.lstat(directory);
+  }
+  const realParent = await fs.realpath(path.dirname(directory));
+  const realDirectory = await fs.realpath(directory);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || realDirectory !== path.join(realParent, path.basename(directory))) {
+    throw new Error("Runtime Host directory must be a real directory.");
+  }
+  if (!isOwnedByCurrentUser(stat)) throw new Error("Runtime Host directory is not owned by the current user.");
+  await fs.chmod(directory, 0o700);
+}
+
+async function readPrivateHostFile(filePath: string): Promise<string | undefined> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await fs.open(filePath, constants.O_RDONLY | hostNoFollowFlag());
+    const stat = await handle.stat();
+    if (!isPrivateHostFile(stat)) return undefined;
+    return await handle.readFile("utf8");
+  } catch (error) {
+    if (isNotFound(error)) return undefined;
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function secureRuntimeSocket(endpoint: string): Promise<void> {
+  const stat = await fs.lstat(endpoint);
+  if (!stat.isSocket() || !isOwnedByCurrentUser(stat)) {
+    throw new Error("Runtime Host endpoint must be an owned Unix socket.");
+  }
+  await fs.chmod(endpoint, 0o600);
+}
+
+function hostWriteNewFlags(): number {
+  return constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | hostNoFollowFlag();
+}
+
+function hostNoFollowFlag(): number {
+  return typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+}
+
+function isPrivateHostFile(stat: Stats): boolean {
+  return stat.isFile()
+    && stat.nlink === 1
+    && (stat.mode & 0o077) === 0
+    && isOwnedByCurrentUser(stat);
+}
+
+function isOwnedByCurrentUser(stat: Stats): boolean {
+  const uid = process.getuid?.();
+  return uid === undefined || stat.uid === uid;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -3177,12 +3427,9 @@ function isNoSuchProcess(error: unknown): boolean {
     && error.code === "ESRCH";
 }
 
-function isRuntimeHostThinkingSelectionError(error: unknown): boolean {
-  return error instanceof Error && error.message === "Runtime Host thinking selection is invalid.";
-}
-
-function isRuntimeHostUnknownOperationError(error: unknown, operation: string): boolean {
-  return error instanceof Error && error.message === `Unknown Runtime Host operation: ${operation}`;
+function assertAllowedKeys(record: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const unexpected = Object.keys(record).find((key) => !allowed.includes(key));
+  if (unexpected !== undefined) throw new Error(`${label} contains unsupported field: ${unexpected}.`);
 }
 
 function isAlreadyExists(error: unknown): boolean {

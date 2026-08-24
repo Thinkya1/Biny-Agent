@@ -6,6 +6,7 @@
  * 会话事实来源，authority 只保存可重建的运行投影和后台运行域事实。
  */
 import { createHash, randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { ensureAgentDirs, agentDir, listSessionFiles, resolveSessionFile, sessionIdFromFile } from "../session/store.js";
@@ -13,7 +14,7 @@ import { readSessionEvents } from "../session/events.js";
 import type { SessionEvent } from "../session/recorder.js";
 import { assertRuntimeEventSequence, validateRuntimeEventStream, type RuntimeEventIdentity, type RuntimeEventSink } from "../session/runtimeEvent.js";
 
-const schemaVersion = 4;
+const schemaVersion = 5;
 const busyTimeoutMs = 5_000;
 const defaultPageSize = 100;
 const maxPageSize = 1_000;
@@ -590,14 +591,22 @@ export class RuntimeEventAuthority implements RuntimeEventSink {
     this.database.close();
   }
 
-  /** 将 JSONL 事实幂等投影到 authority；每次启动都扫描，修复进程崩溃留下的缺口。 */
+  /** 将变化过的 JSONL 事实幂等投影到 authority，修复进程崩溃留下的缺口。 */
   private async reconcileSessionProjections(): Promise<void> {
     const sessions = await listSessionFiles(this.persistenceRoot);
     for (const fileName of sessions) {
       const sessionId = sessionIdFromFile(fileName);
+      const filePath = await resolveSessionFile(this.persistenceRoot, sessionId);
+      const before = await fs.stat(filePath);
+      const fileSize = before.size;
+      const modifiedAtMs = Math.trunc(before.mtimeMs);
+      const backfill = this.database.prepare(
+        "SELECT file_size, modified_at_ms FROM runtime_backfills WHERE session_id = ?"
+      ).get(sessionId) as Record<string, unknown> | undefined;
+      if (Number(backfill?.file_size) === fileSize && Number(backfill?.modified_at_ms) === modifiedAtMs) continue;
       let events: SessionEvent[];
       try {
-        events = await readSessionEvents(await resolveSessionFile(this.persistenceRoot, sessionId));
+        events = await readSessionEvents(filePath);
       } catch {
         // 坏的旧尾部仍交给 session 恢复逻辑处理；authority 不凭损坏数据伪造事实。
         continue;
@@ -607,6 +616,11 @@ export class RuntimeEventAuthority implements RuntimeEventSink {
       } catch {
         // runtime metadata 损坏时不把 SQLite projection 当成新的事实来源；
         // session 恢复路径会报告更具体的顺序/重复 ID 错误。
+        continue;
+      }
+      const after = await fs.stat(filePath);
+      if (after.size !== fileSize || Math.trunc(after.mtimeMs) !== modifiedAtMs) {
+        // 启动期间仍在追加的文件不记录水位；下次 open 会再次完成投影。
         continue;
       }
       this.transaction(() => {
@@ -632,10 +646,12 @@ export class RuntimeEventAuthority implements RuntimeEventSink {
           this.reconcileTerminalRunInTransaction(sessionId, event, runtime, runId, turnId, eventId);
           imported += 1;
         }
-        this.database.prepare("INSERT OR REPLACE INTO runtime_backfills (session_id, completed_at, event_count) VALUES (?, ?, ?)").run(
+        this.database.prepare("INSERT OR REPLACE INTO runtime_backfills (session_id, completed_at, event_count, file_size, modified_at_ms) VALUES (?, ?, ?, ?, ?)").run(
           sessionId,
           new Date().toISOString(),
-          imported
+          imported,
+          fileSize,
+          modifiedAtMs
         );
       });
     }
@@ -888,7 +904,9 @@ export class RuntimeEventAuthority implements RuntimeEventSink {
           CREATE TABLE IF NOT EXISTS runtime_backfills (
             session_id TEXT PRIMARY KEY,
             completed_at TEXT NOT NULL,
-            event_count INTEGER NOT NULL
+            event_count INTEGER NOT NULL,
+            file_size INTEGER,
+            modified_at_ms INTEGER
           );
         `);
         this.database.exec(`PRAGMA user_version = ${String(schemaVersion)};`);
@@ -945,6 +963,18 @@ export class RuntimeEventAuthority implements RuntimeEventSink {
           }
           this.database.exec("CREATE UNIQUE INDEX IF NOT EXISTS runtime_events_session_event_seq_idx ON runtime_events (workspace_id, session_id, event_seq) WHERE event_seq IS NOT NULL");
           this.database.exec("PRAGMA user_version = 4");
+        });
+        currentRevision = 4;
+      }
+      if (currentRevision < 5) {
+        this.transaction(() => {
+          if (!this.hasColumn("runtime_backfills", "file_size")) {
+            this.database.exec("ALTER TABLE runtime_backfills ADD COLUMN file_size INTEGER");
+          }
+          if (!this.hasColumn("runtime_backfills", "modified_at_ms")) {
+            this.database.exec("ALTER TABLE runtime_backfills ADD COLUMN modified_at_ms INTEGER");
+          }
+          this.database.exec("PRAGMA user_version = 5");
         });
       }
     }

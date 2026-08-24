@@ -6,7 +6,7 @@
  * 和可选 session 参数，不必关心文件布局。
  */
 import { randomBytes } from "node:crypto";
-import { chmodSync, constants, existsSync, lstatSync, mkdirSync, promises as fs, readdirSync, realpathSync, type Stats } from "node:fs";
+import { chmodSync, constants, lstatSync, mkdirSync, promises as fs, readdirSync, realpathSync, type Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { globalAgentDir, projectSessionsDir } from "../config/paths.js";
@@ -89,18 +89,32 @@ export function sessionFilePath(workspaceRoot: string, sessionId: string): strin
   const canonicalWorkspace = realpathSync(path.resolve(workspaceRoot));
   const candidatePath = sessionFileCandidatePath(canonicalWorkspace, sessionId);
   const sessionsPath = projectSessionsDir(canonicalWorkspace);
-  // 已存在的旧平铺文件由 candidatePath 优先返回，避免显式创建 recorder 时悄悄生成第二份会话。
-  const existingPath = findSessionPathByNameSync(sessionsPath, `${sessionId}.jsonl`);
-  if (existingPath) return existingPath;
+  const existingPaths = findSessionPathsByNameSync(sessionsPath, `${sessionId}.jsonl`);
+  if (existingPaths.length > 1) throw new Error(`Duplicate session id exists in session storage: ${sessionId}`);
+  if (existingPaths[0]) return existingPaths[0];
   const dateDirectory = path.dirname(candidatePath);
   ensureSessionDirectorySync(sessionsPath, dateDirectory);
   return candidatePath;
 }
 
+function findSessionPathsByNameSync(directory: string, fileName: string): string[] {
+  let entries;
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return [];
+    throw error;
+  }
+  const matches = entries.filter((entry) => entry.name === fileName).map((entry) => path.join(directory, entry.name));
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    matches.push(...findSessionPathsByNameSync(path.join(directory, entry.name), fileName));
+  }
+  return matches;
+}
+
 function sessionFileCandidatePath(workspaceRoot: string, sessionId: string): string {
   const sessionsPath = projectSessionsDir(workspaceRoot);
-  const legacyPath = path.join(sessionsPath, `${sessionId}.jsonl`);
-  if (existsSync(legacyPath)) return legacyPath;
   return path.join(sessionsPath, ...sessionDateSegments(sessionId), `${sessionId}.jsonl`);
 }
 
@@ -336,6 +350,60 @@ async function ensureProjectSessionStorage(canonicalWorkspace: string): Promise<
     throw new Error("Project session storage resolves outside the global sessions directory.");
   }
   await validateSessionDirectories(sessionsPath);
+  await migrateFlatSessionFiles(sessionsPath);
+}
+
+/** 旧平铺 Session 一次性迁到日期目录；发现两个不同实体时停止，绝不猜测覆盖顺序。 */
+async function migrateFlatSessionFiles(sessionsPath: string): Promise<void> {
+  const entries = await fs.readdir(sessionsPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !isSessionFileName(entry.name)) continue;
+    const source = path.join(sessionsPath, entry.name);
+    const sourceStat = await fs.lstat(source);
+    if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
+      throw unsafeSessionError(entry.name);
+    }
+    const sessionId = sessionIdFromFile(entry.name);
+    let targetDirectory = sessionsPath;
+    for (const segment of sessionDateSegments(sessionId)) {
+      targetDirectory = path.join(targetDirectory, segment);
+      await ensureRealDirectory(targetDirectory, "session date directory");
+      if (await fs.realpath(targetDirectory) !== targetDirectory) {
+        throw new Error("Session date directory resolves outside the current project's global session directory.");
+      }
+    }
+    const target = path.join(targetDirectory, entry.name);
+    let targetStat: Stats | undefined;
+    try {
+      targetStat = await fs.lstat(target);
+    } catch (error) {
+      if (!hasErrorCode(error, "ENOENT")) throw error;
+    }
+    if (targetStat) {
+      if (sourceStat.dev !== targetStat.dev || sourceStat.ino !== targetStat.ino) {
+        throw new Error(`Duplicate session id exists in flat and dated storage: ${sessionId}`);
+      }
+      await fs.unlink(source).catch((error: unknown) => {
+        if (!hasErrorCode(error, "ENOENT")) throw error;
+      });
+      await fs.chmod(target, 0o600);
+      continue;
+    }
+    if (sourceStat.nlink !== 1) throw unsafeSessionError(entry.name);
+    try {
+      await fs.link(source, target);
+    } catch (error) {
+      if (!hasErrorCode(error, "EEXIST")) throw error;
+      const [currentSource, currentTarget] = await Promise.all([fs.lstat(source), fs.lstat(target)]);
+      if (currentSource.dev !== currentTarget.dev || currentSource.ino !== currentTarget.ino) {
+        throw new Error(`Duplicate session id exists in flat and dated storage: ${sessionId}`);
+      }
+    }
+    await fs.unlink(source).catch((error: unknown) => {
+      if (!hasErrorCode(error, "ENOENT")) throw error;
+    });
+    await fs.chmod(target, 0o600);
+  }
 }
 
 async function validateSessionDirectories(directory: string): Promise<void> {
@@ -422,25 +490,6 @@ function ensureSessionDirectorySync(sessionsPath: string, directory: string): vo
   }
 }
 
-function findSessionPathByNameSync(directory: string, fileName: string): string | undefined {
-  let entries;
-  try {
-    entries = readdirSync(directory, { withFileTypes: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-  for (const entry of entries) {
-    if (entry.name === fileName) return path.join(directory, entry.name);
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const nested = findSessionPathByNameSync(path.join(directory, entry.name), fileName);
-    if (nested) return nested;
-  }
-  return undefined;
-}
-
 async function listSessionFileEntries(location: SessionStorageLocation): Promise<SessionFileEntry[]> {
   await assertSessionStorage(location);
   const entries = await fs.readdir(location.sessions.path, { withFileTypes: true });
@@ -456,6 +505,14 @@ async function listSessionFileEntries(location: SessionStorageLocation): Promise
     if (existing) safeFiles.push({ fileName: entry.name, filePath: existing });
   }
   await assertSessionStorage(location);
+  const seen = new Map<string, string>();
+  for (const file of safeFiles) {
+    const previous = seen.get(file.fileName);
+    if (previous !== undefined && previous !== file.filePath) {
+      throw new Error(`Duplicate session id exists in session storage: ${sessionIdFromFile(file.fileName)}`);
+    }
+    seen.set(file.fileName, file.filePath);
+  }
   return safeFiles.sort((left, right) => left.fileName.localeCompare(right.fileName));
 }
 
@@ -717,6 +774,10 @@ function unsafeSessionError(fileName: string): Error {
 
 function isSymbolicLinkError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error.code === "ELOOP" || error.code === "EMLINK");
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
 function explicitSessionFileName(session: string): string | undefined {

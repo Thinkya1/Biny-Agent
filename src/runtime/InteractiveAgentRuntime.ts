@@ -79,6 +79,10 @@ export interface InteractiveRuntimeHandle {
   cancelCurrentRun(): void;
   cancelRun(runId: string): boolean;
   answerPermission(requestId: string, result: PermissionResult): void;
+  /** 以当前 surface 的 writer 身份打开一个 session，并在切换/关闭前保持占用。 */
+  claimSession(session: string): Promise<void>;
+  /** 释放当前 surface 的 session writer；不传 session 时释放当前 claim。 */
+  releaseSessionClaim(session?: string): Promise<void>;
   resumeSession(session: string): Promise<ResumedAgentSession>;
   runExclusiveOperation<T>(operation: RuntimeOperation, execute: (signal: AbortSignal) => Promise<T>): Promise<T>;
   startBackgroundOperation<T extends { completion: Promise<unknown> }>(
@@ -113,6 +117,7 @@ interface ActiveTool {
 interface SessionLeaseState {
   lease: SessionLease | undefined;
   acquired: boolean;
+  releaseOnCompletion: boolean;
 }
 
 /**
@@ -127,6 +132,8 @@ export class InteractiveAgentRuntime {
   private readonly runLedger: SessionRunLedger | undefined;
   private readonly runtimeAuthority: RuntimeEventAuthority | undefined;
   private sessionLease: SessionLease | undefined;
+  /** 打开会话后保持的 writer claim；运行 lease 可以与它共享同一个文件 lease。 */
+  private sessionWriterClaim: SessionLease | undefined;
   private lastInfo: AgentSessionInfo | undefined;
   private state: InteractiveRunState = { kind: "idle" };
   private revision = 0;
@@ -346,10 +353,55 @@ export class InteractiveAgentRuntime {
     this.pendingPermission = undefined;
   }
 
+  async claimSession(session: string): Promise<void> {
+    if (this.closed) throw new Error("Agent runtime is closed.");
+    const filePath = await resolveSessionFile(this.commandRuntime.persistenceRoot, session);
+    const sessionId = sessionIdFromFile(filePath);
+    if (this.sessionWriterClaim?.sessionId === sessionId) return;
+    if (this.state.kind !== "idle" || this.activeRun) {
+      // 当前运行已经持有同一 session 的执行 lease，可以把它升级成长期 claim；
+      // 切到另一条 session 则必须等当前运行结束，避免关闭正在写入的 lease。
+      if (this.sessionLease?.sessionId === sessionId) {
+        this.sessionWriterClaim = this.sessionLease;
+        return;
+      }
+      throw new Error("Cannot open another session while the runtime is busy.");
+    }
+    const previous = this.sessionWriterClaim;
+    if (previous) {
+      this.sessionWriterClaim = undefined;
+      if (this.sessionLease === previous) this.sessionLease = undefined;
+      previous.close();
+    }
+    if (!this.sessionLeases) return;
+    const lease = this.sessionLeases.acquire(sessionId);
+    this.sessionWriterClaim = lease;
+  }
+
+  async releaseSessionClaim(session?: string): Promise<void> {
+    const claim = this.sessionWriterClaim;
+    if (!claim || (session !== undefined && claim.sessionId !== session)) return;
+    this.sessionWriterClaim = undefined;
+    // 运行中的执行 lease 仍需继续保护当前 turn；只解除长期 claim 引用。
+    if (this.sessionLease === claim && (this.state.kind !== "idle" || this.activeRun)) return;
+    if (this.sessionLease === claim) this.sessionLease = undefined;
+    claim.close();
+  }
+
   async resumeSession(session: string): Promise<ResumedAgentSession> {
     const filePath = await resolveSessionFile(this.commandRuntime.persistenceRoot, session);
     const sessionId = sessionIdFromFile(filePath);
-    return await this.runMaintenanceOperation("resume", async () => await this.commandRuntime.agent.resume(session), undefined, sessionId);
+    if (this.state.kind !== "idle" || this.activeRun) {
+      throw new Error("Cannot start resume while the runtime is busy.");
+    }
+    const alreadyClaimed = this.sessionWriterClaim?.sessionId === sessionId;
+    await this.claimSession(sessionId);
+    try {
+      return await this.runMaintenanceOperation("resume", async () => await this.commandRuntime.agent.resume(session), undefined, sessionId);
+    } catch (error) {
+      if (!alreadyClaimed) await this.releaseSessionClaim(sessionId);
+      throw error;
+    }
   }
 
   /**
@@ -480,6 +532,8 @@ export class InteractiveAgentRuntime {
       try {
         await this.commandRuntime.close();
       } finally {
+        this.sessionWriterClaim?.close();
+        this.sessionWriterClaim = undefined;
         this.sessionLease?.close();
         this.sessionLease = undefined;
         this.sessionLeases?.close();
@@ -520,17 +574,21 @@ export class InteractiveAgentRuntime {
 
   private acquireSessionLease(sessionId: string): SessionLeaseState {
     const current = this.sessionLease;
-    if (current?.sessionId === sessionId) return { lease: current, acquired: false };
+    if (current?.sessionId === sessionId) return { lease: current, acquired: false, releaseOnCompletion: false };
     current?.close();
     this.sessionLease = undefined;
-    if (!this.sessionLeases) return { lease: undefined, acquired: false };
+    if (this.sessionWriterClaim?.sessionId === sessionId) {
+      this.sessionLease = this.sessionWriterClaim;
+      return { lease: this.sessionLease, acquired: true, releaseOnCompletion: false };
+    }
+    if (!this.sessionLeases) return { lease: undefined, acquired: false, releaseOnCompletion: false };
     const lease = this.sessionLeases.acquire(sessionId);
     this.sessionLease = lease;
-    return { lease, acquired: true };
+    return { lease, acquired: true, releaseOnCompletion: true };
   }
 
   private releaseSessionLease(state: SessionLeaseState): void {
-    if (!state.acquired || !state.lease || this.sessionLease !== state.lease) return;
+    if (!state.acquired || !state.releaseOnCompletion || !state.lease || this.sessionLease !== state.lease) return;
     state.lease.close();
     this.sessionLease = undefined;
   }
@@ -539,6 +597,7 @@ export class InteractiveAgentRuntime {
     if (this.state.kind !== "idle") return;
     const lease = this.sessionLease;
     if (!lease) return;
+    if (this.sessionWriterClaim === lease) return;
     lease.close();
     this.sessionLease = undefined;
   }
@@ -1451,6 +1510,7 @@ function publicOperationName(operation: RuntimeOperation): string {
   if (operation === "compact") return "conversation compaction";
   if (operation === "mcp") return "MCP reconnection";
   if (operation === "memory") return "a memory command";
+  if (operation === "telos") return "a TELOS update";
   if (operation === "personalization") return "personalization settings";
   if (operation === "checkpoint") return "checkpoint restore";
   return "a subagent task";

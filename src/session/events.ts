@@ -4,7 +4,7 @@
  * Session 文件是一行一个 JSON 事件。这里负责把 JSONL 解析成事件数组，并从中提取首条用户消息、
  * 最后一条 assistant 消息、事件数量和时间信息，供 `sessions` 列表与历史恢复界面使用。
  */
-import { constants, promises as fs } from "node:fs";
+import { constants, promises as fs, type Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { z } from "zod";
 import {
@@ -249,10 +249,48 @@ export async function readSessionEvents(filePath: string): Promise<SessionEvent[
 export async function readStoredSessionEvents(
   workspaceRoot: string,
   session: string | undefined
-): Promise<{ filePath: string; events: SessionEvent[]; truncated: boolean }> {
+): Promise<{ filePath: string; events: SessionEvent[]; truncated: boolean; summary?: SessionSummary }> {
   const snapshot = await readSessionSnapshot(workspaceRoot, session);
   const events = parseSessionEvents(snapshot.bytes.toString("utf8"), { overflow: "truncate" });
-  return { filePath: snapshot.filePath, events, truncated: snapshot.truncated ?? false };
+  return {
+    filePath: snapshot.filePath,
+    events,
+    truncated: snapshot.truncated ?? false,
+    summary: summarizeSessionEvents(snapshot.fileName, events, snapshot.stat)
+  };
+}
+
+/** 只读取一个 session 的摘要，供打开会话和 catalog 缺失时的按需修复使用。 */
+export async function readSessionSummary(
+  workspaceRoot: string,
+  session: string | undefined
+): Promise<SessionSummary | undefined> {
+  const snapshot = await readSessionSnapshot(workspaceRoot, session);
+  const events = parseSessionEvents(snapshot.bytes.toString("utf8"));
+  return summarizeSessionEvents(snapshot.fileName, events, snapshot.stat);
+}
+
+export function summarizeSessionEvents(
+  fileName: string,
+  events: readonly SessionEvent[],
+  stat: Pick<Stats, "birthtime" | "mtime">
+): SessionSummary | undefined {
+  if (!events.some((event) => event.type === "user_message")) return undefined;
+  const firstUserMessage = publicUserMessage(events.find((event) => event.type === "user_message")?.content ?? "");
+  const lastAssistant = [...events].reverse().find((event): event is Extract<SessionEvent, { type: "assistant_message" }> => event.type === "assistant_message" && Boolean(event.content));
+  const lastAssistantMessage = lastAssistant?.content ?? "";
+  const lastTurnStatus = [...events].reverse().find((event): event is SessionTurnStatusEvent => event.type === "turn_status");
+  const firstTime = events.find((event) => typeof event.time === "string")?.time;
+  const lastTime = [...events].reverse().find((event) => typeof event.time === "string")?.time;
+  return {
+    fileName,
+    firstUserMessage,
+    lastAssistantMessage,
+    lastTurnStatus,
+    eventCount: events.length,
+    createdAt: firstTime ?? stat.birthtime.toISOString(),
+    updatedAt: lastTime ?? stat.mtime.toISOString()
+  };
 }
 
 export interface ParseSessionEventsOptions {
@@ -358,22 +396,7 @@ export async function listSessionSummaries(workspaceRoot: string): Promise<Sessi
       try {
         const snapshot = await readSessionSnapshot(workspaceRoot, fileName);
         const events = parseSessionEvents(snapshot.bytes.toString("utf8"));
-        if (!events.some((event) => event.type === "user_message")) continue;
-        const firstUserMessage = publicUserMessage(events.find((event) => event.type === "user_message")?.content ?? "");
-        const lastAssistant = [...events].reverse().find((event): event is Extract<SessionEvent, { type: "assistant_message" }> => event.type === "assistant_message" && Boolean(event.content));
-        const lastAssistantMessage = lastAssistant?.content ?? "";
-        const lastTurnStatus = [...events].reverse().find((event): event is SessionTurnStatusEvent => event.type === "turn_status");
-        const firstTime = events.find((event) => typeof event.time === "string")?.time;
-        const lastTime = [...events].reverse().find((event) => typeof event.time === "string")?.time;
-        summaries[index] = {
-          fileName,
-          firstUserMessage,
-          lastAssistantMessage,
-          lastTurnStatus,
-          eventCount: events.length,
-          createdAt: firstTime ?? snapshot.stat.birthtime.toISOString(),
-          updatedAt: lastTime ?? snapshot.stat.mtime.toISOString()
-        };
+        summaries[index] = summarizeSessionEvents(fileName, events, snapshot.stat);
       } catch {
         // Opening a corrupt session directly still reports the precise error;
         // listing healthy sessions remains available for recovery.

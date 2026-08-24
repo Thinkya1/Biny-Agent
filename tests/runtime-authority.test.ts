@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
+import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { agentDir, ensureAgentDirs, sessionFilePath } from "../src/session/store.js";
 import { RuntimeEventAuthority } from "../src/runtime/RuntimeAuthority.js";
 import { DurableTaskRunStore } from "../src/runtime/TaskRunStore.js";
-import { AutomationStore } from "../src/runtime/AutomationScheduler.js";
+import { AutomationStore, type AutomationExecutionTemplate } from "../src/runtime/AutomationScheduler.js";
 import { GoalGraphStore } from "../src/runtime/GoalGraphStore.js";
 import { CapabilityStore } from "../src/runtime/CapabilityStore.js";
 import { evaluateTaskRetry } from "../src/runtime/TaskRetryPolicy.js";
@@ -144,9 +146,9 @@ try {
       name: "unsupported-template",
       triggerType: "once",
       schedule: { at: new Date(Date.now() + 10_000).toISOString() },
-      executionTemplate: { prompt: "must reject", modelAlias: "other-model" }
+      executionTemplate: { prompt: "must reject", modelAlias: "other-model" } as unknown as AutomationExecutionTemplate
     }),
-    /not supported by the current Runtime Host/
+    /unsupported field/
   );
 
   const goal = graphs.createGoal("goal");
@@ -228,6 +230,7 @@ try {
 
   const page = authority.readEvents({ limit: 10 });
   assert.ok(page.events.every((event, index) => index === 0 || event.sequence > page.events[index - 1]!.sequence));
+  await testSessionBackfillWatermark();
   console.log("runtime authority tests passed");
 } finally {
   capabilities.close();
@@ -236,4 +239,37 @@ try {
   tasks.close();
   authority.close();
   await rm(root, { recursive: true, force: true });
+}
+
+async function testSessionBackfillWatermark(): Promise<void> {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "biny-authority-backfill-test-"));
+  try {
+    await ensureAgentDirs(workspace);
+    const sessionId = "2026-08-23-backfill";
+    const sessionFile = sessionFilePath(workspace, sessionId);
+    await writeFile(sessionFile, `${JSON.stringify({ type: "user_message", content: "first" })}\n`, "utf8");
+
+    (await RuntimeEventAuthority.open(workspace)).close();
+    const databasePath = path.join(agentDir(workspace), "runtime.sqlite");
+    let database = new DatabaseSync(databasePath);
+    database.prepare("UPDATE runtime_backfills SET completed_at = ? WHERE session_id = ?").run("sentinel", sessionId);
+    database.close();
+
+    (await RuntimeEventAuthority.open(workspace)).close();
+    database = new DatabaseSync(databasePath);
+    const unchanged = database.prepare("SELECT completed_at, file_size FROM runtime_backfills WHERE session_id = ?").get(sessionId) as Record<string, unknown>;
+    assert.equal(unchanged.completed_at, "sentinel", "unchanged JSONL must not be reparsed");
+    const previousSize = Number(unchanged.file_size);
+    database.close();
+
+    await appendFile(sessionFile, `${JSON.stringify({ type: "assistant_message", content: "second" })}\n`, "utf8");
+    (await RuntimeEventAuthority.open(workspace)).close();
+    database = new DatabaseSync(databasePath);
+    const changed = database.prepare("SELECT completed_at, file_size FROM runtime_backfills WHERE session_id = ?").get(sessionId) as Record<string, unknown>;
+    assert.notEqual(changed.completed_at, "sentinel");
+    assert.ok(Number(changed.file_size) > previousSize);
+    database.close();
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 }
