@@ -4,7 +4,7 @@
  * 新根回合开始前只扫描 YAML frontmatter 的 name/description 并按总预算拼进 system prompt；
  * 完整指令由显式 `/skill:name` 提交或 invoke_skill 按需读取，references/scripts/assets
  * 仍由 read_skill_resource 按需读取。
- * 默认同时发现官方 .agents/skills、~/.agents/skills 与 Biny 旧目录。
+ * 默认发现 Biny 受管目录和标准 .agents/skills；外部目录不会通过符号链接自动获得运行时授权。
  */
 import { constants, promises as fs, type BigIntStats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
@@ -14,6 +14,7 @@ import { parseDocument } from "yaml";
 import { z } from "zod";
 import { ToolAccesses } from "../tools/access.js";
 import type { Tool } from "../tools/types.js";
+import { DEFAULT_PROJECT_SKILL_PATHS, defaultGlobalSkillRoots } from "./skillRoots.js";
 
 const maxDiscoveredSkillCount = 256;
 const maxSkillMetadataBytes = 64 * 1024;
@@ -72,8 +73,9 @@ export async function loadSkills(options: LoadSkillsOptions): Promise<SkillBundl
   const skills: SkillDefinition[] = [];
   const warnings: string[] = [];
   const seen = new Set<string>();
-  // 配置目录按顺序扫描。同名 Skill 不合并，由调用时的 path 消歧。
-  for (const configuredPath of options.projectPaths) {
+  const seenNames = new Set<string>();
+  // 按根目录优先级扫描；同一 scope 内的同名 Skill 只保留先发现的版本。
+  for (const configuredPath of [...new Set([...DEFAULT_PROJECT_SKILL_PATHS, ...options.projectPaths])]) {
     if (skills.length >= maxDiscoveredSkillCount) break;
     if (isOfficialProjectSkillPath(configuredPath)) {
       const repositoryRoot = await findRepositoryRoot(canonicalWorkspace);
@@ -83,7 +85,7 @@ export async function loadSkills(options: LoadSkillsOptions): Promise<SkillBundl
         if (!absolutePath) continue;
         const files: SkillFileCandidate[] = [];
         await collectSkillFiles(repositoryRoot, absolutePath, files, seen);
-        await appendSkillDefinitions(skills, warnings, repositoryRoot, files, "project");
+        await appendSkillDefinitions(skills, warnings, repositoryRoot, files, "project", seenNames);
       }
       continue;
     }
@@ -91,13 +93,13 @@ export async function loadSkills(options: LoadSkillsOptions): Promise<SkillBundl
     if (!absolutePath) continue;
     const files: SkillFileCandidate[] = [];
     await collectSkillFiles(canonicalWorkspace, absolutePath, files, seen);
-    await appendSkillDefinitions(skills, warnings, canonicalWorkspace, files, "project");
+    await appendSkillDefinitions(skills, warnings, canonicalWorkspace, files, "project", seenNames);
   }
 
-  // 显式传 globalRoot 时只扫描该目录（测试和嵌入方可隔离）；默认兼容官方与 Biny 旧目录。
+  // 显式传 globalRoot 时只扫描该目录（测试和嵌入方可隔离）；默认与 SkillHub 使用相同根目录。
   const globalRoots = options.globalRoot
     ? [options.globalRoot]
-    : [path.join(os.homedir(), ".agents", "skills"), path.join(os.homedir(), ".biny", "skills"), "/etc/codex/skills"];
+    : defaultGlobalSkillRoots(os.homedir());
   for (const globalRoot of globalRoots) {
     if (skills.length >= maxDiscoveredSkillCount) break;
     try {
@@ -105,7 +107,7 @@ export async function loadSkills(options: LoadSkillsOptions): Promise<SkillBundl
       if (canonicalGlobalRoot) {
         const globalFiles: SkillFileCandidate[] = [];
         await collectSkillFiles(canonicalGlobalRoot, canonicalGlobalRoot, globalFiles, new Set());
-        await appendSkillDefinitions(skills, warnings, canonicalGlobalRoot, globalFiles, "global");
+        await appendSkillDefinitions(skills, warnings, canonicalGlobalRoot, globalFiles, "global", seenNames);
       }
     } catch (error) {
       warnings.push(`Skipped skill root ${globalRoot}: ${errorMessage(error)}`);
@@ -160,12 +162,20 @@ async function appendSkillDefinitions(
   warnings: string[],
   rootPath: string,
   files: SkillFileCandidate[],
-  scope: SkillScope
+  scope: SkillScope,
+  seenNames: Set<string>
 ): Promise<void> {
   for (const candidate of files.sort((left, right) => left.path.localeCompare(right.path))) {
     if (skills.length >= maxDiscoveredSkillCount) break;
     try {
-      skills.push(await readSkillMetadata(rootPath, candidate, scope));
+      const skill = await readSkillMetadata(rootPath, candidate, scope);
+      const nameKey = `${scope}:${skill.name.toLocaleLowerCase()}`;
+      if (seenNames.has(nameKey)) {
+        warnings.push(`Skipped duplicate skill ${skill.name} at ${candidate.path}.`);
+        continue;
+      }
+      seenNames.add(nameKey);
+      skills.push(skill);
     } catch (error) {
       warnings.push(`Skipped ${candidate.path}: ${errorMessage(error)}`);
     }
@@ -574,7 +584,7 @@ async function collectSkillFiles(rootPath: string, target: string, files: SkillF
     if (!isNotFound(error)) throw error;
     return;
   }
-  if (stat.isSymbolicLink()) throw new Error(`Skill paths cannot contain symbolic links: ${target}`);
+  if (stat.isSymbolicLink()) return;
   if (await escapesRoot(rootPath, target)) throw new Error(`Skill path escapes workspace: ${target}`);
   if (stat.isFile()) {
     if (stat.nlink !== 1n) throw new Error(`Skill files cannot be hardlinks: ${target}`);
@@ -612,7 +622,7 @@ async function resolveRootedSkillPath(rootPath: string, configuredPath: string):
   }
   try {
     const stat = await fs.lstat(absolutePath);
-    if (stat.isSymbolicLink()) throw new Error(`Skill paths cannot be symbolic links: ${configuredPath}`);
+    if (stat.isSymbolicLink()) return undefined;
     const canonical = await fs.realpath(absolutePath);
     if (path.relative(rootPath, canonical).startsWith(`..${path.sep}`) || path.isAbsolute(path.relative(rootPath, canonical))) {
       throw new Error(`Skill path escapes workspace: ${configuredPath}`);

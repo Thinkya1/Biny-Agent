@@ -46,6 +46,11 @@ export interface McpServerStatus {
   lastError?: string;
 }
 
+export interface McpServerDetails {
+  status: McpServerStatus;
+  resources: Array<Record<string, unknown>>;
+}
+
 interface ListedMcpTool {
   name: string;
   description?: string;
@@ -215,6 +220,15 @@ export class McpToolHost {
     };
   }
 
+  async describeServer(serverName: string): Promise<McpServerDetails> {
+    const managed = this.requireServer(serverName);
+    if (!managed.client || !managed.status.connected) await this.reconnect(managed);
+    return {
+      status: { ...managed.status, toolNames: [...managed.status.toolNames], promptNames: [...managed.status.promptNames] },
+      resources: await this.listServerResources(serverName)
+    };
+  }
+
   async close(): Promise<void> {
     this.closing = true;
     const clients = [...this.servers.values()].map((server) => server.client).filter((client): client is Client => Boolean(client));
@@ -379,6 +393,12 @@ export class McpToolHost {
     if (managed.transport === "http") {
       const url = new URL(serverConfig.url ?? "");
       const requestInit = serverConfig.headers ? { headers: serverConfig.headers } : undefined;
+      if (serverConfig.transportProtocol === "sse") {
+        return await this.tryConnect(managed, new SSEClientTransport(url, { requestInit }));
+      }
+      if (serverConfig.transportProtocol === "streamable-http") {
+        return await this.tryConnect(managed, new StreamableHTTPClientTransport(url, { requestInit }));
+      }
       try {
         return await this.tryConnect(managed, new StreamableHTTPClientTransport(url, { requestInit }));
       } catch (streamableError) {

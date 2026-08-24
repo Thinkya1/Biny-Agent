@@ -9,6 +9,13 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseDocument } from "yaml";
+import {
+  GLOBAL_SKILL_ROOT_CONVENTIONS,
+  PROJECT_SKILL_ROOT_CONVENTIONS,
+  type SkillRootConvention,
+  type SkillRootEngine,
+  type SkillRootSource
+} from "./skillRoots.js";
 
 const maxMetadataBytes = 512 * 1024;
 const maxEditorBytes = 512 * 1024;
@@ -17,6 +24,16 @@ const maxFileCount = 512;
 
 export type SkillCatalogScope = "global" | "project";
 export type SkillCatalogEngine = "biny" | "codex" | "claude" | "pi";
+export type SkillCatalogSource = SkillRootSource;
+export type SkillCatalogDiagnosticKind = "unsupported_root" | "unsupported_symlink" | "scan_failed" | "duplicate_id";
+
+export interface SkillCatalogDiagnostic {
+  kind: SkillCatalogDiagnosticKind;
+  message: string;
+  path?: string;
+  ref?: string;
+  shadowedBy?: string;
+}
 
 export interface SkillCatalogFile {
   path: string;
@@ -27,9 +44,12 @@ export interface SkillCatalogFile {
 
 export interface SkillCatalogEntry {
   id: string;
+  ref: string;
   name: string;
   description: string;
   scope: SkillCatalogScope;
+  source: SkillCatalogSource;
+  precedence: number;
   engine: SkillCatalogEngine;
   linkedEngines: SkillCatalogEngine[];
   absolutePath: string;
@@ -38,11 +58,14 @@ export interface SkillCatalogEntry {
   files: SkillCatalogFile[];
   frontmatter: Record<string, unknown>;
   parseError?: string;
+  shadowedBy?: string;
 }
 
 export interface SkillCatalogSnapshot {
   skills: SkillCatalogEntry[];
+  inventory: SkillCatalogEntry[];
   warnings: string[];
+  diagnostics: SkillCatalogDiagnostic[];
 }
 
 export interface SkillCatalogFilePreview {
@@ -56,6 +79,8 @@ export interface SkillCatalogFilePreview {
 interface SkillRoot {
   scope: SkillCatalogScope;
   engine: SkillCatalogEngine;
+  source: SkillCatalogSource;
+  precedence: number;
   directory: string;
   projectRoot?: string;
 }
@@ -72,7 +97,7 @@ interface DiscoveredSkill {
 }
 
 interface GroupedSkill {
-  winner: DiscoveredSkill;
+  item: DiscoveredSkill;
   engines: Set<SkillCatalogEngine>;
 }
 
@@ -80,8 +105,18 @@ export async function scanSkillCatalog(options: { homeDir?: string; projectRoots
   const homeDir = options.homeDir ?? os.homedir();
   const projectRoots = await canonicalProjectRoots(options.projectRoots ?? []);
   const roots = buildSkillRoots(homeDir, projectRoots);
-  const results = await Promise.all(roots.map((root) => scanSkillRoot(root)));
-  const discoveredWarnings = [...new Set(results.flatMap((result) => result.warnings))];
+  const allowedDirectories = (await Promise.all(roots.map(async ({ directory }) => {
+    try {
+      const stat = await fs.lstat(directory);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return undefined;
+      return await fs.realpath(directory);
+    } catch {
+      return undefined;
+    }
+  }))).filter((directory): directory is string => directory !== undefined);
+  const results = await Promise.all(roots.map((root) => scanSkillRoot(root, allowedDirectories)));
+  const discoveredDiagnostics = deduplicateDiagnostics(results.flatMap((result) => result.diagnostics));
+  const discoveredWarnings = [...new Set(discoveredDiagnostics.map((diagnostic) => diagnostic.message))];
   const warnings = discoveredWarnings.length > 24
     ? [...discoveredWarnings.slice(0, 24), `还有 ${String(discoveredWarnings.length - 24)} 条扫描警告未展开。`]
     : discoveredWarnings;
@@ -89,18 +124,50 @@ export async function scanSkillCatalog(options: { homeDir?: string; projectRoots
 
   for (const result of results) {
     for (const item of result.items) {
-      const groupKey = `${item.root.scope}:${item.root.projectRoot ?? ""}:${item.absolutePath}`;
+      const groupKey = `${item.root.scope}:${item.root.projectRoot ?? ""}:${item.root.source}:${item.absolutePath}`;
       const current = grouped.get(groupKey);
       if (current) {
         current.engines.add(item.root.engine);
         continue;
       }
-      grouped.set(groupKey, { winner: item, engines: new Set([item.root.engine]) });
+      grouped.set(groupKey, { item, engines: new Set([item.root.engine]) });
     }
   }
 
-  const skills = [...grouped.values()]
-    .map(({ winner, engines }) => toCatalogEntry(winner, [...engines]))
+  const groupedSkills = [...grouped.values()].sort((left, right) => (
+    left.item.root.precedence - right.item.root.precedence
+      || left.item.name.localeCompare(right.item.name)
+      || left.item.absolutePath.localeCompare(right.item.absolutePath)
+  ));
+  const winners = new Map<string, GroupedSkill>();
+  for (const candidate of groupedSkills) {
+    const key = logicalSkillKey(candidate.item);
+    if (!winners.has(key)) winners.set(key, candidate);
+  }
+
+  const entries = new Map<GroupedSkill, SkillCatalogEntry>();
+  for (const candidate of groupedSkills) {
+    entries.set(candidate, toCatalogEntry(candidate.item, [...candidate.engines]));
+  }
+  const inventory = groupedSkills
+    .map((candidate) => {
+      const entry = entries.get(candidate)!;
+      const winner = winners.get(logicalSkillKey(candidate.item));
+      if (winner !== undefined && winner !== candidate) entry.shadowedBy = entries.get(winner)!.ref;
+      return entry;
+    })
+    .sort((left, right) => left.ref.localeCompare(right.ref));
+  const duplicateDiagnostics = inventory
+    .filter((entry) => entry.shadowedBy)
+    .map((entry): SkillCatalogDiagnostic => ({
+      kind: "duplicate_id",
+      message: `发现重复 Skill「${entry.name}」，已使用优先级更高的 ${entry.shadowedBy}。`,
+      path: entry.absolutePath,
+      ref: entry.ref,
+      shadowedBy: entry.shadowedBy
+    }));
+  const skills = inventory
+    .filter((entry) => entry.shadowedBy === undefined)
     .sort((left, right) => {
       if (left.scope !== right.scope) return left.scope === "global" ? -1 : 1;
       return left.name.localeCompare(right.name);
@@ -109,7 +176,8 @@ export async function scanSkillCatalog(options: { homeDir?: string; projectRoots
     skills.length = maxSkillCount;
     warnings.push(`只展示前 ${String(maxSkillCount)} 个 Skill。`);
   }
-  return { skills, warnings };
+  const diagnostics = deduplicateDiagnostics([...discoveredDiagnostics, ...duplicateDiagnostics]);
+  return { skills, inventory, warnings, diagnostics };
 }
 
 export async function readSkillCatalogFile(entry: SkillCatalogEntry, relativePath: string): Promise<SkillCatalogFilePreview> {
@@ -165,25 +233,36 @@ export async function resolveSkillCatalogFile(entry: SkillCatalogEntry, relative
 
 function buildSkillRoots(homeDir: string, projectRoots: string[]): SkillRoot[] {
   const roots: SkillRoot[] = [];
-  const add = (scope: SkillCatalogScope, engine: SkillCatalogEngine, directory: string, projectRoot?: string): void => {
-    roots.push({ scope, engine, directory, projectRoot });
+  const add = (
+    scope: SkillCatalogScope,
+    convention: SkillRootConvention,
+    engine: SkillRootEngine,
+    directory: string,
+    projectRoot?: string
+  ): void => {
+    roots.push({
+      scope,
+      engine,
+      source: convention.source,
+      precedence: PROJECT_SKILL_ROOT_CONVENTIONS.indexOf(convention),
+      directory,
+      projectRoot
+    });
   };
 
-  add("global", "codex", path.join(homeDir, ".agents", "skills"));
-  add("global", "pi", path.join(homeDir, ".agents", "skills"));
-  add("global", "codex", path.join(homeDir, ".codex", "skills"));
-  add("global", "claude", path.join(homeDir, ".claude", "skills"));
-  add("global", "pi", path.join(homeDir, ".pi", "agent", "skills"));
-  add("global", "biny", path.join(homeDir, ".biny", "skills"));
-  add("global", "codex", "/etc/codex/skills");
+  for (const convention of GLOBAL_SKILL_ROOT_CONVENTIONS) {
+    const directory = path.isAbsolute(convention.relativePath)
+      ? convention.relativePath
+      : path.join(homeDir, convention.relativePath);
+    for (const engine of convention.engines) add("global", convention, engine, directory);
+  }
 
   for (const projectRoot of projectRoots) {
-    add("project", "codex", path.join(projectRoot, ".agents", "skills"), projectRoot);
-    add("project", "pi", path.join(projectRoot, ".agents", "skills"), projectRoot);
-    add("project", "codex", path.join(projectRoot, ".codex", "skills"), projectRoot);
-    add("project", "claude", path.join(projectRoot, ".claude", "skills"), projectRoot);
-    add("project", "pi", path.join(projectRoot, ".pi", "agent", "skills"), projectRoot);
-    add("project", "biny", path.join(projectRoot, ".biny", "skills"), projectRoot);
+    for (const convention of PROJECT_SKILL_ROOT_CONVENTIONS) {
+      for (const engine of convention.engines) {
+        add("project", convention, engine, path.join(projectRoot, convention.relativePath), projectRoot);
+      }
+    }
   }
   return roots;
 }
@@ -200,32 +279,92 @@ async function canonicalProjectRoots(projectRoots: string[]): Promise<string[]> 
   return [...new Set(canonical.filter((root): root is string => root !== undefined))];
 }
 
-async function scanSkillRoot(root: SkillRoot): Promise<{ items: DiscoveredSkill[]; warnings: string[] }> {
+async function scanSkillRoot(root: SkillRoot, allowedDirectories: readonly string[]): Promise<{ items: DiscoveredSkill[]; diagnostics: SkillCatalogDiagnostic[] }> {
+  let rootStat;
+  try {
+    rootStat = await fs.lstat(root.directory);
+  } catch (error) {
+    if (isNotFound(error)) return { items: [], diagnostics: [] };
+    return {
+      items: [],
+      diagnostics: [{
+        kind: "scan_failed",
+        message: `无法扫描 Skill 目录 ${root.directory}：${errorMessage(error)}`,
+        path: root.directory
+      }]
+    };
+  }
+  if (rootStat.isSymbolicLink()) {
+    return {
+      items: [],
+      diagnostics: [{
+        kind: "unsupported_root",
+        message: `跳过符号链接 Skill 根目录：${root.directory}`,
+        path: root.directory
+      }]
+    };
+  }
+  if (!rootStat.isDirectory()) {
+    return {
+      items: [],
+      diagnostics: [{
+        kind: "unsupported_root",
+        message: `跳过非目录 Skill 根目录：${root.directory}`,
+        path: root.directory
+      }]
+    };
+  }
   let entries;
   try {
     entries = await fs.readdir(root.directory, { withFileTypes: true });
   } catch (error) {
-    if (isNotFound(error)) return { items: [], warnings: [] };
-    return { items: [], warnings: [`无法扫描 Skill 目录 ${root.directory}：${errorMessage(error)}`] };
+    if (isNotFound(error)) return { items: [], diagnostics: [] };
+    return {
+      items: [],
+      diagnostics: [{
+        kind: "scan_failed",
+        message: `无法扫描 Skill 目录 ${root.directory}：${errorMessage(error)}`,
+        path: root.directory
+      }]
+    };
   }
 
   const items: DiscoveredSkill[] = [];
-  const warnings: string[] = [];
+  const diagnostics: SkillCatalogDiagnostic[] = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     if (items.length >= maxSkillCount) break;
     if (entry.name.startsWith(".") || entry.name.match(/\.bak\.\d+$/u)) continue;
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     try {
       const absolutePath = await canonicalDirectory(path.join(root.directory, entry.name));
+      if (entry.isSymbolicLink() && !allowedDirectories.some((directory) => isPathInside(directory, absolutePath))) {
+        const linkPath = path.join(root.directory, entry.name);
+        diagnostics.push({
+          kind: "unsupported_symlink",
+          message: `跳过指向非受支持根目录的 Skill 符号链接：${linkPath}`,
+          path: linkPath
+        });
+        continue;
+      }
       const mdPath = await findSkillMarkdown(absolutePath);
       if (!mdPath) continue;
       items.push(await readDiscoveredSkill(root, absolutePath, mdPath));
     } catch (error) {
       if (isNotFound(error)) continue;
-      warnings.push(`跳过 Skill ${path.join(root.directory, entry.name)}：${errorMessage(error)}`);
+      const skillPath = path.join(root.directory, entry.name);
+      diagnostics.push({
+        kind: "scan_failed",
+        message: `跳过 Skill ${skillPath}：${errorMessage(error)}`,
+        path: skillPath
+      });
     }
   }
-  return { items, warnings };
+  return { items, diagnostics };
+}
+
+function isPathInside(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === "" || !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
 }
 
 async function readDiscoveredSkill(root: SkillRoot, absolutePath: string, mdPath: string): Promise<DiscoveredSkill> {
@@ -259,12 +398,15 @@ async function readDiscoveredSkill(root: SkillRoot, absolutePath: string, mdPath
 }
 
 function toCatalogEntry(item: DiscoveredSkill, linkedEngines: SkillCatalogEngine[]): SkillCatalogEntry {
-  const identity = `${item.root.scope}:${item.root.projectRoot ?? "global"}:${item.absolutePath}`;
+  const ref = skillRef(item);
   return {
-    id: createHash("sha256").update(identity).digest("hex").slice(0, 32),
+    id: createHash("sha256").update(ref).digest("hex").slice(0, 32),
+    ref,
     name: item.name,
     description: item.description,
     scope: item.root.scope,
+    source: item.root.source,
+    precedence: item.root.precedence,
     engine: item.root.engine,
     linkedEngines: linkedEngines.sort(),
     absolutePath: item.absolutePath,
@@ -276,12 +418,27 @@ function toCatalogEntry(item: DiscoveredSkill, linkedEngines: SkillCatalogEngine
   };
 }
 
+function skillRef(item: DiscoveredSkill): string {
+  const scope = item.root.scope === "global"
+    ? "global"
+    : `project-${createHash("sha256").update(item.root.projectRoot ?? "").digest("hex").slice(0, 12)}`;
+  return `${scope}:${item.root.source}:${normaliseSkillName(item.name)}`;
+}
+
+function logicalSkillKey(item: DiscoveredSkill): string {
+  return `${item.root.scope}:${item.root.projectRoot ?? "global"}:${normaliseSkillName(item.name)}`;
+}
+
+function normaliseSkillName(name: string): string {
+  return name.trim().toLocaleLowerCase();
+}
+
 async function findSkillMarkdown(directory: string): Promise<string | undefined> {
   for (const name of ["SKILL.md", "skill.md"]) {
     const candidate = path.join(directory, name);
     try {
-      const stat = await fs.stat(candidate);
-      if (stat.isFile()) return candidate;
+      const stat = await fs.lstat(candidate);
+      if (stat.isFile() && !stat.isSymbolicLink()) return candidate;
     } catch {
       // 继续尝试大小写变体。
     }
@@ -337,7 +494,7 @@ async function readMetadataFile(filePath: string): Promise<string> {
   return await fs.readFile(filePath, "utf8");
 }
 
-function parseSkillDocument(content: string): { frontmatter: Record<string, unknown>; body: string } {
+export function parseSkillDocument(content: string): { frontmatter: Record<string, unknown>; body: string } {
   const opening = /^---[ \t]*\r?\n/u.exec(content);
   if (!opening) return { frontmatter: {}, body: content };
   const closingPattern = /^---[ \t]*\r?$/gmu;
@@ -372,4 +529,14 @@ function isNotFound(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function deduplicateDiagnostics(diagnostics: SkillCatalogDiagnostic[]): SkillCatalogDiagnostic[] {
+  const seen = new Set<string>();
+  return diagnostics.filter((diagnostic) => {
+    const key = `${diagnostic.kind}:${diagnostic.path ?? ""}:${diagnostic.ref ?? ""}:${diagnostic.shadowedBy ?? ""}:${diagnostic.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

@@ -295,7 +295,10 @@ function testPromptCacheAccounting(): void {
 
 async function testSkillsAndPlugins(workspaceRoot: string): Promise<void> {
   const extensionDefaults = configSchema.parse({ ...defaultConfig, extensions: {} }).extensions;
-  assert.deepEqual(extensionDefaults.skills, [".agents/skills", ".biny/skills"]);
+  assert.deepEqual(extensionDefaults.skills, [
+    ".biny/skills",
+    ".agents/skills"
+  ]);
   assert.deepEqual(extensionDefaults.plugins, []);
   assert.throws(
     () => configSchema.parse({ ...defaultConfig, extensions: { ...defaultConfig.extensions, plugins: [" "] } }),
@@ -500,8 +503,8 @@ async function testProgressiveSkills(workspaceRoot: string): Promise<void> {
     // 裸 .md 技能保持兼容：文件名主干作为名称，首行作为描述。
     await writeFile(path.join(workspaceRoot, "legacy-skill.md"), "Use the repository's exact test command.", "utf8");
     const legacy = await loadSkills({ workspaceRoot, projectPaths: ["legacy-skill.md", "./legacy-skill.md"], globalRoot: path.join(workspaceRoot, "no-global") });
-    assert.deepEqual(legacy.paths, ["legacy-skill.md"]);
-    assert.deepEqual(legacy.skills.map((skill) => skill.name), ["legacy-skill"]);
+    assert.equal(legacy.paths.filter((skillPath) => skillPath === "legacy-skill.md").length, 1);
+    assert.equal(legacy.skills.some((skill) => skill.name === "legacy-skill"), true);
     assert.match(legacy.prompt, /exact test command/);
 
     // 以水平分割线开头的正文不应被误判成 frontmatter 丢内容。
@@ -511,22 +514,22 @@ async function testProgressiveSkills(workspaceRoot: string): Promise<void> {
       projectPaths: ["hr-skill.md"],
       globalRoot: path.join(workspaceRoot, "no-global")
     });
-    assert.equal(horizontalRule.skills[0]?.description, "Step one: build.");
+    assert.equal(horizontalRule.skills.find((skill) => skill.name === "hr-skill")?.description, "Step one: build.");
 
     // 标准 YAML 的折叠多行 description 可以用于隐式匹配。
     const yamlSkillDir = path.join(workspaceRoot, ".biny", "skills", "yaml-skill");
     await mkdir(yamlSkillDir);
     await writeFile(path.join(yamlSkillDir, "SKILL.md"), "---\nname: yaml-skill\ndescription: >-\n  Review YAML metadata\n  without losing continuation lines.\nmetadata:\n  author: test\n---\nFollow the YAML workflow.", "utf8");
     const yamlBundle = await loadSkills({ workspaceRoot, projectPaths: [path.join(".biny", "skills", "yaml-skill")], globalRoot: path.join(workspaceRoot, "no-global") });
-    assert.equal(yamlBundle.skills[0]?.description, "Review YAML metadata without losing continuation lines.");
+    assert.equal(yamlBundle.skills.find((skill) => skill.name === "yaml-skill")?.description, "Review YAML metadata without losing continuation lines.");
 
     // 不合规 Skill 会出现在 /skills 可见警告里，而不是以错误元数据参与匹配。
     const invalidSkillDir = path.join(workspaceRoot, ".biny", "skills", "invalid-skill");
     await mkdir(invalidSkillDir);
     await writeFile(path.join(invalidSkillDir, "SKILL.md"), "---\nname: another-name\ndescription: Invalid directory binding\n---\nBody.", "utf8");
     const invalidBundle = await loadSkills({ workspaceRoot, projectPaths: [path.join(".biny", "skills", "invalid-skill")], globalRoot: path.join(workspaceRoot, "no-global") });
-    assert.deepEqual(invalidBundle.skills, []);
-    assert.match(invalidBundle.warnings[0] ?? "", /must match its directory name/);
+    assert.equal(invalidBundle.skills.some((skill) => skill.name === "another-name"), false);
+    assert.match(invalidBundle.warnings.join("\n"), /must match its directory name/);
 
     // 超大正文必须明确失败，不能把末尾约束静默截断后继续执行。
     const largeSkillDir = path.join(workspaceRoot, ".biny", "skills", "large-skill");
@@ -604,7 +607,8 @@ async function testExtensionPathBoundary(workspaceRoot: string): Promise<void> {
     const pluginSymlink = path.join(workspaceRoot, "plugin-link.mjs");
     await symlink(externalSkill, skillSymlink);
     await symlink(externalPlugin, pluginSymlink);
-    await assert.rejects(loadWorkspaceSkills(workspaceRoot, ["skill-link.md"]), /symbolic link/);
+    const skippedSkillLink = await loadWorkspaceSkills(workspaceRoot, ["skill-link.md"]);
+    assert.equal(skippedSkillLink.paths.includes("skill-link.md"), false);
     await assert.rejects(
       loadPlugins(workspaceRoot, ["plugin-link.mjs"], configSchema.parse(defaultConfig), new ToolRegistry()),
       /symbolic link/
@@ -641,7 +645,7 @@ async function testExtensionPathBoundary(workspaceRoot: string): Promise<void> {
       const raced = await loadWorkspaceSkills(workspaceRoot, ["skill-race.md"]);
       assert.equal(replacedDuringRead, true);
       assert.equal(raced.prompt.includes("External skill must not load."), false);
-      assert.deepEqual(raced.paths, []);
+      assert.equal(raced.paths.includes("skill-race.md"), false);
     } finally {
       fileHandlePrototype.read = originalRead;
       await fs.rm(racedSkill, { force: true });
@@ -673,7 +677,7 @@ async function testExtensionPathBoundary(workspaceRoot: string): Promise<void> {
     const workspaceAlias = path.join(externalRoot, "workspace-alias");
     await symlink(workspaceRoot, workspaceAlias);
     await writeFile(path.join(workspaceRoot, "skill.md"), "Alias-reachable skill.", "utf8");
-    assert.deepEqual((await loadWorkspaceSkills(workspaceAlias, ["skill.md"])).paths, ["skill.md"]);
+    assert.equal((await loadWorkspaceSkills(workspaceAlias, ["skill.md"])).paths.includes("skill.md"), true);
     assert.deepEqual(
       await loadPlugins(workspaceAlias, ["plugin.mjs"], configSchema.parse(defaultConfig), new ToolRegistry()),
       ["plugin.mjs"]
