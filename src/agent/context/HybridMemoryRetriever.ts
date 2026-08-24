@@ -277,8 +277,6 @@ export function rankHybridMemory(input: HybridMemoryRankingInput, storeRevision 
 
   const included = emptyOriginCounts();
   const trimmed = emptyOriginCounts();
-  const legacyIncluded = { global: 0, project: 0 };
-  const legacyTrimmed = { global: 0, project: 0 };
   const omitted: MemoryRecallReport["omitted"] = [];
   const matches: MemoryMatch[] = [];
   let usedChars = 0;
@@ -294,14 +292,12 @@ export function rankHybridMemory(input: HybridMemoryRankingInput, storeRevision 
         : undefined;
     if (reason) {
       trimmed[bucket] += 1;
-      legacyTrimmed[entry.scope] += 1;
-      omitted.push({ origin: entry.origin, scope: entry.scope, id: entry.id, reason });
+      omitted.push({ origin: entry.origin, id: entry.id, reason });
       if (reason === "budget") budgetOmitted += 1;
       continue;
     }
     usedChars += chars;
     included[bucket] += 1;
-    legacyIncluded[entry.scope] += 1;
     matches.push({
       entry,
       originBucket: bucket,
@@ -315,11 +311,8 @@ export function rankHybridMemory(input: HybridMemoryRankingInput, storeRevision 
   return {
     matches,
     storeRevision,
-    revision: { global: storeRevision, project: storeRevision },
     report: {
       origins: { included, trimmed },
-      included: legacyIncluded,
-      trimmed: legacyTrimmed,
       omitted,
       budgetOmission: budgetOmitted > 0
         ? { maxChars: Math.max(0, input.maxChars), usedChars, omitted: budgetOmitted }
@@ -353,7 +346,6 @@ function emptySearchResult(snapshot: MemoryEntriesResult): MemorySearchResult {
   return {
     matches: [],
     storeRevision: snapshot.storeRevision,
-    revision: { global: snapshot.storeRevision, project: snapshot.storeRevision },
     report
   };
 }
@@ -361,8 +353,6 @@ function emptySearchResult(snapshot: MemoryEntriesResult): MemorySearchResult {
 function emptyRecallReport(): MemoryRecallReport {
   return {
     origins: { included: emptyOriginCounts(), trimmed: emptyOriginCounts() },
-    included: { global: 0, project: 0 },
-    trimmed: { global: 0, project: 0 },
     omitted: [],
     budgetOmission: undefined
   };

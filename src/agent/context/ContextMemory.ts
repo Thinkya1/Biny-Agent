@@ -10,15 +10,13 @@ import type { ContextComponentUsage, SessionContextCheckpoint, SessionContextSta
 import type { ModelContextBudget } from "../../ai/types.js";
 import type { AgentAttachment } from "../AgentSession.js";
 import type { PersonalizationMetadata } from "../../personalization/index.js";
-import type { MemoryOrigin, MemoryOriginCounts, MemoryRecallReport, MemoryScope } from "./memoryTypes.js";
+import type { MemoryOrigin, MemoryOriginCounts, MemoryRecallReport } from "./memoryTypes.js";
 import { canonicalToolSchemaHash, type PromptEpochReason } from "../../llm/promptCache.js";
 import type { HybridMemoryRetriever } from "./HybridMemoryRetriever.js";
 
 const piReserveTokens = 16_384;
 const piKeepRecentTokens = 20_000;
 const defaultSummaryTokens = 4_096;
-const memoryShutdownDrainMs = 2_000;
-const memoryAbortDrainMs = 500;
 const memoryRecallMaxChars = 12_000;
 
 export interface ContextCompactionOptions {
@@ -41,9 +39,6 @@ interface ResolvedCompactionLimits {
  */
 export class ContextMemory {
   private readonly history: AgentMessage[] = [];
-  private memoryTail: Promise<void> = Promise.resolve();
-  private readonly memoryControllers = new Set<AbortController>();
-  private memoryClosed = false;
   private summary: string | undefined;
   private checkpoint: SessionContextCheckpoint | undefined;
   private compactedMessages = 0;
@@ -85,6 +80,10 @@ export class ContextMemory {
       maxTokens: budget.maxInputTokens,
       usedTokens: 0,
       contextWindow: budget.contextWindow,
+      effectiveContextWindow: budget.effectiveContextWindow,
+      effectiveContextWindowPercent: budget.effectiveContextWindowPercent,
+      contextReserveTokens: budget.contextReserveTokens,
+      autoCompactTokenLimit: budget.autoCompactTokenLimit,
       maxOutputTokens: budget.maxOutputTokens,
       modelAlias: budget.modelAlias,
       reserveTokens: this.compactionLimits().reserveTokens,
@@ -113,8 +112,6 @@ export class ContextMemory {
     maxRecalled = this.localMemory?.recallLimit ?? 0
   ): Promise<PreparedAgentContext> {
     this.memoryUseEnabled = useMemories;
-    signal?.throwIfAborted();
-    await this.flush(signal);
     signal?.throwIfAborted();
     await this.workspace.initialize(signal);
     signal?.throwIfAborted();
@@ -178,6 +175,10 @@ export class ContextMemory {
     this.lastBudget = {
       ...assembly.budget,
       contextWindow: budget.contextWindow,
+      effectiveContextWindow: budget.effectiveContextWindow,
+      effectiveContextWindowPercent: budget.effectiveContextWindowPercent,
+      contextReserveTokens: budget.contextReserveTokens,
+      autoCompactTokenLimit: budget.autoCompactTokenLimit,
       maxOutputTokens: budget.maxOutputTokens,
       modelAlias: budget.modelAlias,
       outputReserveTokens: budget.outputReserveTokens,
@@ -380,30 +381,6 @@ export class ContextMemory {
     if (useMemories !== undefined) this.memoryUseEnabled = useMemories;
   }
 
-  queueSuccessfulTask(task: string, answer: string): void {
-    if (!this.localMemory || this.memoryClosed) return;
-    const controller = new AbortController();
-    this.memoryControllers.add(controller);
-    const pending = this.memoryTail.then(async () => {
-      await this.localMemory?.rememberSuccessfulTask(task, answer, controller.signal);
-    }).catch(() => {
-      // 持久记忆是尽力写入，失败不能把已经成功的回合改成错误。
-    }).finally(() => this.memoryControllers.delete(controller));
-    this.memoryTail = pending;
-  }
-
-  async flush(signal?: AbortSignal): Promise<void> {
-    await waitForAbort(this.memoryTail, signal);
-  }
-
-  async shutdownMemory(drainMs = memoryShutdownDrainMs): Promise<void> {
-    this.memoryClosed = true;
-    const pending = this.memoryTail;
-    if (await settlesWithin(pending, drainMs)) return;
-    for (const controller of this.memoryControllers) controller.abort(new Error("Local memory shutdown interrupted the pending write."));
-    await settlesWithin(pending, memoryAbortDrainMs);
-  }
-
   async status(): Promise<ContextStatus> {
     await this.initialize();
     this.syncBudgetMetadata();
@@ -507,10 +484,16 @@ export class ContextMemory {
   }
 
   private compactionLimits(): ResolvedCompactionLimits {
-    const inputBudget = this.inputBudget();
+    const budget = this.currentBudget();
+    const inputBudget = budget.maxInputTokens;
     const maximumReserve = Math.max(0, inputBudget - 1);
     const dynamicReserve = Math.min(piReserveTokens, Math.max(16, Math.floor(inputBudget * 0.15)));
-    const reserveTokens = Math.min(this.compactionOptions.reserveTokens ?? dynamicReserve, maximumReserve);
+    // 有模型窗口元数据时采用 Codex 的 90% 自动压缩参考线；直接注入 AgentModel 的旧
+    // fallback 没有这项元数据，继续使用原来的动态压缩余量。
+    const modelReserve = budget.autoCompactTokenLimit === undefined
+      ? undefined
+      : Math.max(0, inputBudget - budget.autoCompactTokenLimit);
+    const reserveTokens = Math.min(this.compactionOptions.reserveTokens ?? modelReserve ?? dynamicReserve, maximumReserve);
     const recentBudget = Math.max(1, inputBudget - reserveTokens);
     const dynamicKeepRecent = Math.min(piKeepRecentTokens, Math.max(1, Math.floor(recentBudget * 0.55)));
     const keepRecentTokens = Math.min(this.compactionOptions.keepRecentTokens ?? dynamicKeepRecent, recentBudget);
@@ -572,14 +555,15 @@ export class ContextMemory {
   ): Promise<{
       matches: MemoryMatch[];
       report: MemoryRecallReport;
-      entries: Array<{ origin: MemoryOrigin; originBucket?: keyof MemoryOriginCounts; scope: MemoryScope; id: string }>;
+      entries: Array<{ origin: MemoryOrigin; originBucket?: keyof MemoryOriginCounts; id: string }>;
     }> {
     if (!this.localMemory || limit < 1) {
       return { matches: [], report: emptyMemoryRecallReport(), entries: [] };
     }
     try {
       const result = this.memoryRetriever === undefined
-        ? await this.localMemory.searchScoped(input, paths, {
+        ? await this.localMemory.search(input, paths, {
+          origins: ["user", "current_workspace"],
           limit,
           maxChars: memoryRecallMaxChars,
           signal
@@ -600,7 +584,6 @@ export class ContextMemory {
         entries: result.matches.map((match) => ({
           origin: match.entry.origin,
           originBucket: match.originBucket,
-          scope: match.entry.scope,
           id: match.entry.id
         }))
       };
@@ -626,6 +609,10 @@ export class ContextMemory {
       ...this.lastBudget,
       maxTokens: budget.maxInputTokens,
       contextWindow: budget.contextWindow,
+      effectiveContextWindow: budget.effectiveContextWindow,
+      effectiveContextWindowPercent: budget.effectiveContextWindowPercent,
+      contextReserveTokens: budget.contextReserveTokens,
+      autoCompactTokenLimit: budget.autoCompactTokenLimit,
       maxOutputTokens: budget.maxOutputTokens,
       modelAlias: budget.modelAlias,
       reserveTokens: this.compactionLimits().reserveTokens,
@@ -648,6 +635,10 @@ export class ContextMemory {
       ...this.lastBudget,
       maxTokens: budget.maxInputTokens,
       contextWindow: budget.contextWindow,
+      effectiveContextWindow: budget.effectiveContextWindow,
+      effectiveContextWindowPercent: budget.effectiveContextWindowPercent,
+      contextReserveTokens: budget.contextReserveTokens,
+      autoCompactTokenLimit: budget.autoCompactTokenLimit,
       maxOutputTokens: budget.maxOutputTokens,
       modelAlias: budget.modelAlias,
       reserveTokens: this.compactionLimits().reserveTokens,
@@ -673,37 +664,6 @@ export class ContextMemory {
 
   private inputBudget(): number {
     return this.currentBudget().maxInputTokens;
-  }
-}
-
-async function waitForAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return await promise;
-  signal.throwIfAborted();
-  return await new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
-    signal.addEventListener("abort", onAbort, { once: true });
-    void promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      }
-    );
-  });
-}
-
-async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise.then(() => true, () => true),
-      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); })
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
 
@@ -967,8 +927,6 @@ function cloneBudget(budget: ContextBudgetStatus): ContextBudgetStatus {
 function emptyMemoryRecallReport(): MemoryRecallReport {
   return {
     origins: { included: emptyMemoryOriginCounts(), trimmed: emptyMemoryOriginCounts() },
-    included: { global: 0, project: 0 },
-    trimmed: { global: 0, project: 0 },
     omitted: [],
     budgetOmission: undefined
   };
@@ -980,8 +938,6 @@ function cloneMemoryRecallReport(report: MemoryRecallReport): MemoryRecallReport
       included: { ...report.origins.included },
       trimmed: { ...report.origins.trimmed }
     },
-    included: { ...report.included },
-    trimmed: { ...report.trimmed },
     omitted: report.omitted.map((item) => ({ ...item })),
     budgetOmission: report.budgetOmission === undefined ? undefined : { ...report.budgetOmission }
   };
@@ -989,22 +945,20 @@ function cloneMemoryRecallReport(report: MemoryRecallReport): MemoryRecallReport
 
 function memoryRecallForAssembly(
   report: MemoryRecallReport,
-  entries: Array<{ origin: MemoryOrigin; originBucket?: keyof MemoryOriginCounts; scope: MemoryScope; id: string }>,
+  entries: Array<{ origin: MemoryOrigin; originBucket?: keyof MemoryOriginCounts; id: string }>,
   components: ContextComponentUsage[] | undefined
 ): MemoryRecallReport {
   const next = cloneMemoryRecallReport(report);
   const memoryComponent = components?.find((component) => component.id === "stable memory");
   if (!memoryComponent || memoryComponent.disposition === "included") return next;
   for (const entry of entries) {
-    if (next.included[entry.scope] > 0) next.included[entry.scope] -= 1;
-    next.trimmed[entry.scope] += 1;
     const bucket = entry.originBucket ?? (entry.origin.kind === "user"
       ? "user"
       : next.origins.included.currentWorkspace > 0 ? "currentWorkspace" : "otherWorkspaces");
     if (next.origins.included[bucket] > 0) next.origins.included[bucket] -= 1;
     next.origins.trimmed[bucket] += 1;
-    if (!next.omitted.some((omission) => omission.scope === entry.scope && omission.id === entry.id)) {
-      next.omitted.push({ origin: entry.origin, scope: entry.scope, id: entry.id, reason: "budget" });
+    if (!next.omitted.some((omission) => omission.id === entry.id)) {
+      next.omitted.push({ origin: entry.origin, id: entry.id, reason: "budget" });
     }
   }
   const omitted = next.omitted.filter((item) => item.reason === "budget").length;
@@ -1026,6 +980,10 @@ function normalizeRestoredBudget(budget: ContextBudgetStatus, limits: ModelConte
     ...budget,
     maxTokens: limits.maxInputTokens,
     contextWindow: limits.contextWindow,
+    effectiveContextWindow: limits.effectiveContextWindow,
+    effectiveContextWindowPercent: limits.effectiveContextWindowPercent,
+    contextReserveTokens: limits.contextReserveTokens,
+    autoCompactTokenLimit: limits.autoCompactTokenLimit,
     maxOutputTokens: limits.maxOutputTokens,
     modelAlias: limits.modelAlias,
     usedTokens: source === "provider" ? Math.max(0, budget.usedTokens) : Math.min(limits.maxInputTokens, Math.max(0, budget.usedTokens)),
@@ -1043,6 +1001,10 @@ function estimateRestoredBudget(history: AgentMessage[], limits: ModelContextBud
   return {
     maxTokens: limits.maxInputTokens,
     contextWindow: limits.contextWindow,
+    effectiveContextWindow: limits.effectiveContextWindow,
+    effectiveContextWindowPercent: limits.effectiveContextWindowPercent,
+    contextReserveTokens: limits.contextReserveTokens,
+    autoCompactTokenLimit: limits.autoCompactTokenLimit,
     maxOutputTokens: limits.maxOutputTokens,
     modelAlias: limits.modelAlias,
     usedTokens: Math.min(limits.maxInputTokens, estimatedTokens),

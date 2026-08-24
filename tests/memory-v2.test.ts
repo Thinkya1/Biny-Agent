@@ -114,7 +114,7 @@ async function testSharedLibraryAndLexicalFallbackBoundary(): Promise<void> {
       assert.deepEqual(overview.origins, { user: 0, currentWorkspace: 0, otherWorkspaces: 1 });
       assert.equal((await second.listMemoryEntries({ origins: ["other_workspaces"] })).entries.length, 1);
       assert.equal((await second.search("release publish", [], { origins: ["all"] })).matches.length, 1, "manual all-origin search can inspect shared memory");
-      assert.equal((await second.searchScoped("release publish", [])).matches.length, 0, "lexical fallback must not auto-inject another workspace");
+      assert.equal((await second.search("release publish", [], { origins: ["user", "current_workspace"] })).matches.length, 0, "lexical fallback must not auto-inject another workspace");
 
       const own = await second.writeEntry({
         ...projectEntry("Second release", "Run typecheck before publishing the second workspace."),
@@ -122,7 +122,7 @@ async function testSharedLibraryAndLexicalFallbackBoundary(): Promise<void> {
         keywords: ["release", "publish"]
       }, { expectedRevision: overview.storeRevision });
       assert.equal(own.revision, 2);
-      const filtered = await second.searchScoped("release publish", []);
+      const filtered = await second.search("release publish", [], { origins: ["user", "current_workspace"] });
       assert.equal(filtered.matches.length, 1);
       assert.equal(filtered.matches[0]?.entry.origin.kind, "workspace");
       assert.equal((filtered.matches[0]?.entry.origin as { workspaceName?: string }).workspaceName, path.basename(secondWorkspace));
@@ -144,7 +144,7 @@ async function testBoundedIndexConcurrentCasAndUsageProjection(): Promise<void> 
         `Durable indexed summary ${String(index)} ${"content ".repeat(20)}`
       ), { expectedRevision: revision })).revision;
     }
-    const index = await storage.readIndex("project");
+    const index = await storage.readIndex();
     assert.ok(index);
     assert.ok(index.length <= 1_024);
     assert.match(index, /omitted from this bounded index/u);

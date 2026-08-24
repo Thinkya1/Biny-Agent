@@ -5,10 +5,9 @@
  * 所有写操作共享一个单调 revision，并通过 expectedRevision 做 CAS。
  */
 
-/** 新接口使用 audience；scope 仅供尚未迁移的内部调用方兼容。 */
 export type MemoryAudience = "universal" | "workspace";
 
-/** @deprecated 使用 MemoryAudience/MemoryOrigin。 */
+/** 仅用于识别旧磁盘布局，不属于运行时 API。 */
 export type MemoryScope = "global" | "project";
 
 export interface UserMemoryOrigin {
@@ -60,11 +59,9 @@ export interface MemoryLineage {
 
 /** 稳定 id、时间与 revision 由存储层生成。 */
 export interface MemoryEntryInput {
-  /** v3 调用方必须提供 origin 或 audience；workspace audience 自动绑定当前工作区。 */
+  /** 调用方必须提供 origin 或 audience；workspace audience 自动绑定当前工作区。 */
   origin?: MemoryOrigin;
   audience?: MemoryAudience;
-  /** @deprecated 仅供旧调用方；global=universal，project=workspace。 */
-  scope?: MemoryScope;
   kind: MemoryKind;
   topic: string;
   title: string;
@@ -93,8 +90,6 @@ export interface MemoryEntryPatch {
 export interface MemoryEntry {
   id: string;
   origin: MemoryOrigin;
-  /** @deprecated 由 origin 派生，便于旧 Desktop/Runtime 渐进切换。 */
-  scope: MemoryScope;
   kind: MemoryKind;
   topic: string;
   title: string;
@@ -128,8 +123,6 @@ export interface MemoryCandidateInput {
   lineage: MemoryCandidateLineage;
   origin?: MemoryOrigin;
   audienceHint?: MemoryAudience;
-  /** @deprecated 使用 audienceHint。 */
-  scopeHint?: MemoryScope;
   kindHint?: MemoryKind;
 }
 
@@ -140,27 +133,10 @@ export interface MemoryCandidate {
   lineage: MemoryCandidateLineage;
   origin: MemoryOrigin;
   audienceHint?: MemoryAudience;
-  /** @deprecated 使用 audienceHint。 */
-  scopeHint?: MemoryScope;
   kindHint?: MemoryKind;
   createdAt: string;
   eligibleAt: string;
   revision: number;
-}
-
-/** @deprecated 两个字段始终等于 storeRevision。 */
-export interface MemoryScopeRevision {
-  global: number;
-  project: number;
-}
-
-/** @deprecated 仅供旧设置页渐进切换。 */
-export interface MemoryScopeOverview {
-  scope: MemoryScope;
-  revision: number;
-  entryCount: number;
-  candidateCount: number;
-  indexChars: number;
 }
 
 export interface MemoryOriginCounts {
@@ -175,10 +151,6 @@ export interface MemoryOverview {
   candidateCount: number;
   indexChars: number;
   origins: MemoryOriginCounts;
-  /** @deprecated 使用 storeRevision/origins。 */
-  scopes: Record<MemoryScope, MemoryScopeOverview>;
-  /** @deprecated 使用 storeRevision。 */
-  revision: MemoryScopeRevision;
 }
 
 export interface MemoryReadOptions {
@@ -193,8 +165,6 @@ export interface MemoryMutationOptions extends MemoryReadOptions {
 
 export interface MemoryListOptions extends MemoryReadOptions {
   origins?: MemoryOriginSelector[];
-  /** @deprecated 使用 origins。 */
-  scopes?: MemoryScope[];
   topic?: string;
   limit?: number;
 }
@@ -204,8 +174,6 @@ export interface MemoryEntriesResult {
   /** 条目 ID 到权威 Markdown 相对路径的映射，供向量独占命中仍能引用真实文件。 */
   paths?: Record<string, string>;
   storeRevision: number;
-  /** @deprecated 使用 storeRevision。 */
-  revision: MemoryScopeRevision;
 }
 
 export interface ScopedMemoryWriteResult {
@@ -222,8 +190,6 @@ export interface MemoryDeleteResult {
 
 export interface MemoryClearResult {
   selector: MemoryOriginSelector;
-  /** @deprecated 仅在 clearScope 兼容入口中返回。 */
-  scope?: MemoryScope;
   deletedEntries: number;
   deletedCandidates: number;
   revision: number;
@@ -243,16 +209,8 @@ export type MemoryOmissionReason = "entry_limit" | "budget" | "invalid";
 
 export interface MemoryRecallOmission {
   origin: MemoryOrigin;
-  /** @deprecated 使用 origin。 */
-  scope: MemoryScope;
   id: string;
   reason: MemoryOmissionReason;
-}
-
-/** @deprecated 使用 MemoryOriginCounts。 */
-export interface MemoryRecallScopeCounts {
-  global: number;
-  project: number;
 }
 
 export interface MemoryBudgetOmission {
@@ -266,18 +224,12 @@ export interface MemoryRecallReport {
     included: MemoryOriginCounts;
     trimmed: MemoryOriginCounts;
   };
-  /** @deprecated 使用 origins.included。 */
-  included: MemoryRecallScopeCounts;
-  /** @deprecated 使用 origins.trimmed。 */
-  trimmed: MemoryRecallScopeCounts;
   omitted: MemoryRecallOmission[];
   budgetOmission?: MemoryBudgetOmission;
 }
 
 export interface MemorySearchOptions extends MemoryReadOptions {
   origins?: MemoryOriginSelector[];
-  /** @deprecated 使用 origins。 */
-  scopes?: MemoryScope[];
   /** 单库合计上限。 */
   limit?: number;
   /** 注入预算；命中条目超过预算时在 report 中明确标为 budget。 */
@@ -288,8 +240,6 @@ export interface MemorySearchOptions extends MemoryReadOptions {
 export interface MemorySearchResult {
   matches: MemoryMatch[];
   storeRevision: number;
-  /** @deprecated 使用 storeRevision。 */
-  revision: MemoryScopeRevision;
   report: MemoryRecallReport;
 }
 
@@ -323,8 +273,6 @@ export interface MemoryConsolidationOptions extends MemoryReadOptions {
 
 export interface MemoryConsolidationResult {
   origin?: MemoryOrigin;
-  /** @deprecated 仅在 consolidateScope 兼容入口中返回。 */
-  scope: MemoryScope;
   before: number;
   after: number;
   revision: number;
@@ -372,7 +320,6 @@ export class MemoryRevisionConflictError extends Error {
   readonly name = "MemoryRevisionConflictError";
 
   constructor(
-    readonly scope: MemoryScope | "store",
     readonly expectedRevision: number,
     readonly actualRevision: number
   ) {

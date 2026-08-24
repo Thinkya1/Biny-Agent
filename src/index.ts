@@ -40,27 +40,17 @@ export type {
   MemoryOriginSelector,
 } from "./agent/context/memoryTypes.js";
 
-/** 包根只暴露来源感知的 v3 结构；旧 scope 字段留在迁移实现内部。 */
-export type MemoryEntryInput = Omit<StoredMemoryEntryInput, "scope">;
-export type MemoryEntry = Omit<StoredMemoryEntry, "scope">;
-export type MemoryCandidateInput = Omit<StoredMemoryCandidateInput, "scopeHint">;
-export type MemoryCandidate = Omit<StoredMemoryCandidate, "scopeHint">;
-export type MemoryOverview = Omit<StoredMemoryOverview, "scopes" | "revision">;
-export type MemoryEntriesResult = Omit<StoredMemoryEntriesResult, "entries" | "revision"> & {
-  entries: MemoryEntry[];
-};
-export type MemoryClearResult = Omit<StoredMemoryClearResult, "scope">;
-export type MemoryConsolidationResult = Omit<StoredMemoryConsolidationResult, "scope">;
-export type MemoryRecallOmission = Omit<StoredMemoryRecallOmission, "scope">;
-export type MemoryRecallReport = Omit<StoredMemoryRecallReport, "included" | "trimmed" | "omitted"> & {
-  omitted: MemoryRecallOmission[];
-};
-export type MemoryMatch = Omit<StoredMemoryMatch, "entry"> & { entry: MemoryEntry };
-export type MemorySearchResult = Omit<StoredMemorySearchResult, "matches" | "revision" | "report"> & {
-  matches: MemoryMatch[];
-  report: MemoryRecallReport;
-};
-export type MemoryWriteResult = Omit<StoredMemoryWriteResult, "entry"> & { entry?: MemoryEntry };
-export type MemoryCandidateMutationResult = Omit<StoredMemoryCandidateMutationResult, "candidate"> & {
-  candidate?: MemoryCandidate;
-};
+export type MemoryEntryInput = StoredMemoryEntryInput;
+export type MemoryEntry = StoredMemoryEntry;
+export type MemoryCandidateInput = StoredMemoryCandidateInput;
+export type MemoryCandidate = StoredMemoryCandidate;
+export type MemoryOverview = StoredMemoryOverview;
+export type MemoryEntriesResult = StoredMemoryEntriesResult;
+export type MemoryClearResult = StoredMemoryClearResult;
+export type MemoryConsolidationResult = StoredMemoryConsolidationResult;
+export type MemoryRecallOmission = StoredMemoryRecallOmission;
+export type MemoryRecallReport = StoredMemoryRecallReport;
+export type MemoryMatch = StoredMemoryMatch;
+export type MemorySearchResult = StoredMemorySearchResult;
+export type MemoryWriteResult = StoredMemoryWriteResult;
+export type MemoryCandidateMutationResult = StoredMemoryCandidateMutationResult;

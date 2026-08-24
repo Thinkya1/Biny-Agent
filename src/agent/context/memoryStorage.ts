@@ -49,8 +49,6 @@ import {
   type MemoryOverview,
   type MemoryReadOptions,
   type MemoryScope,
-  type MemoryScopeOverview,
-  type MemoryScopeRevision,
   type MemorySearchOptions,
   type MemorySearchResult,
   type ScopedMemoryWriteResult
@@ -125,11 +123,6 @@ interface MemoryStorageOptions {
   maxIndexChars?: number;
 }
 
-interface DeleteTopicResult {
-  deleted: number;
-  revision: number;
-}
-
 interface ReplaceEntriesResult {
   entries: MemoryEntry[];
   revision: number;
@@ -156,7 +149,6 @@ const candidateSchema = z.object({
     })
   ]),
   audienceHint: z.enum(["universal", "workspace"]).optional(),
-  scopeHint: z.enum(["global", "project"]).optional(),
   kindHint: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]).optional(),
   createdAt: z.string(),
   eligibleAt: z.string(),
@@ -240,16 +232,12 @@ export class MemoryStorage {
     options.signal?.throwIfAborted();
     const snapshot = await this.readScope("project", options.signal);
     const origins = countOrigins(snapshot.entries.map(({ entry }) => entry), currentWorkspaceId(snapshot.directory));
-    const globalOverview = scopeOverview("global", snapshot, origins.user);
-    const projectOverview = scopeOverview("project", snapshot, origins.currentWorkspace);
     return {
       storeRevision: snapshot.state.revision,
       entryCount: snapshot.entries.length,
       candidateCount: snapshot.candidates.length,
       indexChars: snapshot.index?.length ?? 0,
-      origins,
-      scopes: { global: globalOverview, project: projectOverview },
-      revision: sameRevision(snapshot.state.revision)
+      origins
     };
   }
 
@@ -257,7 +245,7 @@ export class MemoryStorage {
   async listEntries(options: MemoryListOptions = {}): Promise<MemoryEntriesResult> {
     options.signal?.throwIfAborted();
     const snapshot = await this.readScope("project", options.signal);
-    const selectors = normalizeOriginSelectors(options.origins, options.scopes, true);
+    const selectors = normalizeOriginSelectors(options.origins);
     const workspaceId = currentWorkspaceId(snapshot.directory);
     const topic = options.topic === undefined ? undefined : normalizeMemoryTopic(options.topic);
     const records = snapshot.entries
@@ -273,38 +261,23 @@ export class MemoryStorage {
           entry.id,
           path.relative(snapshot.directory!.storageRoot, path.join(snapshot.directory!.path, entryDirectoryName, fileName))
         ])),
-      storeRevision: snapshot.state.revision,
-      revision: sameRevision(snapshot.state.revision)
+      storeRevision: snapshot.state.revision
     };
-  }
-
-  /** @deprecated 使用 listEntries。 */
-  async listStoredEntries(options: MemoryListOptions = {}): Promise<MemoryEntriesResult> {
-    return await this.listEntries(options);
   }
 
   /** v3 单库词法搜索入口；语义层在 Runtime Host 上游组合。 */
   async search(query: string, queryPaths: string[], options: MemorySearchOptions = {}): Promise<MemorySearchResult> {
-    return await this.searchInternal(query, queryPaths, options, true);
-  }
-
-  /**
-   * @deprecated 使用 search。旧自动召回未显式传 scope 时只读取 user + 当前 workspace，
-   * 避免向量不可用时把其他项目的词法结果自动注入上下文。
-   */
-  async searchScoped(query: string, queryPaths: string[], options: MemorySearchOptions = {}): Promise<MemorySearchResult> {
-    return await this.searchInternal(query, queryPaths, options, options.origins !== undefined || options.scopes !== undefined);
+    return await this.searchInternal(query, queryPaths, options);
   }
 
   private async searchInternal(
     query: string,
     queryPaths: string[],
-    options: MemorySearchOptions,
-    defaultAll: boolean
+    options: MemorySearchOptions
   ): Promise<MemorySearchResult> {
     options.signal?.throwIfAborted();
     const snapshot = await this.readScope("project", options.signal);
-    const selectors = normalizeOriginSelectors(options.origins, options.scopes, defaultAll);
+    const selectors = normalizeOriginSelectors(options.origins);
     const workspaceId = currentWorkspaceId(snapshot.directory);
     const now = options.now ?? new Date();
     const ranked = rankMemoryEntries(
@@ -316,8 +289,6 @@ export class MemoryStorage {
     );
     const records = new Map(snapshot.entries.map((record) => [record.entry.id, record] as const));
     const limit = normalizeLimit(options.limit, 3);
-    const included = { global: 0, project: 0 };
-    const trimmed = { global: 0, project: 0 };
     const originIncluded = emptyOriginCounts();
     const originTrimmed = emptyOriginCounts();
     const omitted: MemorySearchResult["report"]["omitted"] = [];
@@ -330,19 +301,17 @@ export class MemoryStorage {
       if (!record || !snapshot.directory) continue;
       const bucket = originBucket(rankedEntry.entry.origin, workspaceId);
       if (matches.length >= limit) {
-        trimmed[rankedEntry.entry.scope] += 1;
         originTrimmed[bucket] += 1;
-        omitted.push({ origin: rankedEntry.entry.origin, scope: rankedEntry.entry.scope, id: rankedEntry.entry.id, reason: "entry_limit" });
+        omitted.push({ origin: rankedEntry.entry.origin, id: rankedEntry.entry.id, reason: "entry_limit" });
         continue;
       }
       const estimatedChars = rankedEntry.entry.title.length + rankedEntry.excerpt.length + 80;
       if (options.maxChars !== undefined && usedChars + estimatedChars > Math.max(0, options.maxChars)) {
         budgetOmitted += 1;
-        omitted.push({ origin: rankedEntry.entry.origin, scope: rankedEntry.entry.scope, id: rankedEntry.entry.id, reason: "budget" });
+        omitted.push({ origin: rankedEntry.entry.origin, id: rankedEntry.entry.id, reason: "budget" });
         continue;
       }
       usedChars += estimatedChars;
-      included[rankedEntry.entry.scope] += 1;
       originIncluded[bucket] += 1;
       matches.push({
         ...memoryMatchFromRanked(
@@ -355,8 +324,6 @@ export class MemoryStorage {
 
     const report: MemorySearchResult["report"] = {
       origins: { included: originIncluded, trimmed: originTrimmed },
-      included,
-      trimmed,
       omitted,
       budgetOmission: options.maxChars === undefined || budgetOmitted === 0
         ? undefined
@@ -365,7 +332,6 @@ export class MemoryStorage {
     return {
       matches,
       storeRevision: snapshot.state.revision,
-      revision: sameRevision(snapshot.state.revision),
       report
     };
   }
@@ -407,11 +373,6 @@ export class MemoryStorage {
         revision: nextRevision
       };
     });
-  }
-
-  /** @deprecated 使用 writeEntry。 */
-  async writeScoped(input: MemoryEntryInput, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
-    return await this.writeEntry(input, options);
   }
 
   async updateEntry(id: string, patch: MemoryEntryPatch, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
@@ -466,20 +427,15 @@ export class MemoryStorage {
   }
 
   async deleteEntry(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
-    return await this.deleteStoredEntryInternal(id, options);
+    return await this.deleteEntryInternal(id, options);
   }
 
-  /** @deprecated 使用 deleteEntry。 */
-  async deleteStoredEntry(scope: MemoryScope, id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
-    return await this.deleteStoredEntryInternal(id, options, scope);
-  }
-
-  private async deleteStoredEntryInternal(id: string, options: MemoryMutationOptions, scope?: MemoryScope): Promise<MemoryDeleteResult> {
+  private async deleteEntryInternal(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
     options.signal?.throwIfAborted();
     return await this.withScopeLock("project", true, options.signal, async (directory) => {
       const snapshot = await this.readScopeLocked(directory, options.now ?? new Date(), options.signal);
       assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      const record = snapshot.entries.find(({ entry }) => entry.id === id && (scope === undefined || entry.scope === scope));
+      const record = snapshot.entries.find(({ entry }) => entry.id === id);
       if (!record) return { deleted: false, revision: snapshot.state.revision };
       const nextRevision = snapshot.state.revision + 1;
       await this.commitDestructiveMutation(directory, {
@@ -493,34 +449,6 @@ export class MemoryStorage {
       }, options.signal);
       return { deleted: true, revision: nextRevision };
     });
-  }
-
-  async deleteTopic(scope: MemoryScope, topic: string, options: MemoryMutationOptions): Promise<DeleteTopicResult> {
-    options.signal?.throwIfAborted();
-    const normalized = normalizeMemoryTopic(topic);
-    return await this.withScopeLock(scope, true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.now ?? new Date(), options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      const targets = snapshot.entries.filter(({ entry }) => entry.scope === scope && entry.topic === normalized);
-      if (!targets.length) return { deleted: 0, revision: snapshot.state.revision };
-      const nextRevision = snapshot.state.revision + 1;
-      await this.commitDestructiveMutation(directory, {
-        version: 3,
-        fromRevision: snapshot.state.revision,
-        toRevision: nextRevision,
-        createdAt: (options.now ?? new Date()).toISOString(),
-        entryWrites: [],
-        entryDeletes: targets.map(({ fileName }) => fileName),
-        candidateDeletes: []
-      }, options.signal);
-      return { deleted: targets.length, revision: nextRevision };
-    });
-  }
-
-  async clearScope(scope: MemoryScope, options: MemoryMutationOptions): Promise<MemoryClearResult> {
-    const selector: MemoryOriginSelector = scope === "global" ? "user" : "current_workspace";
-    const result = await this.clearEntries(selector, options);
-    return { ...result, scope };
   }
 
   async clearEntries(selector: MemoryOriginSelector, options: MemoryMutationOptions): Promise<MemoryClearResult> {
@@ -575,11 +503,9 @@ export class MemoryStorage {
       if (duplicate) return { queued: false, candidate: duplicate, revision: snapshot.state.revision, reason: "duplicate" };
       const nextRevision = snapshot.state.revision + 1;
       const createdAt = now.toISOString();
-      const candidateOrigin = input.origin ?? (
-        input.audienceHint === "universal" || input.scopeHint === "global"
-          ? { kind: "user" as const }
-          : workspaceOrigin(directory.workspaceRoot)
-      );
+      const candidateOrigin = input.origin ?? (input.audienceHint === "universal"
+        ? { kind: "user" as const }
+        : workspaceOrigin(directory.workspaceRoot));
       const candidate: MemoryCandidate = {
         id: randomUUID(),
         summary,
@@ -592,8 +518,7 @@ export class MemoryStorage {
           externalContext: input.lineage.externalContext
         },
         origin: candidateOrigin,
-        audienceHint: input.audienceHint ?? (input.scopeHint === "global" ? "universal" : input.scopeHint === "project" ? "workspace" : undefined),
-        scopeHint: input.scopeHint,
+        audienceHint: input.audienceHint,
         kindHint: input.kindHint,
         createdAt,
         eligibleAt: new Date(now.getTime() + memoryCandidateEligibilityMs).toISOString(),
@@ -689,7 +614,7 @@ export class MemoryStorage {
       const sourceSet = new Set(sourceEntryIds);
       if (sourceSet.size !== sourceEntryIds.length) throw new Error("Consolidation source ids must be unique.");
       if (![...sourceSet].every((id) => snapshot.entries.some(({ entry }) => entry.id === id))) {
-        throw new MemoryRevisionConflictError("store", options.expectedRevision, snapshot.state.revision);
+        throw new MemoryRevisionConflictError(options.expectedRevision, snapshot.state.revision);
       }
       const sources = snapshot.entries.filter(({ entry }) => sourceSet.has(entry.id));
       const sourceOrigin = sources[0]?.entry.origin;
@@ -735,9 +660,8 @@ export class MemoryStorage {
     });
   }
 
-  async readIndex(scope: MemoryScope, signal?: AbortSignal): Promise<string | undefined> {
-    void scope;
-    return (await this.readScope(scope, signal)).index;
+  async readIndex(signal?: AbortSignal): Promise<string | undefined> {
+    return (await this.readScope("project", signal)).index;
   }
 
   /** 维护状态是操作元数据，不改变 memory revision；后台失败和进程重启后仍可审计。 */
@@ -901,18 +825,6 @@ function emptyState(): MemoryState {
 
 function emptyMaintenanceStatus(): MemoryMaintenanceStatus {
   return { state: "idle", eligible: 0, processed: 0, written: 0, failed: 0 };
-}
-
-function scopeOverview(scope: MemoryScope, snapshot: ScopeSnapshot, entryCount: number): MemoryScopeOverview {
-  return {
-    scope,
-    revision: snapshot.state.revision,
-    entryCount,
-    candidateCount: scope === "global"
-      ? snapshot.candidates.filter((candidate) => candidate.origin.kind === "user").length
-      : snapshot.candidates.filter((candidate) => candidate.origin.kind === "workspace" && candidate.origin.workspaceId === currentWorkspaceId(snapshot.directory)).length,
-    indexChars: snapshot.index?.length ?? 0
-  };
 }
 
 async function resolveScopeDirectory(workspaceRoot: string, scope: MemoryScope, create: boolean): Promise<PinnedScopeDirectory | undefined> {
@@ -1316,7 +1228,7 @@ async function migrateV2ScopesLocked(
       const parsed = legacyCandidateSchema.safeParse(raw);
       if (!parsed.success) throw new Error(`Invalid v2 memory candidate: ${sourceName}/${fileName}`);
       const legacyPath = `${sourceName}/.candidates/${fileName}`;
-      const { version: _version, ...legacyCandidate } = parsed.data;
+      const { version: _version, scopeHint: _scopeHint, ...legacyCandidate } = parsed.data;
       const expected: MemoryCandidate = {
         ...legacyCandidate,
         id: parsed.data.id,
@@ -1445,7 +1357,6 @@ function migrationCandidatePayload(candidate: MemoryCandidate): object {
     lineage: candidate.lineage,
     origin: candidate.origin,
     audienceHint: candidate.audienceHint,
-    scopeHint: candidate.scopeHint,
     kindHint: candidate.kindHint,
     createdAt: candidate.createdAt,
     eligibleAt: candidate.eligibleAt
@@ -1996,11 +1907,7 @@ function unsafeLeafError(fileName: string): Error {
 
 function assertExpectedRevision(scope: MemoryScope | "store", expected: number, actual: number): void {
   if (!Number.isSafeInteger(expected) || expected < 0) throw new Error("expectedRevision must be a non-negative integer.");
-  if (expected !== actual) throw new MemoryRevisionConflictError(scope, expected, actual);
-}
-
-function sameRevision(revision: number): MemoryScopeRevision {
-  return { global: revision, project: revision };
+  if (expected !== actual) throw new MemoryRevisionConflictError(expected, actual);
 }
 
 function workspaceOrigin(canonicalWorkspace: string): Extract<MemoryOrigin, { kind: "workspace" }> {
@@ -2012,9 +1919,9 @@ function workspaceOrigin(canonicalWorkspace: string): Extract<MemoryOrigin, { ki
 }
 
 function resolveEntryOrigin(input: MemoryEntryInput, current: MemoryOrigin): MemoryEntryInput & { origin: MemoryOrigin } {
-  const intended = input.audience === "universal" || input.scope === "global"
+  const intended = input.audience === "universal"
     ? "user"
-    : input.audience === "workspace" || input.scope === "project"
+    : input.audience === "workspace"
       ? "workspace"
       : undefined;
   const origin = input.origin ?? (intended === "user" ? { kind: "user" as const } : current);
@@ -2026,15 +1933,10 @@ function resolveEntryOrigin(input: MemoryEntryInput, current: MemoryOrigin): Mem
 }
 
 function normalizeOriginSelectors(
-  origins: MemoryOriginSelector[] | undefined,
-  scopes: MemoryScope[] | undefined,
-  defaultAll: boolean
+  origins: MemoryOriginSelector[] | undefined
 ): MemoryOriginSelector[] {
   if (origins?.length) return [...new Set(origins)];
-  if (scopes?.length) {
-    return [...new Set(scopes.map((scope): MemoryOriginSelector => scope === "global" ? "user" : "current_workspace"))];
-  }
-  return defaultAll ? ["all"] : ["user", "current_workspace"];
+  return ["all"];
 }
 
 function matchesOriginSelectors(origin: MemoryOrigin, selectors: MemoryOriginSelector[], workspaceId: string): boolean {
@@ -2064,11 +1966,6 @@ function countOrigins(entries: MemoryEntry[], workspaceId: string): MemoryOrigin
   return counts;
 }
 
-function _normalizeScopes(scopes: MemoryScope[] | undefined): MemoryScope[] {
-  if (!scopes?.length) return ["global", "project"];
-  return [...new Set(scopes)];
-}
-
 function normalizeLimit(value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   if (!Number.isFinite(value)) return fallback;
@@ -2078,15 +1975,11 @@ function normalizeLimit(value: number | undefined, fallback: number): number {
 function compareEntriesForDisplay(left: MemoryEntry, right: MemoryEntry): number {
   return right.importance - left.importance
     || right.updatedAt.localeCompare(left.updatedAt)
-    || left.scope.localeCompare(right.scope)
     || left.id.localeCompare(right.id);
 }
 
 function validateCandidateLineage(input: MemoryCandidateInput): void {
   if (input.lineage.source !== "completed_task") throw new Error("Memory candidates require completed_task lineage.");
-  if (input.scopeHint !== undefined && input.scopeHint !== "global" && input.scopeHint !== "project") {
-    throw new Error(`Invalid memory candidate scope hint: ${String(input.scopeHint)}`);
-  }
   if (input.kindHint !== undefined && !isMemoryKind(input.kindHint)) {
     throw new Error(`Invalid memory candidate kind hint: ${String(input.kindHint)}`);
   }

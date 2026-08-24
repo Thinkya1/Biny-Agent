@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { configSchema, type AgentConfig } from "../config/schema.js";
-import { createFileConfigStore, type AgentConfigStore } from "../config/store.js";
+import { createFileConfigStore, updateConfig, type AgentConfigStore } from "../config/store.js";
 import { globalAgentDir } from "../config/paths.js";
 import {
   listModelChoices,
@@ -62,6 +62,7 @@ import type {
 } from "./types.js";
 import { ContextMemory } from "./context/ContextMemory.js";
 import { LocalMemory, MemoryRevisionConflictError, redactSecrets } from "./context/LocalMemory.js";
+import { TelosStorage } from "./context/telosStorage.js";
 import { runMemoryCommand } from "./context/memoryCommands.js";
 import { WorkspaceContext } from "./context/WorkspaceContext.js";
 import type { CompactionResult, ContextStatus } from "./context/types.js";
@@ -177,6 +178,11 @@ export interface AgentSessionInfo {
   modelAlias: string;
   thinking: ThinkingSelection;
   contextWindow?: number;
+  /** 按模型有效窗口比例计算的可用输入窗口。 */
+  effectiveContextWindow?: number;
+  effectiveContextWindowPercent?: number;
+  contextReserveTokens?: number;
+  autoCompactTokenLimit?: number;
   /** 单轮允许注入的输入 token 预算；`getInfo()` 一直带着它，界面用它算上下文用量。 */
   maxInputTokens?: number;
   skills?: string[];
@@ -234,6 +240,7 @@ const memoryMutationCommands = new Set(["add", "forget", "delete", "compact", "c
 export class AgentSession {
   private readonly contextMemory: ContextMemory;
   private readonly localMemory: LocalMemory;
+  private readonly telosStorage: TelosStorage;
   private readonly memoryRetriever: HybridMemoryRetriever;
   private readonly localEmbeddingManager: LocalEmbeddingManager;
   private readonly memoryEmbeddingService: MemoryEmbeddingService;
@@ -300,6 +307,7 @@ export class AgentSession {
       () => this.sideModelRequestContext(),
       () => memoryModel("consolidationModel")
     );
+    this.telosStorage = new TelosStorage(options.workspaceRoot);
     this.localEmbeddingManager = new LocalEmbeddingManager(path.join(globalAgentDir(), "models", "embeddings"));
     this.memoryEmbeddingService = new MemoryEmbeddingService({
       localMemory: this.localMemory,
@@ -371,6 +379,7 @@ export class AgentSession {
 
   async initialize(): Promise<void> {
     await this.contextMemory.initialize();
+    await this.telosStorage.initialize();
   }
 
   /** 技能元数据、具名子代理清单与 MCP instructions 共同构成 system prompt 的扩展段。 */
@@ -518,6 +527,11 @@ export class AgentSession {
   /** 持久记忆存储句柄；读取/自动贡献开关不影响显式 /memory 管理操作。 */
   getLocalMemory(): LocalMemory {
     return this.localMemory;
+  }
+
+  /** TELOS 由独立存储维护；Desktop/Host 通过 AgentSession 取得同一份本地权威。 */
+  getTelosStorage(): TelosStorage {
+    return this.telosStorage;
   }
 
   /** 手动浏览使用同一套混合检索，但不应用自动注入的跨项目硬门禁。 */
@@ -835,12 +849,16 @@ export class AgentSession {
       const initialTools = mode === "plan"
         ? selectPlanTools(this.options.toolRegistry.list(), permissionMode)
         : this.options.toolRegistry.list();
+      const telosPrompt = turnPersonalization.telos.enabled
+        ? await this.telosStorage.promptText()
+        : undefined;
       const baseSystemPrompt = buildSystemPrompt({
         mode: mode === "plan" ? "plan" : "qa",
         permissionMode,
         extensionPrompt: this.extensionPrompt(),
         tools: initialTools,
         personalization: turnPersonalization,
+        telosPrompt,
         cwd: this.options.workspaceRoot
       });
       const prepared = await this.contextMemory.prepareTurn(
@@ -1588,7 +1606,7 @@ export class AgentSession {
     personalization: ResolvedChatPersonalization,
     runOptions: AgentRunOptions
   ): Promise<void> {
-    if (!personalization.contributeMemories) return;
+    if (!personalization.contributeMemories && !personalization.telos.autoObserve) return;
     const sessionId = this.recorder.sessionId;
     const turnId = runOptions.turnId;
     const runId = runOptions.runId;
@@ -1607,16 +1625,32 @@ export class AgentSession {
         externalContext
       }
     };
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const overview = await this.localMemory.getOverview();
+    if (personalization.contributeMemories) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const overview = await this.localMemory.getOverview();
+        try {
+          await this.localMemory.enqueueCandidate(input, {
+            expectedRevision: overview.storeRevision,
+            excludeExternalContext: personalization.excludeExternalContext
+          });
+          break;
+        } catch (error) {
+          if (!(error instanceof MemoryRevisionConflictError) || attempt > 0) throw error;
+        }
+      }
+    }
+    if (personalization.telos.autoObserve && (!externalContext || !personalization.excludeExternalContext)) {
       try {
-        await this.localMemory.enqueueCandidate(input, {
-          expectedRevision: overview.storeRevision,
-          excludeExternalContext: personalization.excludeExternalContext
+        await this.telosStorage.recordObservation({
+          scope: "workspace",
+          summary,
+          sessionId,
+          turnId,
+          runId,
+          externalContext
         });
-        return;
-      } catch (error) {
-        if (!(error instanceof MemoryRevisionConflictError) || attempt > 0) throw error;
+      } catch {
+        // TELOS 是后台辅助能力，不能让一条已经成功的用户任务变成失败。
       }
     }
   }
@@ -1965,7 +1999,6 @@ export class AgentSession {
   }
 
   async close(): Promise<void> {
-    await this.contextMemory.shutdownMemory();
     this.memoryRetriever.close();
     this.memoryEmbeddingService.close();
     await this.localEmbeddingManager.close();
@@ -2153,9 +2186,13 @@ export class AgentSession {
    */
   private async savePermissionMode(mode: PermissionMode): Promise<void> {
     const store = this.configStore();
-    const persisted = await store.load(this.options.workspaceRoot);
-    persisted.permission.mode = mode;
-    await store.save(persisted, this.options.workspaceRoot);
+    await updateConfig(store, this.options.workspaceRoot, (persisted) => ({
+      ...persisted,
+      permission: {
+        ...persisted.permission,
+        mode
+      }
+    }));
   }
 
   private supportedAttachments(attachments: AgentAttachment[] | undefined): AgentAttachment[] {

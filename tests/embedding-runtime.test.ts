@@ -409,8 +409,7 @@ async function testMemoryEmbeddingServiceLifecycle(): Promise<void> {
   const localMemory = {
     listMemoryEntries: async () => ({
       entries: [...entries],
-      storeRevision: 1,
-      revision: { global: 1, project: 1 }
+      storeRevision: 1
     })
   } as unknown as LocalMemory;
   const service = new MemoryEmbeddingService({
@@ -542,7 +541,6 @@ function memoryEntry(id: string, summary: string): MemoryEntry {
   return {
     id,
     origin: { kind: "workspace", workspaceId: "0123456789abcdef01234567", workspaceName: "workspace" },
-    scope: "project",
     kind: "fact",
     topic: "embedding",
     title: `${id} title`,

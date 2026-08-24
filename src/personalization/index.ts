@@ -45,6 +45,26 @@ export const embeddingModelRefSchema: z.ZodType<EmbeddingModelRef> = z.discrimin
 
 export type { EmbeddingModelRef } from "../llm/embedding/types.js";
 
+export const telosPolicySchema = z.object({
+  /** 显式 TELOS 可以独立于事实记忆启用。 */
+  enabled: z.boolean().default(false),
+  /** 是否从成功根回合中积累脱敏行为观察。 */
+  autoObserve: z.boolean().default(false),
+  /** 是否把已确认行为模式与 TELOS 做偏差比较。 */
+  driftDetection: z.boolean().default(false),
+  /** 是否在 Desktop idle 时显示偏差提醒。 */
+  proactivePrompts: z.boolean().default(false)
+}).strict();
+
+export type TelosPolicy = z.infer<typeof telosPolicySchema>;
+
+export const defaultTelosPolicy: TelosPolicy = {
+  enabled: false,
+  autoObserve: false,
+  driftDetection: false,
+  proactivePrompts: false
+};
+
 export const memorySimilarityThresholdSchema = z.object({
   currentWorkspace: z.number().min(0).max(1),
   crossWorkspace: z.number().min(0).max(1)
@@ -76,7 +96,9 @@ const rawMemoryPolicySchema = z.object({
   }).strict()).default({}),
   // 外部网页、MCP/Plugin 与子代理结果默认不进入自动记忆候选。
   excludeExternalContext: z.boolean().default(true),
-  maxRecalled: z.number().int().min(1).max(20).default(5)
+  maxRecalled: z.number().int().min(1).max(20).default(5),
+  // 新增策略保持 optional，旧 config 不会因为升级而出现无意义的写回差异。
+  telos: telosPolicySchema.optional()
 }).strict();
 
 export const memoryPolicySchema = rawMemoryPolicySchema.transform((policy) => ({
@@ -168,6 +190,7 @@ export interface ResolvedChatPersonalization extends PersonalizationMetadata {
   similarityThresholds: Record<string, z.infer<typeof memorySimilarityThresholdSchema>>;
   excludeExternalContext: boolean;
   maxRecalled: number;
+  telos: TelosPolicy;
 }
 
 export interface AgentPersonalizationState {
@@ -223,6 +246,7 @@ export function resolveChatPersonalization(
     similarityThresholds: parsedMemory.similarityThresholds,
     excludeExternalContext: parsedMemory.excludeExternalContext,
     maxRecalled: parsedMemory.maxRecalled,
+    telos: parsedMemory.telos ?? defaultTelosPolicy,
     ...personalizationMetadata(personality, customInstructions)
   };
 }

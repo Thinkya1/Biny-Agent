@@ -364,13 +364,11 @@ function contextDetailRows(context: ContextStatus): CommandCardRow[] {
   ));
   const recall = context.memoryRecall;
   if (recall) {
-    const omittedGlobal = recall.omitted.filter((item) => item.scope === "global").length;
-    const omittedProject = recall.omitted.filter((item) => item.scope === "project").length;
     rows.push(detailRow(
       "Memory recall",
-      `included global=${String(recall.included.global)}, project=${String(recall.included.project)}; `
-      + `trimmed global=${String(recall.trimmed.global)}, project=${String(recall.trimmed.project)}; `
-      + `omitted global=${String(omittedGlobal)}, project=${String(omittedProject)}`
+      `included user=${String(recall.origins.included.user)}, current=${String(recall.origins.included.currentWorkspace)}, other=${String(recall.origins.included.otherWorkspaces)}; `
+      + `trimmed user=${String(recall.origins.trimmed.user)}, current=${String(recall.origins.trimmed.currentWorkspace)}, other=${String(recall.origins.trimmed.otherWorkspaces)}; `
+      + `omitted=${String(recall.omitted.length)}`
     ));
     if (recall.budgetOmission) {
       rows.push(detailRow(

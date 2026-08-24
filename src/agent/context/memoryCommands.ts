@@ -128,9 +128,8 @@ export async function runMemoryCommand(
       return "Consolidation requires current or user so entries from different origins are never merged.";
     }
     const topic = parsed.rest.join(" ").trim() || undefined;
-    const scope = parsed.origin === "user" ? "global" : "project";
     const result = await mutateWithFreshRevision(memory, async (expectedRevision) => (
-      await memory.consolidateScope(scope, { expectedRevision, topic })
+      await memory.consolidateEntries(parsed.origin, { expectedRevision, topic })
     ));
     if (result.error) return `Memory consolidation failed without changing data: ${result.error}`;
     return result.after < result.before

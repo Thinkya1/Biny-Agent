@@ -46,8 +46,6 @@ export function formatStatusReport(
       : "use enabled"
     : "use disabled (stored data retained)";
   const memoryRecall = context.memoryRecall;
-  const omittedGlobal = memoryRecall?.omitted.filter((item) => item.scope === "global").length ?? 0;
-  const omittedProject = memoryRecall?.omitted.filter((item) => item.scope === "project").length ?? 0;
   const usageSummary = usage.calls
     ? `${formatCount(usage.totalTokens)} total (${formatCount(usage.inputTokens)} input + ${formatCount(usage.outputTokens)} output; ${formatCount(usage.reasoningTokens)} reasoning)`
     : "no model calls recorded";
@@ -85,7 +83,7 @@ export function formatStatusReport(
     `Memory: ${memorySummary}`,
     ...(memoryRecall
       ? [
-        `Memory recall: included global=${String(memoryRecall.included.global)}, project=${String(memoryRecall.included.project)}; trimmed global=${String(memoryRecall.trimmed.global)}, project=${String(memoryRecall.trimmed.project)}; omitted global=${String(omittedGlobal)}, project=${String(omittedProject)}`,
+        `Memory recall: included user=${String(memoryRecall.origins.included.user)}, current=${String(memoryRecall.origins.included.currentWorkspace)}, other=${String(memoryRecall.origins.included.otherWorkspaces)}; trimmed user=${String(memoryRecall.origins.trimmed.user)}, current=${String(memoryRecall.origins.trimmed.currentWorkspace)}, other=${String(memoryRecall.origins.trimmed.otherWorkspaces)}; omitted=${String(memoryRecall.omitted.length)}`,
         ...(memoryRecall.budgetOmission
           ? [`Memory budget: ${formatCount(memoryRecall.budgetOmission.usedChars)}/${formatCount(memoryRecall.budgetOmission.maxChars)} chars; ${String(memoryRecall.budgetOmission.omitted)} omitted`]
           : [])

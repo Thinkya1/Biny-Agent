@@ -102,15 +102,12 @@ export interface RankedMemoryEntry {
 }
 
 export function sanitizeMemoryEntryInput(input: MemoryEntryInput): MemoryEntryInput {
-  if (input.origin === undefined && input.audience === undefined && input.scope === undefined) {
+  if (input.origin === undefined && input.audience === undefined) {
     throw new Error("Memory entry requires origin or audience.");
   }
   if (input.origin !== undefined) validateMemoryOrigin(input.origin);
   if (input.audience !== undefined && input.audience !== "universal" && input.audience !== "workspace") {
     throw new Error(`Invalid memory audience: ${String(input.audience)}`);
-  }
-  if (input.scope !== undefined && input.scope !== "global" && input.scope !== "project") {
-    throw new Error(`Invalid memory scope: ${String(input.scope)}`);
   }
   if (!isMemoryKind(input.kind)) throw new Error(`Invalid memory kind: ${String(input.kind)}`);
   const lineage = (Array.isArray(input.lineage) ? input.lineage : [input.lineage]).map(sanitizeMemoryLineage);
@@ -118,7 +115,6 @@ export function sanitizeMemoryEntryInput(input: MemoryEntryInput): MemoryEntryIn
   const sanitized: MemoryEntryInput = {
     origin: input.origin === undefined ? undefined : sanitizeMemoryOrigin(input.origin),
     audience: input.audience,
-    scope: input.scope,
     kind: input.kind,
     topic: normalizeMemoryTopic(redactSecrets(input.topic)),
     title: redactSecrets(input.title).replace(/\s+/g, " ").trim().slice(0, 120),
@@ -140,7 +136,6 @@ export function createStoredMemoryEntry(input: MemoryEntryInput, fields: StoredE
   return {
     id: sanitizeIdentifier(fields.id),
     origin: safe.origin,
-    scope: scopeFromOrigin(safe.origin),
     kind: safe.kind,
     topic: safe.topic,
     title: safe.title,
@@ -245,7 +240,7 @@ export function parseLegacyV2MemoryEntryFile(content: string): LegacyV2MemoryEnt
 }
 
 export function assertAllowedScopedEntry(entry: MemoryEntryInput, workspaceRoot: string): void {
-  const universal = entry.origin?.kind === "user" || entry.audience === "universal" || entry.scope === "global";
+  const universal = entry.origin?.kind === "user" || entry.audience === "universal";
   if (!universal) return;
   if (entry.kind !== "preference" && entry.kind !== "working_style") {
     throw new Error("Universal memory only accepts preference and working_style entries.");

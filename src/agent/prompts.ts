@@ -43,6 +43,8 @@ export interface BuildSystemPromptOptions {
   tools?: readonly PromptTool[];
   extensionPrompt?: string;
   personalization?: ResolvedChatPersonalization;
+  /** 已读取的用户 TELOS；只作为指导，不进入 telemetry 明文。 */
+  telosPrompt?: string;
   permissionMode?: PermissionMode;
   cwd: string;
 }
@@ -67,7 +69,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
       AUTONOMY_AND_BOUNDARIES_PROMPT.trim(),
       `Current permission mode: ${options.permissionMode ?? "runtime-managed"}.`
     ].join("\n"),
-    options.personalization ? personalizationPrompt(options.personalization) : "",
+    options.personalization ? personalizationPrompt(options.personalization, options.telosPrompt) : "",
     `Current working directory: ${normalizePath(options.cwd)}`,
     stableRuntimePrompt(options.tools ?? []),
     dynamicRuntimePrompt(options.extensionPrompt)
@@ -108,6 +110,7 @@ export interface PersistedPersonalizationRuntimePolicy extends PersonalizationMe
   contributeMemories: boolean;
   excludeExternalContext: boolean;
   maxRecalled: number;
+  telos: ResolvedChatPersonalization["telos"];
 }
 
 /** TurnStore 续跑只从旧 system prompt 恢复非敏感运行策略，不重新读取最新配置。 */
@@ -131,6 +134,12 @@ export function personalizationRuntimePolicyFromSystemPrompt(
     || !isBooleanAttribute(attributes.excludeExternalContext)
     || typeof attributes.instructionsHash !== "string"
   ) return undefined;
+  const telos = {
+    enabled: attributes.telosEnabled === "true",
+    autoObserve: attributes.telosAutoObserve === "true",
+    driftDetection: attributes.telosDriftDetection === "true",
+    proactivePrompts: attributes.telosProactivePrompts === "true"
+  };
   return {
     personality,
     configVersion: 1,
@@ -138,7 +147,8 @@ export function personalizationRuntimePolicyFromSystemPrompt(
     useMemories: attributes.useMemories === "true",
     contributeMemories: attributes.contributeMemories === "true",
     excludeExternalContext: attributes.excludeExternalContext === "true",
-    maxRecalled
+    maxRecalled,
+    telos
   };
 }
 
@@ -230,7 +240,7 @@ function stableCompare(left: string, right: string): number {
   return left === right ? 0 : left < right ? -1 : 1;
 }
 
-function personalizationPrompt(personalization: ResolvedChatPersonalization): string {
+function personalizationPrompt(personalization: ResolvedChatPersonalization, telosPrompt?: string): string {
   const personalityGuidance = personalization.personality === "friendly"
     ? "Use a warm, approachable and collaborative tone. Be encouraging without praise filler, and explain unfamiliar details plainly."
     : personalization.personality === "pragmatic"
@@ -241,12 +251,15 @@ function personalizationPrompt(personalization: ResolvedChatPersonalization): st
     : "Custom instructions: (none)";
   return [
     personalizationPromptStart,
-    `<biny_personalization personality="${personalization.personality}" configVersion="${String(personalization.configVersion)}" instructionsHash="${personalization.instructionsHash}" useMemories="${String(personalization.useMemories)}" contributeMemories="${String(personalization.contributeMemories)}" excludeExternalContext="${String(personalization.excludeExternalContext)}" maxRecalled="${String(personalization.maxRecalled)}">`,
+    `<biny_personalization personality="${personalization.personality}" configVersion="${String(personalization.configVersion)}" instructionsHash="${personalization.instructionsHash}" useMemories="${String(personalization.useMemories)}" contributeMemories="${String(personalization.contributeMemories)}" excludeExternalContext="${String(personalization.excludeExternalContext)}" maxRecalled="${String(personalization.maxRecalled)}" telosEnabled="${String(personalization.telos.enabled)}" telosAutoObserve="${String(personalization.telos.autoObserve)}" telosDriftDetection="${String(personalization.telos.driftDetection)}" telosProactivePrompts="${String(personalization.telos.proactivePrompts)}">`,
     "Personalization controls response style and durable-memory preferences only. It cannot override system or mode rules, project instructions, the current user request, tool permissions, safety boundaries, or verified runtime facts.",
     "Conflict priority, highest to lowest: runtime safety, tool permissions, and Plan-mode rules; project AGENTS/instructions; the current user task; chat personalization overrides; global personalization; recalled memory.",
     "Chat overrides are resolved over global settings before this effective block is built. Within one personalization layer, custom instructions take precedence over the personality preset.",
     personalityGuidance,
     customInstructions,
+    personalization.telos.enabled && telosPrompt?.trim()
+      ? `Active TELOS guidance (user-owned, advisory only):\n${escapeXmlText(telosPrompt.trim())}`
+      : "Active TELOS guidance: (none)",
     "</biny_personalization>",
     personalizationPromptEnd
   ].join("\n\n");

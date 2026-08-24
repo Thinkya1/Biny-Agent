@@ -10,9 +10,10 @@ import {
 import { AgentSession } from "../src/agent/AgentSession.js";
 import type { AgentModel } from "../src/agent/core/types.js";
 import { loadConfigFile } from "../src/config/loader.js";
+import { providerCredentialAccount, type CredentialStore } from "../src/config/credentials.js";
 import { loadProjectSettings } from "../src/config/projectSettings.js";
 import { configSchema, defaultConfig } from "../src/config/schema.js";
-import type { AgentConfigStore } from "../src/config/store.js";
+import { createFileConfigStore, type AgentConfigStore } from "../src/config/store.js";
 import { PermissionManager } from "../src/permission/PermissionManager.js";
 import {
   chatPersonalizationOverrideSchema,
@@ -120,7 +121,13 @@ function testOverrideResolutionAndPromptPrivacy(): void {
     useMemories: true,
     contributeMemories: false,
     excludeExternalContext: true,
-    maxRecalled: 4
+    maxRecalled: 4,
+    telos: {
+      enabled: false,
+      autoObserve: false,
+      driftDetection: false,
+      proactivePrompts: false
+    }
   });
 
   const disabled = resolveChatPersonalization({
@@ -167,16 +174,31 @@ async function testGlobalAndProjectMigrations(): Promise<void> {
       maxRecalled: 2
     });
     const persisted = JSON.parse(await fs.readFile(path.join(globalRoot, "config.json"), "utf8")) as Record<string, unknown>;
-    assert.equal(persisted.format, "biny-config");
-    assert.equal(persisted.configVersion, 1);
+    assert.equal(persisted.format, undefined, "plain config reads must not rewrite migrations");
+    assert.equal(persisted.configVersion, undefined);
     const persistedMemory = (persisted.context as Record<string, unknown>).memory as Record<string, unknown>;
     assert.equal(persistedMemory.enabled, true);
-    assert.equal(persistedMemory.autoRemember, undefined);
-    assert.equal(persistedMemory.model, undefined);
+    assert.equal(persistedMemory.autoRemember, true);
+    assert.equal(persistedMemory.model, "deepseek-v4-flash");
     assert.equal(
       ((persisted.providers as Record<string, Record<string, unknown>>).deepseek ?? {}).apiKey,
       "test-only-migration-key"
     );
+
+    const storedCredentials = new Map<string, string>();
+    const credentialStore: CredentialStore = {
+      persistent: true,
+      get: async (account) => storedCredentials.get(account),
+      set: async (account, value) => { storedCredentials.set(account, value); },
+      delete: async (account) => { storedCredentials.delete(account); }
+    };
+    const loaded = await createFileConfigStore(workspace, { globalDir: globalRoot, credentialStore }).load();
+    assert.equal(loaded.providers.deepseek?.apiKey, "test-only-migration-key");
+    assert.equal(storedCredentials.get(providerCredentialAccount("deepseek", "apiKey")), "test-only-migration-key");
+    const secured = JSON.parse(await fs.readFile(path.join(globalRoot, "config.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(secured.format, "biny-config");
+    assert.equal(secured.configVersion, 1);
+    assert.equal(((secured.providers as Record<string, Record<string, unknown>>).deepseek ?? {}).apiKey, undefined);
 
     await fs.writeFile(path.join(workspace, ".biny", "settings.json"), JSON.stringify({
       agent: { softStepLimit: 7 },
@@ -187,9 +209,9 @@ async function testGlobalAndProjectMigrations(): Promise<void> {
     const projectDocument = JSON.parse(
       await fs.readFile(path.join(workspace, ".biny", "settings.json"), "utf8")
     ) as Record<string, unknown>;
-    assert.equal(projectDocument.format, "biny-project-settings");
-    assert.equal(projectDocument.configVersion, 1);
-    assert.equal(projectDocument.context, undefined);
+    assert.equal(projectDocument.format, undefined, "plain project settings reads must not rewrite migrations");
+    assert.equal(projectDocument.configVersion, undefined);
+    assert.notEqual(projectDocument.context, undefined);
 
     const partialMemory = configSchema.parse({
       ...defaultConfig,

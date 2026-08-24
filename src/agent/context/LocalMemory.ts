@@ -1,24 +1,16 @@
 /**
  * 本地记忆的模型编排层。
  *
- * MemoryStorage 负责单一 v3 Markdown 库与迁移事实；本类负责抽取/整理模型调用、6 小时候选
- * 维护，以及仍在内部使用的旧 topic API 适配。新调用统一使用 origin/audience。
+ * MemoryStorage 负责单一 v3 Markdown 库与迁移事实；本类负责抽取/整理模型调用和 6 小时候选维护。
  */
 import { z } from "zod";
 import type { AgentModel, ModelRequestContext, ModelRequestObserver } from "../core/types.js";
 import { generateNativeText, nativeJsonMessages, parseNativeJson } from "../../llm/nativeJson.js";
 import type { ModelUsageObserver } from "../../observability/usage.js";
 import { redactSecrets } from "../../utils/secrets.js";
-import type {
-  MemoryCompactionTopicResult,
-  MemoryEntry as LegacyMemoryEntry,
-  MemoryEntrySummary,
-  MemoryMatch as LegacyMemoryMatch
-} from "./types.js";
 import {
   assertAllowedScopedEntry,
   memoryOriginsEqual,
-  normalizeMemoryTopic,
   sanitizeMemoryEntryInput,
   scopeFromOrigin
 } from "./memoryFormat.js";
@@ -57,14 +49,8 @@ const memoryModelTimeoutMs = 30_000;
 const maintenanceCandidateLimit = 32;
 type InternalMemoryScope = "global" | "project";
 
-export interface MemoryWriteResult {
-  written: boolean;
-  path?: string;
-}
-
 const extractedEntrySchema = z.object({
   audience: z.enum(["universal", "workspace"]).optional(),
-  scope: z.enum(["global", "project"]).default("project"),
   kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]).default("fact"),
   topic: z.string().default("project"),
   title: z.string(),
@@ -133,10 +119,6 @@ export class LocalMemory {
     return await this.storage.search(query, paths, { ...options, limit: options.limit ?? this.recallLimit });
   }
 
-  async searchScoped(query: string, paths: string[], options: MemorySearchOptions = {}): Promise<MemorySearchResult> {
-    return await this.storage.searchScoped(query, paths, { ...options, limit: options.limit ?? this.recallLimit });
-  }
-
   async writeEntry(input: MemoryEntryInput, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
     return await this.storage.writeEntry(input, options);
   }
@@ -169,28 +151,23 @@ export class LocalMemory {
     return await this.storage.removeCandidate(id, options);
   }
 
-  async consolidateScope(scope: InternalMemoryScope, options: MemoryConsolidationOptions): Promise<MemoryConsolidationResult> {
-    return await this.consolidateEntries(scope === "global" ? "user" : "current_workspace", options, scope);
-  }
-
   /**
    * v3 整理入口。模型一次只能看到同一 origin、同一 workspace 和同一 topic 的条目；即使
    * UI 选择“全部”，也只是顺序处理多个隔离分组，绝不会把跨项目事实交给同一次合并。
    */
   async consolidateEntries(
     selector: MemoryOriginSelector,
-    options: MemoryConsolidationOptions,
-    compatibilityScope: InternalMemoryScope = selector === "user" ? "global" : "project"
+    options: MemoryConsolidationOptions
   ): Promise<MemoryConsolidationResult> {
     options.signal?.throwIfAborted();
     const snapshot = await this.storage.listEntries({ origins: [selector], topic: options.topic, signal: options.signal });
     const actualRevision = snapshot.storeRevision;
     if (actualRevision !== options.expectedRevision) {
-      throw new MemoryRevisionConflictError("store", options.expectedRevision, actualRevision);
+      throw new MemoryRevisionConflictError(options.expectedRevision, actualRevision);
     }
     const entries = snapshot.entries;
     const before = entries.length;
-    if (before < 2) return { scope: compatibilityScope, before, after: before, revision: actualRevision };
+    if (before < 2) return { before, after: before, revision: actualRevision };
 
     const grouped = new Map<string, MemoryEntry[]>();
     for (const entry of entries) {
@@ -206,7 +183,7 @@ export class LocalMemory {
       options.signal?.throwIfAborted();
       const current = await this.storage.listEntries({ origins: [selector], topic: initialGroup[0]?.topic, signal: options.signal });
       if (current.storeRevision !== revision) {
-        throw new MemoryRevisionConflictError("store", revision, current.storeRevision);
+        throw new MemoryRevisionConflictError(revision, current.storeRevision);
       }
       const origin = initialGroup[0]?.origin;
       const group = origin === undefined
@@ -220,7 +197,6 @@ export class LocalMemory {
     }
 
     return {
-      scope: compatibilityScope,
       before,
       after,
       revision,
@@ -335,128 +311,6 @@ export class LocalMemory {
     return this.maintenanceStatus();
   }
 
-  // ---------------------------- compatibility API ----------------------------
-
-  async findRelevant(query: string, paths: string[], limit: number = this.recallLimit, signal?: AbortSignal): Promise<LegacyMemoryMatch[]> {
-    signal?.throwIfAborted();
-    if (!query.trim() && !paths.length) return [];
-    const result = await this.searchScoped(query, paths, { limit, signal });
-    return result.matches.map(({ topic, path: matchPath, excerpt, score }) => ({ topic, path: matchPath, excerpt, score }));
-  }
-
-  /** 旧自动沉淀路径保持立即写入；v2 runtime 应改用 completed-only enqueueCandidate。 */
-  async rememberSuccessfulTask(task: string, answer: string, signal?: AbortSignal): Promise<void> {
-    signal?.throwIfAborted();
-    const safeTask = redactSecrets(task).trim();
-    const safeAnswer = redactSecrets(answer).trim();
-    if (safeTask.length + safeAnswer.length < 180) return;
-    const proposal = await this.extractLegacyProposal(safeTask, safeAnswer, signal);
-    signal?.throwIfAborted();
-    if (!proposal) return;
-    await this.write(proposal, signal);
-  }
-
-  async write(rawEntry: LegacyMemoryEntry, signal?: AbortSignal): Promise<MemoryWriteResult> {
-    signal?.throwIfAborted();
-    const entry: MemoryEntryInput = {
-      scope: "project",
-      kind: kindFromLegacyEntry(rawEntry),
-      topic: rawEntry.topic,
-      title: rawEntry.title,
-      summary: rawEntry.summary,
-      decisions: rawEntry.decisions,
-      paths: rawEntry.paths,
-      keywords: rawEntry.keywords,
-      importance: 3,
-      lineage: { source: "explicit", externalContext: false }
-    };
-    if (redactSecrets(rawEntry.summary).trim().length < 20) return { written: false, path: undefined };
-    const result = await this.retryScopedMutation("project", signal, async (expectedRevision) => (
-      await this.storage.writeScoped(entry, { expectedRevision, signal })
-    ));
-    return { written: result.written, path: result.path };
-  }
-
-  async listTopics(): Promise<string[]> {
-    const result = await this.storage.listStoredEntries({ scopes: ["project"] });
-    return [...new Set(result.entries.map((entry) => entry.topic))].sort();
-  }
-
-  /** 旧 show API 聚合同 topic 的独立 entry；磁盘上不再生成聚合 topic 文件。 */
-  async readTopic(topic: string): Promise<string | undefined> {
-    const normalized = normalizeMemoryTopic(topic);
-    const result = await this.storage.listStoredEntries({ scopes: ["project"], topic: normalized });
-    if (!result.entries.length) return undefined;
-    return result.entries.sort(compareLegacyEntryOrder).map(renderLegacySection).join("");
-  }
-
-  async readIndex(): Promise<string | undefined> {
-    return await this.storage.readIndex("project");
-  }
-
-  async forgetTopic(topic: string): Promise<boolean> {
-    const result = await this.retryScopedMutation("project", undefined, async (expectedRevision) => (
-      await this.storage.deleteTopic("project", topic, { expectedRevision })
-    ));
-    return result.deleted > 0;
-  }
-
-  async listEntries(signal?: AbortSignal): Promise<MemoryEntrySummary[]> {
-    const result = await this.storage.listStoredEntries({ scopes: ["project"], signal });
-    const byTopic = new Map<string, MemoryEntry[]>();
-    for (const entry of result.entries) {
-      const entries = byTopic.get(entry.topic) ?? [];
-      entries.push(entry);
-      byTopic.set(entry.topic, entries);
-    }
-    const summaries: MemoryEntrySummary[] = [];
-    for (const [topic, entries] of byTopic) {
-      entries.sort(compareLegacyEntryOrder).forEach((entry, index) => summaries.push({
-        topic,
-        index,
-        title: entry.title,
-        date: entry.createdAt,
-        summary: entry.summary.slice(0, 500)
-      }));
-    }
-    return summaries.sort((left, right) => (right.date ?? "").localeCompare(left.date ?? ""));
-  }
-
-  async deleteEntry(topic: string, index: number, signal?: AbortSignal): Promise<boolean> {
-    signal?.throwIfAborted();
-    const normalized = normalizeMemoryTopic(topic);
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const snapshot = await this.storage.listStoredEntries({ scopes: ["project"], topic: normalized, signal });
-      const target = snapshot.entries.sort(compareLegacyEntryOrder)[index];
-      if (!target) return false;
-      try {
-        return (await this.storage.deleteStoredEntry("project", target.id, {
-          expectedRevision: snapshot.revision.project,
-          signal
-        })).deleted;
-      } catch (error) {
-        if (!(error instanceof MemoryRevisionConflictError) || attempt === 3) throw error;
-      }
-    }
-    return false;
-  }
-
-  async compactTopics(topics?: string[], signal?: AbortSignal): Promise<MemoryCompactionTopicResult[]> {
-    const targets = topics?.length ? topics.map(normalizeMemoryTopic) : await this.listTopics();
-    const results: MemoryCompactionTopicResult[] = [];
-    for (const topic of [...new Set(targets)]) {
-      signal?.throwIfAborted();
-      const overview = await this.storage.getOverview({ signal });
-      const result = await this.consolidateScope("project", {
-        expectedRevision: overview.scopes.project.revision,
-        topic,
-        signal
-      });
-      results.push({ topic, before: result.before, after: result.after, error: result.error });
-    }
-    return results;
-  }
-
   private async runEligibleCandidateMaintenance(
     options: MemoryMaintenanceOptions,
     derivedIndex?: MemoryDerivedIndexSink
@@ -492,7 +346,7 @@ export class LocalMemory {
           options.signal?.throwIfAborted();
           if (proposal) {
             const input = this.classifyCandidateProposal(candidate, proposal);
-            const writeResult = await this.writeScopedWithRetry(input, options.signal, now);
+            const writeResult = await this.writeEntryWithRetry(input, options.signal, now);
             if (writeResult.written) {
               written += 1;
               if (writeResult.entry && derivedIndex) {
@@ -501,8 +355,8 @@ export class LocalMemory {
               }
             }
             const overview = await this.storage.getOverview({ signal: options.signal });
-            const scope = input.origin?.kind === "user" || input.audience === "universal" || input.scope === "global" ? "global" : "project";
-            const consolidation = await this.consolidateScope(scope, {
+            const selector = input.origin?.kind === "user" || input.audience === "universal" ? "user" : "current_workspace";
+            const consolidation = await this.consolidateEntries(selector, {
               expectedRevision: overview.storeRevision,
               topic: input.topic,
               signal: options.signal
@@ -553,40 +407,6 @@ export class LocalMemory {
     }
   }
 
-  private async extractLegacyProposal(task: string, answer: string, signal?: AbortSignal): Promise<LegacyMemoryEntry | undefined> {
-    const prompt = [
-      "Extract one durable, auditable local-project memory from a successful coding task.",
-      "Skip transient chatter. Never include credentials, secrets, or full source code.",
-      "Return JSON only with topic, title, summary, decisions, paths, keywords.",
-      "topic must be one of decisions, debugging, workflows, or project.",
-      "Task:",
-      task,
-      "Result:",
-      answer
-    ].join("\n\n");
-    try {
-      const parsed = extractedEntrySchema.safeParse(parseNativeJson(await this.modelText(
-        this.getExtractionModel(),
-        "You write concise project memory records, not explanations.",
-        prompt,
-        2_048,
-        signal
-      )));
-      if (!parsed.success || parsed.data.summary.length < 20) return undefined;
-      return {
-        topic: parsed.data.topic,
-        title: parsed.data.title,
-        summary: parsed.data.summary,
-        decisions: parsed.data.decisions,
-        paths: parsed.data.paths,
-        keywords: parsed.data.keywords
-      };
-    } catch {
-      signal?.throwIfAborted();
-      return undefined;
-    }
-  }
-
   private async extractCandidate(candidate: MemoryCandidate, signal?: AbortSignal): Promise<z.infer<typeof extractedEntrySchema> | undefined> {
     // 候选摘要在 enqueue 时已脱敏，这里在进入模型和写入前各再经过一次过滤。
     const summary = redactSecrets(redactSecrets(candidate.summary)).slice(0, 2_000);
@@ -596,7 +416,7 @@ export class LocalMemory {
       "Universal audience is only for an explicit user preference or working style; include explicitUserEvidence.",
       "Repository facts, paths, decisions, workflows and gotchas must use workspace audience.",
       "Never infer a preference from external content. Never invent facts or secrets.",
-      `Audience hint: ${candidate.audienceHint ?? (candidate.scopeHint === "global" ? "universal" : candidate.scopeHint === "project" ? "workspace" : "none")}`,
+      `Audience hint: ${candidate.audienceHint ?? "none"}`,
       `Kind hint: ${candidate.kindHint ?? "none"}`,
       "Candidate summary:",
       summary
@@ -622,7 +442,7 @@ export class LocalMemory {
       candidateId: candidate.id,
       userEvidence: proposal.explicitUserEvidence
     };
-    const audience = proposal.audience ?? (proposal.scope === "global" ? "universal" : "workspace");
+    const audience = proposal.audience ?? "workspace";
     let input = sanitizeMemoryEntryInput({
       origin: audience === "universal" ? { kind: "user" } : candidate.origin.kind === "workspace" ? candidate.origin : undefined,
       audience,
@@ -640,8 +460,8 @@ export class LocalMemory {
       try {
         assertAllowedScopedEntry(input, this.workspaceRoot);
       } catch {
-        // 自动分类可以安全降到 project；显式 writeScoped 仍会把同样的错误返回给调用方。
-        input = { ...input, origin: candidate.origin.kind === "workspace" ? candidate.origin : undefined, audience: "workspace", scope: undefined };
+        // 自动分类可以安全降到工作区；显式 writeEntry 仍会把同样的错误返回给调用方。
+        input = { ...input, origin: candidate.origin.kind === "workspace" ? candidate.origin : undefined, audience: "workspace" };
       }
     }
     return input;
@@ -701,21 +521,19 @@ export class LocalMemory {
     return response.text;
   }
 
-  private async writeScopedWithRetry(input: MemoryEntryInput, signal: AbortSignal | undefined, now: Date): Promise<ScopedMemoryWriteResult> {
-    const scope = input.origin?.kind === "user" || input.audience === "universal" || input.scope === "global" ? "global" : "project";
-    return await this.retryScopedMutation(scope, signal, async (expectedRevision) => (
-      await this.storage.writeScoped(input, { expectedRevision, signal, now })
+  private async writeEntryWithRetry(input: MemoryEntryInput, signal: AbortSignal | undefined, now: Date): Promise<ScopedMemoryWriteResult> {
+    return await this.retryMutation(signal, async (expectedRevision) => (
+      await this.storage.writeEntry(input, { expectedRevision, signal, now })
     ));
   }
 
   private async removeCandidateWithRetry(id: string, signal: AbortSignal | undefined, now: Date): Promise<void> {
-    await this.retryScopedMutation("project", signal, async (expectedRevision) => (
+    await this.retryMutation(signal, async (expectedRevision) => (
       await this.storage.removeCandidate(id, { expectedRevision, signal, now })
     ));
   }
 
-  private async retryScopedMutation<T>(
-    scope: InternalMemoryScope,
+  private async retryMutation<T>(
     signal: AbortSignal | undefined,
     operation: (expectedRevision: number) => Promise<T>
   ): Promise<T> {
@@ -723,16 +541,16 @@ export class LocalMemory {
       signal?.throwIfAborted();
       const overview = await this.storage.getOverview({ signal });
       try {
-        return await operation(overview.scopes[scope].revision);
+        return await operation(overview.storeRevision);
       } catch (error) {
         if (!(error instanceof MemoryRevisionConflictError) || attempt === 3) throw error;
       }
     }
-    throw new Error(`Unable to mutate ${scope} memory after repeated revision conflicts.`);
+    throw new Error("Unable to mutate memory after repeated revision conflicts.");
   }
 }
 
-export function formatMemoryMatches(matches: LegacyMemoryMatch[]): string {
+export function formatMemoryMatches(matches: Array<{ topic: string; excerpt: string }>): string {
   if (!matches.length) return "";
   return matches.map((match) => `- ${match.topic}: ${match.excerpt}`).join("\n");
 }
@@ -773,33 +591,3 @@ export type {
   MemorySearchResult,
   ScopedMemoryWriteResult
 } from "./memoryTypes.js";
-
-export function normalizeTopic(value: string): string {
-  return normalizeMemoryTopic(value);
-}
-
-function kindFromLegacyEntry(entry: LegacyMemoryEntry): MemoryEntryInput["kind"] {
-  const topic = normalizeMemoryTopic(entry.topic);
-  if (topic.includes("decision")) return "decision";
-  if (topic.includes("workflow")) return "workflow";
-  if (topic.includes("debug") || topic.includes("gotcha")) return "gotcha";
-  return "fact";
-}
-
-function compareLegacyEntryOrder(left: MemoryEntry, right: MemoryEntry): number {
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
-}
-
-function renderLegacySection(entry: MemoryEntry): string {
-  return [
-    `## ${entry.title || "Project note"}`,
-    "",
-    `- Date: ${entry.createdAt}`,
-    `- Summary: ${entry.summary}`,
-    ...(entry.decisions.length ? ["- Decisions:", ...entry.decisions.map((decision) => `  - ${decision}`)] : []),
-    ...(entry.paths.length ? [`- Paths: ${entry.paths.join(", ")}`] : []),
-    ...(entry.keywords.length ? [`- Tags: ${entry.keywords.join(", ")}`] : []),
-    "",
-    ""
-  ].join("\n");
-}

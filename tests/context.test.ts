@@ -133,6 +133,7 @@ async function main(): Promise<void> {
     await testSessionReplayAndAgentResume();
     await testCheckpointIsResumeTruthSource();
     await testLegacyAgentStateIsIgnored();
+    await testFlatSessionMigration();
     await testSessionPathBoundaries();
     await testGlobalSessionsStayProjectScoped();
     await testSessionSummariesSortByUpdatedAt();
@@ -143,7 +144,7 @@ async function main(): Promise<void> {
     await testTurnStatusPersistence();
     await testSessionAndToolDisplayRedaction();
     await testMemoryRedactionDedupAndWriter();
-    await testMemoryQueueLifecycleAndUsagePersistence();
+    await testMemoryCandidateLifecycleAndUsagePersistence();
     await testMemoryStorageBoundaries();
     await testMemoryEntryManagementAndCjkSearch();
     await testCredentialAndSymlinkBoundaries();
@@ -1055,6 +1056,38 @@ async function testLegacyAgentStateIsIgnored(): Promise<void> {
   });
 }
 
+async function testFlatSessionMigration(): Promise<void> {
+  await withTempWorkspace(async (workspaceRoot) => {
+    await ensureAgentDirs(workspaceRoot);
+    const sessionsRoot = projectSessionsDir(await fs.realpath(workspaceRoot));
+    const sessionId = "2026-08-23-flat";
+    const source = path.join(sessionsRoot, `${sessionId}.jsonl`);
+    const content = `${JSON.stringify({ type: "user_message", content: "flat session" })}\n`;
+    await fs.writeFile(source, content, "utf8");
+
+    await ensureAgentDirs(workspaceRoot);
+    const target = path.join(sessionsRoot, "2026", "08", "23", `${sessionId}.jsonl`);
+    await assert.rejects(fs.access(source));
+    assert.equal(await fs.readFile(target, "utf8"), content);
+    assert.deepEqual(await listSessionFiles(workspaceRoot), [`${sessionId}.jsonl`]);
+  });
+
+  await withTempWorkspace(async (workspaceRoot) => {
+    await ensureAgentDirs(workspaceRoot);
+    const sessionsRoot = projectSessionsDir(await fs.realpath(workspaceRoot));
+    const sessionId = "2026-08-23-conflict";
+    const source = path.join(sessionsRoot, `${sessionId}.jsonl`);
+    const target = path.join(sessionsRoot, "2026", "08", "23", `${sessionId}.jsonl`);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(source, "flat\n", "utf8");
+    await fs.writeFile(target, "dated\n", "utf8");
+
+    await assert.rejects(ensureAgentDirs(workspaceRoot), /Duplicate session id exists in flat and dated storage/u);
+    assert.equal(await fs.readFile(source, "utf8"), "flat\n");
+    assert.equal(await fs.readFile(target, "utf8"), "dated\n");
+  });
+}
+
 async function testSessionPathBoundaries(): Promise<void> {
   await withTempWorkspace(async (workspaceRoot) => {
     await ensureAgentDirs(workspaceRoot);
@@ -1445,100 +1478,49 @@ async function testMemoryRedactionDedupAndWriter(): Promise<void> {
     const oldMemoryDir = path.join(workspaceRoot, ".biny", "memory");
     await fs.mkdir(oldMemoryDir, { recursive: true });
     await fs.writeFile(path.join(oldMemoryDir, "old.md"), "This old project-local memory must not be loaded.", "utf8");
-    assert.deepEqual(await store.listTopics(), []);
-    const first = await store.write({
+    assert.deepEqual((await store.listMemoryEntries({ origins: ["current_workspace"] })).entries, []);
+    const first = await store.writeEntry({
+      audience: "workspace",
+      kind: "gotcha",
       topic: "debugging",
       title: "Context refresh result",
       summary: "Refresh src/agent/context/ContextMemory.ts after write_file. apiKey=sk-supersecretvalue123.",
       decisions: ["Use deterministic Markdown memory."],
       paths: ["src/agent/context/ContextMemory.ts"],
-      keywords: ["context", "refresh"]
-    });
+      keywords: ["context", "refresh"],
+      lineage: { source: "explicit", externalContext: false }
+    }, { expectedRevision: 0 });
     assert.equal(first.written, true);
-    const duplicate = await store.write({
+    const duplicate = await store.writeEntry({
+      audience: "workspace",
+      kind: "gotcha",
       topic: "debugging",
       title: "Context refresh result",
       summary: "Refresh src/agent/context/ContextMemory.ts after write_file. apiKey=sk-supersecretvalue123.",
       decisions: ["Use deterministic Markdown memory."],
       paths: ["src/agent/context/ContextMemory.ts"],
-      keywords: ["context", "refresh"]
-    });
+      keywords: ["context", "refresh"],
+      lineage: { source: "explicit", externalContext: false }
+    }, { expectedRevision: first.revision });
     assert.equal(duplicate.written, false);
 
-    const debugFile = path.join(globalAgentDir(), "memory", "entries", "debugging.md");
+    assert.ok(first.path);
+    const debugFile = path.join(globalAgentDir(), first.path);
     const stored = await fs.readFile(debugFile, "utf8");
     assert.equal(stored.includes("sk-supersecretvalue123"), false);
     assert.match(stored, /\[redacted\]/);
     assert.match(redactSecrets("Authorization: Bearer abcdefghijklmnop"), /\[redacted\]/);
     assert.equal(redactSecrets("aws_secret_access_key=not-a-real-value"), "aws_secret_access_key=[redacted]");
     assert.equal(redactSecrets("-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----"), "[redacted private key]");
-    assert.equal((await store.findRelevant("context refresh", ["src/agent/context/ContextMemory.ts"])).length > 0, true);
+    assert.equal((await store.search("context refresh", ["src/agent/context/ContextMemory.ts"])).matches.length > 0, true);
     const abortedLookup = new AbortController();
     abortedLookup.abort();
-    await assert.rejects(store.findRelevant("context refresh", [], 3, abortedLookup.signal), /abort/i);
-
-    await store.rememberSuccessfulTask(
-      "Implement a deterministic context refresh workflow for tool writes. ".repeat(4),
-      "The runtime now refreshes the snapshot and RepoMap after write_file before the next turn. ".repeat(4)
-    );
-    assert.equal((await store.listTopics()).includes("workflows"), true);
+    await assert.rejects(store.search("context refresh", [], { limit: 3, signal: abortedLookup.signal }), /abort/i);
   });
 }
 
-async function testMemoryQueueLifecycleAndUsagePersistence(): Promise<void> {
+async function testMemoryCandidateLifecycleAndUsagePersistence(): Promise<void> {
   await withTempWorkspace(async (workspaceRoot) => {
-    const firstGate = deferred<void>();
-    const secondGate = deferred<void>();
-    let active = 0;
-    let peak = 0;
-    let started = 0;
-    const queuedMemory = {
-      rememberSuccessfulTask: async (): Promise<void> => {
-        const index = started;
-        started += 1;
-        active += 1;
-        peak = Math.max(peak, active);
-        await (index === 0 ? firstGate.promise : secondGate.promise);
-        active -= 1;
-      }
-    } as unknown as LocalMemory;
-    const memory = new ContextMemory(
-      () => new ContextTestModel().model,
-      new WorkspaceContext(workspaceRoot, [], 32 * 1024),
-      queuedMemory,
-      24_000,
-      32 * 1024
-    );
-    memory.queueSuccessfulTask("first", "answer");
-    memory.queueSuccessfulTask("second", "answer");
-    await waitUntil(() => started === 1);
-    assert.equal(peak, 1);
-    firstGate.resolve(undefined);
-    await waitUntil(() => started === 2);
-    assert.equal(peak, 1);
-    secondGate.resolve(undefined);
-    await memory.flush();
-
-    let stuckStarted = false;
-    const stuckMemory = {
-      rememberSuccessfulTask: async (): Promise<void> => {
-        stuckStarted = true;
-        await new Promise<void>(() => undefined);
-      }
-    } as unknown as LocalMemory;
-    const bounded = new ContextMemory(
-      () => new ContextTestModel().model,
-      new WorkspaceContext(workspaceRoot, [], 32 * 1024),
-      stuckMemory,
-      24_000,
-      32 * 1024
-    );
-    bounded.queueSuccessfulTask("stuck", "answer");
-    await waitUntil(() => stuckStarted);
-    const shutdownStartedAt = Date.now();
-    await bounded.shutdownMemory(20);
-    assert.ok(Date.now() - shutdownStartedAt < 800);
-
     const config = testConfig();
     config.context.memory.enabled = true;
     config.context.memory.useMemories = true;
@@ -1582,44 +1564,54 @@ async function testMemoryEntryManagementAndCjkSearch(): Promise<void> {
   await withTempWorkspace(async (workspaceRoot) => {
     const provider = new ContextTestModel();
     const store = new LocalMemory(workspaceRoot, () => provider.model);
-    await store.write({
+    let revision = (await store.getOverview()).storeRevision;
+    const first = await store.writeEntry({
+      audience: "workspace",
+      kind: "workflow",
       topic: "project",
       title: "Weather workflow",
       summary: "使用 wttr.in 获取天气并渲染 Markdown 表格。",
       decisions: [],
       paths: [],
-      keywords: ["weather"]
-    });
-    await store.write({
+      keywords: ["weather"],
+      lineage: { source: "explicit", externalContext: false }
+    }, { expectedRevision: revision });
+    revision = first.revision;
+    const second = await store.writeEntry({
+      audience: "workspace",
+      kind: "workflow",
       topic: "project",
       title: "Weather retries",
       summary: "wttr.in 请求失败时最多重试三次并按指数退避。",
       decisions: [],
       paths: [],
-      keywords: ["retry"]
-    });
+      keywords: ["retry"],
+      lineage: { source: "explicit", externalContext: false }
+    }, { expectedRevision: revision });
 
     // 中文查询没有空格分界，必须靠 bigram 命中记忆内容。
-    const matches = await store.findRelevant("天气怎么获取", []);
-    assert.equal(matches.length > 0, true);
-    assert.equal(matches[0]?.topic, "project");
+    const matches = await store.search("天气怎么获取", []);
+    assert.equal(matches.matches.length > 0, true);
+    assert.equal(matches.matches[0]?.topic, "project");
 
-    const entries = await store.listEntries();
-    assert.equal(entries.length, 2);
-    assert.equal(entries.every((entry) => entry.topic === "project"), true);
-    assert.equal(entries.some((entry) => entry.title === "Weather retries"), true);
+    const entries = await store.listMemoryEntries({ origins: ["current_workspace"] });
+    assert.equal(entries.entries.length, 2);
+    assert.equal(entries.entries.every((entry) => entry.topic === "project"), true);
+    assert.equal(entries.entries.some((entry) => entry.title === "Weather retries"), true);
 
-    const compaction = await store.compactTopics(["project"]);
-    assert.equal(compaction[0]?.before, 2);
-    assert.equal(compaction[0]?.after, 1);
-    assert.equal(compaction[0]?.error, undefined);
-    assert.equal((await store.listEntries()).length, 1);
+    const compaction = await store.consolidateEntries("current_workspace", { expectedRevision: second.revision, topic: "project" });
+    assert.equal(compaction.before, 2);
+    assert.equal(compaction.after, 1);
+    assert.equal(compaction.error, undefined);
+    const compacted = await store.listMemoryEntries({ origins: ["current_workspace"] });
+    assert.equal(compacted.entries.length, 1);
 
-    // 删掉最后一条后，话题文件与索引行应一起消失。
-    assert.equal(await store.deleteEntry("project", 0), true);
-    assert.equal((await store.listTopics()).includes("project"), false);
-    assert.equal((await store.readIndex())?.includes("project.md") ?? false, false);
-    assert.equal(await store.deleteEntry("project", 0), false);
+    const compactedEntry = compacted.entries[0];
+    assert.ok(compactedEntry);
+    const deleted = await store.deleteEntryById(compactedEntry.id, { expectedRevision: compacted.storeRevision });
+    assert.equal(deleted.deleted, true);
+    assert.equal((await store.listMemoryEntries({ topic: "project" })).entries.length, 0);
+    assert.equal((await store.deleteEntryById(compactedEntry.id, { expectedRevision: deleted.revision })).deleted, false);
   });
 }
 
@@ -1631,12 +1623,15 @@ async function testMemoryStorageBoundaries(): Promise<void> {
     const outsideRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-outside-"));
     const store = new LocalMemory(workspaceRoot, () => new ContextTestModel().model);
     const entry = {
+      audience: "workspace" as const,
+      kind: "gotcha" as const,
       topic: "debugging",
       title: "Safe local memory boundary",
       summary: "This sufficiently long test summary must never be written through an unsafe memory link.",
       decisions: [],
       paths: [],
-      keywords: ["boundary"]
+      keywords: ["boundary"],
+      lineage: { source: "explicit" as const, externalContext: false }
     };
     try {
       const victim = path.join(outsideRoot, "victim.md");
@@ -1646,23 +1641,23 @@ async function testMemoryStorageBoundaries(): Promise<void> {
       await fs.mkdir(path.dirname(memoryDir), { recursive: true });
 
       await fs.symlink(outsideRoot, memoryDir);
-      await assert.rejects(store.findRelevant("outside-memory", []), /real directory, not a symbolic link/);
-      await assert.rejects(store.write(entry), /real directory, not a symbolic link/);
+      await assert.rejects(store.search("outside-memory", []), /real directory, not a symbolic link/);
+      await assert.rejects(store.writeEntry(entry, { expectedRevision: 0 }), /real directory, not a symbolic link/);
       assert.equal(await fs.readFile(victim, "utf8"), victimContent);
 
       await fs.rm(memoryDir, { force: true });
       await fs.mkdir(memoryDir);
       await fs.symlink(victim, path.join(memoryDir, "MEMORY.md"));
-      await assert.rejects(store.findRelevant("outside-memory", []), /single regular file/);
-      await assert.rejects(store.write(entry), /single regular file/);
+      await assert.rejects(store.search("outside-memory", []), /single regular file/);
+      await assert.rejects(store.writeEntry(entry, { expectedRevision: 0 }), /single regular file/);
       assert.equal(await fs.readFile(victim, "utf8"), victimContent);
 
       await fs.rm(path.join(memoryDir, "MEMORY.md"), { force: true });
       const entriesDir = path.join(memoryDir, "entries");
       await fs.mkdir(entriesDir);
       await fs.link(victim, path.join(entriesDir, "debugging.md"));
-      await assert.rejects(store.listTopics(), /single regular file/);
-      await assert.rejects(store.write(entry), /single regular file/);
+      await assert.rejects(store.listMemoryEntries(), /single regular file/);
+      await assert.rejects(store.writeEntry(entry, { expectedRevision: 0 }), /single regular file/);
       assert.equal(await fs.readFile(victim, "utf8"), victimContent);
     } finally {
       if (previousAgentRoot === undefined) delete process.env[BINY_AGENT_DIR_ENV];
@@ -1745,14 +1740,6 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T | PromiseLike<T>
     resolve = settle;
   });
   return { promise, resolve };
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("Timed out waiting for context test condition.");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
 }
 
 await main();

@@ -257,7 +257,7 @@ async function testMemoryTopicLifecycle(): Promise<void> {
 
     const empty = await runMemoryCommand(memory, ["list"]);
     assert.match(empty, /empty/);
-    assert.deepEqual(await memory.listTopics(), []);
+    assert.deepEqual((await memory.listMemoryEntries()).entries, []);
 
     const added = await runMemoryCommand(memory, ["add", "decisions", "Always run pnpm typecheck before committing changes."]);
     assert.match(added, /Saved workspace\/fact memory/);
@@ -286,9 +286,9 @@ async function testMemoryTopicLifecycle(): Promise<void> {
 
     const forgotten = await runMemoryCommand(memory, ["forget", "decisions"]);
     assert.match(forgotten, /Deleted 1 memory entry/);
-    assert.deepEqual(await memory.listTopics(), []);
+    assert.deepEqual((await memory.listMemoryEntries()).entries, []);
     // 索引中的话题行也要被清掉。
-    assert.ok(!((await memory.readIndex()) ?? "").includes("decisions.md"));
+    assert.equal((await memory.listMemoryEntries({ topic: "decisions" })).entries.length, 0);
 
     const missing = await runMemoryCommand(memory, ["forget", "decisions"]);
     assert.match(missing, /No memory entry or topic/);
