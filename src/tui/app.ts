@@ -17,7 +17,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { formatPermissionModeChanged } from "../permission/commands.js";
 import type { PermissionMode } from "../permission/PermissionManager.js";
-import { filterPickerModelChoices, parseThinkingSelection, type ThinkingSelection } from "../llm/ModelManager.js";
+import { filterPickerModelChoices, parseThinkingSelection, type ModelChoice, type ThinkingSelection } from "../llm/ModelManager.js";
 import { globalConfigDir } from "../config/paths.js";
 import { slashCommandsForSurface } from "../runtime/commandRegistry.js";
 import { withAttachmentReferences } from "../attachments/references.js";
@@ -47,6 +47,7 @@ import { FooterComponent, ShortcutsBarComponent, StatusIndicatorComponent, Welco
 import { CardComponent } from "./components/cards.js";
 import { PermissionDialog, SelectDialog, TextViewerDialog } from "./components/dialogs.js";
 import { PendingAttachmentsComponent } from "./components/pendingAttachments.js";
+import { SessionWriterConflictComponent } from "./components/sessionWriterConflict.js";
 import { TranscriptView } from "./components/transcriptView.js";
 import { appendInputHistory, loadInputHistory } from "./inputHistory.js";
 import { permissionModeOptions } from "./permissionModeOptions.js";
@@ -54,6 +55,8 @@ import { pasteTuiClipboard } from "./runtime/clipboard.js";
 import { permissionChoiceToResult } from "./runtime/permissionChoice.js";
 import { readGitBranch } from "./runtime/gitBranch.js";
 import { openDesktopSession } from "./runtime/desktopHandoff.js";
+import { readStoredSessionEvents } from "../session/events.js";
+import { isSessionWriterConflictError } from "../runtime/SessionLease.js";
 import { sessionEventsToTranscript } from "./sessionTranscript.js";
 import { modelThinkingOptions, selectedThinkingForModel } from "./modelOptions.js";
 import { createInitialTuiState, tuiReducer } from "./reducer.js";
@@ -77,14 +80,11 @@ const TUI_SLASH_COMMANDS = slashCommandsForSurface("tui");
 const TUI_AUTOCOMPLETE_COMMANDS = TUI_SLASH_COMMANDS.filter((command) => command.name !== "/skills");
 const TUI_SHUTDOWN_DRAIN_MS = 1_500;
 
-/** 应返回卡片数据的报告类命令（Host 版本过旧时才会缺失 `card` 字段）。 */
-const CARD_COMMANDS = new Set(["/status", "/usage", "/skills", "/plugins"]);
-
-export function isCardCapableCommand(command: string, args: readonly string[]): boolean {
-  if (CARD_COMMANDS.has(command)) return true;
-  if (command === "/mcp") return args[0]?.toLowerCase() !== "reconnect";
-  if (command === "/subagent") return args[0] === "status" || args[0] === "agents";
-  return false;
+interface ModelPresentation {
+  provider: string;
+  modelLabel: string;
+  reasoningLabel: string;
+  thinking: ThinkingSelection;
 }
 
 export const personalitySelectOptions = [
@@ -134,6 +134,8 @@ export class BinyTui {
   private readonly chatContainer = new TranscriptView();
   private readonly editorContainer = new Container();
   private readonly pendingAttachmentsView = new PendingAttachmentsComponent();
+  private sessionWriterConflict: { sessionId: string; ownerSurface?: string } | undefined;
+  private sessionWriterConflictView: SessionWriterConflictComponent | undefined;
   private readonly status: StatusIndicatorComponent;
   private readonly footer: FooterComponent;
   private readonly shortcuts = new ShortcutsBarComponent();
@@ -146,6 +148,11 @@ export class BinyTui {
   private pendingAttachments: AgentAttachment[] = [];
   private permissionMode: PermissionMode = "ask";
   private thinking: ThinkingSelection = "off";
+  /** 模型切换先更新 TUI 展示，再按顺序等待 Runtime 确认。 */
+  private modelSwitchQueue: Promise<void> = Promise.resolve();
+  private modelSwitchPromise: Promise<void> | undefined;
+  private modelSwitchGeneration = 0;
+  private confirmedModel: ModelPresentation | undefined;
   private gitBranch: string | undefined;
   private contextUsage: { usedTokens?: number; maxTokens?: number; source?: "estimated" | "provider" } = {};
   private cacheHitRate: number | undefined;
@@ -239,13 +246,14 @@ export class BinyTui {
       if (attached) {
         runtime = attached;
       } else {
-        const selectedSession = this.initialSession;
         const createLocalRuntime: RuntimeHostFactory = async (sessionId?: string) => {
           const local = await createInteractiveAgentHost(this.workspaceRoot);
           if (sessionId !== undefined) await local.runtime.resumeSession(sessionId);
           return local;
         };
-        const local = await createLocalRuntime(selectedSession);
+        // 显式 session 在 Host/界面完成 attach 后再恢复；这样 writer conflict 可以
+        // 转成只读历史，而不会在本地 fallback 创建阶段直接终止 TUI。
+        const local = await createLocalRuntime(undefined);
         runtime = local.runtime;
         commands = local.commands;
         try {
@@ -285,6 +293,7 @@ export class BinyTui {
       const { info, permissionMode } = this.runtimeSnapshot;
       this.permissionMode = permissionMode;
       this.thinking = info.thinking;
+      this.confirmedModel = modelPresentationFromInfo(info);
       // 补全器要的是不带斜杠的命令名，它自己会补上 `/`；带斜杠会补出 `//resume`。
       const skills = commands
         ? commands.listSkills()
@@ -366,6 +375,7 @@ export class BinyTui {
     const runtime = this.runtime;
     if (!runtime) return;
     const info = runtime.getSnapshot().info;
+    this.confirmedModel = modelPresentationFromInfo(info);
     this.dispatch({
       type: "session.started",
       sessionId: info.sessionId,
@@ -380,6 +390,7 @@ export class BinyTui {
   private async startNewChat(): Promise<void> {
     try {
       await this.restartRuntimeForNewChat();
+      this.clearSessionWriterConflict();
       this.chatContainer.reset();
       this.dispatch({ type: "transcript.replaced", items: [], viewingSessionId: this.runtimeSnapshot?.info.sessionId });
       this.mode = "chat";
@@ -506,6 +517,17 @@ export class BinyTui {
       this.ui.requestRender();
       return;
     }
+    const pendingModelSwitch = this.modelSwitchPromise;
+    if (pendingModelSwitch) {
+      // 底部模型名已经立即变化，但消息必须等真实 Runtime 切换完成后再提交，
+      // 避免用户紧接着按 Enter 时仍由旧模型处理。
+      try {
+        await pendingModelSwitch;
+      } catch {
+        // applyModel 已经展示具体失败原因；保留输入，避免误发到旧模型。
+        return;
+      }
+    }
     const prompt = value || "请分析这个附件。";
     const attachments = this.pendingAttachments;
     this.setPendingAttachments([]);
@@ -593,6 +615,13 @@ export class BinyTui {
           this.setPendingAttachments([]);
         }
       }
+      return { consume: true };
+    }
+    if (this.sessionWriterConflict) {
+      if (matchesKey(data, "enter") || data.toLowerCase() === "r") {
+        this.sessionWriterConflictView?.handleInput(data);
+      }
+      // 冲突状态只允许 Retry 和退出，普通输入不能落入 Editor。
       return { consume: true };
     }
     if (matchesKey(data, "escape")) {
@@ -926,11 +955,6 @@ export class BinyTui {
           data: sharedResult.card
         });
       } else {
-        // 附着到旧版本 Host 时没有 card 字段：退回文本弹层，并说明原因，
-        // 避免「体感不对」又无从查起。
-        if (isCardCapableCommand(command, args)) {
-          this.notify(`${command} 需要较新的 Host：当前 Host 运行的是旧版本代码，无法渲染卡片。请重启 Desktop 或结束残留的 biny 进程后重试。`);
-        }
         this.showTextViewer(sharedResult.title, sharedResult.content);
       }
       if (command === "/compact") await this.refreshContextUsage();
@@ -946,7 +970,7 @@ export class BinyTui {
     const commands = this.commands;
     if (!runtime) return;
     if (args[0]) {
-      await this.applyModel(args[0], parseThinkingSelection(args[1]));
+      this.applyModel(args[0], parseThinkingSelection(args[1]));
       return;
     }
     if (commands) {
@@ -1154,7 +1178,7 @@ export class BinyTui {
       return;
     }
     if (!model.efforts.length) {
-      await this.applyModel(alias, "off");
+      this.applyModel(alias, "off", model);
       return;
     }
 
@@ -1170,34 +1194,64 @@ export class BinyTui {
         label: option.label
       })),
       onSelect: (item) => {
-        void this.applyModel(alias, item.value as ThinkingSelection);
+        this.applyModel(alias, item.value as ThinkingSelection, model);
       }
     });
   }
 
-  private async applyModel(alias: string, thinking?: ThinkingSelection): Promise<void> {
+  private applyModel(alias: string, thinking?: ThinkingSelection, model?: ModelChoice): void {
     const runtime = this.runtime;
     const commands = this.commands;
     if (!runtime) return;
-    try {
-      const info = commands
-        ? await runtime.runExclusiveOperation(
-          "switch_model",
-          async () => await commands.agent.switchModel(alias, thinking)
-        )
-        : await requireRemoteRuntime(runtime).switchModel(alias, thinking);
-      this.dispatch({
-        type: "model.changed",
-        provider: info.provider,
-        modelLabel: info.modelLabel,
-        reasoningLabel: info.reasoningLabel
+    const requestId = ++this.modelSwitchGeneration;
+    const optimistic = modelPresentationFromChoice(
+      alias,
+      thinking ?? model?.defaultThinking ?? "off",
+      model,
+      this.state.provider
+    );
+    this.applyModelPresentation(optimistic);
+
+    const request = this.modelSwitchQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const info = commands
+          ? await runtime.runExclusiveOperation(
+            "switch_model",
+            async () => await commands.agent.switchModel(alias, thinking)
+          )
+          : await requireRemoteRuntime(runtime).switchModel(alias, thinking);
+        const confirmed = modelPresentationFromInfo(info);
+        this.confirmedModel = confirmed;
+        if (this.modelSwitchGeneration === requestId) {
+          this.applyModelPresentation(confirmed);
+          this.notify(`Model changed to ${info.modelLabel} ${info.reasoningLabel.toLowerCase()}`);
+        }
       });
-      this.thinking = info.thinking;
-      this.editor.borderColor = theme.thinkingBorder(this.thinking);
-      this.notify(`Model changed to ${info.modelLabel} ${info.reasoningLabel.toLowerCase()}`);
-    } catch (error) {
-      this.showTextViewer("Model", `Model switch failed: ${describeError(error)}`);
-    }
+    this.modelSwitchQueue = request.catch(() => undefined);
+    this.modelSwitchPromise = request;
+    void request.then(
+      () => {
+        if (this.modelSwitchGeneration === requestId) this.modelSwitchPromise = undefined;
+      },
+      (error: unknown) => {
+        if (this.modelSwitchGeneration !== requestId) return;
+        this.modelSwitchPromise = undefined;
+        this.applyModelPresentation(this.confirmedModel ?? modelPresentationFromInfo(runtime.getSnapshot().info));
+        this.showTextViewer("Model", `Model switch failed: ${describeError(error)}`);
+      }
+    );
+  }
+
+  private applyModelPresentation(presentation: ModelPresentation): void {
+    this.thinking = presentation.thinking;
+    this.editor.borderColor = theme.thinkingBorder(this.thinking);
+    this.dispatch({
+      type: "model.changed",
+      provider: presentation.provider,
+      modelLabel: presentation.modelLabel,
+      reasoningLabel: presentation.reasoningLabel
+    });
   }
 
   private showPermissionModePicker(): void {
@@ -1263,17 +1317,73 @@ export class BinyTui {
   private async resumeSession(session: string): Promise<void> {
     const runtime = this.runtime;
     if (!runtime || !session) return;
-    const resumed = await runtime.resumeSession(session);
-    this.announceCurrentSession();
+    try {
+      const resumed = await runtime.resumeSession(session);
+      this.clearSessionWriterConflict();
+      this.announceCurrentSession();
+      this.chatContainer.reset();
+      this.dispatch({
+        type: "transcript.replaced",
+        viewingSessionId: resumed.sessionId,
+        items: sessionEventsToTranscript(resumed.events)
+      });
+      this.mode = "chat";
+      await this.refreshContextUsage();
+      await this.refreshUsage();
+    } catch (error) {
+      if (!isSessionWriterConflictError(error)) throw error;
+      await this.showSessionWriterConflict(session, error.ownerSurface);
+    }
+  }
+
+  private async showSessionWriterConflict(sessionId: string, ownerSurface?: string): Promise<void> {
+    this.sessionWriterConflict = { sessionId, ownerSurface };
+    this.editorContainer.removeChild(this.pendingAttachmentsView);
+    this.editorContainer.removeChild(this.editor);
+    this.sessionWriterConflictView = new SessionWriterConflictComponent(
+      this.sessionWriterConflict,
+      () => { void this.retrySessionWriterConflict(); }
+    );
+    this.editorContainer.addChild(this.sessionWriterConflictView);
+    this.ui.setFocus(this.sessionWriterConflictView);
+    this.setPendingAttachments([]);
     this.chatContainer.reset();
-    this.dispatch({
-      type: "transcript.replaced",
-      viewingSessionId: resumed.sessionId,
-      items: sessionEventsToTranscript(resumed.events)
-    });
-    this.mode = "chat";
-    await this.refreshContextUsage();
-    await this.refreshUsage();
+    try {
+      const stored = await readStoredSessionEvents(this.commands?.persistenceRoot ?? this.workspaceRoot, sessionId);
+      this.dispatch({
+        type: "transcript.replaced",
+        viewingSessionId: sessionId,
+        items: sessionEventsToTranscript(stored.events)
+      });
+    } catch (error) {
+      this.dispatch({ type: "error.message", message: `读取只读会话失败：${describeError(error)}` });
+    }
+    this.ui.requestRender();
+  }
+
+  private clearSessionWriterConflict(): void {
+    if (!this.sessionWriterConflict && !this.sessionWriterConflictView) return;
+    if (this.sessionWriterConflictView) this.editorContainer.removeChild(this.sessionWriterConflictView);
+    this.sessionWriterConflictView = undefined;
+    this.sessionWriterConflict = undefined;
+    this.editorContainer.addChild(this.pendingAttachmentsView);
+    this.editorContainer.addChild(this.editor);
+    this.ui.setFocus(this.editor);
+    this.ui.requestRender();
+  }
+
+  private async retrySessionWriterConflict(): Promise<void> {
+    const conflict = this.sessionWriterConflict;
+    const view = this.sessionWriterConflictView;
+    if (!conflict || !view) return;
+    view.setRetrying(true);
+    this.ui.requestRender();
+    try {
+      await this.resumeSession(conflict.sessionId);
+    } finally {
+      if (this.sessionWriterConflictView === view) view.setRetrying(false);
+      this.ui.requestRender();
+    }
   }
 
   // ---------------------------------------------------------------- 退出
@@ -1350,6 +1460,36 @@ async function drainRuntimeBeforeExit(runtime: InteractiveRuntimeHandle): Promis
 
 function sessionLabel(summary: SessionSummary, nowMs: number): string {
   return `${summary.fileName.replace(/\.jsonl$/, "")} · ${formatSessionAge(summary.updatedAt, nowMs)}`;
+}
+
+function modelPresentationFromInfo(info: { provider: string; modelLabel: string; reasoningLabel: string; thinking: ThinkingSelection }): ModelPresentation {
+  return {
+    provider: info.provider,
+    modelLabel: info.modelLabel,
+    reasoningLabel: info.reasoningLabel,
+    thinking: info.thinking
+  };
+}
+
+function modelPresentationFromChoice(
+  alias: string,
+  thinking: ThinkingSelection,
+  model: ModelChoice | undefined,
+  fallbackProvider: string
+): ModelPresentation {
+  return {
+    provider: model?.providerType ?? fallbackProvider,
+    modelLabel: model?.displayName ?? alias,
+    reasoningLabel: formatReasoningLabel(thinking),
+    thinking
+  };
+}
+
+function formatReasoningLabel(thinking: ThinkingSelection): string {
+  if (thinking === "off") return "Off";
+  return thinking === "xhigh"
+    ? "XHigh"
+    : `${thinking[0]?.toUpperCase() ?? ""}${thinking.slice(1)}`;
 }
 
 function describeError(error: unknown): string {
