@@ -23,7 +23,7 @@ export function runPermissionCommand(manager: PermissionManager, args: string[])
     return formatPermissionModeChanged(manager.getStatus().mode);
   }
 
-  if (subcommand === "auto" || subcommand === "safe") {
+  if (subcommand === "auto") {
     manager.setMode("auto");
     return formatPermissionModeChanged(manager.getStatus().mode);
   }

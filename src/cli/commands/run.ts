@@ -25,7 +25,7 @@ export interface RunCommandOptions {
   /** 覆盖本次运行的 soft step limit。 */
   softSteps?: number;
   /** 覆盖本次运行的权限模式。 */
-  permissionMode?: Exclude<PermissionMode, "safe">;
+  permissionMode?: PermissionMode;
   /** 无交互运行；会关闭 critical confirmation，并自动批准权限请求。 */
   headless?: boolean;
   /** 只输出一行 JSON，并允许非 completed 的 agent 终态交给外部 verifier 判定。 */
@@ -167,32 +167,70 @@ function canAttachRun(options: RunCommandOptions): boolean {
     && options.headless !== true;
 }
 
-function createRunConfigStore(workspaceRoot: string, options: RunCommandOptions): AgentConfigStore {
-  const base = createFileConfigStore(workspaceRoot);
+export function createRunConfigStore(
+  workspaceRoot: string,
+  options: RunCommandOptions,
+  base: AgentConfigStore = createFileConfigStore(workspaceRoot)
+): AgentConfigStore {
+  if (base.loadVersioned === undefined || base.saveVersioned === undefined) {
+    throw new Error("Run configuration requires a versioned config store.");
+  }
   const revision = base.revision;
   return {
     load: async (requestedWorkspaceRoot) => {
       const config = await base.load(requestedWorkspaceRoot);
       return applyRunConfig(config, options);
     },
-    save: async (config, requestedWorkspaceRoot) => await base.save(config, requestedWorkspaceRoot),
-    revision: revision ? () => revision() : undefined
+    // --model/--permission-mode/--headless 只覆盖本次运行；持久化写入必须走下面的
+    // versioned 接口，才能在保存 OAuth 等真实配置更新时剥离这些临时覆盖。
+    save: async () => {
+      throw new Error("Run configuration overrides must be saved with a versioned update.");
+    },
+    revision: revision ? () => revision() : undefined,
+    loadVersioned: async (requestedWorkspaceRoot) => {
+      const snapshot = await base.loadVersioned!(requestedWorkspaceRoot);
+      return { ...snapshot, config: applyRunConfig(snapshot.config, options) };
+    },
+    saveVersioned: async (candidate, expectedRevision, requestedWorkspaceRoot) => {
+      const persisted = await base.loadVersioned!(requestedWorkspaceRoot);
+      const saved = await base.saveVersioned!(
+        removeRunOverrides(candidate, persisted.config, options),
+        expectedRevision,
+        requestedWorkspaceRoot
+      );
+      return { ...saved, config: applyRunConfig(saved.config, options) };
+    }
   };
 }
 
 export function applyRunConfig(config: AgentConfig, options: RunCommandOptions): AgentConfig {
+  const next = structuredClone(config);
   if (options.model !== undefined) {
-    if (!config.models[options.model]) throw new Error(`Unknown model alias: ${options.model}`);
-    config.defaultModel = options.model;
+    if (!next.models[options.model]) throw new Error(`Unknown model alias: ${options.model}`);
+    next.defaultModel = options.model;
   }
-  if (options.maxSteps !== undefined) config.agent.hardStepLimit = options.maxSteps;
-  if (options.softSteps !== undefined) config.agent.softStepLimit = options.softSteps;
-  if (options.permissionMode !== undefined) config.permission.mode = options.permissionMode;
+  if (options.maxSteps !== undefined) next.agent.hardStepLimit = options.maxSteps;
+  if (options.softSteps !== undefined) next.agent.softStepLimit = options.softSteps;
+  if (options.permissionMode !== undefined) next.permission.mode = options.permissionMode;
   if (options.headless) {
-    config.permission.mode = options.permissionMode ?? "full-access";
-    config.permission.criticalAlwaysAsk = false;
+    next.permission.mode = options.permissionMode ?? "full-access";
+    next.permission.criticalAlwaysAsk = false;
   }
-  return config;
+  return next;
+}
+
+function removeRunOverrides(
+  candidate: AgentConfig,
+  persisted: AgentConfig,
+  options: RunCommandOptions
+): AgentConfig {
+  const next = structuredClone(candidate);
+  if (options.model !== undefined) next.defaultModel = persisted.defaultModel;
+  if (options.maxSteps !== undefined) next.agent.hardStepLimit = persisted.agent.hardStepLimit;
+  if (options.softSteps !== undefined) next.agent.softStepLimit = persisted.agent.softStepLimit;
+  if (options.permissionMode !== undefined || options.headless) next.permission.mode = persisted.permission.mode;
+  if (options.headless) next.permission.criticalAlwaysAsk = persisted.permission.criticalAlwaysAsk;
+  return next;
 }
 
 export function validateRunOptions(options: RunCommandOptions): void {

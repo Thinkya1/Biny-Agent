@@ -15,6 +15,7 @@ import {
 } from "./migrations.js";
 import { projectBinyDir, projectSettingsPath } from "./paths.js";
 import { reasoningEffortSchema } from "./schema.js";
+import { withGlobalConfigWriteLock } from "./versioned.js";
 
 const maxConfigFileBytes = 1024 * 1024;
 
@@ -30,14 +31,6 @@ const agentOverrideSchema = z.object({
   maxRepeatedActions: z.number().int().min(1).max(32).optional(),
   maxConcurrentTools: z.number().int().min(1).max(32).optional(),
   maxQueuedToolCalls: z.number().int().min(1).max(1_024).optional()
-}).strict();
-
-const permissionOverrideSchema = z.object({
-  mode: z.enum(["safe", "ask", "read-only", "auto", "full-access"]).optional(),
-  allowTools: z.array(z.string()).optional(),
-  allowPaths: z.array(z.string()).optional(),
-  denyPaths: z.array(z.string()).optional(),
-  criticalAlwaysAsk: z.boolean().optional()
 }).strict();
 
 const compactionOverrideSchema = z.object({
@@ -77,7 +70,6 @@ export const projectSettingsSchema = z.object({
   defaultModel: z.string().min(1).optional(),
   thinking: thinkingOverrideSchema.optional(),
   agent: agentOverrideSchema.optional(),
-  permission: permissionOverrideSchema.optional(),
   context: contextOverrideSchema.optional(),
   sandbox: sandboxOverrideSchema.optional(),
   checkpoints: checkpointsOverrideSchema.optional(),
@@ -116,7 +108,6 @@ export async function loadProjectSettings(workspaceRoot: string): Promise<Projec
   try {
     const migration = migrateProjectSettingsDocument(JSON.parse(raw));
     const document = projectSettingsDocumentSchema.parse(migration.document);
-    if (migration.migrated) await writeProjectSettingsDocument(canonicalWorkspace, document);
     return projectSettingsFromDocument(document);
   } catch (error) {
     throw new Error(`Invalid project .biny/settings.json: ${error instanceof Error ? error.message : String(error)}`);
@@ -129,6 +120,15 @@ export async function saveProjectSettings(
   settings: ProjectSettings
 ): Promise<ProjectSettings> {
   const canonicalWorkspace = await fs.realpath(path.resolve(workspaceRoot));
+  return await withGlobalConfigWriteLock(projectBinyDir(canonicalWorkspace), async () => (
+    await saveProjectSettingsUnlocked(canonicalWorkspace, settings)
+  ));
+}
+
+async function saveProjectSettingsUnlocked(
+  canonicalWorkspace: string,
+  settings: ProjectSettings
+): Promise<ProjectSettings> {
   const parsed = projectSettingsSchema.parse(settings);
   const document = projectSettingsDocumentSchema.parse({
     ...parsed,
@@ -143,8 +143,11 @@ export async function updateProjectSettings(
   workspaceRoot: string,
   update: (current: ProjectSettings) => ProjectSettings | Promise<ProjectSettings>
 ): Promise<ProjectSettings> {
-  const current = await loadProjectSettings(workspaceRoot);
-  return await saveProjectSettings(workspaceRoot, await update(structuredClone(current)));
+  const canonicalWorkspace = await fs.realpath(path.resolve(workspaceRoot));
+  return await withGlobalConfigWriteLock(projectBinyDir(canonicalWorkspace), async () => {
+    const current = await loadProjectSettings(canonicalWorkspace);
+    return await saveProjectSettingsUnlocked(canonicalWorkspace, await update(structuredClone(current)));
+  });
 }
 
 function projectSettingsFromDocument(document: ProjectSettingsDocument): ProjectSettings {

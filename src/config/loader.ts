@@ -60,26 +60,18 @@ export async function loadConfigFile(root: string): Promise<AgentConfig> {
     throw error;
   }
   let handle: FileHandle | undefined;
-  let config: AgentConfig | undefined;
-  let migrated = false;
   try {
     handle = await openExistingConfig(location);
     await tightenConfigMode(handle);
     const raw = await readBoundedConfig(location, handle);
     const migration = migrateGlobalConfigDocument(JSON.parse(raw));
-    config = configSchema.parse(migration.document);
-    migrated = migration.migrated;
+    return configSchema.parse(migration.document);
   } catch (error) {
     if (isNotFound(error)) return configSchema.parse(defaultConfig);
     throw new Error(`Failed to load ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     await handle?.close();
   }
-  if (!config) throw new Error(`Failed to load ${CONFIG_FILE}: parsed configuration is unavailable.`);
-  // 迁移写回保留原文中的 credential 字段；不能走 public saveConfigFile（它会主动移除凭据），
-  // 也不能再次 load，否则旧文档会递归触发同一次迁移。
-  if (migrated) await writeConfigDocumentFile(root, config);
-  return config;
 }
 
 export async function saveConfig(workspaceRoot: string, config: AgentConfig, options: ConfigPathOptions = {}): Promise<void> {
@@ -412,6 +404,10 @@ function withoutCredentials(config: AgentConfig): AgentConfig {
   for (const provider of Object.values(safe.providers)) {
     provider.apiKey = undefined;
     if (provider.oauth) provider.oauth.refreshToken = undefined;
+  }
+  for (const server of Object.values(safe.extensions.mcp)) {
+    for (const key of Object.keys(server.credentialRefs?.env ?? {})) delete server.env?.[key];
+    for (const key of Object.keys(server.credentialRefs?.headers ?? {})) delete server.headers?.[key];
   }
   return safe;
 }

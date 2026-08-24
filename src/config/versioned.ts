@@ -30,12 +30,19 @@ export class ConfigRevisionConflictError extends Error {
   }
 }
 
-/** revision 覆盖全部非凭据配置；Keychain/token 正文既不进入 IPC，也不进入哈希。 */
+/** revision 覆盖非凭据配置和凭据槽位的非机密版本；Keychain/token 正文既不进入 IPC，也不进入哈希。 */
 export function configDocumentRevision(config: AgentConfig): string {
   const publicConfig = structuredClone(config) as AgentConfig;
+  // 联网搜索密钥和 provider 凭据都保存在凭据存储中，不属于 config.json 文档内容。
+  // 凭据正文仍不参与 revision；只对外持久化随机版本 nonce，避免把密钥正文混入哈希。
+  delete publicConfig.web.search.apiKey;
   for (const provider of Object.values(publicConfig.providers)) {
     delete provider.apiKey;
     if (provider.oauth) delete provider.oauth.refreshToken;
+  }
+  for (const server of Object.values(publicConfig.extensions.mcp)) {
+    for (const key of Object.keys(server.credentialRefs?.env ?? {})) delete server.env?.[key];
+    for (const key of Object.keys(server.credentialRefs?.headers ?? {})) delete server.headers?.[key];
   }
   return `sha256:${createHash("sha256").update(stableJson(publicConfig)).digest("hex")}`;
 }

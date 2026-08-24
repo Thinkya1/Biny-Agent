@@ -13,7 +13,7 @@ export type PermissionGrantScope = "once" | "command" | "session" | "tool" | "pa
 export type PermissionDecision = "allow" | "ask" | "deny";
 
 export interface ProjectPermissionPolicy {
-  mode: PermissionMode | "safe";
+  mode: PermissionMode;
   allowTools: string[];
   allowPaths: string[];
   denyPaths: string[];
@@ -112,7 +112,7 @@ export class PermissionManager {
       denyPaths: policy.denyPaths ?? defaultPolicy.denyPaths,
       criticalAlwaysAsk: policy.criticalAlwaysAsk ?? defaultPolicy.criticalAlwaysAsk
     };
-    this.mode = normalizePermissionMode(this.policy.mode);
+    this.mode = this.policy.mode;
   }
 
   evaluate(request: PermissionRequestContext): PermissionEvaluation {
@@ -230,11 +230,6 @@ export class PermissionManager {
       projectPolicySource: this.policy.source
     };
   }
-}
-
-export function normalizePermissionMode(mode: PermissionMode | "safe" | undefined): PermissionMode {
-  if (mode === "read-only" || mode === "auto" || mode === "full-access" || mode === "ask") return mode;
-  return "ask";
 }
 
 function isAllowedBySession(

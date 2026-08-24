@@ -9,6 +9,7 @@ import {
   BINY_KEYCHAIN_SERVICE,
   deferredCredentialTransactionStatus,
   finalizeDeferredCredentialTransaction,
+  loadStoredCredentials,
   MacKeychainCredentialStore,
   rollbackDeferredCredentialTransaction,
   WEB_SEARCH_CREDENTIAL_ACCOUNT,
@@ -16,7 +17,8 @@ import {
   saveConfigAndStoredCredentials
 } from "../src/config/credentials.js";
 import { resolveRunBudget } from "../src/agent/runBudget.js";
-import { createFileConfigStore } from "../src/config/store.js";
+import { createFileConfigStore, updateConfig } from "../src/config/store.js";
+import { loadProjectSettings, updateProjectSettings } from "../src/config/projectSettings.js";
 import { ConfigRevisionConflictError, configDocumentRevision } from "../src/config/versioned.js";
 import type { CredentialStore } from "../src/config/credentials.js";
 
@@ -24,12 +26,17 @@ await testGlobalPathResolution();
 testRunBudget();
 testRemovedModelFormatsRequireManualUpdate();
 await testProjectOverridesAndGlobalPersistence();
+await testConcurrentProjectSettingUpdates();
 await testRemovedProjectBudgetFieldsAreRejected();
 await testProjectCredentialFieldsAreRejected();
 await testProjectModelAliasMustBeGlobal();
 await testLegacyProjectConfigIsIgnored();
 await testVersionedGlobalConfigRejectsStaleWriters();
+await testInlineCredentialsRequirePersistentStorage();
+await testMcpCredentialReferencesStayOutOfConfig();
+await testVersionedCredentialUpdatesRejectStaleWriters();
 testConfigRevisionMatchesJsonRoundTrip();
+await testConfigUpdatesRequireVersionedStore();
 await testCredentialTransactionCompensatesPartialWrites();
 await testDeferredCredentialTransactionKeepsRollbackLineage();
 await testFileConfigStoreDeferredCredentialContract();
@@ -118,6 +125,8 @@ async function testProjectOverridesAndGlobalPersistence(): Promise<void> {
     await saveConfig(workspace, { ...defaultConfig, defaultModel: "deepseek-v4-pro" }, { globalDir: globalRoot });
     await fs.mkdir(path.join(workspace, ".biny"));
     await fs.writeFile(path.join(workspace, ".biny", "settings.json"), JSON.stringify({
+      format: "biny-project-settings",
+      configVersion: 1,
       defaultModel: "deepseek-v4-flash",
       thinking: { enabled: false },
       agent: { softStepLimit: 2 },
@@ -133,7 +142,7 @@ async function testProjectOverridesAndGlobalPersistence(): Promise<void> {
     assert.equal(effective.defaultModel, "deepseek-v4-flash");
     assert.equal(effective.thinking.enabled, false);
     assert.equal(effective.agent.softStepLimit, 2);
-    assert.equal(effective.permission.mode, "read-only");
+    assert.equal(effective.permission.mode, "ask");
     assert.equal(effective.context.compaction.reserveTokens, 2_048);
     assert.equal(effective.context.compaction.keepRecentTokens, 8_192);
     assert.equal(effective.context.compaction.maxSummaryTokens, 1_024);
@@ -143,12 +152,16 @@ async function testProjectOverridesAndGlobalPersistence(): Promise<void> {
 
     const changed = structuredClone(effective);
     changed.defaultModel = "deepseek-v4-pro";
-    changed.permission.mode = "ask";
+    changed.permission.mode = "full-access";
     await saveConfig(workspace, changed, { globalDir: globalRoot });
     const global = await loadConfigFile(globalRoot);
     assert.equal(global.defaultModel, "deepseek-v4-pro");
-    assert.equal(global.permission.mode, "ask");
+    assert.equal(global.permission.mode, "full-access");
     assert.equal((await loadConfig(workspace, { globalDir: globalRoot })).defaultModel, "deepseek-v4-flash");
+    assert.equal((await loadConfig(workspace, { globalDir: globalRoot })).permission.mode, "full-access");
+    const projectDocument = JSON.parse(await fs.readFile(path.join(workspace, ".biny", "settings.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(projectDocument.configVersion, 1, "read-only config loading must not rewrite project settings");
+    assert.deepEqual(projectDocument.permission, { mode: "read-only" });
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -172,6 +185,21 @@ async function testRemovedProjectBudgetFieldsAreRejected(): Promise<void> {
       loadConfig(workspace, { globalDir: globalRoot }),
       /Invalid project [\s\S]*Unrecognized key\(s\)/u
     );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testConcurrentProjectSettingUpdates(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-project-settings-lock-"));
+  try {
+    await Promise.all([
+      updateProjectSettings(root, (current) => ({ ...current, defaultModel: "deepseek-v4-pro" })),
+      updateProjectSettings(root, (current) => ({ ...current, agent: { ...current.agent, softStepLimit: 9 } }))
+    ]);
+    const current = await loadProjectSettings(root);
+    assert.equal(current.defaultModel, "deepseek-v4-pro");
+    assert.equal(current.agent?.softStepLimit, 9);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -262,6 +290,114 @@ async function testVersionedGlobalConfigRejectsStaleWriters(): Promise<void> {
   }
 }
 
+async function testVersionedCredentialUpdatesRejectStaleWriters(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-credential-cas-"));
+  const workspace = path.join(root, "project");
+  const globalRoot = path.join(root, "global");
+  const values = new Map<string, string>();
+  const credentialStore: CredentialStore = {
+    persistent: true,
+    get: async (account) => values.get(account),
+    set: async (account, value) => { values.set(account, value); },
+    delete: async (account) => { values.delete(account); }
+  };
+  try {
+    await fs.mkdir(workspace);
+    const firstStore = createFileConfigStore(workspace, { globalDir: globalRoot, credentialStore });
+    const secondStore = createFileConfigStore(workspace, { globalDir: globalRoot, credentialStore });
+    const first = await firstStore.loadVersioned!();
+    const stale = await secondStore.loadVersioned!();
+    const target = structuredClone(first.config);
+    target.providers.deepseek!.apiKey = "first-secret";
+    await firstStore.saveVersioned!(target, first.revision);
+    assert.equal(values.get(providerCredentialAccount("deepseek", "apiKey")), "first-secret");
+
+    const staleTarget = structuredClone(stale.config);
+    staleTarget.personalization.personality = "friendly";
+    await assert.rejects(
+      secondStore.saveVersioned!(staleTarget, stale.revision),
+      (error: unknown) => error instanceof ConfigRevisionConflictError
+    );
+    assert.equal((await firstStore.loadVersioned!()).config.providers.deepseek?.apiKey, "first-secret");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testInlineCredentialsRequirePersistentStorage(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-inline-credential-"));
+  const workspace = path.join(root, "project");
+  const globalRoot = path.join(root, "global");
+  const credentialStore: CredentialStore = {
+    persistent: false,
+    get: async () => undefined,
+    set: async () => undefined,
+    delete: async () => undefined
+  };
+  try {
+    await fs.mkdir(workspace);
+    await fs.mkdir(globalRoot);
+    const document = structuredClone(defaultConfig);
+    document.providers.deepseek!.apiKey = "inline-test-secret";
+    await fs.writeFile(path.join(globalRoot, "config.json"), `${JSON.stringify(document)}\n`, { mode: 0o600 });
+    await assert.rejects(
+      createFileConfigStore(workspace, { globalDir: globalRoot, credentialStore }).load(),
+      /apiKeyEnv/u
+    );
+    assert.equal((await fs.readFile(path.join(globalRoot, "config.json"), "utf8")).includes("inline-test-secret"), true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testMcpCredentialReferencesStayOutOfConfig(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-mcp-credentials-"));
+  const journalPath = path.join(root, ".credentials.transaction.json");
+  const values = new Map<string, string>();
+  const store: CredentialStore = {
+    persistent: true,
+    get: async (account) => values.get(account),
+    set: async (account, value) => { values.set(account, value); },
+    delete: async (account) => { values.delete(account); }
+  };
+  const previous = structuredClone(defaultConfig);
+  const target = structuredClone(defaultConfig);
+  target.extensions.mcp = {
+    "demo-server": {
+      id: "11111111-1111-4111-8111-111111111111",
+      type: "stdio",
+      command: "node",
+      args: ["server.js"],
+      env: { DEMO_TOKEN: "mcp-inline-secret" },
+      credentialRefs: { env: { DEMO_TOKEN: "mcp:demo-server:env:DEMO_TOKEN" } },
+      enabled: true,
+      stderr: "ignore"
+    }
+  };
+  let persisted = structuredClone(previous);
+  try {
+    await saveConfigAndStoredCredentials(
+      target,
+      previous,
+      store,
+      journalPath,
+      async () => {
+        await saveConfigFile(root, target);
+        persisted = await loadConfigFile(root);
+      },
+      async () => persisted
+    );
+    assert.equal(values.get("mcp:demo-server:env:DEMO_TOKEN"), "mcp-inline-secret");
+    const document = JSON.parse(await fs.readFile(path.join(root, "config.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(JSON.stringify(document).includes("mcp-inline-secret"), false);
+    assert.equal(configDocumentRevision(target), configDocumentRevision(persisted));
+    const restored = await loadStoredCredentials(persisted, store);
+    assert.equal(restored.extensions.mcp["demo-server"]?.env?.DEMO_TOKEN, "mcp-inline-secret");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
 function testConfigRevisionMatchesJsonRoundTrip(): void {
   const explicitUndefined = structuredClone(defaultConfig);
   explicitUndefined.providers.deepseek = {
@@ -271,6 +407,22 @@ function testConfigRevisionMatchesJsonRoundTrip(): void {
   };
   const persistedShape = JSON.parse(JSON.stringify(explicitUndefined)) as typeof explicitUndefined;
   assert.equal(configDocumentRevision(explicitUndefined), configDocumentRevision(persistedShape));
+
+  const searchCredential = structuredClone(defaultConfig);
+  searchCredential.web.search.apiKey = "test-only-search-key";
+  const searchDocument = structuredClone(searchCredential);
+  delete searchDocument.web.search.apiKey;
+  assert.equal(configDocumentRevision(searchCredential), configDocumentRevision(searchDocument));
+}
+
+async function testConfigUpdatesRequireVersionedStore(): Promise<void> {
+  await assert.rejects(
+    updateConfig({
+      load: async () => structuredClone(defaultConfig),
+      save: async () => undefined
+    }, undefined, (current) => current),
+    /require a versioned config store/u
+  );
 }
 
 async function testCredentialTransactionCompensatesPartialWrites(): Promise<void> {
@@ -453,7 +605,7 @@ async function testFileConfigStoreDeferredCredentialContract(): Promise<void> {
     const target = structuredClone(before.config);
     target.providers.deepseek!.apiKey = "deferred-store-target";
     const saved = await saveDeferred(target, before.revision, "store-rollback");
-    assert.equal(saved.revision, before.revision, "credential-only updates keep the public config revision");
+    assert.notEqual(saved.revision, before.revision, "credential updates advance the opaque credential revision");
     assert.equal(await status("store-rollback"), "target");
     assert.equal(values.get(account), "deferred-store-target");
     assert.equal(await rollback(before.config, saved.revision, "store-rollback"), "completed");
@@ -472,7 +624,7 @@ async function testFileConfigStoreDeferredCredentialContract(): Promise<void> {
 async function testMacKeychainCredentialStore(): Promise<void> {
   const values = new Map<string, string>();
   const calls: Array<{ command: string; args: string[] }> = [];
-  const store = new MacKeychainCredentialStore(async (command, args) => {
+  const store = new MacKeychainCredentialStore(async (command, args, input) => {
     calls.push({ command, args });
     const account = args[args.indexOf("-a") + 1]!;
     if (command === "security" && args[0] === "find-generic-password") {
@@ -480,7 +632,7 @@ async function testMacKeychainCredentialStore(): Promise<void> {
       if (!value) throw Object.assign(new Error("missing"), { code: 44 });
       return { stdout: `${value}\n` };
     }
-    if (args[0] === "add-generic-password") values.set(account, args[args.indexOf("-w") + 1]!);
+    if (args[0] === "add-generic-password") values.set(account, input?.trim() ?? "");
     if (args[0] === "delete-generic-password") values.delete(account);
     return { stdout: "" };
   });
@@ -490,4 +642,7 @@ async function testMacKeychainCredentialStore(): Promise<void> {
   await store.delete("provider:openai:apiKey");
   assert.equal(await store.get("provider:openai:apiKey"), undefined);
   assert.ok(calls.every((call) => call.args.includes("-s") && call.args[call.args.indexOf("-s") + 1] === BINY_KEYCHAIN_SERVICE));
+  const addCall = calls.find((call) => call.args[0] === "add-generic-password");
+  assert.equal(addCall?.args.at(-1), "-w");
+  assert.equal(addCall?.args.includes("test-secret"), false);
 }

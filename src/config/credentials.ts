@@ -5,14 +5,11 @@
  * 不落盘，模型凭据只从配置声明的环境变量读取。凭据值不会进入 IPC、session 或 config.json。
  */
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import type { AgentConfig } from "./schema.js";
 import { configDocumentRevision } from "./versioned.js";
-
-const execFileAsync = promisify(execFile);
 
 export const BINY_KEYCHAIN_SERVICE = "com.biny.agent";
 export const WEB_SEARCH_CREDENTIAL_ACCOUNT = "web-search:apiKey";
@@ -73,15 +70,14 @@ export interface KeychainCommandResult {
   stderr?: string;
 }
 
-export type KeychainCommand = (command: string, args: string[]) => Promise<KeychainCommandResult>;
+export type KeychainCommand = (command: string, args: string[], input?: string) => Promise<KeychainCommandResult>;
 
 export class MacKeychainCredentialStore implements CredentialStore {
   readonly persistent = true;
 
   constructor(
-    private readonly run: KeychainCommand = async (command, args) => {
-      const result = await execFileAsync(command, args, { encoding: "utf8" });
-      return { stdout: result.stdout, stderr: result.stderr };
+    private readonly run: KeychainCommand = async (command, args, input) => {
+      return await runKeychainCommand(command, args, input);
     }
   ) {}
 
@@ -98,7 +94,8 @@ export class MacKeychainCredentialStore implements CredentialStore {
 
   async set(account: string, value: string): Promise<void> {
     try {
-      await this.run("security", ["add-generic-password", "-U", "-s", BINY_KEYCHAIN_SERVICE, "-a", account, "-w", value]);
+      // `security` 会在 `-w` 没有参数且位于末尾时从 stdin 读取，避免密钥出现在子进程 argv。
+      await this.run("security", ["add-generic-password", "-U", "-s", BINY_KEYCHAIN_SERVICE, "-a", account, "-w"], `${value}\n`);
     } catch (error) {
       throw keychainError("保存", account, error);
     }
@@ -153,12 +150,27 @@ export async function loadStoredCredentials(config: AgentConfig, store: Credenti
   }
   const webSearchApiKey = await store.get(WEB_SEARCH_CREDENTIAL_ACCOUNT);
   if (webSearchApiKey) next.web.search.apiKey = webSearchApiKey;
+  for (const server of Object.values(next.extensions.mcp)) {
+    for (const [key, account] of Object.entries(server.credentialRefs?.env ?? {})) {
+      const value = await store.get(account);
+      if (value === undefined) continue;
+      server.env ??= {};
+      server.env[key] = value;
+    }
+    for (const [key, account] of Object.entries(server.credentialRefs?.headers ?? {})) {
+      const value = await store.get(account);
+      if (value === undefined) continue;
+      server.headers ??= {};
+      server.headers[key] = value;
+    }
+  }
   return next;
 }
 
 export async function saveStoredCredentials(config: AgentConfig, store: CredentialStore, previous?: AgentConfig): Promise<void> {
   const values: Array<{ account: string; value: string | undefined }> = [
-    { account: WEB_SEARCH_CREDENTIAL_ACCOUNT, value: config.web.search.apiKey }
+    { account: WEB_SEARCH_CREDENTIAL_ACCOUNT, value: config.web.search.apiKey },
+    ...mcpCredentialValues(config, previous ?? config)
   ];
   for (const [alias, provider] of Object.entries(config.providers)) {
     values.push({ account: providerCredentialAccount(alias, "apiKey"), value: provider.apiKey });
@@ -176,6 +188,10 @@ export async function saveStoredCredentials(config: AgentConfig, store: Credenti
       if (old?.oauth?.refreshToken && !current?.oauth?.refreshToken) await store.delete(providerCredentialAccount(alias, "refreshToken"));
     }
     if (previous.web.search.apiKey && !config.web.search.apiKey) await store.delete(WEB_SEARCH_CREDENTIAL_ACCOUNT);
+    const currentMcpAccounts = new Set(mcpCredentialAccounts(config));
+    for (const account of mcpCredentialAccounts(previous)) {
+      if (!currentMcpAccounts.has(account)) await store.delete(account);
+    }
   }
 }
 
@@ -199,6 +215,7 @@ export async function saveConfigAndStoredCredentials(
   if (await readCredentialJournal(journalPath)) {
     throw new CredentialRecoveryRequiredError("已有延迟清理的 Keychain 事务，不能开始新的配置保存。");
   }
+  synchronizeCredentialRevisions(config, previous);
   const journal = await prepareCredentialTransaction(
     config,
     previous,
@@ -233,6 +250,32 @@ export async function saveConfigAndStoredCredentials(
     }
     throw error;
   }
+}
+
+/**
+ * 给每个凭据槽位维护一个不含密钥正文的随机版本。
+ *
+ * 公共配置字段的 revision 不能直接哈希 Keychain 正文，否则 revision 会变成凭据指纹；
+ * 但完全忽略凭据又会让旧配置快照覆盖并发写入的新密钥。随机 nonce 由配置事务随同
+ * config.json 原子保存，足以让旧快照在 saveVersioned 的 CAS 预检阶段失败。
+ */
+export function synchronizeCredentialRevisions(config: AgentConfig, previous: AgentConfig): void {
+  const targetValues = storedCredentialValues(config, previous);
+  const previousValues = storedCredentialValues(previous, previous);
+  const revisions = { ...(previous.credentialRevisions ?? {}), ...(config.credentialRevisions ?? {}) };
+  for (const [account, target] of targetValues) {
+    const candidateRevision = config.credentialRevisions?.[account];
+    const previousRevision = previous.credentialRevisions?.[account];
+    if (target === previousValues.get(account)) {
+      revisions[account] = candidateRevision ?? previousRevision ?? randomUUID();
+    } else if (candidateRevision !== undefined && candidateRevision !== previousRevision) {
+      // Desktop settings prepares this nonce before starting its outer transaction.
+      revisions[account] = candidateRevision;
+    } else {
+      revisions[account] = randomUUID();
+    }
+  }
+  config.credentialRevisions = revisions;
 }
 
 /** load 边界先恢复未完成的凭据事务；无法证明方向时 fail closed，不返回混合状态。 */
@@ -387,7 +430,40 @@ function storedCredentialValues(config: AgentConfig, previous: AgentConfig): Map
     values.set(providerCredentialAccount(alias, "apiKey"), provider?.apiKey);
     values.set(providerCredentialAccount(alias, "refreshToken"), provider?.oauth?.refreshToken);
   }
+  for (const { account, value } of mcpCredentialValues(config, previous)) values.set(account, value);
+  for (const account of mcpCredentialAccounts(previous)) {
+    if (!values.has(account)) values.set(account, undefined);
+  }
   return values;
+}
+
+function mcpCredentialValues(config: AgentConfig, previous: AgentConfig): Array<{ account: string; value: string | undefined }> {
+  const values: Array<{ account: string; value: string | undefined }> = [];
+  const names = new Set([...Object.keys(previous.extensions.mcp), ...Object.keys(config.extensions.mcp)]);
+  for (const name of names) {
+    const current = config.extensions.mcp[name];
+    const old = previous.extensions.mcp[name];
+    for (const location of ["env", "headers"] as const) {
+      const keys = new Set([
+        ...Object.keys(old?.credentialRefs?.[location] ?? {}),
+        ...Object.keys(current?.credentialRefs?.[location] ?? {})
+      ]);
+      for (const key of keys) {
+        const account = current?.credentialRefs?.[location]?.[key] ?? old?.credentialRefs?.[location]?.[key];
+        if (!account) continue;
+        const active = current?.credentialRefs?.[location]?.[key] === account;
+        values.push({ account, value: active ? current?.[location]?.[key] : undefined });
+      }
+    }
+  }
+  return values;
+}
+
+function mcpCredentialAccounts(config: AgentConfig): string[] {
+  return Object.values(config.extensions.mcp).flatMap((server) => [
+    ...Object.values(server.credentialRefs?.env ?? {}),
+    ...Object.values(server.credentialRefs?.headers ?? {})
+  ]);
 }
 
 async function applyCredentialMutationSide(
@@ -428,6 +504,29 @@ async function writeCredentialJournal(journalPath: string, journal: CredentialTr
   await fs.writeFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await fs.chmod(temporary, 0o600);
   await fs.rename(temporary, journalPath);
+}
+
+function runKeychainCommand(command: string, args: string[], input?: string): Promise<KeychainCommandResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      const error = new Error(`Keychain command exited with ${code === null ? signal ?? "unknown status" : `code ${String(code)}`}.`);
+      Object.assign(error, { code: code ?? signal, stderr, stdout });
+      reject(error);
+    });
+    child.stdin.end(input);
+  });
 }
 
 async function readCredentialJournal(journalPath: string): Promise<CredentialTransactionJournal | undefined> {

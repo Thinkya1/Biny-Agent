@@ -5,6 +5,7 @@
  * capabilities. Only the canonical multi-model format is accepted.
  */
 import { z } from "zod";
+import { DEFAULT_PROJECT_SKILL_PATHS } from "../extensions/skillRoots.js";
 import {
   memoryPolicySchema,
   personalizationSettingsSchema,
@@ -30,7 +31,7 @@ const agentSchema = z.object({
 });
 
 const permissionSchema = z.object({
-  mode: z.enum(["safe", "ask", "read-only", "auto", "full-access"]).default("ask"),
+  mode: z.enum(["ask", "read-only", "auto", "full-access"]).default("ask"),
   allowTools: z.array(z.string()).default(["read_file", "list_files", "search_files", "grep_search", "git_status", "git_diff", "web_search", "save_memory"]),
   allowPaths: z.array(z.string()).default([]),
   denyPaths: z.array(z.string()).default([".env", ".env.local", ".ssh/", "node_modules/"]),
@@ -208,10 +209,20 @@ const modelPricingSchema = z.object({
 });
 
 const mcpServerSchema = z.object({
+  /** 用于凭据 account 稳定关联；旧配置没有该字段时在下一次桌面保存时补齐。 */
+  id: z.string().uuid().optional(),
+  description: z.string().trim().max(2_000).optional(),
   type: z.enum(["stdio", "http"]).optional(),
+  /** Remote 新配置可显式选择协议；缺省时保留 streamable HTTP -> SSE 回退。 */
+  transportProtocol: z.enum(["streamable-http", "sse"]).optional(),
   command: z.string().min(1).optional(),
   args: z.array(z.string()).default([]),
   env: z.record(z.string()).optional(),
+  /** env/header 的值保存在 Keychain；这里仅保存 account 引用。 */
+  credentialRefs: z.object({
+    env: z.record(z.string().min(1).max(512)).optional(),
+    headers: z.record(z.string().min(1).max(512)).optional()
+  }).optional(),
   cwd: z.string().min(1).optional(),
   stderr: z.enum(["ignore", "inherit", "pipe"]).default("ignore"),
   url: z.string().url().optional(),
@@ -249,7 +260,7 @@ const subagentToolNameSchema = z.enum(defaultSubagentAllowedTools);
 
 const extensionsSchema = z.object({
   mcp: z.record(mcpServerSchema).default({}),
-  skills: z.array(z.string().trim().min(1)).max(32).default([".agents/skills", ".biny/skills"]),
+  skills: z.array(z.string().trim().min(1)).max(32).default([...DEFAULT_PROJECT_SKILL_PATHS]),
   plugins: z.array(z.string().trim().min(1)).max(32).default([]),
   subagent: z.object({
     enabled: z.boolean().default(false),
@@ -468,6 +479,8 @@ const canonicalConfigSchema = z.object({
   configVersion: z.literal(GLOBAL_CONFIG_VERSION),
   defaultModel: z.string().min(1),
   providers: z.record(providerConfigSchema),
+  /** 凭据正文保存在 Keychain；这里仅保存并发 CAS 使用的非机密版本 nonce。 */
+  credentialRevisions: z.record(z.string().min(1).max(128)).optional(),
   models: z.record(modelAliasSchema),
   thinking: thinkingSchema,
   agent: agentSchema,
@@ -735,7 +748,7 @@ export const defaultConfig: AgentConfig = {
   telemetry: { enabled: false, recordInputs: false, recordOutputs: false },
   extensions: {
     mcp: {},
-    skills: [".agents/skills", ".biny/skills"],
+    skills: [...DEFAULT_PROJECT_SKILL_PATHS],
     plugins: [],
     subagent: {
       enabled: false,

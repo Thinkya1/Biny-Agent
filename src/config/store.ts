@@ -21,11 +21,14 @@ import {
 import type { AgentConfig } from "./schema.js";
 import {
   assertConfigRevision,
+  ConfigRevisionConflictError,
   configDocumentRevision,
   withGlobalConfigWriteLock,
   type VersionedConfigSnapshot
 } from "./versioned.js";
 import { globalConfigDir } from "./paths.js";
+
+const configUpdateMaxAttempts = 3;
 
 /** 运行时面向的配置存储接口。 */
 export interface AgentConfigStore {
@@ -65,6 +68,37 @@ export interface FileConfigStoreOptions {
   globalDir?: string;
 }
 
+/**
+ * 在共享全局配置上执行一个只改自己字段的更新。
+ *
+ * Desktop、TUI 和 Runtime Host 可能各自持有不同的配置快照。普通的 load + save
+ * 只能保证单次写入不互相覆盖，不能保证两次读改写之间没有第三方更新；带版本存储
+ * 的实现用 CAS 检测冲突，重读后重新计算候选配置，避免模型切换和权限更新互相回滚。
+ */
+export async function updateConfig(
+  store: AgentConfigStore,
+  workspaceRoot: string | undefined,
+  update: (config: AgentConfig) => AgentConfig
+): Promise<AgentConfig> {
+  const loadVersioned = store.loadVersioned;
+  const saveVersioned = store.saveVersioned;
+  if (loadVersioned === undefined || saveVersioned === undefined) {
+    throw new Error("Configuration updates require a versioned config store.");
+  }
+
+  for (let attempt = 0; attempt < configUpdateMaxAttempts; attempt += 1) {
+    const current = await loadVersioned(workspaceRoot);
+    const next = update(current.config);
+    try {
+      return (await saveVersioned(next, current.revision, workspaceRoot)).config;
+    } catch (error) {
+      if (!(error instanceof ConfigRevisionConflictError) || attempt === configUpdateMaxAttempts - 1) throw error;
+    }
+  }
+
+  throw new Error("Configuration update retry limit was reached.");
+}
+
 export function createFileConfigStore(workspaceRoot: string, options: FileConfigStoreOptions = {}): AgentConfigStore {
   const credentials = options.credentialStore ?? createCredentialStore();
   const pathOptions: ConfigPathOptions = { globalDir: options.globalDir };
@@ -76,7 +110,27 @@ export function createFileConfigStore(workspaceRoot: string, options: FileConfig
     const targetRoot = requestedWorkspaceRoot ?? workspaceRoot;
     const loadDocument = async (): Promise<AgentConfig> => await loadConfig(targetRoot, pathOptions);
     await recoverStoredCredentialTransaction(credentials, journalPath, loadDocument);
-    return await applyStoredCredentials(await loadDocument(), credentials);
+    let document = await loadDocument();
+    if (hasInlineCredentials(document)) {
+      if (!credentials.persistent) {
+        throw new Error(
+          "配置文件包含明文凭据，但当前平台没有持久凭据存储；请改用 providers.<alias>.apiKeyEnv。"
+        );
+      }
+      const previous = structuredClone(document);
+      const target = structuredClone(document);
+      await saveConfigAndStoredCredentials(
+        target,
+        previous,
+        credentials,
+        journalPath,
+        async () => await saveConfig(targetRoot, target, pathOptions),
+        loadDocument
+      );
+      document = await loadDocument();
+      revision += 1;
+    }
+    return await applyStoredCredentials(document, credentials);
   };
   const load = async (requestedWorkspaceRoot?: string): Promise<AgentConfig> => {
     const run = writeTail.then(async () => await withGlobalConfigWriteLock(
@@ -207,4 +261,9 @@ export function createFileConfigStore(workspaceRoot: string, options: FileConfig
       return await run;
     }
   };
+}
+
+function hasInlineCredentials(config: AgentConfig): boolean {
+  return Boolean(config.web.search.apiKey)
+    || Object.values(config.providers).some((provider) => Boolean(provider.apiKey || provider.oauth?.refreshToken));
 }
