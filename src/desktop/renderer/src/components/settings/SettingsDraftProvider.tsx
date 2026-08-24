@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type {
+  DesktopActivitySettingsInput,
   DesktopChatPersonalizationOverride,
   DesktopFontPreference,
   DesktopMemorySettings,
@@ -85,6 +86,10 @@ export function SettingsDraftProvider({
 
   const setPersonalization = useCallback((value: DesktopPersonalizationSettings): void => {
     setDraft((current) => current ? { ...current, personalization: value } : current);
+  }, []);
+
+  const setActivity = useCallback((value: DesktopActivitySettingsInput): void => {
+    setDraft((current) => current ? { ...current, activity: value } : current);
   }, []);
 
   const setMemory = useCallback((value: DesktopMemorySettings): void => {
@@ -257,6 +262,7 @@ export function SettingsDraftProvider({
     setThemePreference,
     setFontPreference,
     setPersonalization,
+    setActivity,
     setMemory,
     setWebSearch,
     setChat,
@@ -284,6 +290,7 @@ export function SettingsDraftProvider({
     setFontPreference,
     setMemory,
     setPersonalization,
+    setActivity,
     setThemePreference,
     setWebSearch,
     snapshot,
@@ -299,6 +306,7 @@ function draftFromSnapshot(snapshot: DesktopSettingsSnapshot): DesktopSettingsDr
     themePreference: snapshot.themePreference,
     fontPreference: { ...snapshot.fontPreference },
     personalization: { ...snapshot.personalization },
+    activity: activityInputFromSnapshot(snapshot.activity),
     memory: structuredClone(snapshot.memory),
     webSearch: webSearchInput(snapshot.webSearch),
     chat: snapshot.chat ? structuredClone(snapshot.chat.personalization) : undefined,
@@ -323,6 +331,7 @@ function countDirtyFields(snapshot: DesktopSettingsSnapshot, draft: DesktopSetti
   if (draft.themePreference !== snapshot.themePreference) count += 1;
   if (!sameJson(draft.fontPreference, snapshot.fontPreference)) count += 1;
   if (!sameJson(draft.personalization, snapshot.personalization)) count += 1;
+  if (!sameJson(draft.activity, activityInputFromSnapshot(snapshot.activity))) count += 1;
   if (!sameJson(draft.memory, snapshot.memory)) count += 1;
   if (!sameWebSearch(draft.webSearch, snapshot.webSearch)) count += 1;
   if (draft.models.upserts.length || draft.models.removeAliases.length || draft.models.defaultModel || draft.models.oauthCredentialHandles.length) count += 1;
@@ -332,6 +341,11 @@ function countDirtyFields(snapshot: DesktopSettingsSnapshot, draft: DesktopSetti
 
 function validDraft(draft: DesktopSettingsDraft): boolean {
   if (new TextEncoder().encode(draft.personalization.customInstructions).byteLength > 4_096) return false;
+  const activity = draft.activity;
+  if (activity.captureDebounceMs < 250 || activity.heartbeatMs < 1_000 || activity.idleTimeoutMs < 1_000
+    || activity.inputPauseMs < 0 || activity.visualPollMs < 0 || activity.jpegQuality < 1 || activity.jpegQuality > 100
+    || activity.ocrEveryNFrames < 1 || activity.ocrLanguages.length === 0 || activity.maxStorageMb < 256
+    || activity.outputDirectory.trim() === "") return false;
   const thresholds = (draft.memory as DesktopMemorySettings & {
     similarityThresholds?: Record<string, { currentWorkspace: number; crossWorkspace: number }>;
   }).similarityThresholds;
@@ -354,6 +368,7 @@ function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraf
     themePreference: draft.themePreference === snapshot.themePreference ? undefined : draft.themePreference,
     fontPreference: sameJson(draft.fontPreference, snapshot.fontPreference) ? undefined : draft.fontPreference,
     personalization: sameJson(draft.personalization, snapshot.personalization) ? undefined : draft.personalization,
+    activity: sameJson(draft.activity, activityInputFromSnapshot(snapshot.activity)) ? undefined : draft.activity,
     memory: sameJson(draft.memory, snapshot.memory) ? undefined : draft.memory,
     webSearch: sameWebSearch(draft.webSearch, snapshot.webSearch) ? undefined : draft.webSearch,
     models: modelsDirty ? {
@@ -369,6 +384,12 @@ function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraf
     } : undefined
   };
 }
+
+function activityInputFromSnapshot(value: DesktopSettingsSnapshot["activity"]): DesktopActivitySettingsInput {
+  const { externalPolicy: _externalPolicy, ...input } = value;
+  return structuredClone(input);
+}
+
 
 function sameWebSearch(draft: DesktopWebSearchSettingsInput, snapshot: DesktopWebSearchSettings): boolean {
   return draft.enabled === snapshot.enabled

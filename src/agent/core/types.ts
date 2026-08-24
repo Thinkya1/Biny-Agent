@@ -5,6 +5,8 @@
  * `ModelStreamEvent`，Agent Loop 就可以独立处理消息、工具和事件生命周期。
  */
 import type { JsonSchema } from "../../tools/schema.js";
+import type { ActivityModelRuntime } from "../../activity/types.js";
+import type { ActivityDataResidency } from "../../activity/settings.js";
 import type { ReasoningEffort } from "../../config/schema.js";
 import type { PromptEpochReason, PromptShapeDiagnostic, PromptShapeStatus } from "../../llm/promptCache.js";
 
@@ -177,6 +179,10 @@ export interface ModelStreamOptions {
 export interface AgentModel {
   provider: string;
   modelId: string;
+  /** 只有 builtin-llama.cpp 才能在 v1 作为 Activity 的可信本地 runtime。 */
+  runtime?: ActivityModelRuntime;
+  /** 这是显式元数据，不是由 provider 名称或 URL 推导出的结论。 */
+  dataResidency?: ActivityDataResidency;
   supportsTools?: boolean;
   stream(
     context: ModelStreamContext,

@@ -157,6 +157,7 @@ type StagedSettingsCredential =
 export interface DesktopSettingsConfigSnapshot {
   revision: string;
   personalization: AgentConfig["personalization"];
+  activity: AgentConfig["activity"];
   memory: AgentConfig["context"]["memory"];
   webSearch: DesktopWebSearchSettings;
   models: DesktopSettingsModelsSnapshot;
@@ -606,6 +607,13 @@ export class DesktopAgentManager {
           ...next.context,
           memory: input.memory ?? next.context.memory
         }
+      });
+    }
+    if (input.activity !== undefined) {
+      next = configSchema.parse({
+        ...next,
+        // externalPolicy 不在 Desktop 设置输入中，保留配置文件当前值，避免未来策略被 UI/IPC 提前打开。
+        activity: { ...next.activity, ...input.activity }
       });
     }
     if (input.webSearch !== undefined) {
@@ -2341,6 +2349,7 @@ function describeSettingsConfigSnapshot(config: AgentConfig, revision: string): 
   return {
     revision,
     personalization: { ...config.personalization },
+    activity: structuredClone(config.activity),
     memory: structuredClone(config.context.memory),
     webSearch: describeWebSearchSettings(config.web.search),
     models: {

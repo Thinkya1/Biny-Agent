@@ -14,6 +14,8 @@ import type {
   ModelStreamEvent,
   ModelStreamOptions
 } from "../agent/core/types.js";
+import type { ActivityModelRuntime } from "../activity/types.js";
+import type { ActivityDataResidency } from "../activity/settings.js";
 import type { ModelApiBackend } from "../config/schema.js";
 import { createRetryFetch, type RetryPolicy } from "../ai/retry.js";
 import { createProxyAwareFetch } from "../network/proxyFetch.js";
@@ -43,6 +45,8 @@ export interface NativeModelConfig {
   provider: string;
   providerAlias?: string;
   modelId: string;
+  runtime?: ActivityModelRuntime;
+  dataResidency?: ActivityDataResidency;
   api: ModelApiBackend;
   baseUrl: string;
   apiKey?: string;
@@ -79,6 +83,8 @@ export function createNativeModel(config: NativeModelConfig): AgentModel {
   return {
     provider: config.provider,
     modelId: config.modelId,
+    runtime: config.runtime ?? "provider",
+    dataResidency: config.dataResidency,
     supportsTools: config.supportsTools !== false,
     stream: async (context, options) => observedNativeStream(
       adapter,

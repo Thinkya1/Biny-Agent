@@ -8,6 +8,7 @@
  * 事件订阅返回取消函数，组件卸载时必须调用，否则监听器会随重新挂载不断累积。
  */
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { ActivityRuntimeSnapshot } from "../../../activity/types.js";
 import type { DesktopAgentEventEnvelope, DesktopApi, DesktopMenuAction, DesktopSessionHandoff, DesktopSettingsCloseRequest, DesktopTerminalEvent } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 
@@ -64,6 +65,9 @@ const api: DesktopApi = {
   saveMemorySettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.saveMemorySettings, projectId, input),
   settingsSnapshot: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.settingsSnapshot, projectId, sessionId),
   saveSettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.saveSettings, projectId, input),
+  activitySnapshot: async () => await ipcRenderer.invoke(desktopIpc.activitySnapshot),
+  searchActivity: async (query, limit) => await ipcRenderer.invoke(desktopIpc.activitySearch, query, limit),
+  clearActivity: async () => await ipcRenderer.invoke(desktopIpc.activityClear),
   stageSettingsCredential: async (secret, scope) => await ipcRenderer.invoke(desktopIpc.stageSettingsCredential, secret, scope),
   completeModelLoginForSettings: async (projectId, provider, authRequestId, pastedAuthorization) => await ipcRenderer.invoke(
     desktopIpc.completeModelLoginForSettings,
@@ -136,6 +140,7 @@ const api: DesktopApi = {
   mcpReconnect: async (projectId, name) => await ipcRenderer.invoke(desktopIpc.mcpReconnect, projectId, name),
   mcpDetails: async (projectId, name) => await ipcRenderer.invoke(desktopIpc.mcpDetails, projectId, name),
   openExternal: async (url) => await ipcRenderer.invoke(desktopIpc.openExternal, url),
+  openSystemSettings: async (pane) => await ipcRenderer.invoke(desktopIpc.openSystemSettings, pane),
   setSidebarWidth: async (width) => await ipcRenderer.invoke(desktopIpc.setSidebarWidth, width),
   setFilePanelWidth: async (width) => await ipcRenderer.invoke(desktopIpc.setFilePanelWidth, width),
   setThemePreference: async (theme) => await ipcRenderer.invoke(desktopIpc.setThemePreference, theme),
@@ -169,6 +174,11 @@ const api: DesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, request: DesktopSettingsCloseRequest): void => listener(request);
     ipcRenderer.on(desktopIpc.settingsCloseRequest, handler);
     return () => ipcRenderer.removeListener(desktopIpc.settingsCloseRequest, handler);
+  },
+  onActivityEvent(listener) {
+    const handler = (_event: Electron.IpcRendererEvent, snapshot: ActivityRuntimeSnapshot): void => listener(snapshot);
+    ipcRenderer.on(desktopIpc.activityEvent, handler);
+    return () => ipcRenderer.removeListener(desktopIpc.activityEvent, handler);
   }
 };
 

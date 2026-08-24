@@ -61,6 +61,9 @@ import type {
   AgentTurnOutcome
 } from "./types.js";
 import { ContextMemory } from "./context/ContextMemory.js";
+import { ActivityPrivacyPolicy } from "../activity/privacyPolicy.js";
+import { ActivityStore, resolveActivityDirectory } from "../activity/store.js";
+import type { ActivityContextEntry } from "../activity/types.js";
 import { LocalMemory, MemoryRevisionConflictError, redactSecrets } from "./context/LocalMemory.js";
 import { TelosStorage } from "./context/telosStorage.js";
 import { runMemoryCommand } from "./context/memoryCommands.js";
@@ -244,6 +247,8 @@ export class AgentSession {
   private readonly memoryRetriever: HybridMemoryRetriever;
   private readonly localEmbeddingManager: LocalEmbeddingManager;
   private readonly memoryEmbeddingService: MemoryEmbeddingService;
+  private readonly activityStore = new ActivityStore();
+  private activityStoreDirectory: string | undefined;
   private usageRecords: SessionUsage[] = [];
   private modelRequestRecords: ModelRequestMetrics[] = [];
   private unpersistedRelatedUsage: SessionUsage[] = [];
@@ -367,7 +372,8 @@ export class AgentSession {
       options.config.context.compaction,
       onModelRequest,
       () => this.sideModelRequestContext(),
-      this.memoryRetriever
+      this.memoryRetriever,
+      new ActivityPrivacyPolicy(options.config.activity)
     );
     this.contextMemory.setPersonalization(
       metadataForPersonalization(this.activePersonalization),
@@ -838,6 +844,7 @@ export class AgentSession {
       const snapshot = await this.readPersonalizationState();
       this.activeConfig = snapshot.config;
       this.activePersonalization = snapshot.state.resolved;
+      this.contextMemory.setActivityPrivacyPolicy(this.activeConfig.activity);
       turnPersonalization = snapshot.state.resolved;
       this.contextMemory.setPersonalization(
         metadataForPersonalization(turnPersonalization),
@@ -867,7 +874,8 @@ export class AgentSession {
         abortSignal,
         this.supportedAttachments(runOptions.attachments),
         turnPersonalization.useMemories,
-        turnPersonalization.maxRecalled
+        turnPersonalization.maxRecalled,
+        await this.activityEntriesForTurn(input, abortSignal, model)
       );
       if (prepared.compaction) {
         this.persistContextCheckpoint(
@@ -1998,10 +2006,38 @@ export class AgentSession {
     });
   }
 
+  private async activityEntriesForTurn(
+    input: string,
+    signal: AbortSignal,
+    model: AgentModel
+  ): Promise<readonly ActivityContextEntry[]> {
+    const policy = new ActivityPrivacyPolicy(this.activeConfig.activity);
+    // 云模型在策略判断前不会触碰 Activity 查询；因此也不会因为本地检索结果被误带入
+    // provider 请求。未来允许外发时仍需在策略层显式改变，而不是从这里绕过门禁。
+    if (!policy.canUseWithModel(model)) return [];
+    signal.throwIfAborted();
+    try {
+      const directory = resolveActivityDirectory(this.activeConfig.activity.outputDirectory);
+      if (directory !== this.activityStoreDirectory) {
+        await this.activityStore.open(directory);
+        this.activityStoreDirectory = directory;
+      }
+      return this.activityStore.search(input, 8).map((entry) => ({
+        summary: entry.summary,
+        occurredAt: entry.occurredAt,
+        application: entry.application
+      }));
+    } catch {
+      // Activity 是旁路历史证据；存储不可用时不能让正常对话失败。
+      return [];
+    }
+  }
+
   async close(): Promise<void> {
     this.memoryRetriever.close();
     this.memoryEmbeddingService.close();
     await this.localEmbeddingManager.close();
+    await this.activityStore.close();
     const relatedUsage = this.takeRelatedUsage();
     if (relatedUsage) {
       this.recorder.record({

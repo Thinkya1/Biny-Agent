@@ -13,6 +13,10 @@ import type { PersonalizationMetadata } from "../../personalization/index.js";
 import type { MemoryOrigin, MemoryOriginCounts, MemoryRecallReport } from "./memoryTypes.js";
 import { canonicalToolSchemaHash, type PromptEpochReason } from "../../llm/promptCache.js";
 import type { HybridMemoryRetriever } from "./HybridMemoryRetriever.js";
+import { prepareActivityContext, type ActivityContextResult } from "../../activity/context.js";
+import { ActivityPrivacyPolicy } from "../../activity/privacyPolicy.js";
+import type { ActivityContextEntry } from "../../activity/types.js";
+import type { ActivitySettings } from "../../activity/settings.js";
 
 const piReserveTokens = 16_384;
 const piKeepRecentTokens = 20_000;
@@ -67,7 +71,8 @@ export class ContextMemory {
     private readonly compactionOptions: ContextCompactionOptions = {},
     private readonly onModelRequest: ModelRequestObserver = () => undefined,
     private readonly getModelRequestContext: () => ModelRequestContext | undefined = () => undefined,
-    private readonly memoryRetriever?: HybridMemoryRetriever
+    private readonly memoryRetriever?: HybridMemoryRetriever,
+    private activityPrivacyPolicy: ActivityPrivacyPolicy = new ActivityPrivacyPolicy()
   ) {
     this.resolveBudget = getBudgetLimits ?? (() => ({
       contextWindow: maxTokens,
@@ -109,7 +114,8 @@ export class ContextMemory {
     signal?: AbortSignal,
     attachments: AgentAttachment[] = [],
     useMemories = true,
-    maxRecalled = this.localMemory?.recallLimit ?? 0
+    maxRecalled = this.localMemory?.recallLimit ?? 0,
+    activityEntries: readonly ActivityContextEntry[] = []
   ): Promise<PreparedAgentContext> {
     this.memoryUseEnabled = useMemories;
     signal?.throwIfAborted();
@@ -125,6 +131,7 @@ export class ContextMemory {
       )
       : { matches: [], report: emptyMemoryRecallReport(), entries: [] };
     const memoryMatches = recalled.matches;
+    const activityContext = prepareActivityContext(this.activityPrivacyPolicy, this.getModel(), activityEntries);
     signal?.throwIfAborted();
     this.memoryTopics = [...new Set(memoryMatches.map((match) => match.topic))];
     const budget = this.currentBudget();
@@ -139,7 +146,8 @@ export class ContextMemory {
       budget.maxInputTokens,
       limits.reserveTokens,
       false,
-      attachments
+      attachments,
+      activityContext.prompt
     );
     let compaction = noCompaction(this.summary, estimateMessageTokens(this.history));
     if (this.shouldCompact(assembly.budget.requestedTokens ?? assembly.budget.usedTokens, limits)) {
@@ -161,7 +169,8 @@ export class ContextMemory {
           budget.maxInputTokens,
           limits.reserveTokens,
           true,
-          attachments
+          attachments,
+          activityContext.prompt
         );
       }
     }
@@ -190,8 +199,14 @@ export class ContextMemory {
     return {
       systemPrompt: assembly.systemPrompt,
       messages: assembly.messages,
-      compaction: compaction.compacted ? compaction : undefined
+      compaction: compaction.compacted ? compaction : undefined,
+      activity: activityContext
     };
+  }
+
+  /** 更新全局设置快照后同步 Activity 门禁；不改变当前回合已经组装的上下文。 */
+  setActivityPrivacyPolicy(settings: ActivitySettings): void {
+    this.activityPrivacyPolicy = new ActivityPrivacyPolicy(settings);
   }
 
   replaceHistory(messages: AgentMessage[]): void {
@@ -1035,6 +1050,7 @@ export interface PreparedAgentContext {
   systemPrompt?: string;
   messages: AgentMessage[];
   compaction?: CompactionResult;
+  activity: ActivityContextResult;
 }
 
 export interface RunContextCompaction {
@@ -1056,7 +1072,8 @@ function assembleContext(
   maxTokens: number,
   reserveTokens: number,
   autoCompacted: boolean,
-  attachments: AgentAttachment[]
+  attachments: AgentAttachment[],
+  activityPrompt: string | undefined
 ): ContextAssembly {
   const omitted: string[] = [];
   const components: ContextComponentUsage[] = [];
@@ -1144,6 +1161,7 @@ function assembleContext(
     conversationSummary,
     explicitPaths,
     recentActivity,
+    activityPrompt ?? "",
     stableMemory,
     repoMap,
     projectSnapshot
@@ -1155,6 +1173,7 @@ function assembleContext(
   addSystem("conversation summary", conversationSummary, true, Math.max(1, Math.floor(usableTokens * 0.25)));
   addSystem("explicit paths", explicitPaths, false);
   addSystem("recent workspace activity", recentActivity, false);
+  addSystem("Activity evidence", activityPrompt ?? "", false);
   addSystem("RepoMap candidates", repoMap, false);
   addSystem("project snapshot", projectSnapshot, false);
 

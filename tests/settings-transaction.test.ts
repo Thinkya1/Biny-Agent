@@ -68,6 +68,7 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
     return {
       revision,
       personalization: structuredClone(this.config.personalization),
+      activity: structuredClone(this.config.activity),
       memory: structuredClone(this.config.context.memory),
       webSearch: {
         enabled: this.config.web.search.enabled,
@@ -105,6 +106,7 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
     const before = structuredClone(this.config);
     const after = structuredClone(this.config);
     if (input.personalization !== undefined) after.personalization = structuredClone(input.personalization);
+    if (input.activity !== undefined) after.activity = { ...after.activity, ...structuredClone(input.activity) };
     if (input.memory !== undefined) after.context.memory = structuredClone(input.memory);
     if (input.webSearch !== undefined) {
       after.web.search = {
@@ -117,6 +119,7 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
       };
     }
     const included = input.personalization !== undefined
+      || input.activity !== undefined
       || input.memory !== undefined
       || input.webSearch !== undefined
       || input.models !== undefined;
@@ -312,6 +315,7 @@ class FailPreferenceRollbackEvidenceTransaction extends DesktopSettingsTransacti
 }
 
 await testCommitAndJournalRedaction();
+await testActivitySettingsUseConfigCas();
 await testPostCommitHookCannotRollbackSettings();
 await testPreflightConflictsAreZeroWrite();
 await testSegmentFailureCompensation();
@@ -326,6 +330,23 @@ await testCredentialOnlyPendingJournalIsAmbiguous();
 await testStartupRecoveryRunsBeforeTaskAdmission();
 testRuntimeMutationRecoveryClassification();
 console.log("settings transaction tests passed");
+
+async function testActivitySettingsUseConfigCas(): Promise<void> {
+  await withFixture(async ({ state, agents }) => {
+    const transaction = new DesktopSettingsTransaction(state, agents);
+    const initial = await transaction.snapshot("project");
+    const { externalPolicy: _externalPolicy, ...activity } = initial.activity;
+    const result = await transaction.save("project", {
+      expectedPreferenceRevision: initial.preferenceRevision,
+      expectedConfigRevision: initial.configRevision,
+      activity: { ...activity, heartbeatMs: 90_000 }
+    });
+    assert.equal(result.status, "committed", JSON.stringify(result));
+    assert.deepEqual(result.appliedFields, ["activity"]);
+    assert.equal(agents.config.activity.heartbeatMs, 90_000);
+    assert.equal(agents.config.activity.externalPolicy, "local_only");
+  });
+}
 
 async function testCommitAndJournalRedaction(): Promise<void> {
   await withFixture(async ({ root, state, agents }) => {

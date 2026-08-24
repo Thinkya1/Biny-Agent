@@ -20,12 +20,14 @@ import {
   type SaveDialogOptions
 } from "electron";
 import { z } from "zod";
+import { activitySettingsInputSchema } from "../../../activity/settings.js";
 import { modelApiBackendSchema, modelCompatibilitySchema, modelLimitsSchema, modelProviderSchema, providerProtocolSchema, reasoningEffortSchema } from "../../../config/schema.js";
 import { memoryPolicySchema } from "../../../personalization/index.js";
 import { clampFontSize } from "../../fontPreference.js";
-import type { DesktopActiveView, DesktopBootstrap, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopThemePreference } from "../../protocol.js";
+import type { DesktopActiveView, DesktopBootstrap, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopSystemSettingsPane, DesktopThemePreference } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 import { DesktopAgentManager } from "./DesktopAgentManager.js";
+import { ActivityRecorderService } from "./ActivityRecorderService.js";
 import { DesktopBrowserService } from "./DesktopBrowserService.js";
 import { DesktopMcpService } from "./DesktopMcpService.js";
 import { DesktopProjectService } from "./DesktopProjectService.js";
@@ -40,6 +42,7 @@ interface IpcContext {
   projects: DesktopProjectService;
   agents: DesktopAgentManager;
   settings: DesktopSettingsTransaction;
+  activity: ActivityRecorderService;
   terminals: DesktopTerminalManager;
   browser: DesktopBrowserService;
   skills: DesktopSkillService;
@@ -65,9 +68,12 @@ const sessionTreePageOptionsSchema = z.object({
   includeArchived: z.boolean().optional()
 }).optional();
 const permissionModeSchema = z.enum(["ask", "read-only", "auto", "full-access"]);
-const activeViewSchema = z.enum(["chat", "runtime", "extensions", "mcp"]);
+const activeViewSchema = z.enum(["chat", "runtime", "extensions"]);
+const systemSettingsPaneSchema = z.enum(["screen-recording", "accessibility"]);
 const terminalSizeSchema = z.number().int().min(2).max(1_000);
 const terminalDataSchema = z.string().max(1_000_000);
+const activityQuerySchema = z.string().trim().max(500);
+const activityLimitSchema = z.number().int().min(1).max(100).optional();
 const thinkingSchema = z.union([z.literal("off"), reasoningEffortSchema]);
 const modelLoginProviderSchema = z.enum(["claude-code", "openai-codex"]);
 const settingsCredentialScopeSchema = z.object({
@@ -202,6 +208,7 @@ const settingsSaveInputSchema = z.object({
   themePreference: themePreferenceSchema.optional(),
   fontPreference: fontPreferenceSchema.optional(),
   personalization: personalizationSettingsSchema.shape.settings.optional(),
+  activity: activitySettingsInputSchema.optional(),
   memory: memorySettingsSchema.optional(),
   webSearch: webSearchSettingsSchema.optional(),
   models: z.object({
@@ -638,9 +645,21 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
+  handle(desktopIpc.activitySnapshot, async () => context.activity.snapshot());
+
+  handle(desktopIpc.activitySearch, async (_event, query: unknown, limit: unknown) => (
+    await context.activity.search(activityQuerySchema.parse(query), activityLimitSchema.parse(limit))
+  ));
+
+  handleRecoveryGated(desktopIpc.activityClear, async () => {
+    context.agents.assertNoRunningTasks("任务运行期间不能清除 Activity 数据。");
+    return await context.activity.clear();
+  });
+
   handle(desktopIpc.saveSettings, async (_event, projectId: unknown, input: unknown) => {
     context.agents.assertNoRunningTasks("任务运行期间不能保存设置。");
     const result = await settings.save(idSchema.parse(projectId), settingsSaveInputSchema.parse(input));
+    if (result.status === "committed") await context.activity.refresh();
     const preference = result.snapshot?.themePreference;
     if (preference !== undefined) {
       applyNativeThemePreference(preference);
@@ -926,6 +945,16 @@ export function registerDesktopIpc(context: IpcContext): void {
 
   handle(desktopIpc.openExternal, async (_event, url: unknown) => {
     await shell.openExternal(externalUrlSchema.parse(url));
+  });
+
+  handle(desktopIpc.openSystemSettings, async (_event, pane: unknown) => {
+    const selected = systemSettingsPaneSchema.parse(pane) as DesktopSystemSettingsPane;
+    if (process.platform !== "darwin") return;
+    const urls: Record<DesktopSystemSettingsPane, string> = {
+      "screen-recording": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+      accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    };
+    await shell.openExternal(urls[selected]);
   });
 
   handle(desktopIpc.setSidebarWidth, async (_event, width: unknown) => {

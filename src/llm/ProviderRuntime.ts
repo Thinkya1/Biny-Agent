@@ -212,6 +212,8 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       provider: this.config.type,
       providerAlias: this.id,
       modelId: normalizedModel.model,
+      runtime: "provider",
+      dataResidency: normalizedModel.dataResidency ?? this.config.dataResidency,
       api,
       baseUrl,
       apiKey,

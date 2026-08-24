@@ -3,6 +3,7 @@ import { createContext, useContext } from "react";
 import type { ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type {
   DesktopChatPersonalizationOverride,
+  DesktopActivitySettingsInput,
   DesktopFontPreference,
   DesktopMemorySettings,
   DesktopModelConfigurationInput,
@@ -28,6 +29,7 @@ export interface DesktopSettingsDraft {
   themePreference: DesktopThemePreference;
   fontPreference: DesktopFontPreference;
   personalization: DesktopPersonalizationSettings;
+  activity: DesktopActivitySettingsInput;
   memory: DesktopMemorySettings;
   webSearch: DesktopWebSearchSettingsInput;
   chat?: DesktopChatPersonalizationOverride;
@@ -44,6 +46,7 @@ export interface SettingsDraftContextValue {
   setThemePreference(value: DesktopThemePreference): void;
   setFontPreference(value: DesktopFontPreference): void;
   setPersonalization(value: DesktopPersonalizationSettings): void;
+  setActivity(value: DesktopActivitySettingsInput): void;
   setMemory(value: DesktopMemorySettings): void;
   setWebSearch(value: DesktopWebSearchSettingsInput): void;
   setChat(value: DesktopChatPersonalizationOverride): void;

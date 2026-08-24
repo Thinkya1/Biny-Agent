@@ -1,4 +1,5 @@
 /** Biny 的公共 AI 类型；Agent Loop 与运行时服务保持为内部实现。 */
+export * from "./activity/index.js";
 import type {
   MemoryCandidate as StoredMemoryCandidate,
   MemoryCandidateInput as StoredMemoryCandidateInput,

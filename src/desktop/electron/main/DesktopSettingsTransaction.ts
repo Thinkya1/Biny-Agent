@@ -708,6 +708,7 @@ export class DesktopSettingsTransaction {
       themePreference: preferences.themePreference,
       fontPreference: preferences.fontPreference,
       personalization: config.personalization,
+      activity: structuredClone(config.activity),
       memory: config.memory,
       webSearch: config.webSearch,
       models: config.models,
@@ -860,6 +861,7 @@ function createJournal(
     : normalizeFontPreference(input.fontPreference);
   const preferencesIncluded = input.themePreference !== undefined || input.fontPreference !== undefined;
   const configIncluded = input.personalization !== undefined
+    || input.activity !== undefined
     || input.memory !== undefined
     || input.webSearch !== undefined
     || input.models !== undefined;
@@ -1166,6 +1168,7 @@ function listAppliedFields(input: DesktopSettingsSaveInput): string[] {
   if (input.themePreference !== undefined) fields.push("themePreference");
   if (input.fontPreference !== undefined) fields.push("fontPreference");
   if (input.personalization !== undefined) fields.push("personalization");
+  if (input.activity !== undefined) fields.push("activity");
   if (input.memory !== undefined) fields.push("memory");
   if (input.webSearch !== undefined) fields.push("webSearch");
   if (input.models !== undefined) fields.push("models");

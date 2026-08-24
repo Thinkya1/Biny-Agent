@@ -7,6 +7,14 @@
 import { z } from "zod";
 import { DEFAULT_PROJECT_SKILL_PATHS } from "../extensions/skillRoots.js";
 import {
+  activityDataResidencySchema,
+  activitySettingsSchema,
+  type ActivityDataResidency,
+  type ActivityExternalPolicy,
+  type ActivitySettings,
+  defaultActivitySettings
+} from "../activity/settings.js";
+import {
   memoryPolicySchema,
   personalizationSettingsSchema,
   type MemoryPolicy,
@@ -157,6 +165,8 @@ const providerConfigSchema = z.object({
   headers: z.record(z.string()).optional(),
   apiBackend: modelApiBackendSchema.optional(),
   compatibility: modelCompatibilitySchema.optional(),
+  /** 外部端点不得凭 URL 推断本地性；未来本地服务必须显式声明。 */
+  dataResidency: activityDataResidencySchema.optional(),
   /** 仅显式声明的 provider embedding 型号会进入目录；不会从聊天模型或 ID 猜测。 */
   embeddingModels: z.array(providerEmbeddingModelSchema).max(64).optional()
 }).superRefine((provider, context) => {
@@ -446,6 +456,8 @@ export const modelLimitsSchema = z.object({
 const modelAliasSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
+  /** 仅作为未来隐私白名单的显式声明，当前 v1 不会因此放行 Activity。 */
+  dataResidency: activityDataResidencySchema.optional(),
   displayName: z.string().min(1).optional(),
   description: z.string().min(1).optional(),
   supportsTools: z.boolean().optional(),
@@ -489,6 +501,7 @@ const canonicalConfigSchema = z.object({
     ignore: z.array(z.string())
   }),
   personalization: personalizationSettingsSchema,
+  activity: activitySettingsSchema,
   context: contextSchema,
   diagnostics: diagnosticsSchema,
   checkpoints: checkpointsSchema,
@@ -628,7 +641,7 @@ export type WebFetchConfig = z.infer<typeof webFetchSchema>;
 export type WebSearchConfig = z.infer<typeof webSearchSchema>;
 export type WebCookiesConfig = z.infer<typeof webCookiesSchema>;
 export type WebConfig = z.infer<typeof webSchema>;
-export type { MemoryPolicy, PersonalizationSettings };
+export type { ActivityDataResidency, ActivityExternalPolicy, ActivitySettings, MemoryPolicy, PersonalizationSettings };
 
 const defaultWorkspaceIgnore = [
   "node_modules",
@@ -697,6 +710,7 @@ export const defaultConfig: AgentConfig = {
     ignore: defaultWorkspaceIgnore
   },
   personalization: { enabled: true, personality: "none", customInstructions: "" },
+  activity: defaultActivitySettings,
   checkpoints: { enabled: true },
   sandbox: { mode: "off", allowNetwork: true },
   hooks: { beforeTool: [], afterTool: [] },

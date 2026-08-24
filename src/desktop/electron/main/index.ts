@@ -11,6 +11,7 @@ import { app, BrowserWindow, dialog, nativeImage, net, Notification, shell } fro
 import type { DesktopBootstrap, DesktopSessionHandoff } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 import { DesktopAgentManager } from "./DesktopAgentManager.js";
+import { ActivityRecorderService, defaultActivitySidecarPath } from "./ActivityRecorderService.js";
 import { DesktopBrowserService } from "./DesktopBrowserService.js";
 import { DesktopConfigStore } from "./DesktopConfigStore.js";
 import { DesktopMcpService } from "./DesktopMcpService.js";
@@ -67,6 +68,17 @@ async function startDesktopApplication(): Promise<void> {
   const skills = new DesktopSkillService(state, configStore);
   let mainWindow: BrowserWindow | undefined;
   let preparingQuit = false;
+  const activity = new ActivityRecorderService({
+    configStore,
+    sidecarPath: defaultActivitySidecarPath({
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath()
+    }),
+    emit: (snapshot) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(desktopIpc.activityEvent, snapshot);
+    }
+  });
   const settingsClose = new DesktopSettingsCloseCoordinator();
   const agents = new DesktopAgentManager(state, projects, configStore, (projectId, update) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -92,6 +104,7 @@ async function startDesktopApplication(): Promise<void> {
   // 恢复检查必须早于 IPC 注册和窗口开放；无法自动恢复时保留应用可用来展示设置错误，
   // 但同一个 transaction 实例会阻止所有新工作入口。
   await settings.recoverAtStartup();
+  await activity.initialize();
   const prepareHandoff = async (handoff: DesktopLaunchHandoff): Promise<DesktopSessionHandoff> => {
     const project = await projects.createProject(handoff.workspaceRoot);
     await state.commitSelection(project.id, handoff.sessionId, "chat");
@@ -196,6 +209,7 @@ async function startDesktopApplication(): Promise<void> {
     projects,
     agents,
     settings,
+    activity,
     terminals,
     browser,
     skills,
@@ -245,6 +259,7 @@ async function startDesktopApplication(): Promise<void> {
         await agents.stopAllForExit();
       }
       terminals.disposeAll();
+      await activity.stop();
       await browser.dispose();
       mainWindow?.destroy();
       try {

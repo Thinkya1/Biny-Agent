@@ -8,6 +8,9 @@
  * 通道名统一用 `desktop:<领域>:<动作>` 的形式，便于排查。
  */
 import type { InteractiveAgentRunMode } from "../agent/AgentSession.js";
+import type { ActivitySettings, ActivitySettingsInput } from "../activity/settings.js";
+import type { ActivityRuntimeSnapshot } from "../activity/types.js";
+import type { ActivitySearchResult } from "../activity/store.js";
 import type { ModelCatalogEntry } from "../ai/types.js";
 import type { ModelApiBackend, ModelCompatibility, ModelLimits, ModelProvider, ThinkingLevelMap, WebSearchConfig } from "../config/schema.js";
 import type { EmbeddingModelDescriptor } from "../llm/embedding/types.js";
@@ -33,6 +36,9 @@ import type {
   TelosOverview,
   TelosScope
 } from "../agent/context/telosTypes.js";
+
+export type DesktopActivitySettings = ActivitySettings;
+export type DesktopActivitySettingsInput = ActivitySettingsInput;
 
 export const desktopIpc = {
   bootstrap: "desktop:bootstrap",
@@ -94,6 +100,10 @@ export const desktopIpc = {
   settingsDraftState: "desktop:settings:draft-state",
   settingsCloseRequest: "desktop:settings:close-request",
   settingsCloseResponse: "desktop:settings:close-response",
+  activitySnapshot: "desktop:activity:snapshot",
+  activitySearch: "desktop:activity:search",
+  activityClear: "desktop:activity:clear",
+  activityEvent: "desktop:activity:event",
   searchMemory: "desktop:memory:search",
   addMemoryEntry: "desktop:memory:add",
   updateMemoryEntry: "desktop:memory:update",
@@ -118,6 +128,7 @@ export const desktopIpc = {
   readInlineImage: "desktop:file:read-image",
   openWorkspaceFile: "desktop:file:open",
   openExternal: "desktop:external:open",
+  openSystemSettings: "desktop:system-settings:open",
   setSidebarWidth: "desktop:ui:sidebar-width",
   setFilePanelWidth: "desktop:ui:file-panel-width",
   setThemePreference: "desktop:ui:theme",
@@ -147,7 +158,8 @@ export const desktopIpc = {
 } as const;
 
 export type DesktopThemePreference = "system" | "light" | "dark";
-export type DesktopActiveView = "chat" | "runtime" | "extensions" | "mcp";
+export type DesktopSystemSettingsPane = "screen-recording" | "accessibility";
+export type DesktopActiveView = "chat" | "runtime" | "extensions";
 
 /** 界面字体偏好。`family` 为 CSS 字体族名，"system" 表示跟随操作系统；`size` 为基准字号（px）。 */
 export interface DesktopFontPreference {
@@ -897,6 +909,7 @@ export interface DesktopSettingsSnapshot {
   themePreference: DesktopThemePreference;
   fontPreference: DesktopFontPreference;
   personalization: DesktopPersonalizationSettings;
+  activity: ActivitySettings;
   memory: DesktopMemorySettings;
   webSearch: DesktopWebSearchSettings;
   models: DesktopSettingsModelsSnapshot;
@@ -927,6 +940,8 @@ export interface DesktopSettingsSaveInput {
   themePreference?: DesktopThemePreference;
   fontPreference?: DesktopFontPreference;
   personalization?: DesktopPersonalizationSettings;
+  /** 外发策略不属于 renderer 可写入的输入；主进程会保留当前策略并仅更新采集参数。 */
+  activity?: ActivitySettingsInput;
   memory?: DesktopMemorySettings;
   webSearch?: DesktopWebSearchSettingsInput;
   models?: DesktopSettingsModelsInput;
@@ -1121,6 +1136,9 @@ export interface DesktopApi {
   saveMemorySettings(projectId: string, input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot>;
   settingsSnapshot(projectId: string, sessionId?: string): Promise<DesktopSettingsSnapshot>;
   saveSettings(projectId: string, input: DesktopSettingsSaveInput): Promise<DesktopSettingsSaveResult>;
+  activitySnapshot(): Promise<ActivityRuntimeSnapshot>;
+  searchActivity(query: string, limit?: number): Promise<ActivitySearchResult[]>;
+  clearActivity(): Promise<ActivityRuntimeSnapshot>;
   stageSettingsCredential(secret: string, scope: DesktopSettingsCredentialScope): Promise<DesktopStagedSettingsCredential>;
   completeModelLoginForSettings(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string, pastedAuthorization?: string): Promise<DesktopStagedModelLoginResult>;
   releaseSettingsCredentials(handles: string[]): Promise<void>;
@@ -1151,6 +1169,7 @@ export interface DesktopApi {
   readInlineImage(projectId: string, relativePath: string): Promise<string | undefined>;
   openWorkspaceFile(projectId: string, relativePath: string): Promise<void>;
   openExternal(url: string): Promise<void>;
+  openSystemSettings(pane: DesktopSystemSettingsPane): Promise<void>;
   setSidebarWidth(width: number): Promise<void>;
   setFilePanelWidth(width: number): Promise<void>;
   setThemePreference(theme: DesktopThemePreference): Promise<DesktopThemePreference>;
@@ -1184,4 +1203,5 @@ export interface DesktopApi {
   onSessionHandoff(listener: (target: DesktopSessionHandoff) => void): () => void;
   onMenuAction(listener: (action: DesktopMenuAction) => void): () => void;
   onSettingsCloseRequest(listener: (request: DesktopSettingsCloseRequest) => void): () => void;
+  onActivityEvent(listener: (snapshot: ActivityRuntimeSnapshot) => void): () => void;
 }
