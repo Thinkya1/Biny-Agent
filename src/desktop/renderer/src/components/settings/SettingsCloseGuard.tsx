@@ -10,7 +10,9 @@ export function SettingsCloseGuard({ busy, onCancel, onDiscard }: {
   return (
     <SettingsDetailLayer onClose={onCancel}>
       <section aria-labelledby="settings-close-title" className="settings-confirm-panel settings-discard-panel" role="dialog">
-        <AppIcon className="settings-confirm-icon" size={88} />
+        <div className="settings-confirm-icon-frame">
+          <AppIcon className="settings-confirm-icon" size={180} />
+        </div>
         <h3 id="settings-close-title">有未保存的更改，确定要关闭吗？未保存的更改将丢失。</h3>
         <div className="settings-confirm-actions">
           <button className="ghost-button" disabled={busy} onClick={onCancel} type="button">Cancel</button>
