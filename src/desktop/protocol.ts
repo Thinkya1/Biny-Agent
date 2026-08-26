@@ -10,6 +10,7 @@
 import type { InteractiveAgentRunMode } from "../agent/AgentSession.js";
 import type { ActivitySettings, ActivitySettingsInput } from "../activity/settings.js";
 import type { ActivityRuntimeSnapshot } from "../activity/types.js";
+import type { ActivityReportResult } from "../activity/analyzer.js";
 import type { ActivitySearchResult } from "../activity/store.js";
 import type { ModelCatalogEntry } from "../ai/types.js";
 import type { ModelApiBackend, ModelCompatibility, ModelLimits, ModelProvider, ThinkingLevelMap, WebSearchConfig } from "../config/schema.js";
@@ -39,6 +40,9 @@ import type {
 
 export type DesktopActivitySettings = ActivitySettings;
 export type DesktopActivitySettingsInput = ActivitySettingsInput;
+
+/** 指定日期的 Activity 打工日记；markdown 可直接渲染，blocked/message 说明补分析为何被跳过。 */
+export type DesktopActivityReport = ActivityReportResult;
 
 export const desktopIpc = {
   bootstrap: "desktop:bootstrap",
@@ -104,7 +108,9 @@ export const desktopIpc = {
   settingsCloseRequest: "desktop:settings:close-request",
   settingsCloseResponse: "desktop:settings:close-response",
   activitySnapshot: "desktop:activity:snapshot",
+  activityRequestPermission: "desktop:activity:request-permission",
   activitySearch: "desktop:activity:search",
+  activityReport: "desktop:activity:report",
   activityClear: "desktop:activity:clear",
   activityEvent: "desktop:activity:event",
   searchMemory: "desktop:memory:search",
@@ -144,6 +150,7 @@ export const desktopIpc = {
   event: "desktop:agent:event",
   menuAction: "desktop:menu:action",
   skillCatalog: "desktop:skill:catalog",
+  skillExpand: "desktop:skill:expand",
   skillSourceImport: "desktop:skill:source-import",
   skillSourceInstall: "desktop:skill:source-install",
   skillImportExisting: "desktop:skill:import-existing",
@@ -179,7 +186,7 @@ export const desktopIpc = {
 } as const;
 
 export type DesktopThemePreference = "system" | "light" | "dark";
-export type DesktopSystemSettingsPane = "screen-recording" | "accessibility";
+export type DesktopSystemSettingsPane = "screen-recording" | "accessibility" | "input-monitoring";
 export type DesktopActiveView = "chat" | "runtime" | "extensions";
 
 /** 界面字体偏好。`family` 为 CSS 字体族名，"system" 表示跟随操作系统；`size` 为基准字号（px）。 */
@@ -264,8 +271,19 @@ export interface DesktopSessionDocument {
   session: DesktopSessionSummary;
   events: SessionEvent[];
   liveEvents: AgentHostEvent[];
+  /** 会话体量接近持久化上限时给出预警信息；未接近时缺省。 */
+  limits?: DesktopSessionLimits;
   /** session 仍可读，但当前 Desktop 没有 writer ownership 时的只读冲突。 */
   writerConflict?: DesktopSessionWriterConflict;
+}
+
+/** 会话文件体量与事件数接近上限时的预警投影。 */
+export interface DesktopSessionLimits {
+  nearSizeLimit: boolean;
+  sizeBytes: number;
+  eventCount: number;
+  maxSizeBytes: number;
+  maxEvents: number;
 }
 
 export interface DesktopSessionWriterConflict {
@@ -834,7 +852,7 @@ export interface DesktopCookieJarStatus {
   updatedAt?: string;
 }
 
-export type DesktopPersonality = "none" | "friendly" | "pragmatic";
+export type DesktopPersonality = "none" | "friendly" | "pragmatic" | "buddy";
 
 /** 全局个性化设置；Desktop 只接触无凭据的运行时投影。 */
 export interface DesktopPersonalizationSettings {
@@ -1280,11 +1298,12 @@ export interface DesktopApi {
   editPrompt(projectId: string, sessionId: string, userMessageIndex: number, input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[]): Promise<DesktopRunReceipt>;
   cancelRun(projectId: string, runId: string): Promise<void>;
   runSlashCommand(projectId: string, sessionId: string | undefined, command: string): Promise<DesktopSlashResult>;
+  expandSkillCommand(projectId: string, input: string): Promise<string>;
   resolvePermission(projectId: string, requestId: string, result: PermissionResult): Promise<void>;
   setPermissionMode(projectId: string, mode: PermissionMode): Promise<DesktopWorkspaceSnapshot>;
   switchModel(projectId: string, alias: string, thinking: ThinkingSelection): Promise<ModelRuntimeInfo>;
   testModelConfiguration(projectId: string, configuration: DesktopModelConfigurationInput): Promise<DesktopModelConnectionTestResult>;
-  fetchModelCatalog(projectId: string, providerAlias: string): Promise<DesktopModelCatalogResult>;
+  fetchModelCatalog(projectId: string, providerAlias: string, force?: boolean): Promise<DesktopModelCatalogResult>;
   /**
    * 用尚未保存的候选配置（临时密钥 + 目录地址）直接向服务商拉取模型目录，
    * 供“新增连接”流程在提交前加载可勾选的模型列表。
@@ -1310,7 +1329,10 @@ export interface DesktopApi {
   settingsSnapshot(projectId: string, sessionId?: string): Promise<DesktopSettingsSnapshot>;
   saveSettings(projectId: string, input: DesktopSettingsSaveInput): Promise<DesktopSettingsSaveResult>;
   activitySnapshot(): Promise<ActivityRuntimeSnapshot>;
+  requestActivityPermission(pane: DesktopSystemSettingsPane): Promise<void>;
   searchActivity(query: string, limit?: number): Promise<ActivitySearchResult[]>;
+  /** 生成指定日期（today/yesterday/YYYY-MM-DD，默认 today）的 Activity 打工日记。 */
+  activityReport(date?: string): Promise<DesktopActivityReport>;
   clearActivity(): Promise<ActivityRuntimeSnapshot>;
   stageSettingsCredential(secret: string, scope: DesktopSettingsCredentialScope): Promise<DesktopStagedSettingsCredential>;
   completeModelLoginForSettings(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string, pastedAuthorization?: string): Promise<DesktopStagedModelLoginResult>;

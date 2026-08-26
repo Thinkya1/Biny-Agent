@@ -234,7 +234,8 @@ export function SettingsDraftProvider({
       if (result.status === "committed") {
         credentialHandlesRef.current.clear();
         adoptSnapshot(result.snapshot);
-        await window.biny.updateSettingsDraftState({ dirty: false, canSave: false, open: active }).catch(() => undefined);
+        // 保存事务已经返回 committed；关闭握手的清理是非关键 IPC，不再让 UI 额外等待一轮。
+        void window.biny.updateSettingsDraftState({ dirty: false, canSave: false, open: active }).catch(() => undefined);
         onCommitted(result.snapshot);
       } else if (result.status === "rolled_back") {
         // 后端已验证补偿完成；只更新 CAS 基线，用户的草稿值继续保留以便处理冲突后重试。
@@ -354,7 +355,8 @@ function validDraft(draft: DesktopSettingsDraft): boolean {
   if (activity.captureDebounceMs < 250 || activity.heartbeatMs < 1_000 || activity.idleTimeoutMs < 1_000
     || activity.inputPauseMs < 0 || activity.visualPollMs < 0 || activity.jpegQuality < 1 || activity.jpegQuality > 100
     || activity.ocrEveryNFrames < 1 || activity.ocrLanguages.length === 0 || activity.maxStorageMb < 256
-    || activity.outputDirectory.trim() === "") return false;
+    || activity.outputDirectory.trim() === ""
+    || (activity.analysisModel !== undefined && activity.analysisModel.trim().length > 200)) return false;
   const thresholds = (draft.memory as DesktopMemorySettings & {
     similarityThresholds?: Record<string, { currentWorkspace: number; crossWorkspace: number }>;
   }).similarityThresholds;

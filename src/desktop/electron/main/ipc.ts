@@ -70,11 +70,12 @@ const sessionTreePageOptionsSchema = z.object({
 }).optional();
 const permissionModeSchema = z.enum(["ask", "read-only", "auto", "full-access"]);
 const activeViewSchema = z.enum(["chat", "runtime", "extensions"]);
-const systemSettingsPaneSchema = z.enum(["screen-recording", "accessibility"]);
+const systemSettingsPaneSchema = z.enum(["screen-recording", "accessibility", "input-monitoring"]);
 const terminalSizeSchema = z.number().int().min(2).max(1_000);
 const terminalDataSchema = z.string().max(1_000_000);
 const activityQuerySchema = z.string().trim().max(500);
 const activityLimitSchema = z.number().int().min(1).max(100).optional();
+const activityReportDateSchema = z.string().trim().min(1).max(40).optional();
 const thinkingSchema = z.union([z.literal("off"), reasoningEffortSchema]);
 const modelLoginProviderSchema = z.enum(["claude-code", "openai-codex"]);
 const settingsCredentialScopeSchema = z.object({
@@ -138,7 +139,7 @@ const webSearchSettingsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(60_000),
   maxResults: z.number().int().min(1).max(10)
 });
-const personalitySchema = z.enum(["none", "friendly", "pragmatic"]);
+const personalitySchema = z.enum(["none", "friendly", "pragmatic", "buddy"]);
 const customInstructionsSchema = z.string().refine(
   (value) => Buffer.byteLength(value, "utf8") <= 4_096,
   "Custom instructions must not exceed 4 KiB."
@@ -562,6 +563,11 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
+  handleRecoveryGated(desktopIpc.skillExpand, async (_event, projectId: unknown, input: unknown) => await context.agents.expandSkillCommand(
+    idSchema.parse(projectId),
+    z.string().min(1).max(200_000).parse(input)
+  ));
+
   handleRecoveryGated(desktopIpc.resolvePermission, async (_event, projectId: unknown, requestId: unknown, result: unknown) => {
     await context.agents.resolvePermission(idSchema.parse(projectId), idSchema.parse(requestId), permissionResultSchema.parse(result));
   });
@@ -578,8 +584,8 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.testModelConfiguration(idSchema.parse(projectId), modelConfigurationSchema.parse(configuration));
   });
 
-  handle(desktopIpc.fetchModelCatalog, async (_event, projectId: unknown, providerAlias: unknown) => {
-    return await context.agents.fetchModelCatalog(idSchema.parse(projectId), idSchema.parse(providerAlias));
+  handle(desktopIpc.fetchModelCatalog, async (_event, projectId: unknown, providerAlias: unknown, force: unknown) => {
+    return await context.agents.fetchModelCatalog(idSchema.parse(projectId), idSchema.parse(providerAlias), force === true);
   });
 
   handle(desktopIpc.fetchModelCatalogCandidate, async (_event, projectId: unknown, configuration: unknown) => {
@@ -698,8 +704,16 @@ export function registerDesktopIpc(context: IpcContext): void {
 
   handle(desktopIpc.activitySnapshot, async () => context.activity.snapshot());
 
+  handle(desktopIpc.activityRequestPermission, async (_event, pane: unknown) => {
+    await context.activity.requestPermission(systemSettingsPaneSchema.parse(pane) as DesktopSystemSettingsPane);
+  });
+
   handle(desktopIpc.activitySearch, async (_event, query: unknown, limit: unknown) => (
     await context.activity.search(activityQuerySchema.parse(query), activityLimitSchema.parse(limit))
+  ));
+
+  handle(desktopIpc.activityReport, async (_event, date: unknown) => (
+    await context.activity.buildReport(activityReportDateSchema.parse(date))
   ));
 
   handleRecoveryGated(desktopIpc.activityClear, async () => {
@@ -710,12 +724,16 @@ export function registerDesktopIpc(context: IpcContext): void {
   handle(desktopIpc.saveSettings, async (_event, projectId: unknown, input: unknown) => {
     context.agents.assertNoRunningTasks("任务运行期间不能保存设置。");
     const result = await settings.save(idSchema.parse(projectId), settingsSaveInputSchema.parse(input));
-    if (result.status === "committed") await context.activity.refresh();
+    if (result.status === "committed" && result.appliedFields.includes("activity")) {
+      // 配置已经完成事务提交；Activity sidecar 的停启是派生刷新，不应阻塞保存响应。
+      void context.activity.refresh().catch(() => undefined);
+    }
     const preference = result.snapshot?.themePreference;
     if (preference !== undefined) {
       applyNativeThemePreference(preference);
+      // macOS 窗口底色是 vibrancy 材质，不透明背景会把它盖掉；材质本身会随主题自动变化。
       const window = context.getWindow();
-      if (window && !window.isDestroyed()) window.setBackgroundColor(themeBackgroundColor(preference));
+      if (window && !window.isDestroyed() && process.platform !== "darwin") window.setBackgroundColor(themeBackgroundColor(preference));
     }
     return result;
   });
@@ -1057,7 +1075,8 @@ export function registerDesktopIpc(context: IpcContext): void {
     if (process.platform !== "darwin") return;
     const urls: Record<DesktopSystemSettingsPane, string> = {
       "screen-recording": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-      accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+      accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+      "input-monitoring": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
     };
     await shell.openExternal(urls[selected]);
   });
@@ -1075,8 +1094,9 @@ export function registerDesktopIpc(context: IpcContext): void {
     const preference = themePreferenceSchema.parse(theme);
     await context.state.setThemePreference(preference);
     applyNativeThemePreference(preference);
+    // macOS 窗口底色是 vibrancy 材质，不透明背景会把它盖掉；材质本身会随主题自动变化。
     const window = context.getWindow();
-    if (window && !window.isDestroyed()) {
+    if (window && !window.isDestroyed() && process.platform !== "darwin") {
       window.setBackgroundColor(themeBackgroundColor(preference));
     }
     return preference;

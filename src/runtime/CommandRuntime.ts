@@ -13,6 +13,8 @@ import { SessionRecorder } from "../session/recorder.js";
 import { ensureAgentDirs } from "../session/store.js";
 import { createToolRegistry } from "../tools/registry.js";
 import { createTodoTool } from "../tools/todo.js";
+import type { ActivitySettings } from "../activity/settings.js";
+import type { MemoryEntry } from "../agent/context/memoryTypes.js";
 import { TodoStore } from "../session/todoStore.js";
 import { CheckpointStore } from "../session/checkpointStore.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
@@ -22,6 +24,10 @@ import { createMcpResourceTools, McpToolHost } from "../extensions/mcp.js";
 import { createSubagentTool, runSubagentTask as executeSubagentTask, type SubagentOptions } from "../extensions/subagent.js";
 import { buildSubagentDefinitionsPrompt, loadSubagentDefinitions, type SubagentDefinition } from "../extensions/agents.js";
 import { createMemoryTools } from "../extensions/memory.js";
+import { createActivityReportTool } from "../tools/activity/report.js";
+import { createActivityDigestTool } from "../tools/activity/digest.js";
+import { createActivitySearchTool, createActivitySemanticSearchTool } from "../tools/activity/search.js";
+import { createActivitySessionsTool, createActivitySessionShowTool } from "../tools/activity/sessions.js";
 import { createToolCounts, formatExtensionReport, type ExtensionSection, type ExtensionStatus } from "../extensions/report.js";
 import { createNativeModelSettings, type NativeModelSettings } from "../llm/nativeFactory.js";
 import {
@@ -184,6 +190,32 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
       () => agent?.getLocalMemory(),
       { indexEntry: async (entry) => await agent?.indexMemoryEntry(entry) }
     )) toolRegistry.registerBuiltinTool(tool);
+    // Activity 回忆改为主动工具集：模型按需生成打工日记/时间线/搜索，而不是把脱敏事件
+    // 注入每个回合。模型、策略、记忆库与嵌入运行时都在调用时现取（当前聊天模型 + 最新
+    // activity 设置），不沿用装配时的快照；report/digest 执行后会顺手把 worth_memory=1
+    // 的分析行同步成记忆条目（幂等）。
+    const loadActivitySettings = async (): Promise<ActivitySettings> =>
+      (await configStore.load(workspaceRoot)).activity;
+    const activityMemoryDeps = {
+      getMemory: () => agent?.getLocalMemory(),
+      indexMemoryEntry: async (entry: MemoryEntry) => await agent?.indexMemoryEntry(entry)
+    } as const;
+    toolRegistry.registerBuiltinTool(createActivityReportTool({
+      getModel: () => modelManager?.getModel(),
+      loadSettings: loadActivitySettings,
+      ...activityMemoryDeps
+    }));
+    toolRegistry.registerBuiltinTool(createActivityDigestTool({
+      loadSettings: loadActivitySettings,
+      ...activityMemoryDeps
+    }));
+    toolRegistry.registerBuiltinTool(createActivitySearchTool({ loadSettings: loadActivitySettings }));
+    toolRegistry.registerBuiltinTool(createActivitySemanticSearchTool({
+      loadSettings: loadActivitySettings,
+      getEmbeddingRuntime: async () => await agent?.getEmbeddingRuntime()
+    }));
+    toolRegistry.registerBuiltinTool(createActivitySessionsTool({ loadSettings: loadActivitySettings }));
+    toolRegistry.registerBuiltinTool(createActivitySessionShowTool({ loadSettings: loadActivitySettings }));
     // MCP/Plugin 仍由 Host 持有连接和执行权，但先把工具能力注册进统一 envelope，
     // 这样 Desktop/TUI 查询 capability projection 时能看到已加载的 Host-owned 能力。
     for (const entry of toolRegistry.listEntries()) {

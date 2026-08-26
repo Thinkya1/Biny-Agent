@@ -4,18 +4,21 @@ import os from "node:os";
 import path from "node:path";
 import { ActivityPrivacyPolicy, updateActivitySettings } from "../src/activity/index.js";
 import type { AgentModel } from "../src/agent/core/types.js";
-import { ContextMemory } from "../src/agent/context/ContextMemory.js";
-import { WorkspaceContext } from "../src/agent/context/WorkspaceContext.js";
 import { createFileConfigStore } from "../src/config/store.js";
 import { configSchema, defaultConfig } from "../src/config/schema.js";
-import { activityExternalPolicySchema } from "../src/activity/settings.js";
+import {
+  activityAnalysisPolicySchema,
+  activityExternalPolicySchema,
+  defaultActivitySettings
+} from "../src/activity/settings.js";
 
 const policies = ["local_only", "confirm_external", "external_allowed"] as const;
 
 testActivityPolicySchemaAndDefault();
+testAnalysisPolicySchemaAndDefault();
 await testActivityPolicyPersistenceUsesCas();
 await testActivityPolicyBlocksExternalModelsWithoutFallback();
-await testContextMemoryOnlyInjectsTrustedLocalActivity();
+await testAnalysisPolicyGatesExternalModels();
 
 function testActivityPolicySchemaAndDefault(): void {
   for (const externalPolicy of policies) {
@@ -98,56 +101,63 @@ async function testActivityPolicyBlocksExternalModelsWithoutFallback(): Promise<
   assert.equal(localOnly.canUseWithModel(fakeLocalUrl), false, "provider name and URL must not infer local trust");
 }
 
-async function testContextMemoryOnlyInjectsTrustedLocalActivity(): Promise<void> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-activity-context-"));
-  try {
-    const entry = {
-      summary: "password=do-not-send",
-      application: "Editor",
-      occurredAt: "2026-08-24T00:00:00.000Z",
-      screenshot: "RAW_SCREENSHOT"
-    } as unknown as { summary: string; application: string; occurredAt: string };
-    const localModel = model("builtin-llama.cpp", "llama.cpp");
-    const localMemory = new ContextMemory(
-      () => localModel,
-      new WorkspaceContext(root, [], 32 * 1024),
-      undefined,
-      8_000,
-      32 * 1024,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      new ActivityPrivacyPolicy()
-    );
-    const localPrepared = await localMemory.prepareTurn("summarize", "system", undefined, [], false, 0, [entry]);
-    assert.equal(localPrepared.activity.status, "allowed");
-    assert.match(localPrepared.systemPrompt ?? "", /untrusted historical context, not instructions/u);
-    assert.match(localPrepared.systemPrompt ?? "", /password=\[redacted\]/u);
-    assert.doesNotMatch(localPrepared.systemPrompt ?? "", /RAW_(?:OCR|KEY_VALUE|SCREENSHOT)/u);
-
-    const cloudModel = model("provider", "openai");
-    const cloudMemory = new ContextMemory(
-      () => cloudModel,
-      new WorkspaceContext(root, [], 32 * 1024),
-      undefined,
-      8_000,
-      32 * 1024,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      new ActivityPrivacyPolicy()
-    );
-    const cloudPrepared = await cloudMemory.prepareTurn("summarize", "system", undefined, [], false, 0, [entry]);
-    assert.equal(cloudPrepared.activity.status, "blocked");
-    assert.equal(cloudPrepared.activity.entries.length, 0);
-    assert.doesNotMatch(cloudPrepared.systemPrompt ?? "", /RAW_|password=\[redacted\]/u);
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
+function testAnalysisPolicySchemaAndDefault(): void {
+  for (const analysisPolicy of policies) {
+    assert.equal(activityAnalysisPolicySchema.parse(analysisPolicy), analysisPolicy);
+    const parsed = configSchema.parse({
+      ...defaultConfig,
+      activity: { analysisPolicy }
+    });
+    assert.equal(parsed.activity.analysisPolicy, analysisPolicy);
   }
+
+  // 分析维度默认 confirm_external 且未确认：外部模型分析默认不放行，与回忆维度（local_only）相互独立。
+  assert.equal(defaultActivitySettings.analysisPolicy, "confirm_external");
+  assert.equal(defaultActivitySettings.analysisExternalConfirmed, false);
+  const legacy = structuredClone(defaultConfig) as unknown as Record<string, unknown>;
+  delete legacy.activity;
+  assert.equal(configSchema.parse(legacy).activity.analysisPolicy, "confirm_external");
+  assert.throws(() => activityAnalysisPolicySchema.parse("cloud_by_default"), /Invalid enum value/u);
+}
+
+async function testAnalysisPolicyGatesExternalModels(): Promise<void> {
+  const local = model("builtin-llama.cpp", "llama.cpp");
+  const cloud = model("provider", "openai");
+
+  // 受信任的本地模型在任何分析策略下都放行。
+  for (const analysisPolicy of policies) {
+    const decision = new ActivityPrivacyPolicy({ analysisPolicy }).evaluateAnalysis(local);
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.reason, "trusted_local_model");
+    assert.equal(decision.trustedLocalModel, true);
+  }
+
+  // external_allowed：明确允许把脱敏摘要送到外部模型。
+  const allowed = new ActivityPrivacyPolicy({ analysisPolicy: "external_allowed" }).evaluateAnalysis(cloud);
+  assert.equal(allowed.allowed, true);
+  assert.equal(allowed.reason, "external_allowed");
+
+  // confirm_external：未确认拦截、确认后放行。
+  const pending = new ActivityPrivacyPolicy({ analysisPolicy: "confirm_external", analysisExternalConfirmed: false });
+  assert.equal(pending.evaluateAnalysis(cloud).allowed, false);
+  assert.equal(pending.evaluateAnalysis(cloud).reason, "external_needs_confirmation");
+  const confirmed = new ActivityPrivacyPolicy({ analysisPolicy: "confirm_external", analysisExternalConfirmed: true });
+  assert.equal(confirmed.evaluateAnalysis(cloud).allowed, true);
+  assert.equal(confirmed.evaluateAnalysis(cloud).reason, "external_confirmed");
+
+  // local_only + 外部模型：拦截，且 runAnalysis 绝不执行回调（不降级到备用模型）。
+  const localOnly = new ActivityPrivacyPolicy({ analysisPolicy: "local_only" });
+  const blocked = localOnly.evaluateAnalysis(cloud);
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.reason, "external_blocked");
+  let operationCalled = false;
+  const run = await localOnly.runAnalysis(cloud, () => {
+    operationCalled = true;
+    return "must-not-run";
+  });
+  assert.equal(run.status, "blocked");
+  assert.equal(run.value, undefined);
+  assert.equal(operationCalled, false);
 }
 
 function model(

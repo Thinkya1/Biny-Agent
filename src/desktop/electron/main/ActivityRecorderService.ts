@@ -1,8 +1,8 @@
 /**
  * Electron 主进程里的 Activity 编排服务。
  *
- * Swift sidecar 只提供系统采集能力；这里负责启动/停止、JSONL IPC、JPEG/SQLite/FTS5 落盘、
- * 存储上限和运行态广播。默认配置关闭采集，sidecar 不会因为应用启动而自动截屏。
+ * sidecar 优先发送事件和最小 AX 语义；只有 sidecar 明确要求视觉 fallback 时才发送 JPEG。
+ * 这里负责 JSONL IPC、事件/截图落盘、事件驱动的 Session 生命周期、容量淘汰和运行态广播。
  */
 import { access } from "node:fs/promises";
 import path from "node:path";
@@ -11,16 +11,52 @@ import { createInterface, type Interface } from "node:readline";
 import type { AgentConfigStore } from "../../../config/store.js";
 import type { ActivitySettings } from "../../../activity/settings.js";
 import { ActivityStore, type ActivitySearchResult } from "../../../activity/store.js";
+import { ActivityPrivacyPolicy } from "../../../activity/privacyPolicy.js";
+import {
+  analyzePendingActivitySessions,
+  buildActivityReport,
+  type ActivityReportResult
+} from "../../../activity/analyzer.js";
+import { resolveActivityAnalysisModel } from "../../../activity/analysisModel.js";
+import { ActivityAnalysisScheduler } from "../../../activity/analysisScheduler.js";
 import type { ActivityRuntimeSnapshot, ActivityServiceState } from "../../../activity/types.js";
+import type { DesktopSystemSettingsPane } from "../../protocol.js";
+
+interface SidecarEventMessage {
+  type: "event";
+  occurredAt: string;
+  eventType: string;
+  application?: string;
+  bundleId?: string;
+  windowTitle?: string;
+  axRole?: string;
+  axTitle?: string;
+  /** 浏览器标签页标题（sidecar 通过 AppleScript 采集，优先于窗口标题）。 */
+  tabTitle?: string;
+  /** 浏览器标签页 URL。 */
+  url?: string;
+  text?: string;
+  mouseEventType?: string;
+  mouseButton?: number;
+  inputEventCount?: number;
+  axAvailable?: boolean;
+  fallbackReason?: string;
+}
 
 interface SidecarCaptureMessage {
   type: "capture";
   occurredAt: string;
+  eventType?: string;
   application?: string;
   bundleId?: string;
+  windowTitle?: string;
+  axRole?: string;
+  axTitle?: string;
+  text?: string;
   jpegBase64: string;
   ocrText?: string;
-  inputEventCount: number;
+  inputEventCount?: number;
+  fallbackReason?: string;
 }
 
 interface SidecarStatusMessage {
@@ -28,8 +64,10 @@ interface SidecarStatusMessage {
   status: string;
   screenRecordingGranted: boolean;
   accessibilityGranted: boolean;
+  inputMonitoringGranted?: boolean;
+  axAvailable?: boolean;
+  fallbackAvailable?: boolean;
   currentApplication?: string;
-  inputEventCount: number;
   error?: string;
 }
 
@@ -37,6 +75,8 @@ interface SidecarErrorMessage {
   type: "error";
   message: string;
 }
+
+type SidecarMessage = SidecarEventMessage | SidecarCaptureMessage | SidecarStatusMessage | SidecarErrorMessage;
 
 export interface ActivityRecorderServiceOptions {
   configStore: AgentConfigStore;
@@ -52,19 +92,32 @@ export class ActivityRecorderService {
   private child?: ChildProcessWithoutNullStreams;
   private output?: Interface;
   private sessionId?: string;
+  private sessionIdleTimer?: ReturnType<typeof setTimeout>;
+  private lastActivityAt?: number;
   private settings?: ActivitySettings;
   private currentApplication?: string;
   private state: ActivityServiceState = "stopped";
   private error?: string;
   private screenRecordingGranted = false;
   private accessibilityGranted = false;
+  private inputMonitoringGranted = false;
+  private axAvailable = false;
+  private fallbackAvailable = false;
   private operationTail = Promise.resolve();
   private snapshotCache: ActivityRuntimeSnapshot = this.createSnapshot();
+  /** 退出时中止在途的一轮分析，避免 quit 被未完成的模型请求拖住。 */
+  private readonly analysisAbort = new AbortController();
+  private readonly analysisScheduler: ActivityAnalysisScheduler;
 
   constructor(options: ActivityRecorderServiceOptions) {
     this.configStore = options.configStore;
     this.sidecarPath = options.sidecarPath;
     this.emit = options.emit;
+    // 触发式分析：session 结束防抖 + 周期 sweep 共用这一个入口；调度器只管时机，
+    // 门禁与模型选择在 runAnalysisSweep 里每次新鲜加载。
+    this.analysisScheduler = new ActivityAnalysisScheduler({
+      run: () => this.runAnalysisSweep()
+    });
   }
 
   async initialize(): Promise<void> {
@@ -82,6 +135,10 @@ export class ActivityRecorderService {
   }
 
   async stop(): Promise<void> {
+    // 先停调度并中止在途分析，再停采集：stopInternal 会结束当前 session，
+    // 提前 stop() 让那次 endCurrentSession 不再排出「60s 后才跑」的分析（进程已在退出）。
+    this.analysisScheduler.stop();
+    this.analysisAbort.abort();
     await this.enqueue(async () => await this.stopInternal());
   }
 
@@ -92,6 +149,48 @@ export class ActivityRecorderService {
 
   async search(query: string, limit = 20): Promise<ActivitySearchResult[]> {
     return await this.enqueue(async () => this.store.search(query, limit));
+  }
+
+  /**
+   * 生成指定日期的打工日记。刻意不走 enqueue、也不用采集器自己的 store：补分析要做多次模型
+   * 调用，占用采集器那条写连接会把事件落盘队列堵住。这里开一条独立连接读分析表、补分析。
+   */
+  async buildReport(date?: string): Promise<ActivityReportResult> {
+    const config = await this.configStore.load();
+    const policy = new ActivityPrivacyPolicy(config.activity);
+    const model = resolveActivityAnalysisModel(config);
+    const store = new ActivityStore();
+    await store.open(config.activity.outputDirectory);
+    try {
+      return await buildActivityReport({ store, policy, model }, date ?? "today");
+    } finally {
+      await store.close();
+    }
+  }
+
+  /**
+   * 触发式分析的统一入口：session 结束防抖与周期 sweep 都跑这一个。
+   * 与 buildReport 同理开一条独立 store 连接，避免多次模型调用堵住采集写队列。
+   * 每次新鲜加载 config，因此 analysisPolicy/analysisModel 的改动下一轮即生效；
+   * 策略未放行或无可用模型时由 analyzePendingActivitySessions 逐项跳过，session 保持待分析。
+   */
+  private async runAnalysisSweep(): Promise<void> {
+    const config = await this.configStore.load();
+    const policy = new ActivityPrivacyPolicy(config.activity);
+    const model = resolveActivityAnalysisModel(config);
+    const store = new ActivityStore();
+    await store.open(config.activity.outputDirectory);
+    try {
+      await analyzePendingActivitySessions({ store, policy, model, signal: this.analysisAbort.signal });
+    } finally {
+      await store.close();
+    }
+  }
+
+  async requestPermission(permission: DesktopSystemSettingsPane): Promise<void> {
+    await this.enqueue(async () => {
+      this.send({ type: "request_permission", permission });
+    });
   }
 
   async clear(): Promise<ActivityRuntimeSnapshot> {
@@ -106,21 +205,24 @@ export class ActivityRecorderService {
   }
 
   private async applySettings(nextSettings: ActivitySettings): Promise<void> {
+    await this.stopInternal();
     this.settings = nextSettings;
     try {
       await this.store.open(nextSettings.outputDirectory);
     } catch (error) {
-      await this.stopInternal();
+      this.analysisScheduler.stop();
       this.setState("error", safeError(error));
       return;
     }
     if (!nextSettings.enabled) {
-      await this.stopInternal();
+      // 采集关停时分析也不再排期；待分析 session 留在库里，重新启用后由 sweep 补。
+      this.analysisScheduler.stop();
       this.setState("paused");
       return;
     }
+    // 分析作用于已落库的数据，不依赖 sidecar 是否可用，因此 enabled 即启动触发调度。
+    this.analysisScheduler.start();
     if (this.sidecarPath === undefined) {
-      await this.stopInternal();
       this.setState("unavailable", "当前平台没有可用的 macOS Activity sidecar。");
       return;
     }
@@ -147,27 +249,31 @@ export class ActivityRecorderService {
       this.setState("error", safeError(error));
     });
     child.once("exit", (code, signal) => {
+      if (this.child !== child) return;
       this.output?.close();
       this.output = undefined;
       this.child = undefined;
-      if (this.sessionId) {
-        this.store.endSession(this.sessionId, new Date().toISOString());
-        this.sessionId = undefined;
-      }
+      this.endCurrentSession(new Date().toISOString());
       if (this.state !== "stopped" && this.settings?.enabled) {
         this.setState("error", `Activity sidecar 已退出（code=${code ?? "-"}, signal=${signal ?? "-"}）。`);
       }
     });
-    this.sessionId = this.store.startSession(new Date().toISOString());
+    const sessionStartedAt = new Date().toISOString();
+    this.sessionId = this.store.startSession(sessionStartedAt);
+    this.lastActivityAt = Date.parse(sessionStartedAt);
+    this.scheduleSessionIdleClose();
     this.send({ type: "start", settings });
     this.setState("running");
   }
 
   private async stopInternal(): Promise<void> {
+    this.clearSessionIdleTimer();
     const child = this.child;
     this.output?.close();
     this.output = undefined;
     this.child = undefined;
+    this.state = "stopped";
+    this.error = undefined;
     if (child && !child.killed) {
       this.send({ type: "stop" }, child);
       await new Promise<void>((resolve) => {
@@ -181,56 +287,141 @@ export class ActivityRecorderService {
         });
       });
     }
-    if (this.sessionId) {
-      this.store.endSession(this.sessionId, new Date().toISOString());
-      this.sessionId = undefined;
-    }
-    this.state = "stopped";
+    this.endCurrentSession(new Date().toISOString());
   }
 
   private handleSidecarLine(line: string): void {
-    let message: SidecarCaptureMessage | SidecarStatusMessage | SidecarErrorMessage;
+    let message: SidecarMessage;
     try {
-      message = JSON.parse(line) as typeof message;
+      message = JSON.parse(line) as SidecarMessage;
     } catch {
       this.setState("error", "Activity sidecar 返回了无效 JSON。");
       return;
     }
+    if (message.type === "event") {
+      void this.enqueue(async () => await this.persistEvent(message));
+      return;
+    }
     if (message.type === "capture") {
-      void this.persistCapture(message);
+      void this.enqueue(async () => await this.persistFallbackCapture(message));
       return;
     }
     if (message.type === "status") {
       this.screenRecordingGranted = message.screenRecordingGranted;
       this.accessibilityGranted = message.accessibilityGranted;
-      this.currentApplication = message.currentApplication;
-      if (message.status === "permission_required") this.setState("permission_required", message.error);
-      else if (message.status === "paused") this.setState("paused");
-      else if (message.status === "running") this.setState("running", message.error);
-      else if (message.status === "sensitive_application") this.publish();
+      this.inputMonitoringGranted = message.inputMonitoringGranted ?? message.accessibilityGranted;
+      this.axAvailable = message.axAvailable ?? false;
+      this.fallbackAvailable = message.fallbackAvailable ?? message.screenRecordingGranted;
+      this.currentApplication = message.currentApplication ?? undefined;
+      if (message.status === "paused") this.setState("paused", message.error);
+      else if (message.status === "stopped") this.setState("stopped", message.error);
+      else if (message.status === "unavailable") this.setState("unavailable", message.error);
+      else if (message.status === "running" || message.status === "permission_required") this.setState("running", message.error);
+      else this.publish();
       return;
     }
     this.setState("error", message.message);
   }
 
-  private async persistCapture(message: SidecarCaptureMessage): Promise<void> {
-    if (!this.sessionId || !this.settings) return;
+  private async persistEvent(message: SidecarEventMessage): Promise<void> {
+    if (!this.settings || !this.child) return;
     try {
-      const jpeg = Buffer.from(message.jpegBase64, "base64");
-      await this.store.recordCapture({
-        sessionId: this.sessionId,
+      const sessionId = this.ensureSession(message.occurredAt);
+      this.store.recordEvent({
+        sessionId,
         occurredAt: message.occurredAt,
+        eventType: message.eventType,
         application: message.application,
         bundleId: message.bundleId,
-        rawOcrText: message.ocrText,
-        jpeg,
+        windowTitle: message.tabTitle ?? message.windowTitle,
+        axRole: message.axRole,
+        axTitle: message.axTitle,
+        url: message.url,
+        rawText: message.text,
+        mouseEventType: message.mouseEventType,
+        mouseButton: message.mouseButton,
+        fallbackReason: message.fallbackReason,
         inputEventCount: message.inputEventCount
-      }, this.settings.maxStorageMb);
-      this.currentApplication = message.application;
+      });
+      this.axAvailable = message.axAvailable ?? this.axAvailable;
+      this.currentApplication = message.application ?? this.currentApplication;
       this.publish();
     } catch (error) {
       this.setState("error", safeError(error));
     }
+  }
+
+  private async persistFallbackCapture(message: SidecarCaptureMessage): Promise<void> {
+    if (!this.settings || !this.child) return;
+    try {
+      const jpeg = Buffer.from(message.jpegBase64, "base64");
+      if (!jpeg.byteLength) throw new Error("Activity fallback 返回了空 JPEG。");
+      const sessionId = this.ensureSession(message.occurredAt);
+      await this.store.recordFallbackCapture({
+        sessionId,
+        occurredAt: message.occurredAt,
+        eventType: message.eventType ?? "fallback_capture",
+        application: message.application,
+        bundleId: message.bundleId,
+        windowTitle: message.windowTitle,
+        axRole: message.axRole,
+        axTitle: message.axTitle,
+        rawText: message.text,
+        rawOcrText: message.ocrText,
+        fallbackReason: message.fallbackReason,
+        inputEventCount: message.inputEventCount,
+        jpeg
+      }, this.settings.maxStorageMb);
+      this.currentApplication = message.application ?? this.currentApplication;
+      this.publish();
+    } catch (error) {
+      this.setState("error", safeError(error));
+    }
+  }
+
+  private ensureSession(occurredAt: string): string {
+    const occurredAtMs = parseTimestamp(occurredAt);
+    const idleTimeoutMs = this.settings?.idleTimeoutMs ?? 30_000;
+    if (this.sessionId && this.lastActivityAt !== undefined && occurredAtMs - this.lastActivityAt >= idleTimeoutMs) {
+      this.endCurrentSession(toIso(this.lastActivityAt + idleTimeoutMs));
+    }
+    if (!this.sessionId) this.sessionId = this.store.startSession(occurredAt);
+    this.lastActivityAt = Math.max(this.lastActivityAt ?? occurredAtMs, occurredAtMs);
+    this.scheduleSessionIdleClose();
+    return this.sessionId;
+  }
+
+  private scheduleSessionIdleClose(): void {
+    this.clearSessionIdleTimer();
+    const idleTimeoutMs = Math.max(1_000, this.settings?.idleTimeoutMs ?? 30_000);
+    this.sessionIdleTimer = setTimeout(() => {
+      void this.enqueue(async () => {
+        if (!this.sessionId || this.lastActivityAt === undefined) return;
+        const now = Date.now();
+        if (now - this.lastActivityAt < idleTimeoutMs) {
+          this.scheduleSessionIdleClose();
+          return;
+        }
+        this.endCurrentSession(toIso(this.lastActivityAt + idleTimeoutMs));
+        this.publish();
+      });
+    }, idleTimeoutMs);
+  }
+
+  private clearSessionIdleTimer(): void {
+    if (this.sessionIdleTimer !== undefined) clearTimeout(this.sessionIdleTimer);
+    this.sessionIdleTimer = undefined;
+  }
+
+  private endCurrentSession(endedAt: string): void {
+    this.clearSessionIdleTimer();
+    if (this.sessionId) {
+      this.store.endSession(this.sessionId, endedAt);
+      // session 结束 → 防抖触发分析；调度器未启动（采集停用/已退出）时 notify 为空操作。
+      this.analysisScheduler.notifySessionEnded();
+    }
+    this.sessionId = undefined;
+    this.lastActivityAt = undefined;
   }
 
   private send(command: Record<string, unknown>, target = this.child): void {
@@ -256,8 +447,12 @@ export class ActivityRecorderService {
       collectorAvailable: this.sidecarPath !== undefined,
       screenRecordingGranted: this.screenRecordingGranted,
       accessibilityGranted: this.accessibilityGranted,
+      inputMonitoringGranted: this.inputMonitoringGranted,
+      axAvailable: this.axAvailable,
+      fallbackAvailable: this.fallbackAvailable,
       sessions: storeSnapshot.sessions,
-      captures: storeSnapshot.captures,
+      events: storeSnapshot.events,
+      fallbackCaptures: storeSnapshot.fallbackCaptures,
       storageBytes: storeSnapshot.storageBytes,
       recentSessions: storeSnapshot.recentSessions,
       currentSessionId: this.sessionId,
@@ -270,7 +465,7 @@ export class ActivityRecorderService {
     try {
       return this.store.snapshot();
     } catch {
-      return { sessions: 0, captures: 0, storageBytes: 0, recentSessions: [] };
+      return { sessions: 0, events: 0, fallbackCaptures: 0, storageBytes: 0, recentSessions: [] };
     }
   }
 
@@ -286,6 +481,15 @@ export function defaultActivitySidecarPath(options: { packaged: boolean; resourc
   return options.packaged
     ? path.join(options.resourcesPath, "native/activity-recorder")
     : path.join(options.appPath, "out/native/activity-recorder");
+}
+
+function parseTimestamp(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function toIso(value: number): string {
+  return new Date(value).toISOString();
 }
 
 function safeError(error: unknown): string {
