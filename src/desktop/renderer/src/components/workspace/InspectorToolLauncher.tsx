@@ -36,18 +36,18 @@ export function InspectorToolLauncher({ onAction, error }: {
   error?: string;
 }): React.JSX.Element {
   return (
-    <section aria-label="工作区工具" className="cindy-inspector-launcher">
-      <div aria-hidden="true" className="cindy-inspector-launcher-spacer" />
-      <div className="cindy-inspector-launcher-list">
+    <section aria-label="工作区工具" className="biny-inspector-launcher">
+      <div aria-hidden="true" className="biny-inspector-launcher-spacer" />
+      <div className="biny-inspector-launcher-list">
         {launcherActions.map(({ action, icon, label, shortcut }) => (
-          <button className="cindy-inspector-launcher-item" key={action} onClick={() => onAction(action)} type="button">
+          <button className="biny-inspector-launcher-item" key={action} onClick={() => onAction(action)} type="button">
             <Icon name={icon} size={20} />
             <span>{label}</span>
             {shortcut ? <kbd>{shortcut}</kbd> : null}
           </button>
         ))}
       </div>
-      {error ? <p className="cindy-inspector-launcher-error" role="alert"><Icon name="warning" size={14} /><span>{error}</span></p> : null}
+      {error ? <p className="biny-inspector-launcher-error" role="alert"><Icon name="warning" size={14} /><span>{error}</span></p> : null}
     </section>
   );
 }
@@ -57,8 +57,8 @@ export function InspectorReview({ state, onRetry }: {
   onRetry(): void;
 }): React.JSX.Element {
   return (
-    <section aria-label="审阅结果" className="cindy-inspector-command">
-      <div className="cindy-inspector-command-intro">
+    <section aria-label="审阅结果" className="biny-inspector-command">
+      <div className="biny-inspector-command-intro">
         <Icon name="shield" size={18} />
         <div>
           <h2>审阅</h2>
@@ -66,7 +66,7 @@ export function InspectorReview({ state, onRetry }: {
         </div>
       </div>
       <InspectorCommandOutput emptyLabel="正在准备审阅…" state={state} />
-      <div className="cindy-inspector-command-actions">
+      <div className="biny-inspector-command-actions">
         <button disabled={state.status === "loading"} onClick={onRetry} type="button">
           {state.status === "loading" ? "正在审阅" : "重新审阅"}
         </button>
@@ -86,8 +86,8 @@ export function InspectorSideChat({ state, onSend }: {
     onSend(question);
   }, [input, onSend, state.status]);
   return (
-    <section aria-label="侧边聊天" className="cindy-inspector-command cindy-inspector-side-chat">
-      <div className="cindy-inspector-command-intro">
+    <section aria-label="侧边聊天" className="biny-inspector-command biny-inspector-side-chat">
+      <div className="biny-inspector-command-intro">
         <Icon name="message" size={18} />
         <div>
           <h2>侧边聊天</h2>
@@ -95,7 +95,7 @@ export function InspectorSideChat({ state, onSend }: {
         </div>
       </div>
       <InspectorCommandOutput emptyLabel="输入问题后，子代理会在这里返回结果。" state={state} />
-      <form className="cindy-inspector-side-chat-form" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+      <form className="biny-inspector-side-chat-form" onSubmit={(event) => { event.preventDefault(); submit(); }}>
         <textarea
           aria-label="向侧边聊天提问"
           disabled={state.status === "loading"}
@@ -124,18 +124,18 @@ function InspectorCommandOutput({ emptyLabel, state }: {
   state: InspectorCommandState;
 }): React.JSX.Element {
   if (state.status === "loading") {
-    return <div aria-live="polite" className="cindy-inspector-command-state"><span className="mini-spinner" /><span>正在请求子代理…</span></div>;
+    return <div aria-live="polite" className="biny-inspector-command-state"><span className="mini-spinner" /><span>正在请求子代理…</span></div>;
   }
   if (state.status === "error") {
-    return <div className="cindy-inspector-command-state is-error" role="alert"><Icon name="warning" size={16} /><span>{state.error}</span></div>;
+    return <div className="biny-inspector-command-state is-error" role="alert"><Icon name="warning" size={16} /><span>{state.error}</span></div>;
   }
   if (state.status === "ready") {
     return (
-      <div className="cindy-inspector-command-result">
-        <span className="cindy-inspector-command-result-title">{state.result?.title ?? "结果"}</span>
+      <div className="biny-inspector-command-result">
+        <span className="biny-inspector-command-result-title">{state.result?.title ?? "结果"}</span>
         <pre>{state.result?.content}</pre>
       </div>
     );
   }
-  return <div className="cindy-inspector-command-state"><span>{emptyLabel}</span></div>;
+  return <div className="biny-inspector-command-state"><span>{emptyLabel}</span></div>;
 }

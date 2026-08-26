@@ -17,6 +17,8 @@ export type ToolRisk = "read" | "write" | "execute";
 export type ToolExecutionState =
   | "not_started"
   | "running"
+  /** 已通过所有执行前检查，副作用从此刻起可能已经开始。 */
+  | "admitted"
   | "side_effect_committed"
   | "cancel_requested"
   | "cancelled"

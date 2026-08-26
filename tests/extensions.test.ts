@@ -463,6 +463,9 @@ async function testProgressiveSkills(workspaceRoot: string): Promise<void> {
     assert.match(expanded, /References are relative to .*test-runner\./);
     assert.match(expanded, /Always run pnpm test from the workspace root\./);
     assert.match(expanded, /<\/skill>\n\nrun the tests$/);
+    const expandedDesktop = await expandSkillCommand(bundle, "/skills:test-runner\u00a0run the desktop tests");
+    assert.match(expandedDesktop, /<skill name="test-runner"/);
+    assert.match(expandedDesktop, /<\/skill>\n\nrun the desktop tests$/);
     assert.equal(await expandSkillCommand(bundle, "/skill:missing do something"), "/skill:missing do something");
 
     const tool = createSkillTool(bundle);

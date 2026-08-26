@@ -135,25 +135,25 @@ export function SkillDiscoveryView({ onBack, onError, onInstalled }: {
   }, [onError]);
 
   return (
-    <div className="cindy-skill-discovery-page">
-      <header className="cindy-skill-discovery-header">
-        <button aria-label="返回技能管理" className="cindy-skill-discovery-back" onClick={onBack} type="button"><Icon name="arrow-left" size={18} /></button>
+    <div className="biny-skill-discovery-page">
+      <header className="biny-skill-discovery-header">
+        <button aria-label="返回技能管理" className="biny-skill-discovery-back" onClick={onBack} type="button"><Icon name="arrow-left" size={18} /></button>
         <h1>Skills 管理</h1>
-        <div className="cindy-skill-discovery-header-actions">
+        <div className="biny-skill-discovery-header-actions">
           <button disabled={loading} onClick={() => void loadSnapshot()} type="button"><Icon name="refresh" size={16} />刷新</button>
           <button onClick={() => setRepositoryManagerOpen(true)} type="button"><Icon name="settings" size={16} />仓库管理</button>
         </div>
       </header>
-      <div className="cindy-skill-discovery-body">
-        {snapshot.warnings.length ? <div className="cindy-extension-warning" role="status"><Icon name="warning" size={15} /><div>{snapshot.warnings.map((warning) => <div key={warning}>{warning}</div>)}</div></div> : null}
-        <div className="cindy-skill-discovery-source-tabs" role="tablist" aria-label="技能发现来源">
+      <div className="biny-skill-discovery-body">
+        {snapshot.warnings.length ? <div className="biny-extension-warning" role="status"><Icon name="warning" size={15} /><div>{snapshot.warnings.map((warning) => <div key={warning}>{warning}</div>)}</div></div> : null}
+        <div className="biny-skill-discovery-source-tabs" role="tablist" aria-label="技能发现来源">
           <button aria-selected={source === "repos"} className={source === "repos" ? "is-active" : ""} onClick={() => setSource("repos")} role="tab" type="button">仓库</button>
           <button aria-selected={source === "skillssh"} className={source === "skillssh" ? "is-active" : ""} onClick={() => setSource("skillssh")} role="tab" type="button">skills.sh</button>
         </div>
         {source === "repos" ? (
           <>
             <DiscoveryFilters query={query} repository={repository} repositories={snapshot.repositories} status={status} onQuery={setQuery} onRepository={setRepository} onStatus={setStatus} />
-            {loading && !snapshot.skills.length ? <DiscoveryLoading /> : !visibleRepositorySkills.length ? <DiscoveryEmpty detail="没有匹配的技能，试试其他搜索词或仓库。" /> : <div className="cindy-discovery-grid">{visibleRepositorySkills.map((skill) => <DiscoveryCard key={skill.key} skill={skill} installing={installingKey === skill.key} onInstall={() => void install(skill)} onView={() => void openUrl(skill.readmeUrl, onError)} />)}</div>}
+            {loading && !snapshot.skills.length ? <DiscoveryLoading /> : !visibleRepositorySkills.length ? <DiscoveryEmpty detail="没有匹配的技能，试试其他搜索词或仓库。" /> : <div className="biny-discovery-grid">{visibleRepositorySkills.map((skill) => <DiscoveryCard key={skill.key} skill={skill} installing={installingKey === skill.key} onInstall={() => void install(skill)} onView={() => void openUrl(skill.readmeUrl, onError)} />)}</div>}
           </>
         ) : (
           <SkillsShPanel
@@ -187,8 +187,8 @@ const DiscoveryFilters = memo(function DiscoveryFilters({ query, repository, rep
   onStatus(status: SkillStatusFilter): void;
 }): React.JSX.Element {
   return (
-    <div className="cindy-discovery-filters">
-      <label className="cindy-discovery-search"><Icon name="search" size={17} /><input aria-label="搜索技能名称或仓库名称" onChange={(event) => onQuery(event.target.value)} placeholder="搜索技能名称或仓库名称…" value={query} /></label>
+    <div className="biny-discovery-filters">
+      <label className="biny-discovery-search"><Icon name="search" size={17} /><input aria-label="搜索技能名称或仓库名称" onChange={(event) => onQuery(event.target.value)} placeholder="搜索技能名称或仓库名称…" value={query} /></label>
       <select aria-label="筛选仓库" onChange={(event) => onRepository(event.target.value)} value={repository}>
         <option value="all">全部仓库</option>
         {repositories.map((item) => <option key={`${item.owner}/${item.name}`} value={`${item.owner}/${item.name}`}>{item.owner}/{item.name}</option>)}
@@ -209,15 +209,15 @@ const DiscoveryCard = memo(function DiscoveryCard({ skill, installing, onInstall
   onView(): void;
 }): React.JSX.Element {
   return (
-    <article className="cindy-discovery-card">
-      <div className="cindy-discovery-card-content">
+    <article className="biny-discovery-card">
+      <div className="biny-discovery-card-content">
         <h2>{skill.name}</h2>
-        <div className="cindy-discovery-card-repo">{skill.directory}<span>{skill.repoOwner}/{skill.repoName}</span></div>
+        <div className="biny-discovery-card-repo">{skill.directory}<span>{skill.repoOwner}/{skill.repoName}</span></div>
         <p>{skill.description}</p>
       </div>
-      <div className="cindy-discovery-card-actions">
-        <button className="cindy-discovery-view" onClick={onView} type="button"><Icon name="external" size={15} />查看</button>
-        <button className="cindy-discovery-install" disabled={skill.installed || installing} onClick={onInstall} type="button">{skill.installed ? <><Icon name="check" size={15} />已安装</> : installing ? "安装中…" : <><Icon name="archive" size={15} />安装</>}</button>
+      <div className="biny-discovery-card-actions">
+        <button className="biny-discovery-view" onClick={onView} type="button"><Icon name="external" size={15} />查看</button>
+        <button className="biny-discovery-install" disabled={skill.installed || installing} onClick={onInstall} type="button">{skill.installed ? <><Icon name="check" size={15} />已安装</> : installing ? "安装中…" : <><Icon name="archive" size={15} />安装</>}</button>
       </div>
     </article>
   );
@@ -239,14 +239,14 @@ const SkillsShPanel = memo(function SkillsShPanel({ hasSearched, input, loading,
 }): React.JSX.Element {
   return (
     <>
-      <div className="cindy-skillssh-search-row">
-        <label className="cindy-discovery-search"><Icon name="search" size={17} /><input aria-label="搜索 skills.sh" onChange={(event) => onInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onSearch(); }} placeholder="搜索 skills.sh 技能…" value={input} /></label>
-        <button className="cindy-discovery-search-button" disabled={input.trim().length < 2 || loading} onClick={onSearch} type="button">{loading ? "搜索中…" : "搜索"}</button>
+      <div className="biny-skillssh-search-row">
+        <label className="biny-discovery-search"><Icon name="search" size={17} /><input aria-label="搜索 skills.sh" onChange={(event) => onInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onSearch(); }} placeholder="搜索 skills.sh 技能…" value={input} /></label>
+        <button className="biny-discovery-search-button" disabled={input.trim().length < 2 || loading} onClick={onSearch} type="button">{loading ? "搜索中…" : "搜索"}</button>
       </div>
       {!hasSearched ? <DiscoveryEmpty detail="输入至少 2 个字符，搜索 skills.sh 公共技能目录。" /> : !skills.length && !loading ? <DiscoveryEmpty detail="没有找到匹配的 skills.sh 技能。" /> : <>
-        <div className="cindy-discovery-result-meta">共找到 {total} 个结果</div>
-        <div className="cindy-discovery-grid">{skills.map((skill) => <SkillsShCard key={skill.key} skill={skill} installing={installingKey === skill.key} onInstall={() => onInstall(skill)} onView={() => onView(skill.readmeUrl)} />)}</div>
-        {offset + skills.length < total ? <button className="cindy-discovery-load-more" disabled={loading} onClick={onLoadMore} type="button">{loading ? "加载中…" : "加载更多"}</button> : null}
+        <div className="biny-discovery-result-meta">共找到 {total} 个结果</div>
+        <div className="biny-discovery-grid">{skills.map((skill) => <SkillsShCard key={skill.key} skill={skill} installing={installingKey === skill.key} onInstall={() => onInstall(skill)} onView={() => onView(skill.readmeUrl)} />)}</div>
+        {offset + skills.length < total ? <button className="biny-discovery-load-more" disabled={loading} onClick={onLoadMore} type="button">{loading ? "加载中…" : "加载更多"}</button> : null}
       </>}
     </>
   );
@@ -259,15 +259,15 @@ const SkillsShCard = memo(function SkillsShCard({ skill, installing, onInstall, 
   onView(): void;
 }): React.JSX.Element {
   return (
-    <article className="cindy-discovery-card">
-      <div className="cindy-discovery-card-content">
+    <article className="biny-discovery-card">
+      <div className="biny-discovery-card-content">
         <h2>{skill.name}</h2>
-        <div className="cindy-discovery-card-repo">{skill.directory}<span>{skill.repoOwner}/{skill.repoName}</span></div>
+        <div className="biny-discovery-card-repo">{skill.directory}<span>{skill.repoOwner}/{skill.repoName}</span></div>
         <p>来自 skills.sh，已安装 {skill.installs.toLocaleString()} 次。</p>
       </div>
-      <div className="cindy-discovery-card-actions">
-        <button className="cindy-discovery-view" onClick={onView} type="button"><Icon name="external" size={15} />查看</button>
-        <button className="cindy-discovery-install" disabled={skill.installed || installing} onClick={onInstall} type="button">{skill.installed ? <><Icon name="check" size={15} />已安装</> : installing ? "安装中…" : <><Icon name="archive" size={15} />安装</>}</button>
+      <div className="biny-discovery-card-actions">
+        <button className="biny-discovery-view" onClick={onView} type="button"><Icon name="external" size={15} />查看</button>
+        <button className="biny-discovery-install" disabled={skill.installed || installing} onClick={onInstall} type="button">{skill.installed ? <><Icon name="check" size={15} />已安装</> : installing ? "安装中…" : <><Icon name="archive" size={15} />安装</>}</button>
       </div>
     </article>
   );
@@ -295,17 +295,17 @@ const RepositoryManager = memo(function RepositoryManager({ repositories, onAdd,
   };
 
   return (
-    <div className="cindy-skill-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section aria-label="仓库管理" className="cindy-skill-repository-dialog" role="dialog">
-        <div className="cindy-skill-dialog-heading"><div><h2>仓库管理</h2><p>添加 GitHub 仓库，发现其中的 SKILL.md。</p></div><button aria-label="关闭仓库管理" onClick={onClose} type="button"><Icon name="close" size={18} /></button></div>
-        <div className="cindy-skill-repository-form">
+    <div className="biny-skill-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section aria-label="仓库管理" className="biny-skill-repository-dialog" role="dialog">
+        <div className="biny-skill-dialog-heading"><div><h2>仓库管理</h2><p>添加 GitHub 仓库，发现其中的 SKILL.md。</p></div><button aria-label="关闭仓库管理" onClick={onClose} type="button"><Icon name="close" size={18} /></button></div>
+        <div className="biny-skill-repository-form">
           <input aria-label="GitHub 仓库" onChange={(event) => setUrl(event.target.value)} placeholder="owner/repository 或 GitHub URL" value={url} />
           <input aria-label="仓库分支" onChange={(event) => setBranch(event.target.value)} placeholder="分支" value={branch} />
           <button onClick={submit} type="button"><Icon name="add" size={15} />添加仓库</button>
         </div>
-        {error ? <div className="cindy-skill-dialog-error" role="alert">{error}</div> : null}
-        <div className="cindy-skill-repository-list">
-          {repositories.map((repository) => <div className="cindy-skill-repository-row" key={`${repository.owner}/${repository.name}`}><div><strong>{repository.owner}/{repository.name}</strong><span>{repository.branch}</span></div><button aria-label={`删除 ${repository.owner}/${repository.name}`} onClick={() => onRemove(repository)} type="button"><Icon name="trash" size={15} /></button></div>)}
+        {error ? <div className="biny-skill-dialog-error" role="alert">{error}</div> : null}
+        <div className="biny-skill-repository-list">
+          {repositories.map((repository) => <div className="biny-skill-repository-row" key={`${repository.owner}/${repository.name}`}><div><strong>{repository.owner}/{repository.name}</strong><span>{repository.branch}</span></div><button aria-label={`删除 ${repository.owner}/${repository.name}`} onClick={() => onRemove(repository)} type="button"><Icon name="trash" size={15} /></button></div>)}
         </div>
       </section>
     </div>
@@ -313,11 +313,11 @@ const RepositoryManager = memo(function RepositoryManager({ repositories, onAdd,
 });
 
 function DiscoveryLoading(): React.JSX.Element {
-  return <div className="cindy-discovery-placeholder">正在从仓库读取技能…</div>;
+  return <div className="biny-discovery-placeholder">正在从仓库读取技能…</div>;
 }
 
 function DiscoveryEmpty({ detail }: { detail: string }): React.JSX.Element {
-  return <div className="cindy-discovery-placeholder"><Icon name="wand" size={24} /><strong>暂无技能</strong><span>{detail}</span></div>;
+  return <div className="biny-discovery-placeholder"><Icon name="wand" size={24} /><strong>暂无技能</strong><span>{detail}</span></div>;
 }
 
 function parseRepository(value: string, branch: string): DesktopSkillRepository | undefined {

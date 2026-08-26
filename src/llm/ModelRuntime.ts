@@ -47,8 +47,8 @@ export class ModelRuntime {
     this.providers.validate(alias);
   }
 
-  async refreshModels(providerAlias: string, signal?: AbortSignal): Promise<ModelCatalogEntry[]> {
-    const entries = await this.providers.refreshModels(providerAlias, signal);
+  async refreshModels(providerAlias: string, signal?: AbortSignal, force = false): Promise<ModelCatalogEntry[]> {
+    const entries = await this.providers.refreshModels(providerAlias, signal, force);
     this.models.registerCatalog(providerAlias, entries);
     return entries;
   }

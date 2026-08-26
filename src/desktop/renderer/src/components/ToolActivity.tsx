@@ -1,22 +1,23 @@
 /**
- * 单个工具调用的展示卡片：DSH 风格折叠行（变体图标 + 标题 + 摘要 + 状态点 + 扫光），
+ * 单个工具调用的展示卡片：折叠行（状态图标芯片 + 标题 + 摘要 + 用时），
  * 展开体保留权限询问、命令日志、文件变更、diff、网页搜索等卡片。
  *
  * 展开状态是「自动 + 手动覆盖」的组合：等待权限、失败、被拒时默认展开，其余（包括运行中）
- * 保持折叠，运行状态由行首扫光表达；用户手动切换后 `override` 记住该选择，
+ * 保持折叠，运行状态由图标芯片的呼吸光环表达；用户手动切换后 `override` 记住该选择，
  * 直到工具状态发生变化再回到自动策略。
  */
-import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { isFullYesConfirmation } from "../../../../permission/confirmation.js";
 import type { PermissionResult } from "../../../../permission/PermissionManager.js";
 import { tokenizeCommand } from "../commandHighlight.js";
-import { classifyTool, firstLine, toolRowState, VARIANT_TITLES } from "../chatDshModel.js";
+import { classifyTool, firstLine, toolRowState, VARIANT_TITLES } from "../chatModel.js";
 import type { TimelineCommand, TimelineTool } from "../sessionTimeline.js";
 import { projectWebSearchView, type WebSearchResultView, type WebSearchView } from "../webSearchPresentation.js";
 import { CopyButton } from "./CopyButton.js";
 import { Icon } from "./Icon.js";
-import { ToolRow } from "./chat-dsh/ToolRow.js";
-import { IoCard } from "./chat-dsh/IoCard.js";
+import { CodeView } from "./chat/CodeView.js";
+import { ToolCallBlock } from "./chat/ToolCallBlock.js";
+import { IoCard } from "./chat/IoCard.js";
 
 interface ToolActivityProps {
   projectId: string;
@@ -32,7 +33,6 @@ export const ToolActivity = memo(function ToolActivity({ projectId, tool, onPrev
   // override 连同当时的状态一起记：状态一变（比如从 running 变 success）就作废，回到自动策略。
   const [override, setOverride] = useState<{ status: TimelineTool["status"]; expanded: boolean }>();
   const expanded = override?.status === tool.status ? override.expanded : auto;
-  const detailsId = useId();
   const [resolving, setResolving] = useState(false);
   const command = useMemo(() => commandDetails(tool), [tool]);
   const diff = useMemo(() => tool.diff ? analyzeDiff(tool.diff) : undefined, [tool.diff]);
@@ -58,7 +58,7 @@ export const ToolActivity = memo(function ToolActivity({ projectId, tool, onPrev
 
   return (
     <article className={`execution-step tool-activity is-${tool.status}`} data-project-id={projectId}>
-      <ToolRow
+      <ToolCallBlock
         durationLabel={durationMs !== undefined ? formatDuration(durationMs) : undefined}
         errorSummary={errorText ? firstLine(errorText) : null}
         expandable
@@ -70,30 +70,26 @@ export const ToolActivity = memo(function ToolActivity({ projectId, tool, onPrev
         title={VARIANT_TITLES[variant]}
         variant={variant}
       >
-        <div aria-hidden={!expanded} className={`timeline-reveal t-resize${expanded ? " is-open" : ""}`} id={detailsId} inert={!expanded}>
-          <div className="timeline-reveal-inner">
-            <div className="tool-details">
-              {tool.permission ? (
-                <PermissionCard disabled={resolving} permission={tool.permission} onResolve={resolve} />
-              ) : null}
-              {command ? <CommandLog command={command} running={tool.status === "running"} /> : null}
-              {fileChange ? <FileChangeView change={fileChange} onPreviewFile={onPreviewFile} /> : null}
-              {diff && tool.diff ? <DiffView diff={tool.diff} info={diff} onPreviewFile={onPreviewFile} /> : null}
-              {webSearch ? <WebSearchLog onOpenExternal={onOpenExternal} tool={tool} view={webSearch} /> : null}
-              {!command && !diff && !webSearch && !fileChange ? <ToolPayload tool={tool} /> : null}
-              {errorText ? (
-                <section className="tool-section">
-                  <h4 className="tool-section-label">错误</h4>
-                  <div className="copyable-code-block is-error">
-                    <CopyButton className="copy-button" label="复制错误" value={errorText} />
-                    <pre className="tool-error-output"><code>{errorText}</code></pre>
-                  </div>
-                </section>
-              ) : null}
-            </div>
-          </div>
+        <div className="tool-details">
+          {tool.permission ? (
+            <PermissionCard disabled={resolving} permission={tool.permission} onResolve={resolve} />
+          ) : null}
+          {command ? <CommandLog command={command} running={tool.status === "running"} /> : null}
+          {fileChange ? <FileChangeView change={fileChange} onPreviewFile={onPreviewFile} /> : null}
+          {diff && tool.diff ? <DiffView diff={tool.diff} info={diff} onPreviewFile={onPreviewFile} /> : null}
+          {webSearch ? <WebSearchLog onOpenExternal={onOpenExternal} tool={tool} view={webSearch} /> : null}
+          {!command && !diff && !webSearch && !fileChange ? <ToolPayload onPreviewFile={onPreviewFile} tool={tool} /> : null}
+          {errorText ? (
+            <section className="tool-section">
+              <h4 className="tool-section-label">错误</h4>
+              <div className="copyable-code-block is-error">
+                <CopyButton className="copy-button" label="复制错误" value={errorText} />
+                <pre className="tool-error-output"><code>{errorText}</code></pre>
+              </div>
+            </section>
+          ) : null}
         </div>
-      </ToolRow>
+      </ToolCallBlock>
     </article>
   );
 });
@@ -273,9 +269,18 @@ function FileChangeView({ change, onPreviewFile }: { change: FileChangeDetails; 
   const lines = useMemo(() => fileChangeLines(change), [change]);
   const visible = showAll ? lines : lines.slice(0, fileChangeVisibleLines);
   const fileName = change.path?.replaceAll("\\", "/").split("/").at(-1);
+  // 写入是整段新内容：直接走高亮代码卡片（行号 + 语言标签），比满屏绿色 add 行更清爽。
+  if (change.operation === "write") {
+    return (
+      <section className="tool-section">
+        <h4 className="tool-section-label">内容<span className="tool-section-meta">+{lines.length} 行</span></h4>
+        <CodeView code={change.content ?? ""} filePath={change.path} onPreviewFile={change.path ? onPreviewFile : undefined} />
+      </section>
+    );
+  }
   return (
     <section className="tool-section">
-      <h4 className="tool-section-label">{change.operation === "write" ? "内容" : "变更"}</h4>
+      <h4 className="tool-section-label">变更</h4>
       <div className="code-card">
         {change.path ? (
           <button className="code-card-header" onClick={() => onPreviewFile(change.path ?? "")} title={`在右侧预览 ${change.path}`} type="button">
@@ -284,7 +289,7 @@ function FileChangeView({ change, onPreviewFile }: { change: FileChangeDetails; 
           </button>
         ) : null}
         <div className="code-card-body">
-          <CopyButton className="copy-button" label={change.operation === "write" ? "复制内容" : "复制新内容"} value={(change.operation === "write" ? change.content : change.after) ?? ""} />
+          <CopyButton className="copy-button" label="复制新内容" value={change.after ?? ""} />
           <pre className="code-lines"><code>
             {visible.map((line, index) => (
               <span className={`code-line is-${line.kind}`} key={`${String(index)}-${line.text.slice(0, 20)}`}>
@@ -385,17 +390,23 @@ function DiffLine({ line }: { line: DiffLineData }): React.JSX.Element {
   return <span className="diff-line" data-line={diffLineKind(line.text)}>{line.text}{"\n"}</span>;
 }
 
-function ToolPayload({ tool }: { tool: TimelineTool }): React.JSX.Element {
+function ToolPayload({ tool, onPreviewFile }: { tool: TimelineTool; onPreviewFile(path: string): void }): React.JSX.Element {
   const progress = tool.updates.filter((update) => update.text).map((update) => update.text).join("\n");
   const display = tool.display;
   if (display?.kind === "file_io") {
-    // 操作和路径在折叠行的名称与摘要里已经表达过，这里只补充结果本身。
+    // 操作和路径在折叠行的名称与摘要里已经表达过，这里只补充结果本身；
+    // 读文件的内容按扩展名做语法高亮（带行号），和 Alma 的 Read 展示对齐。
     const resultPreview = fileToolResult(tool.result);
     if (!resultPreview?.text && resultPreview?.count === undefined) return <></>;
+    const path = display.path ?? tool.path;
     return (
       <section className="tool-section">
-        <h4 className="tool-section-label">结果{resultPreview.count !== undefined ? <span className="tool-section-meta">{resultPreview.count}</span> : null}</h4>
-        {resultPreview.text ? <CopyableCodeBlock label="复制结果" value={resultPreview.text} /> : null}
+        {resultPreview.count !== undefined ? (
+          <h4 className="tool-section-label">结果<span className="tool-section-meta">{resultPreview.count}</span></h4>
+        ) : null}
+        {resultPreview.text ? (
+          <CodeView code={resultPreview.text} filePath={path} onPreviewFile={path ? onPreviewFile : undefined} />
+        ) : null}
       </section>
     );
   }
@@ -437,7 +448,7 @@ function useLiveDuration(tool: TimelineTool): number | undefined {
   return Number.isNaN(startedAt) ? undefined : Math.max(0, now - startedAt);
 }
 
-// 行首状态字形已由 DSH 风格 ToolRow 的状态点与扫光取代，这里只保留摘要派生。
+// 行首状态由工具行的图标芯片与呼吸光环表达，这里只保留摘要派生。
 
 function toolSummary(tool: TimelineTool, command: TimelineCommand | undefined, diff: DiffInfo | undefined, webSearch: WebSearchView | undefined): string {
   if (command?.command) return command.command;

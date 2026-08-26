@@ -48,23 +48,23 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
   if (!presence.present) return null;
 
   return (
-    <aside aria-label="后台运行" className="cindy-runtime-panel" data-panel-phase={presence.phase}>
-      <header className="cindy-runtime-panel-header">
+    <aside aria-label="后台运行" className="biny-runtime-panel" data-panel-phase={presence.phase}>
+      <header className="biny-runtime-panel-header">
         <div>
           <strong>后台运行</strong>
           <span>任务与 Graph 由 Runtime authority 管理</span>
         </div>
-        <div className="cindy-runtime-panel-actions">
-          <button aria-label="刷新后台运行状态" className="cindy-runtime-panel-icon" disabled={busyAction !== undefined} onClick={() => void onRefresh().catch(onError)} title="刷新" type="button">
+        <div className="biny-runtime-panel-actions">
+          <button aria-label="刷新后台运行状态" className="biny-runtime-panel-icon" disabled={busyAction !== undefined} onClick={() => void onRefresh().catch(onError)} title="刷新" type="button">
             <Icon name="refresh" size={14} />
           </button>
-          <button aria-label="关闭后台运行面板" className="cindy-runtime-panel-icon" onClick={onClose} title="关闭" type="button">
+          <button aria-label="关闭后台运行面板" className="biny-runtime-panel-icon" onClick={onClose} title="关闭" type="button">
             <Icon name="close" size={14} />
           </button>
         </div>
       </header>
 
-      <div className="cindy-runtime-summary" aria-label="后台运行统计">
+      <div className="biny-runtime-summary" aria-label="后台运行统计">
         <span>任务 {tasks.length}</span>
         <span>Graph {graphs.length}</span>
       </div>
@@ -79,7 +79,7 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
             <RuntimeRow key={id} label={id} status={status}>
               {action ? (
                 <button
-                  className="cindy-runtime-row-action"
+                  className="biny-runtime-row-action"
                   disabled={busyAction !== undefined}
                   onClick={() => void runAction(`${action.operation}:${id}`, action.operation, { taskRunId: id })}
                   type="button"
@@ -107,7 +107,7 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
             <RuntimeRow key={`graph:${id}`} label={`Graph · ${id}`} status={status}>
               {paused || status === "running" ? (
                 <button
-                  className="cindy-runtime-row-action"
+                  className="biny-runtime-row-action"
                   disabled={busyAction !== undefined}
                   onClick={() => void runAction(`${paused ? "graph.resume" : "graph.pause"}:${id}`, paused ? "graph.resume" : "graph.pause", { graphId: id })}
                   type="button"
@@ -120,7 +120,7 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
         })}
       </RuntimeSection>
 
-      <div className="cindy-runtime-panel-footer">
+      <div className="biny-runtime-panel-footer">
         <span>Capability {capabilities.length}</span>
         <span>断线恢复从 SQLite authority 继续</span>
       </div>
@@ -132,21 +132,21 @@ function RuntimeSection({ children, empty, title }: { children?: React.ReactNode
   const content = Array.isArray(children) ? children.filter(Boolean) : children;
   const isEmpty = Array.isArray(content) ? content.length === 0 : !content;
   return (
-    <section className="cindy-runtime-section">
+    <section className="biny-runtime-section">
       <h3>{title}</h3>
-      {isEmpty ? <p className="cindy-runtime-empty">{empty}</p> : content}
+      {isEmpty ? <p className="biny-runtime-empty">{empty}</p> : content}
     </section>
   );
 }
 
 function RuntimeRow({ children, label, status }: { children?: React.ReactNode; label: string; status: string }): React.JSX.Element {
   return (
-    <div className="cindy-runtime-row">
-      <div className="cindy-runtime-row-copy">
+    <div className="biny-runtime-row">
+      <div className="biny-runtime-row-copy">
         <span title={label}>{label}</span>
         <small>{status}</small>
       </div>
-      <div className="cindy-runtime-row-actions">{children}</div>
+      <div className="biny-runtime-row-actions">{children}</div>
     </div>
   );
 }

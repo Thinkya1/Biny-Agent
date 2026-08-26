@@ -333,23 +333,23 @@ export function useWorkspaceInspector({
       <aside aria-label="工作区检查器" className="desktop-inspector" role="complementary">
         <header className={`desktop-inspector-header${activeTool ? " is-tool" : ""}`}>
           {activeTool ? (
-            <button aria-label="返回工作区工具" className="cindy-inspector-back" onClick={() => openInspector("launcher")} title="返回工作区工具" type="button">
+            <button aria-label="返回工作区工具" className="biny-inspector-back" onClick={() => openInspector("launcher")} title="返回工作区工具" type="button">
               <Icon name="arrow-left" size={15} />
               <Icon name={activeTool.icon} size={14} />
               <span>{activeTool.label}</span>
             </button>
-          ) : <span aria-hidden="true" className="cindy-inspector-header-spacer" />}
+          ) : <span aria-hidden="true" className="biny-inspector-header-spacer" />}
           <button aria-label="收起工作区工具" className="desktop-inspector-close" onClick={() => setInspectorOpen(false)} title="收起工作区工具" type="button">
             <Icon name="panel-right" size={15} />
           </button>
         </header>
         <div className="desktop-inspector-body" id="desktop-inspector-panel">
-          <div className="t-page-slide cindy-inspector-pages" data-page={inspectorView === "launcher" ? "1" : "2"}>
-            <section aria-hidden={inspectorView === "launcher" ? undefined : true} className="t-page cindy-inspector-launcher-page" data-page-id="1" inert={inspectorView === "launcher" ? undefined : true}>
+          <div className="t-page-slide biny-inspector-pages" data-page={inspectorView === "launcher" ? "1" : "2"}>
+            <section aria-hidden={inspectorView === "launcher" ? undefined : true} className="t-page biny-inspector-launcher-page" data-page-id="1" inert={inspectorView === "launcher" ? undefined : true}>
               <InspectorToolLauncher error={launcherError} onAction={openLauncherAction} />
             </section>
-            <section aria-hidden={inspectorView === "launcher" ? true : undefined} className="t-page cindy-inspector-tool-page" data-page-id="2" inert={inspectorView === "launcher" ? true : undefined}>
-              <div className="cindy-inspector-view-content" key={inspectorView}>{toolContent}</div>
+            <section aria-hidden={inspectorView === "launcher" ? true : undefined} className="t-page biny-inspector-tool-page" data-page-id="2" inert={inspectorView === "launcher" ? true : undefined}>
+              <div className="biny-inspector-view-content" key={inspectorView}>{toolContent}</div>
             </section>
           </div>
         </div>
@@ -381,7 +381,7 @@ function FilePanelResizer({ width, onWidthChange, onResizeStart, onResizeEnd }: 
   onResizeEnd(width: number): void;
 }): React.JSX.Element {
   const resizeWithKeyboard = (direction: -1 | 1, resizer: HTMLDivElement): void => {
-    const layoutRoot = resizer.closest<HTMLElement>(".cindy-app-shell");
+    const layoutRoot = resizer.closest<HTMLElement>(".biny-app-shell");
     const currentWidth = resizer.parentElement?.getBoundingClientRect().width ?? width;
     const next = clampFilePanelWidthForLayout(currentWidth + direction * 16, layoutRoot);
     onWidthChange(next);
@@ -392,7 +392,7 @@ function FilePanelResizer({ width, onWidthChange, onResizeStart, onResizeEnd }: 
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     onResizeStart();
-    const layoutRoot = event.currentTarget.closest<HTMLElement>(".cindy-app-shell");
+    const layoutRoot = event.currentTarget.closest<HTMLElement>(".biny-app-shell");
     const startX = event.clientX;
     const startWidth = event.currentTarget.parentElement?.getBoundingClientRect().width ?? width;
     let currentWidth = startWidth;
@@ -434,7 +434,7 @@ function FilePanelResizer({ width, onWidthChange, onResizeStart, onResizeEnd }: 
 
 function clampFilePanelWidthForLayout(width: number, layoutRoot: HTMLElement | null): number {
   const appWidth = layoutRoot?.clientWidth ?? document.documentElement.clientWidth;
-  const sidebar = layoutRoot?.querySelector<HTMLElement>(":scope > .cindy-sidebar-block");
+  const sidebar = layoutRoot?.querySelector<HTMLElement>(":scope > .biny-sidebar-block");
   const sidebarWidth = sidebar?.getBoundingClientRect().width ?? 0;
   return clampFilePanelWidth(width, appWidth, sidebarWidth);
 }

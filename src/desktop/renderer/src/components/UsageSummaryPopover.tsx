@@ -41,63 +41,63 @@ export function UsageSummaryPopover({ anchorRef, open, onClose, summary }: Usage
   if (!presence.present) return null;
 
   return (
-    <section aria-label="本会话费用与用量" className="cindy-usage-popover" data-popover-phase={presence.phase} role="dialog">
-      <header className="cindy-usage-popover-header">
+    <section aria-label="本会话费用与用量" className="biny-usage-popover" data-popover-phase={presence.phase} role="dialog">
+      <header className="biny-usage-popover-header">
         <div>
           <strong>本会话费用</strong>
           <span>{summary.calls ? `${String(summary.calls)} 条用量记录` : "尚未产生模型请求"}</span>
         </div>
-        <button aria-label="关闭费用明细" className="cindy-toolbar-button" onClick={onClose} type="button">
+        <button aria-label="关闭费用明细" className="biny-toolbar-button" onClick={onClose} type="button">
           <Icon name="close" size={14} />
         </button>
       </header>
 
-      <div className="cindy-usage-total">
+      <div className="biny-usage-total">
         <span>估算费用</span>
         <strong>{formatUsageCost(summary)}</strong>
       </div>
 
-      <div className="cindy-usage-grid">
-        <div className="cindy-usage-stat">
+      <div className="biny-usage-grid">
+        <div className="biny-usage-stat">
           <span>Token</span>
           <strong>{formatTokenCount(summary.totalTokens)}</strong>
         </div>
-        <div className="cindy-usage-stat">
+        <div className="biny-usage-stat">
           <span>已计价记录</span>
           <strong>{String(summary.pricedCalls)}</strong>
         </div>
-        <div className="cindy-usage-stat">
+        <div className="biny-usage-stat">
           <span>输入 Token</span>
           <strong>{formatTokenCount(summary.inputTokens)}</strong>
         </div>
-        <div className="cindy-usage-stat">
+        <div className="biny-usage-stat">
           <span>输出 Token</span>
           <strong>{formatTokenCount(summary.outputTokens)}</strong>
         </div>
-        <div className="cindy-usage-stat">
+        <div className="biny-usage-stat">
           <span>最近缓存命中</span>
           <strong>{formatCacheHitRate(summary.latestCacheHitRate)}</strong>
         </div>
-        <div className="cindy-usage-stat">
+        <div className="biny-usage-stat">
           <span>会话加权命中</span>
           <strong>{formatCacheHitRate(summary.sessionCacheHitRate)}</strong>
         </div>
-        <div className="cindy-usage-stat">
+        <div className="biny-usage-stat">
           <span>缓存读取</span>
           <strong>{formatTokenCount(summary.cacheReadTokens)}</strong>
         </div>
-        <div className="cindy-usage-stat">
+        <div className="biny-usage-stat">
           <span>缓存写入</span>
           <strong>{formatTokenCount(summary.cacheWriteTokens)}</strong>
         </div>
-        <div className="cindy-usage-stat">
+        <div className="biny-usage-stat">
           <span>未命中输入</span>
           <strong>{formatTokenCount(summary.cacheMissTokens ?? 0)}</strong>
         </div>
       </div>
 
-      {summary.unpricedCalls ? <p className="cindy-usage-warning">有 {String(summary.unpricedCalls)} 条记录缺少价格，暂不显示部分合计。</p> : null}
-      <p className="cindy-usage-note">价格来自模型目录；最终账单以模型服务商为准。</p>
+      {summary.unpricedCalls ? <p className="biny-usage-warning">有 {String(summary.unpricedCalls)} 条记录缺少价格，暂不显示部分合计。</p> : null}
+      <p className="biny-usage-note">价格来自模型目录；最终账单以模型服务商为准。</p>
     </section>
   );
 }

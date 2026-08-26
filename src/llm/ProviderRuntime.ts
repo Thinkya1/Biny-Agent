@@ -42,7 +42,7 @@ export interface ProviderRuntime {
   getModels(): ModelCatalogEntry[];
   resolveModel(model: ModelAliasConfig): ModelAliasConfig;
   restoreModels(models: readonly ModelCatalogEntry[]): void;
-  refreshModels(signal?: AbortSignal): Promise<ModelCatalogEntry[]>;
+  refreshModels(signal?: AbortSignal, force?: boolean): Promise<ModelCatalogEntry[]>;
   isConfigured(model?: ModelAliasConfig): boolean;
   validate(model?: ModelAliasConfig): void;
   createModelSettings(agentConfig: AgentConfig, model: ModelAliasConfig): NativeModelSettings;
@@ -102,7 +102,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
     this.liveModels = models.map((model) => liveCatalogMetadata(model, this.id));
   }
 
-  async refreshModels(signal?: AbortSignal): Promise<ModelCatalogEntry[]> {
+  async refreshModels(signal?: AbortSignal, force = false): Promise<ModelCatalogEntry[]> {
     signal?.throwIfAborted();
     const cached = await this.modelsStore?.read(this.id).catch(() => undefined);
     let models: readonly ModelCatalogEntry[];
@@ -116,7 +116,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       const result = await fetchModelCatalogSnapshot(
         { alias: this.id, config: this.config, definition: this.definition },
         signal,
-        { etag: cached?.etag, lastModified: cached?.lastModified },
+        force ? {} : { etag: cached?.etag, lastModified: cached?.lastModified },
         this.fetcher
       );
       if (result.notModified && !cached) throw new Error(`Provider ${this.id} returned 304 without a stored model catalog.`);
@@ -394,8 +394,8 @@ export class ProviderRegistry {
     provider.validate(model);
   }
 
-  async refreshModels(id: string, signal?: AbortSignal): Promise<ModelCatalogEntry[]> {
-    return await this.require(id).refreshModels(signal);
+  async refreshModels(id: string, signal?: AbortSignal, force = false): Promise<ModelCatalogEntry[]> {
+    return await this.require(id).refreshModels(signal, force);
   }
 
   catalogsSnapshot(): Array<[string, ModelCatalogEntry[]]> {

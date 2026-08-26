@@ -45,7 +45,7 @@ export function WorkspaceContextBar({
     const closeOnOutsidePointer = (event: PointerEvent): void => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (target.closest(".cindy-workspace-context-menu") || projectAnchorRef.current?.contains(target) || branchAnchorRef.current?.contains(target)) return;
+      if (target.closest(".biny-workspace-context-menu") || projectAnchorRef.current?.contains(target) || branchAnchorRef.current?.contains(target)) return;
       setOpenMenu(null);
     };
     const closeOnEscape = (event: KeyboardEvent): void => {
@@ -68,14 +68,14 @@ export function WorkspaceContextBar({
   };
 
   return (
-    <div className="cindy-workspace-context-bar">
-      <span className="cindy-workspace-context-label">工作区</span>
-      <div className="cindy-workspace-context-selectors">
-        <div className="cindy-workspace-context-anchor" ref={projectAnchorRef}>
+    <div className="biny-workspace-context-bar">
+      <span className="biny-workspace-context-label">工作区</span>
+      <div className="biny-workspace-context-selectors">
+        <div className="biny-workspace-context-anchor" ref={projectAnchorRef}>
           <button
             aria-expanded={openMenu === "project"}
             aria-haspopup="menu"
-            className="cindy-workspace-context-trigger"
+            className="biny-workspace-context-trigger"
             onClick={toggleProjectMenu}
             type="button"
           >
@@ -93,19 +93,19 @@ export function WorkspaceContextBar({
             projects={projects}
           />
         </div>
-        <span aria-hidden="true" className="cindy-workspace-context-divider">/</span>
-        <div className="cindy-workspace-context-anchor" ref={branchAnchorRef}>
+        <span aria-hidden="true" className="biny-workspace-context-divider">/</span>
+        <div className="biny-workspace-context-anchor" ref={branchAnchorRef}>
           <button
             aria-expanded={openMenu === "branch"}
             aria-haspopup="menu"
-            className="cindy-workspace-context-trigger cindy-workspace-branch-trigger"
+            className="biny-workspace-context-trigger biny-workspace-branch-trigger"
             disabled={project.missing}
             onClick={toggleBranchMenu}
             type="button"
           >
             <Icon name="branch" size={14} />
             <span>{project.branch ?? "未检出分支"}</span>
-            {project.dirty ? <span aria-label="有未提交更改" className="cindy-workspace-context-dirty" title="有未提交更改" /> : null}
+            {project.dirty ? <span aria-label="有未提交更改" className="biny-workspace-context-dirty" title="有未提交更改" /> : null}
             <Icon name="chevron" size={11} />
           </button>
           <BranchMenu
@@ -162,15 +162,15 @@ function ProjectMenu({
   return (
     <ComposerPopover
       anchorRef={anchorRef}
-      className={`composer-popover cindy-composer-popover cindy-workspace-context-menu${presenceClass(presence.phase)}`}
+      className={`composer-popover biny-composer-popover biny-workspace-context-menu${presenceClass(presence.phase)}`}
       phase={presence.phase}
     >
-      <div aria-label="选择项目" className="cindy-workspace-context-menu-surface" role="menu">
-        <label className="cindy-workspace-context-search">
+      <div aria-label="选择项目" className="biny-workspace-context-menu-surface" role="menu">
+        <label className="biny-workspace-context-search">
           <Icon name="search" size={13} />
           <input aria-label="搜索项目" onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目…" ref={searchRef} type="search" value={query} />
         </label>
-        <div className="cindy-workspace-context-options">
+        <div className="biny-workspace-context-options">
           {filteredProjects.map((candidate) => {
             const selected = candidate.id === currentProjectId;
             const choose = (event: React.SyntheticEvent): void => {
@@ -183,7 +183,7 @@ function ProjectMenu({
             return (
               <button
                 aria-checked={selected}
-                className={`cindy-workspace-context-option${selected ? " is-selected" : ""}`}
+                className={`biny-workspace-context-option${selected ? " is-selected" : ""}`}
                 disabled={candidate.missing}
                 key={candidate.id}
                 onKeyDown={(event) => {
@@ -194,16 +194,16 @@ function ProjectMenu({
                 role="menuitemradio"
                 type="button"
               >
-                <span className="cindy-workspace-context-option-leading"><Icon name="folder" size={14} /><span><strong>{candidate.name}</strong><small>{candidate.missing ? "路径不可用" : candidate.path}</small></span></span>
-                <span className="cindy-workspace-context-option-check">{selected ? <Icon name="check" size={14} /> : null}</span>
+                <span className="biny-workspace-context-option-leading"><Icon name="folder" size={14} /><span><strong>{candidate.name}</strong><small>{candidate.missing ? "路径不可用" : candidate.path}</small></span></span>
+                <span className="biny-workspace-context-option-check">{selected ? <Icon name="check" size={14} /> : null}</span>
               </button>
             );
           })}
-          {!filteredProjects.length ? <div className="cindy-workspace-context-menu-empty">没有匹配的项目</div> : null}
+          {!filteredProjects.length ? <div className="biny-workspace-context-menu-empty">没有匹配的项目</div> : null}
         </div>
-        <div className="cindy-workspace-context-menu-separator" />
+        <div className="biny-workspace-context-menu-separator" />
         <button
-          className="cindy-workspace-context-menu-action"
+          className="biny-workspace-context-menu-action"
           onPointerDown={(event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -286,16 +286,16 @@ function BranchMenu({
   return (
     <ComposerPopover
       anchorRef={anchorRef}
-      className={`composer-popover cindy-composer-popover cindy-workspace-context-menu${presenceClass(presence.phase)}`}
+      className={`composer-popover biny-composer-popover biny-workspace-context-menu${presenceClass(presence.phase)}`}
       phase={presence.phase}
     >
-      <div aria-label="选择 Git 分支" className="cindy-workspace-context-menu-surface" role="menu">
-        <label className="cindy-workspace-context-search">
+      <div aria-label="选择 Git 分支" className="biny-workspace-context-menu-surface" role="menu">
+        <label className="biny-workspace-context-search">
           <Icon name="search" size={13} />
           <input aria-label="搜索分支" onChange={(event) => setQuery(event.target.value)} placeholder="搜索本地分支…" ref={searchRef} type="search" value={query} />
         </label>
-        <div className="cindy-workspace-context-options">
-          {branchesLoading ? <div className="cindy-workspace-context-menu-empty">正在读取本地分支…</div> : null}
+        <div className="biny-workspace-context-options">
+          {branchesLoading ? <div className="biny-workspace-context-menu-empty">正在读取本地分支…</div> : null}
           {!branchesLoading ? filteredBranches.map((branch) => {
             const selected = branch.name === currentBranch;
             const choose = (event: React.SyntheticEvent): void => {
@@ -307,7 +307,7 @@ function BranchMenu({
             return (
               <button
                 aria-checked={selected}
-                className={`cindy-workspace-context-option${selected ? " is-selected" : ""}`}
+                className={`biny-workspace-context-option${selected ? " is-selected" : ""}`}
                 key={branch.name}
                 onKeyDown={(event) => {
                   if (event.key !== "Enter" && event.key !== " ") return;
@@ -317,16 +317,16 @@ function BranchMenu({
                 role="menuitemradio"
                 type="button"
               >
-                <span className="cindy-workspace-context-option-leading"><Icon name="branch" size={14} /><span><strong>{branch.name}</strong><small>本地分支</small></span></span>
-                <span className="cindy-workspace-context-option-check">{selected ? <Icon name="check" size={14} /> : null}</span>
+                <span className="biny-workspace-context-option-leading"><Icon name="branch" size={14} /><span><strong>{branch.name}</strong><small>本地分支</small></span></span>
+                <span className="biny-workspace-context-option-check">{selected ? <Icon name="check" size={14} /> : null}</span>
               </button>
             );
           }) : null}
-          {!branchesLoading && !filteredBranches.length ? <div className="cindy-workspace-context-menu-empty">没有匹配的本地分支</div> : null}
+          {!branchesLoading && !filteredBranches.length ? <div className="biny-workspace-context-menu-empty">没有匹配的本地分支</div> : null}
         </div>
-        <div className="cindy-workspace-context-menu-separator" />
+        <div className="biny-workspace-context-menu-separator" />
         {creating ? (
-          <form className="cindy-workspace-context-create" onSubmit={(event) => void submitCreate(event)}>
+          <form className="biny-workspace-context-create" onSubmit={(event) => void submitCreate(event)}>
             <label htmlFor="workspace-new-branch">新分支名称</label>
             <input id="workspace-new-branch" onChange={(event) => setNewBranch(event.target.value)} placeholder="feature/short-name" ref={createRef} value={newBranch} />
             <div>
@@ -336,7 +336,7 @@ function BranchMenu({
           </form>
         ) : (
           <button
-            className="cindy-workspace-context-menu-action"
+            className="biny-workspace-context-menu-action"
             onPointerDown={(event) => {
               event.preventDefault();
               event.stopPropagation();

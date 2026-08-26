@@ -33,7 +33,7 @@ function SidebarPinSpacer({ active }: { active: boolean }): React.JSX.Element {
   return (
     <div
       aria-hidden="true"
-      className="cindy-sidebar-pin-spacer"
+      className="biny-sidebar-pin-spacer"
       data-active={active ? "true" : undefined}
     />
   );
@@ -43,17 +43,17 @@ export function DesktopShell({ children, overlays, rightPanel, rightSidebar, sid
   // Inspector 退场期间仍保留 dock 节点，横线要等右侧栏完全卸载后再恢复。
   const rightSidebarVisible = rightPanel !== undefined && rightPanel !== null;
   const rootStyle = {
-    "--cindy-sidebar-visual-width": `${sidebarLayout.visualWidth}px`,
-    "--cindy-sidebar-flow-width": `${sidebarLayout.flowWidth}px`,
-    "--cindy-sidebar-content-width": `${sidebarLayout.contentWidth}px`,
-    "--cindy-sidebar-expanded-width": `${sidebarLayout.expandedWidth}px`,
+    "--biny-sidebar-visual-width": `${sidebarLayout.visualWidth}px`,
+    "--biny-sidebar-flow-width": `${sidebarLayout.flowWidth}px`,
+    "--biny-sidebar-content-width": `${sidebarLayout.contentWidth}px`,
+    "--biny-sidebar-expanded-width": `${sidebarLayout.expandedWidth}px`,
     // 和左栏一样，右侧只改变目标流宽度；动画插值由外壳统一驱动，主区因此会被连续推向左侧。
-    "--cindy-inspector-flow-width": `${rightSidebar?.open ? rightSidebar.width : 0}px`
+    "--biny-inspector-flow-width": `${rightSidebar?.open ? rightSidebar.width : 0}px`
   } as React.CSSProperties;
   return (
     <Theme mode={theme} theme={neutralTheme}>
       <div
-        className="desktop-root cindy-root"
+        className="desktop-root biny-root"
         data-sidebar-mode={sidebarLayout.mode}
         data-right-sidebar-visible={rightSidebarVisible ? "true" : undefined}
         data-inspector-resizing={rightSidebar?.resizing ? "true" : undefined}
@@ -61,9 +61,9 @@ export function DesktopShell({ children, overlays, rightPanel, rightSidebar, sid
         data-sidebar-transition={sidebarLayout.transition === "idle" ? undefined : sidebarLayout.transition}
         style={rootStyle}
       >
-        <div className="cindy-app-shell">
-          <main className="cindy-content-shell">{children}</main>
-          <div className="cindy-sidebar-block">
+        <div className="biny-app-shell">
+          <main className="biny-content-shell">{children}</main>
+          <div className="biny-sidebar-block">
             <SidebarPinSpacer active={sidebarLayout.transition === "pinning"} />
             {sideNav}
           </div>
@@ -71,11 +71,11 @@ export function DesktopShell({ children, overlays, rightPanel, rightSidebar, sid
         </div>
         <div
           aria-hidden="true"
-          className="cindy-topbar-divider"
+          className="biny-topbar-divider"
         />
         <div
           aria-hidden="true"
-          className="cindy-sidebar-divider"
+          className="biny-sidebar-divider"
         />
         {overlays}
       </div>

@@ -108,7 +108,7 @@ const settingsTitles: Record<SettingsTab, string> = {
   "MCP 服务器": "MCP 服务器",
   技能: "技能",
   插件: "插件",
-  活动记录: "Activity Recorder",
+  活动记录: "活动记录器",
   记忆: "记忆",
   联网搜索: "联网搜索",
   关于: "关于"
@@ -121,7 +121,7 @@ const settingsSubtitles: Record<SettingsTab, string> = {
   "MCP 服务器": "管理可供 Agent 使用的 MCP 扩展服务。",
   技能: "管理本机可用的 Agent Skills，并按需查看技能内容。",
   插件: "管理当前项目的 Plugin，并从官方市场安装。",
-  活动记录: "本地记录屏幕、OCR 与输入活动，并控制隐私边界。",
+  活动记录: "记录事件与 AX 语义，必要时使用本地视觉 fallback，并控制隐私边界。",
   记忆: "记忆检索、自动生成、长期策略与条目管理。",
   联网搜索: "配置联网搜索与数据来源。",
   关于: "版本与产品信息。"
@@ -694,7 +694,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
   onRemove(alias: string): Promise<void>;
   onNotify(message: string): void;
   onOpenExternal(url: string): Promise<void>;
-  onFetchCatalog(providerAlias: string): Promise<DesktopModelCatalogResult>;
+  onFetchCatalog(providerAlias: string, force?: boolean): Promise<DesktopModelCatalogResult>;
   onFetchCatalogCandidate(configuration: DesktopModelConfigurationInput): Promise<DesktopModelCatalogResult>;
   onStartLogin(provider: DesktopModelLoginProvider): Promise<DesktopModelLoginStartResult>;
   onCompleteLogin(provider: DesktopModelLoginProvider, authRequestId: string, pastedAuthorization?: string): Promise<void>;
@@ -710,7 +710,6 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
   const [query, setQuery] = useState("");
   const [connectApiKey, setConnectApiKey] = useState("");
   const [connectBaseUrl, setConnectBaseUrl] = useState("");
-  const [connectModelId, setConnectModelId] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [detailApiKey, setDetailApiKey] = useState("");
   const [detailBaseUrl, setDetailBaseUrl] = useState("");
@@ -784,7 +783,6 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
   const openConnect = (provider: ProviderCatalogItem): void => {
     setConnectApiKey("");
     setConnectBaseUrl(provider.baseUrl);
-    setConnectModelId(provider.models[0]?.id ?? "");
     setShowKey(false);
     setTestResult(undefined);
     setLoginStage("idle");
@@ -817,10 +815,10 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     setView({ kind: "detail", provider: providerAlias });
   };
 
-  const refreshCatalog = async (providerAlias: string): Promise<void> => {
+  const refreshCatalog = async (providerAlias: string, force = false): Promise<void> => {
     setFetchingCatalog(true);
     try {
-      const result = await onFetchCatalog(providerAlias);
+      const result = await onFetchCatalog(providerAlias, force);
       setLiveCatalog((current) => ({
         ...current,
         [providerAlias]: { models: result.models.map(catalogModelFromEntry), fetchedAt: result.fetchedAt, source: result.source }
@@ -846,10 +844,10 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     provider: ProviderCatalogItem,
     options: { apiKey?: string; baseUrl?: string; modelId?: string; model?: CatalogModel; requireApiKey?: boolean; makeDefault?: boolean } = {}
   ): DesktopModelConfigurationInput | undefined => {
-    // 只有没有固定 baseUrl 的内置卡片需要用户手填地址和模型 ID；
-    // 其余内置服务商都有固定 baseUrl，模型列表从服务商目录勾选，不再要求手填。
+    // 自定义端点（无固定 baseUrl）由用户填服务地址、从实时目录勾选模型；
+    // 其余内置服务商都有固定 baseUrl，模型列表从服务商目录勾选。
     const isCustom = isManualEndpoint(provider);
-    const modelId = (options.modelId ?? (isCustom ? connectModelId : provider.models[0]?.id ?? connectModelId)).trim();
+    const modelId = (options.modelId ?? provider.models[0]?.id ?? "").trim();
     if (!modelId) return undefined;
     const apiKey = (options.apiKey ?? connectApiKey).trim();
     if ((options.requireApiKey ?? provider.requiresApiKey) && !apiKey) return undefined;
@@ -894,7 +892,15 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     const generation = connectGenerationRef.current;
     setConnectFetching(true);
     try {
-      const baseUrl = provider.baseUrl.trim();
+      const isCustom = isManualEndpoint(provider);
+      const baseUrl = (isCustom ? connectBaseUrl.trim() : provider.baseUrl).trim();
+      if (isCustom && !baseUrl) {
+        if (manual) onNotify("请先填写服务地址再加载模型");
+        setConnectModels([]);
+        setConnectSelected([]);
+        setConnectFetchSource(undefined);
+        return;
+      }
       const providerAlias = providerAliasFor(provider, baseUrl);
       const seed = provider.models[0];
       const result = await onFetchCatalogCandidate({
@@ -966,22 +972,28 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
 
   const connectProvider = async (provider: ProviderCatalogItem): Promise<void> => {
     if (isManualEndpoint(provider)) {
-      const configuration = buildProviderConfiguration(provider, {
-        apiKey: connectApiKey,
-        baseUrl: connectBaseUrl.trim() || provider.baseUrl,
-        modelId: connectModelId,
-        requireApiKey: provider.requiresApiKey,
-        // Connecting a brand-new provider is the one place the active default
-        // should move — the user just picked this model.
-        makeDefault: true
-      });
-      if (!configuration) return;
-      await saveConfiguration(configuration);
+      const baseUrl = connectBaseUrl.trim() || provider.baseUrl;
+      const candidates = connectModels.filter((model) => connectSelected.includes(model.id));
+      if (!candidates.length) return;
+      let makeDefault = true;
+      for (const model of candidates) {
+        const configuration = buildProviderConfiguration(provider, {
+          apiKey: connectApiKey,
+          baseUrl,
+          modelId: model.id,
+          model,
+          requireApiKey: provider.requiresApiKey,
+          makeDefault
+        });
+        if (!configuration) continue;
+        await saveConfiguration(configuration);
+        makeDefault = false;
+      }
       setConnectApiKey("");
       setView({ kind: "list" });
       // Pull the provider's real model list right away, so the connection detail
       // opens on the live catalog instead of the single built-in seed model.
-      void refreshCatalogQuietly(configuration.providerAlias);
+      void refreshCatalogQuietly(providerAliasFor(provider, baseUrl));
       return;
     }
     // 内置服务商：按勾选的模型逐个写入草稿，第一个成为默认模型。
@@ -1377,7 +1389,6 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
               provider={view.provider}
               apiKey={connectApiKey}
               baseUrl={connectBaseUrl}
-              modelId={connectModelId}
               showKey={showKey}
               saving={saving}
               testing={testing}
@@ -1389,7 +1400,6 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
               isCustom={isManualEndpoint(view.provider)}
               onApiKey={(value) => { setConnectApiKey(value); setTestResult(undefined); }}
               onBaseUrl={(value) => { setConnectBaseUrl(value); setTestResult(undefined); }}
-              onModelId={(value) => { setConnectModelId(value); setTestResult(undefined); }}
               onToggleKey={() => setShowKey((value) => !value)}
               onLoadModels={() => void loadConnectModels(view.provider, connectApiKey, true)}
               onSelectAll={toggleAllConnectModels}
@@ -1400,7 +1410,8 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
                   ? buildProviderConfiguration(view.provider, {
                       apiKey: connectApiKey,
                       baseUrl: connectBaseUrl.trim() || view.provider.baseUrl,
-                      modelId: connectModelId,
+                      modelId: connectSelected[0] ?? view.provider.models[0]?.id,
+                      model: connectModels.find((model) => model.id === (connectSelected[0] ?? view.provider.models[0]?.id)),
                       requireApiKey: view.provider.requiresApiKey
                     })
                   : buildProviderConfiguration(view.provider, {
@@ -1448,7 +1459,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
             onDisableModel={(alias) => void disableModel(alias)}
             onDeleteConnection={() => void deleteConnection()}
             canDeleteConnection={models.length > detailGroup.models.length}
-            onRefreshCatalog={() => void refreshCatalog(detailGroup.provider)}
+            onRefreshCatalog={() => void refreshCatalog(detailGroup.provider, true)}
             onRelogin={() => {
               // The saved config records which OAuth flow minted this token, so
               // re-login reuses the exact same provider card rather than guessing.
@@ -1787,14 +1798,13 @@ function ConnectionDetailDialog({
 /**
  * 新增连接对话框（API key 方式）。
  *
- * `isCustom` 指自建/中转端点：这类没有内置默认值，必须自己填 base URL 和模型 id，
- * 因此提交条件比选内置服务商时更严。
+ * `isCustom` 指自建/中转端点：这类没有内置默认值，需要自己填 base URL，
+ * 再从实时模型目录勾选启用（不再要求手填模型 ID）。
  */
 function ConnectProviderDialog({
   provider,
   apiKey,
   baseUrl,
-  modelId,
   showKey,
   saving,
   testing,
@@ -1806,7 +1816,6 @@ function ConnectProviderDialog({
   isCustom,
   onApiKey,
   onBaseUrl,
-  onModelId,
   onToggleKey,
   onLoadModels,
   onSelectAll,
@@ -1819,7 +1828,6 @@ function ConnectProviderDialog({
   provider: ProviderCatalogItem;
   apiKey: string;
   baseUrl: string;
-  modelId: string;
   showKey: boolean;
   saving: boolean;
   testing: boolean;
@@ -1831,7 +1839,6 @@ function ConnectProviderDialog({
   isCustom: boolean;
   onApiKey(value: string): void;
   onBaseUrl(value: string): void;
-  onModelId(value: string): void;
   onToggleKey(): void;
   onLoadModels(): void;
   onSelectAll(): void;
@@ -1843,8 +1850,8 @@ function ConnectProviderDialog({
 }): React.JSX.Element {
   const [modelQuery, setModelQuery] = useState("");
   const keyMissing = provider.requiresApiKey && !apiKey.trim();
-  const canSubmit = !saving && !testing && !keyMissing && (isCustom ? Boolean(modelId.trim() && baseUrl.trim()) : selected.length > 0 && !fetching);
-  const canTest = !saving && !testing && !keyMissing && (isCustom ? Boolean(modelId.trim() && baseUrl.trim()) : selected.length > 0 || provider.models.length > 0);
+  const canSubmit = !saving && !testing && !keyMissing && !fetching && selected.length > 0 && (isCustom ? Boolean(baseUrl.trim()) : true);
+  const canTest = !saving && !testing && !keyMissing && (isCustom ? (selected.length > 0 || provider.models.length > 0) && Boolean(baseUrl.trim()) : selected.length > 0 || provider.models.length > 0);
   const apiKeyUrl = provider.apiKeyUrl;
   const filteredModels = models.filter((model) => !modelQuery.trim()
     || `${model.displayName} ${model.id}`.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()));
@@ -1854,7 +1861,9 @@ function ConnectProviderDialog({
     : models.length > 0
       ? `已选 ${String(selected.length)} / ${String(models.length)} · ${fetchSource === "fetched" ? "已从服务商获取" : "内置候选，需手动选择；可点击“加载模型”刷新"}`
       : keyMissing
-        ? "填写密钥后自动加载支持列表"
+        ? isCustom
+          ? "填写 API Key 和服务地址后，可点击“加载模型”获取支持列表"
+          : "填写密钥后自动加载支持列表"
         : "点击“加载模型”从服务商获取支持列表";
   return (
     <div className="connect-dialog" role="dialog" aria-label={`连接 ${provider.label}`}>
@@ -1886,22 +1895,16 @@ function ConnectProviderDialog({
           {apiKeyUrl ? <a className="settings-link" href={apiKeyUrl} onClick={(event) => { event.preventDefault(); void onOpenExternal(apiKeyUrl); }} rel="noreferrer">获取模型密钥</a> : null}
         </div>
         {isCustom ? (
-          <>
-            <div className="connection-field">
-              <div className="connection-field-label"><span>模型 ID</span></div>
-              <input onChange={(event) => onModelId(event.target.value)} placeholder="例如 gpt-5.2" value={modelId} />
-            </div>
-            <div className="connection-field">
-              <div className="connection-field-label"><span>服务地址</span></div>
-              <input onChange={(event) => onBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" value={baseUrl} />
-            </div>
-          </>
-        ) : (
           <div className="connection-field">
-            <div className="connection-field-label">
-              <span>启用模型</span>
-              <small>{modelHint}</small>
-            </div>
+            <div className="connection-field-label"><span>服务地址</span></div>
+            <input onChange={(event) => onBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" value={baseUrl} />
+          </div>
+        ) : null}
+        <div className="connection-field">
+          <div className="connection-field-label">
+            <span>启用模型</span>
+            <small>{modelHint}</small>
+          </div>
             <div className="connect-model-toolbar">
               <label className="model-search-input">
                 <Icon name="search" size={13} />
@@ -1940,7 +1943,6 @@ function ConnectProviderDialog({
               {!filteredModels.length ? <div className="model-list-empty">{models.length ? "没有匹配的模型" : fetching ? "正在加载模型…" : "尚未加载模型列表"}</div> : null}
             </div>
           </div>
-        )}
         {testResult ? <ConnectionTestResult result={testResult} /> : null}
         <div className="connect-dialog-actions">
           <button onClick={onCancel} type="button">取消</button>

@@ -35,6 +35,7 @@ import type {
   DesktopSessionSummary,
   DesktopSettingsSaveInput,
   DesktopSettingsSnapshot,
+  DesktopSkillCatalogEntry,
   DesktopWorkspaceSnapshot
 } from "../src/desktop/protocol.js";
 import {
@@ -60,6 +61,7 @@ import { projectWebSearchView } from "../src/desktop/renderer/src/webSearchPrese
 import type { TimelineTool } from "../src/desktop/renderer/src/sessionTimeline.js";
 import { catalogForConnection, customCatalogEntry, providerCatalog } from "../src/desktop/renderer/src/providerCatalog.js";
 import { thinkingLabel as composerThinkingLabel } from "../src/desktop/renderer/src/components/composer/composerLabels.js";
+import { DESKTOP_COMPOSER_COMMAND_NAMES, buildDesktopComposerItems, isSkillSlashCommand, normalizeSkillSlashCommand } from "../src/desktop/renderer/src/components/composer/desktopSlashCommands.js";
 import { highlightFencedCode, highlightWorkspaceFile } from "../src/desktop/renderer/src/syntaxHighlight.js";
 import { splitAttachmentReferences, withAttachmentReferences } from "../src/desktop/attachmentReferences.js";
 import { tokenizeCommand } from "../src/desktop/renderer/src/commandHighlight.js";
@@ -100,6 +102,7 @@ testFencedCodeHighlighting();
 testAttachmentReferenceRoundTrip();
 await testInlineImageReading();
 testCommandHighlighting();
+testDesktopComposerSlashItems();
 testWorkspaceFileMarkers();
 await testFilePanelSizing();
 testSidebarSizing();
@@ -110,6 +113,8 @@ await testDesktopActiveViewPersistence();
 await testDesktopMemoryV3CasAndOriginFilters();
 await testDesktopSettingsTransaction();
 await testDesktopGlobalWriteGateAndRuntimeRefresh();
+await testDesktopSettingsSaveReturnsBeforeRuntimeRefresh();
+await testDesktopGlobalPersonalizationRefreshesInBackground();
 await testDesktopSettingsCredentialLifecycle();
 await testDesktopModelConfiguration();
 await testDesktopModelSwitchDoesNotResumeInterruptedTurn();
@@ -118,6 +123,7 @@ await testDesktopDoesNotResumePersistedIdleSession();
 await testDesktopPermissionModePersistsInIdleSnapshot();
 await testDesktopPermissionModePersistsThroughExistingHost();
 await testDesktopReconcilesPersistedPermissionWithExistingHost();
+await testDesktopMemoryChangesKeepPermissionMode();
 await testDesktopCredentialsAreSeparated();
 await testDesktopWebSearchSettings();
 await testDesktopPersonalizationCasAndChatOverride();
@@ -1470,7 +1476,10 @@ async function testDesktopGlobalWriteGateAndRuntimeRefresh(): Promise<void> {
     });
     const transactionId = "global-runtime-refresh";
     await agents.commitSettingsConfig(prepared, transactionId);
-    assert.deepEqual(new Set(rebuilt), new Set([first.id, second.id]), "config commit must refresh every resident idle runtime");
+    assert.deepEqual(rebuilt, [], "配置提交本身不应等待派生 Runtime 刷新");
+    agents.settingsCommitted(prepared);
+    await (agents as unknown as { idleRuntimeRebuildTail: Promise<void> }).idleRuntimeRebuildTail;
+    assert.deepEqual(new Set(rebuilt), new Set([first.id, second.id]), "提交确认后应刷新每个 resident idle Runtime");
 
     rebuilt.length = 0;
     assert.equal(await agents.rollbackSettingsConfig(prepared, transactionId), "completed");
@@ -1514,6 +1523,125 @@ async function testDesktopGlobalWriteGateAndRuntimeRefresh(): Promise<void> {
     );
     agents.hasRunningTasks = originalHasRunningTasks;
   } finally {
+    await agents?.closeAll();
+    if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
+    else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
+    await rm(firstRoot, { recursive: true, force: true });
+    await rm(secondRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopSettingsSaveReturnsBeforeRuntimeRefresh(): Promise<void> {
+  const firstRoot = await mkdtemp(path.join(os.tmpdir(), "biny-settings-save-first-"));
+  const secondRoot = await mkdtemp(path.join(os.tmpdir(), "biny-settings-save-second-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-settings-save-data-"));
+  const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
+  let agents: DesktopAgentManager | undefined;
+  let releaseRebuild: () => void = () => undefined;
+  try {
+    process.env.BINY_RUNTIME_HOST_ENTRY = path.join(desktopRoot, "missing-runtime-host-entry.js");
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const first = await projects.createProject(firstRoot);
+    const second = await projects.createProject(secondRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    await agents.setPermissionMode(first.id, "read-only");
+    await agents.setPermissionMode(second.id, "read-only");
+
+    const internals = agents as unknown as {
+      rebuildManagedRuntime(projectId: string, managed: unknown): Promise<void>;
+      idleRuntimeRebuildTail: Promise<void>;
+    };
+    const rebuilt: string[] = [];
+    let resolveRebuildStarted: () => void = () => undefined;
+    const rebuildStarted = new Promise<void>((resolve) => { resolveRebuildStarted = resolve; });
+    const rebuildGate = new Promise<void>((resolve) => { releaseRebuild = resolve; });
+    internals.rebuildManagedRuntime = async (projectId: string, _managed: unknown): Promise<void> => {
+      rebuilt.push(projectId);
+      resolveRebuildStarted();
+      await rebuildGate;
+    };
+
+    const settings = new DesktopSettingsTransaction(state, agents);
+    const initial = await settings.snapshot(first.id);
+    const result = await settings.save(first.id, {
+      expectedPreferenceRevision: initial.preferenceRevision,
+      expectedConfigRevision: initial.configRevision,
+      personalization: {
+        ...initial.personalization,
+        personality: initial.personalization.personality === "friendly" ? "pragmatic" : "friendly"
+      }
+    });
+    assert.equal(result.status, "committed", JSON.stringify(result));
+    assert.deepEqual(rebuilt, [], "设置事务返回 committed 时不应等待 Runtime 重建");
+
+    await Promise.race([
+      rebuildStarted,
+      new Promise<void>((resolve) => setTimeout(resolve, 1_000))
+    ]);
+    assert.deepEqual(rebuilt, [first.id], "保存返回后才开始后台刷新当前 resident Runtime");
+    releaseRebuild();
+    await internals.idleRuntimeRebuildTail;
+    assert.deepEqual(new Set(rebuilt), new Set([first.id, second.id]));
+  } finally {
+    releaseRebuild();
+    await agents?.closeAll();
+    if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
+    else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
+    await rm(firstRoot, { recursive: true, force: true });
+    await rm(secondRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopGlobalPersonalizationRefreshesInBackground(): Promise<void> {
+  const firstRoot = await mkdtemp(path.join(os.tmpdir(), "biny-global-personalization-first-"));
+  const secondRoot = await mkdtemp(path.join(os.tmpdir(), "biny-global-personalization-second-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-global-personalization-data-"));
+  const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
+  let agents: DesktopAgentManager | undefined;
+  let releaseRebuild: () => void = () => undefined;
+  try {
+    process.env.BINY_RUNTIME_HOST_ENTRY = path.join(desktopRoot, "missing-runtime-host-entry.js");
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const first = await projects.createProject(firstRoot);
+    const second = await projects.createProject(secondRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    await agents.setPermissionMode(first.id, "read-only");
+    await agents.setPermissionMode(second.id, "read-only");
+
+    const internals = agents as unknown as {
+      rebuildManagedRuntime(projectId: string, managed: unknown): Promise<void>;
+      idleRuntimeRebuildTail: Promise<void>;
+    };
+    const rebuilt: string[] = [];
+    let resolveRebuildStarted: () => void = () => undefined;
+    const rebuildStarted = new Promise<void>((resolve) => { resolveRebuildStarted = resolve; });
+    const rebuildGate = new Promise<void>((resolve) => { releaseRebuild = resolve; });
+    internals.rebuildManagedRuntime = async (projectId: string, _managed: unknown): Promise<void> => {
+      rebuilt.push(projectId);
+      resolveRebuildStarted();
+      await rebuildGate;
+    };
+
+    const initial = await agents.personalizationOverview(first.id);
+    const saved = await agents.saveMemorySettings(first.id, {
+      expectedRevision: initial.configRevision,
+      settings: { ...initial.memory, useMemories: !initial.memory.useMemories }
+    });
+    assert.equal(saved.settings.useMemories, !initial.memory.useMemories);
+    assert.deepEqual(rebuilt, [], "全局记忆设置返回前不应等待空闲 Runtime 重建");
+
+    await Promise.race([
+      rebuildStarted,
+      new Promise<void>((resolve) => setTimeout(resolve, 1_000))
+    ]);
+    assert.deepEqual(rebuilt, [first.id], "设置返回后才开始后台重建当前空闲 Runtime");
+    releaseRebuild();
+    await internals.idleRuntimeRebuildTail;
+    assert.deepEqual(new Set(rebuilt), new Set([first.id, second.id]));
+  } finally {
+    releaseRebuild();
     await agents?.closeAll();
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
@@ -2007,6 +2135,85 @@ async function testDesktopReconcilesPersistedPermissionWithExistingHost(): Promi
   } finally {
     await agents?.closeAll();
     await host?.closeOwner();
+    if (previousAgentRoot === undefined) delete process.env.BINY_AGENT_DIR;
+    else process.env.BINY_AGENT_DIR = previousAgentRoot;
+    if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
+    else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopMemoryChangesKeepPermissionMode(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-memory-permission-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-memory-permission-data-"));
+  const previousAgentRoot = process.env.BINY_AGENT_DIR;
+  const previousHostEntry = process.env.BINY_RUNTIME_HOST_ENTRY;
+  let agents: DesktopAgentManager | undefined;
+  let localHost: Awaited<ReturnType<typeof createInteractiveAgentHost>> | undefined;
+  let host: Awaited<ReturnType<typeof startRuntimeHost>> | undefined;
+  try {
+    process.env.BINY_AGENT_DIR = desktopRoot;
+    process.env.BINY_RUNTIME_HOST_ENTRY = path.join(desktopRoot, "missing-runtime-host-entry.js");
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    const createRuntime = async (sessionId?: string) => {
+      const next = await createInteractiveAgentHost(project.path, {
+        persistenceRoot: dataRoot,
+        configStore,
+        attachmentRoot: projects.attachmentsRoot(project)
+      });
+      try {
+        if (sessionId !== undefined) await next.runtime.resumeSession(sessionId);
+        return next;
+      } catch (error) {
+        await next.runtime.close();
+        throw error;
+      }
+    };
+    localHost = await createRuntime();
+    host = await startRuntimeHost(dataRoot, localHost.runtime, localHost.commands, {
+      configDir: desktopRoot,
+      createRuntime
+    });
+
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const permission = await agents.setPermissionMode(project.id, "full-access");
+    assert.equal(permission.permissionMode, "full-access");
+
+    const initial = await agents.personalizationOverview(project.id);
+    const memory = await agents.saveMemorySettings(project.id, {
+      expectedRevision: initial.configRevision,
+      settings: { ...initial.memory, useMemories: !initial.memory.useMemories }
+    });
+    assert.equal(memory.settings.useMemories, !initial.memory.useMemories);
+    assert.equal(host.getCurrentRuntime().getSnapshot().permissionMode, "full-access");
+    assert.equal((await configStore.load(project.path)).permission.mode, "full-access");
+    assert.equal((await agents.workspaceSnapshot(project.id)).permissionMode, "full-access");
+
+    const recorder = new SessionRecorder(dataRoot, "memory-permission-session");
+    recorder.record({ type: "user_message", content: "切换当前聊天记忆" });
+    await recorder.close();
+    const document = await agents.openSession(project.id, recorder.sessionId);
+    const chat = await agents.saveChatPersonalization(
+      project.id,
+      recorder.sessionId,
+      {
+        personality: "inherit",
+        customInstructions: { mode: "inherit", value: undefined },
+        useMemories: initial.memory.useMemories,
+        contributeMemories: initial.memory.useMemories
+      },
+      document.session.metadataRevision
+    );
+    assert.equal(chat.permissionMode, "full-access");
+    assert.equal(chat.runtime?.permissionMode, "full-access");
+    assert.equal((await configStore.load(project.path)).permission.mode, "full-access");
+  } finally {
+    await agents?.closeAll();
+    await host?.closeOwner();
+    if (localHost && !host) await localHost.runtime.close();
     if (previousAgentRoot === undefined) delete process.env.BINY_AGENT_DIR;
     else process.env.BINY_AGENT_DIR = previousAgentRoot;
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
@@ -3580,6 +3787,39 @@ function subscribeHostEvents(
   return runtime.subscribe((update) => {
     if (update.event) listener(update.event);
   });
+}
+
+function testDesktopComposerSlashItems(): void {
+  const skill = (name: string, description: string): DesktopSkillCatalogEntry => ({
+    name,
+    description
+  } as unknown as DesktopSkillCatalogEntry);
+  const items = buildDesktopComposerItems([
+    skill("zeta", "Zeta workflow"),
+    skill("AI-slop", "Audit the interface"),
+    skill("ai-SLOP", "Duplicate display name")
+  ]);
+  const commandItems = items.filter((item) => item.auxiliaryData?.kind === "command");
+  const skillItems = items.filter((item) => item.auxiliaryData?.kind === "skill");
+
+  assert.deepEqual(commandItems.map((item) => item.label), [
+    "/usage",
+    "/compact",
+    "/status",
+    "/mcp",
+    "/skills",
+    "/plugins",
+    "/subagent",
+    "/review",
+    "/undo"
+  ]);
+  assert.equal(commandItems.some((item) => item.label === "/tasks"), false);
+  assert.equal(commandItems.every((item) => DESKTOP_COMPOSER_COMMAND_NAMES.includes(item.label as typeof DESKTOP_COMPOSER_COMMAND_NAMES[number])), true);
+  assert.deepEqual(skillItems.map((item) => item.label), ["/skills:AI-slop", "/skills:zeta"]);
+  assert.equal(isSkillSlashCommand("/skills:AI-slop"), true);
+  assert.equal(isSkillSlashCommand("/skill:zeta run it"), true);
+  assert.equal(isSkillSlashCommand("/skills"), false);
+  assert.equal(normalizeSkillSlashCommand("/skills:zeta\u00a0run it"), "/skills:zeta run it");
 }
 
 function memoryCredentialStore(): CredentialStore {

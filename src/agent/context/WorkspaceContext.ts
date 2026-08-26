@@ -104,6 +104,12 @@ export class WorkspaceContext {
     }
   }
 
+  /** 标记项目快照与 repo map 为脏；工作区在会话外被改动（如切分支）时让下一回合重新扫描。 */
+  invalidateSnapshot(): void {
+    this.snapshotDirty = true;
+    this.repoMapDirty = true;
+  }
+
   status(): WorkspaceContextStatus {
     return {
       loadedInstructions: this.loadedInstructions.map((instruction) => instruction.path),

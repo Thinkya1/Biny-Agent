@@ -28,7 +28,7 @@ const SIDEBAR_NAV_ITEMS: ReadonlyArray<{
   icon: IconName;
   label: string;
 }> = [
-  { action: "newTask", icon: "edit", label: "新建任务" },
+  { action: "newTask", icon: "compose", label: "新建任务" },
   { action: "runtime", icon: "activity", label: "自动化" },
   { action: "extensions", icon: "plug", label: "技能" },
   { action: "search", icon: "search", label: "搜索" }
@@ -138,7 +138,7 @@ export const Sidebar = memo(function Sidebar({
     if (!projectMenuOpen && !projectOrganizationMenuOpen && !projectCreateMenuOpen) return;
     const closeOnPointerDown = (event: PointerEvent): void => {
       const target = event.target;
-      if (target instanceof Element && target.closest(".cindy-sidebar-menu-anchor, .cindy-sidebar-menu")) return;
+      if (target instanceof Element && target.closest(".biny-sidebar-menu-anchor, .biny-sidebar-menu")) return;
       setProjectMenuOpen(undefined);
       setProjectOrganizationMenuOpen(false);
       setProjectCreateMenuOpen(false);
@@ -316,7 +316,7 @@ export const Sidebar = memo(function Sidebar({
       : expandedProjectIds.has(project.id);
     return (
       <div
-        className={`cindy-project-group${dragState?.sourceId === project.id ? " is-dragging" : ""}${projectDropClass(project.id, section)}`}
+        className={`biny-project-group${dragState?.sourceId === project.id ? " is-dragging" : ""}${projectDropClass(project.id, section)}`}
         key={`${section}:${project.id}`}
         onDragOver={(event) => {
           event.preventDefault();
@@ -374,14 +374,14 @@ export const Sidebar = memo(function Sidebar({
 
   return (
     <>
-      {!contentVisible ? <div aria-hidden="true" className="cindy-sidebar-peek-trigger" {...peekTriggerHandlers} /> : null}
+      {!contentVisible ? <div aria-hidden="true" className="biny-sidebar-peek-trigger" {...peekTriggerHandlers} /> : null}
       <aside
         aria-label="主导航"
         aria-hidden={contentVisible ? undefined : true}
-        className={`cindy-sidebar${contentVisible ? "" : " is-hidden"}${compact ? " is-compact" : ""}${layout.resizing ? " is-resizing" : ""}${peekOpen ? ` is-peek-overlay is-peek-${layout.transition === "peek-closing" ? "closing" : layout.transition === "pinning" ? "pinning" : "peeking"}` : ""}`}
+        className={`biny-sidebar${contentVisible ? "" : " is-hidden"}${compact ? " is-compact" : ""}${layout.resizing ? " is-resizing" : ""}${peekOpen ? ` is-peek-overlay is-peek-${layout.transition === "peek-closing" ? "closing" : layout.transition === "pinning" ? "pinning" : "peeking"}` : ""}`}
         ref={peekOpen ? peekDrawerRef : undefined}
         style={{
-          width: "var(--cindy-sidebar-animated-visual-width)"
+          width: "var(--biny-sidebar-animated-visual-width)"
         }}
         onPointerEnter={peekOpen ? peekDrawerHandlers.onPointerEnter : undefined}
         onPointerLeave={peekOpen ? peekDrawerHandlers.onPointerLeave : undefined}
@@ -390,15 +390,15 @@ export const Sidebar = memo(function Sidebar({
         onPointerUp={peekOpen ? peekDrawerHandlers.onPointerUp : undefined}
       >
         {/* 顶部行是侧栏内容的固定锚点；收起时也保留它，避免导航内容向上跳 46px。 */}
-        <div aria-hidden="true" className="cindy-sidebar-topbar-spacer" />
+        <div aria-hidden="true" className="biny-sidebar-topbar-spacer" />
 
-      <div className="cindy-sidebar-body">
-        <div className="cindy-sidebar-scroll">
-          <nav aria-label="功能导航" className="cindy-sidebar-nav">
+      <div className="biny-sidebar-body">
+        <div className="biny-sidebar-scroll">
+          <nav aria-label="功能导航" className="biny-sidebar-nav">
             {SIDEBAR_NAV_ITEMS.map((item) => (
               <button
                 aria-label={item.label}
-                className={`cindy-sidebar-nav-item${item.action === activeNavigation ? " is-active" : ""}`}
+                className={`biny-sidebar-nav-item${item.action === activeNavigation ? " is-active" : ""}`}
                 data-sidebar-nav-action={item.action}
                 key={item.label}
                 onClick={navActionHandlers[item.action]}
@@ -433,13 +433,13 @@ export const Sidebar = memo(function Sidebar({
 
           <SidebarSection
             actions={(
-              <div className="cindy-sidebar-section-actions cindy-sidebar-menu-anchor">
+              <div className="biny-sidebar-section-actions biny-sidebar-menu-anchor">
                 <button
                   ref={projectOrganizationButtonRef}
                   aria-expanded={projectOrganizationMenuOpen}
                   aria-haspopup="menu"
                   aria-label="项目排序"
-                  className="cindy-sidebar-section-action"
+                  className="biny-sidebar-section-action"
                   onClick={() => {
                     setProjectMenuOpen(undefined);
                     setProjectCreateMenuOpen(false);
@@ -455,7 +455,7 @@ export const Sidebar = memo(function Sidebar({
                   aria-expanded={projectCreateMenuOpen}
                   aria-haspopup="menu"
                   aria-label="添加项目"
-                  className="cindy-sidebar-section-action"
+                  className="biny-sidebar-section-action"
                   onClick={() => {
                     setProjectMenuOpen(undefined);
                     setProjectOrganizationMenuOpen(false);
@@ -486,7 +486,7 @@ export const Sidebar = memo(function Sidebar({
             compactDivider
             onToggle={() => toggleSection("projects")}
           >
-            {unpinnedProjects.length ? unpinnedProjects.map((project) => renderProject(project, "projects")) : <div className="cindy-sidebar-empty-row">暂无项目，点击 + 添加</div>}
+            {unpinnedProjects.length ? unpinnedProjects.map((project) => renderProject(project, "projects")) : <div className="biny-sidebar-empty-row">暂无项目，点击 + 添加</div>}
           </SidebarSection>
 
           <SidebarSection expanded={expandedSections.dialogue} icon="message" label="对话" onToggle={() => toggleSection("dialogue")}>
@@ -503,13 +503,13 @@ export const Sidebar = memo(function Sidebar({
               onToggleSession={toggleSession}
               onLoadMoreSessionChildren={loadMoreSessionChildren}
             />
-            {!dialogueSessions.length ? <p className="cindy-sidebar-empty-row">暂无未归类对话</p> : null}
+            {!dialogueSessions.length ? <p className="biny-sidebar-empty-row">暂无未归类对话</p> : null}
           </SidebarSection>
         </div>
       </div>
 
-      <div className="cindy-sidebar-footer">
-        <button aria-label="设置" className="cindy-sidebar-settings-item" onClick={onSettings} title="设置" type="button">
+      <div className="biny-sidebar-footer">
+        <button aria-label="设置" className="biny-sidebar-settings-item" onClick={onSettings} title="设置" type="button">
           <Icon name="settings" size={16} />
           <span>设置</span>
         </button>
@@ -521,7 +521,7 @@ export const Sidebar = memo(function Sidebar({
           aria-valuemax={MAX_SIDEBAR_WIDTH}
           aria-valuemin={SIDEBAR_RAIL_WIDTH}
           aria-valuenow={layout.visualWidth}
-          className="cindy-sidebar-resizer"
+          className="biny-sidebar-resizer"
           onKeyDown={onResizeKeyDown}
           onPointerDown={onResizePointerDown}
           role="separator"
@@ -545,13 +545,13 @@ export const Sidebar = memo(function Sidebar({
 function SidebarChrome({ collapsed, floating = false, canGoBack, canGoForward, onNavigateBack, onNavigateForward, onToggle }: { collapsed: boolean; floating?: boolean; canGoBack: boolean; canGoForward: boolean; onNavigateBack(): void; onNavigateForward(): void; onToggle(): void }): React.JSX.Element {
   return (
     <>
-      {floating ? <div aria-hidden="true" className="cindy-sidebar-topbar-visual" /> : null}
-      <div className={`cindy-sidebar-topbar${floating ? " cindy-sidebar-topbar-floating" : ""}`}>
-        <div className={floating ? "cindy-sidebar-topbar-hit-layer" : undefined}>
+      {floating ? <div aria-hidden="true" className="biny-sidebar-topbar-visual" /> : null}
+      <div className={`biny-sidebar-topbar${floating ? " biny-sidebar-topbar-floating" : ""}`}>
+        <div className={floating ? "biny-sidebar-topbar-hit-layer" : undefined}>
           <button
             aria-expanded={!collapsed}
             aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
-            className="cindy-chrome-button"
+            className="biny-chrome-button"
             onClick={onToggle}
             title={collapsed ? "展开侧栏" : "收起侧栏"}
             type="button"
@@ -560,7 +560,7 @@ function SidebarChrome({ collapsed, floating = false, canGoBack, canGoForward, o
           </button>
           <button
             aria-label="上一步"
-            className="cindy-chrome-button cindy-navigation-button"
+            className="biny-chrome-button biny-navigation-button"
             disabled={!canGoBack}
             onClick={onNavigateBack}
             title="上一步"
@@ -570,7 +570,7 @@ function SidebarChrome({ collapsed, floating = false, canGoBack, canGoForward, o
           </button>
           <button
             aria-label="下一步"
-            className="cindy-chrome-button cindy-navigation-button"
+            className="biny-chrome-button biny-navigation-button"
             disabled={!canGoForward}
             onClick={onNavigateForward}
             title="下一步"
@@ -586,22 +586,22 @@ function SidebarChrome({ collapsed, floating = false, canGoBack, canGoForward, o
 
 function SidebarSection({ label, icon, compactDivider, expanded, actions, onToggle, children }: { label: string; icon?: IconName; compactDivider?: boolean; expanded: boolean; actions?: React.ReactNode; onToggle(): void; children: React.ReactNode }): React.JSX.Element {
   return (
-    <section aria-label={label} className={`cindy-sidebar-section${expanded ? " is-expanded" : ""}${icon ? " has-compact-icon" : ""}${compactDivider ? " has-compact-divider" : ""}`}>
-      <div className="cindy-sidebar-section-header">
-        <button aria-expanded={expanded} aria-label={label} className="cindy-sidebar-section-trigger" onClick={onToggle} type="button">
-          {icon ? <span aria-hidden="true" className="cindy-sidebar-section-icon"><Icon name={icon} size={17} /></span> : null}
-          <span className="cindy-sidebar-section-label">{label}</span>
-          <span className="cindy-sidebar-section-chevron"><Icon name="chevron" size={13} /></span>
+    <section aria-label={label} className={`biny-sidebar-section${expanded ? " is-expanded" : ""}${icon ? " has-compact-icon" : ""}${compactDivider ? " has-compact-divider" : ""}`}>
+      <div className="biny-sidebar-section-header">
+        <button aria-expanded={expanded} aria-label={label} className="biny-sidebar-section-trigger" onClick={onToggle} type="button">
+          {icon ? <span aria-hidden="true" className="biny-sidebar-section-icon"><Icon name={icon} size={17} /></span> : null}
+          <span className="biny-sidebar-section-label">{label}</span>
+          <span className="biny-sidebar-section-chevron"><Icon name="chevron" size={13} /></span>
         </button>
         {actions}
       </div>
-      <div className="cindy-sidebar-section-content"><div>{children}</div></div>
+      <div className="biny-sidebar-section-content"><div>{children}</div></div>
     </section>
   );
 }
 
 function ProjectSessions({ projectId, sessions, selectedSessionId, onSelectSession, onSessionMenu, onSessionPin, expandedSessionIds, loadingSessionIds, sessionNextCursors, onToggleSession, onLoadMoreSessionChildren }: { projectId: string; sessions: DesktopSessionSummary[]; selectedSessionId?: string; onSelectSession(projectId: string, sessionId: string): void; onSessionMenu(session: DesktopSessionSummary): void; onSessionPin(session: DesktopSessionSummary): void; expandedSessionIds: Set<string>; loadingSessionIds: Set<string>; sessionNextCursors: Map<string, string>; onToggleSession(session: DesktopSessionSummary): void; onLoadMoreSessionChildren(session: DesktopSessionSummary): void }): React.JSX.Element | null {
-  if (!sessions.length) return <div className="cindy-sidebar-empty-row cindy-sidebar-project-empty">没有聊天</div>;
+  if (!sessions.length) return <div className="biny-sidebar-empty-row biny-sidebar-project-empty">没有聊天</div>;
   return (
     <CollapsibleSessionList
       limit={PROJECT_SESSION_COLLAPSE_LIMIT}
@@ -646,7 +646,7 @@ function CollapsibleSessionList({ limit, ...props }: SessionListProps & { limit:
     <>
       <SessionList {...props} sessions={visibleSessions} />
       {shouldCollapse ? (
-        <button className="cindy-sidebar-session-expand" onClick={() => setExpanded((current) => !current)} type="button">
+        <button className="biny-sidebar-session-expand" onClick={() => setExpanded((current) => !current)} type="button">
           {expanded ? "收起" : `显示全部 ${props.sessions.length} 项`}
         </button>
       ) : null}
@@ -676,11 +676,11 @@ function SessionList({ flat = false, projectId, sessions, selectedSessionId, onS
     const meta = sidebarSessionMeta(session, running);
     const metaTitle = meta ? sidebarSessionUpdatedAt(session.updatedAt) : undefined;
     return [
-      <div className={`cindy-sidebar-session-tree-row${session.id === selectedSessionId ? " is-selected" : ""}`} key={`${session.projectId}:${session.id}`}>
+      <div className={`biny-sidebar-session-tree-row${session.id === selectedSessionId ? " is-selected" : ""}`} key={`${session.projectId}:${session.id}`}>
         <button
           aria-expanded={expandable ? expanded : undefined}
           aria-label={expandable ? (expanded ? "收起子会话" : "展开子会话") : undefined}
-          className={`cindy-sidebar-session-toggle${expandable ? "" : " is-empty"}`}
+          className={`biny-sidebar-session-toggle${expandable ? "" : " is-empty"}`}
           disabled={!expandable || loading}
           onClick={() => onToggleSession(session)}
           style={{ marginLeft: `${depth * 16}px` }}
@@ -688,10 +688,10 @@ function SessionList({ flat = false, projectId, sessions, selectedSessionId, onS
         >
           {loading ? "…" : expandable ? <Icon name="chevron" size={12} /> : null}
         </button>
-        <div className={`cindy-sidebar-session-entry${session.id === selectedSessionId ? " is-selected" : ""}${session.archived ? " is-archived" : ""}${running ? " is-running" : ""}`}>
+        <div className={`biny-sidebar-session-entry${session.id === selectedSessionId ? " is-selected" : ""}${session.archived ? " is-archived" : ""}${running ? " is-running" : ""}`}>
           <button
             aria-current={session.id === selectedSessionId ? "page" : undefined}
-            className="cindy-sidebar-session-item"
+            className="biny-sidebar-session-item"
             onClick={() => onSelectSession(projectId ?? session.projectId, session.id)}
             onContextMenu={(event) => {
               event.preventDefault();
@@ -700,14 +700,14 @@ function SessionList({ flat = false, projectId, sessions, selectedSessionId, onS
             title={session.firstUserMessage || session.title}
             type="button"
           >
-            {running ? <span aria-hidden="true" className={`cindy-sidebar-session-running${session.status === "waiting_permission" ? " is-waiting" : ""}`} /> : session.unread ? <span aria-label="未读" className="cindy-sidebar-session-unread" /> : null}
-            <span className="cindy-sidebar-session-title">{title}</span>
-            {meta && metaTitle ? <span aria-label={`上次活动：${metaTitle}`} className="cindy-sidebar-session-meta" title={metaTitle}>{meta}</span> : null}
+            {running ? <span aria-hidden="true" className={`biny-sidebar-session-running${session.status === "waiting_permission" ? " is-waiting" : ""}`} /> : session.unread ? <span aria-label="未读" className="biny-sidebar-session-unread" /> : null}
+            <span className="biny-sidebar-session-title">{title}</span>
+            {meta && metaTitle ? <span aria-label={`上次活动：${metaTitle}`} className="biny-sidebar-session-meta" title={metaTitle}>{meta}</span> : null}
           </button>
-          <div className="cindy-sidebar-session-actions">
+          <div className="biny-sidebar-session-actions">
             <button
               aria-label={session.pinned ? "取消置顶任务" : "置顶任务"}
-              className={`cindy-sidebar-session-pin${session.pinned ? " is-active" : ""}`}
+              className={`biny-sidebar-session-pin${session.pinned ? " is-active" : ""}`}
               onClick={() => onSessionPin(session)}
               title={session.pinned ? "取消置顶任务" : "置顶任务"}
               type="button"
@@ -716,7 +716,7 @@ function SessionList({ flat = false, projectId, sessions, selectedSessionId, onS
             </button>
             <button
               aria-label={`${title} 的更多操作`}
-              className="cindy-sidebar-session-more"
+              className="biny-sidebar-session-more"
               onClick={() => onSessionMenu(session)}
               title="更多操作"
               type="button"
@@ -728,14 +728,14 @@ function SessionList({ flat = false, projectId, sessions, selectedSessionId, onS
       </div>,
       ...children,
       ...(expanded && nextCursor ? [
-        <button className="cindy-sidebar-session-expand" key={`${session.projectId}:${session.id}:more`} onClick={() => onLoadMoreSessionChildren(session)} type="button">
+        <button className="biny-sidebar-session-expand" key={`${session.projectId}:${session.id}:more`} onClick={() => onLoadMoreSessionChildren(session)} type="button">
           加载更多子会话
         </button>
       ] : [])
     ];
   };
   return (
-    <div className={`cindy-sidebar-session-list${projectId ? " is-indented" : ""}`}>
+    <div className={`biny-sidebar-session-list${projectId ? " is-indented" : ""}`}>
       {(byParent.get(undefined) ?? []).flatMap((session) => renderNode(session, 0, new Set()))}
     </div>
   );
@@ -784,7 +784,7 @@ const ProjectRow = memo(function ProjectRow({
   const suppressClickRef = useRef(false);
   return (
     <div
-      className={`cindy-project-row-wrap${selected ? " is-active" : ""}${sessionsExpanded ? " is-expanded" : ""}${dragActive ? " is-drag-active" : ""}`}
+      className={`biny-project-row-wrap${selected ? " is-active" : ""}${sessionsExpanded ? " is-expanded" : ""}${dragActive ? " is-drag-active" : ""}`}
       draggable
       onDragEnd={(event) => {
         event.preventDefault();
@@ -793,7 +793,7 @@ const ProjectRow = memo(function ProjectRow({
         onDragEnd();
       }}
       onDragStart={(event) => {
-        if (event.target instanceof Element && event.target.closest(".cindy-project-row-actions")) {
+        if (event.target instanceof Element && event.target.closest(".biny-project-row-actions")) {
           event.preventDefault();
           return;
         }
@@ -806,7 +806,7 @@ const ProjectRow = memo(function ProjectRow({
     >
       <div
         aria-expanded={sessionsExpanded}
-        className={`cindy-project-row${selected ? " is-active" : ""}`}
+        className={`biny-project-row${selected ? " is-active" : ""}`}
         onClick={() => { if (!suppressClickRef.current) onSelect(project.id); }}
         onKeyDown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
@@ -818,12 +818,12 @@ const ProjectRow = memo(function ProjectRow({
         tabIndex={0}
       >
         <Icon name={sessionsExpanded ? "folder-open" : "folder"} size={16} />
-        <span className="cindy-project-row-label">{project.name}</span>
-        {project.missing ? <span className="cindy-project-status is-failed" title="路径不可用" /> : running ? <span className="cindy-project-status is-running" title="正在运行" /> : null}
+        <span className="biny-project-row-label">{project.name}</span>
+        {project.missing ? <span className="biny-project-status is-failed" title="路径不可用" /> : running ? <span className="biny-project-status is-running" title="正在运行" /> : null}
       </div>
-      <div className={`cindy-project-row-actions${menuOpen ? " is-open" : ""} cindy-sidebar-menu-anchor`}>
-        <button aria-label={`新建任务 ${project.name}`} className="cindy-project-row-action" onClick={onNewTask} title="新建任务" type="button"><Icon name="edit" size={14} /></button>
-        <button ref={menuButtonRef} aria-expanded={menuOpen} aria-haspopup="menu" aria-label={`${project.name} 项目操作`} className="cindy-project-row-action" onClick={onMenu} title="项目操作" type="button"><Icon name="more" size={14} /></button>
+      <div className={`biny-project-row-actions${menuOpen ? " is-open" : ""} biny-sidebar-menu-anchor`}>
+        <button aria-label={`新建任务 ${project.name}`} className="biny-project-row-action" onClick={onNewTask} title="新建任务" type="button"><Icon name="compose" size={14} /></button>
+        <button ref={menuButtonRef} aria-expanded={menuOpen} aria-haspopup="menu" aria-label={`${project.name} 项目操作`} className="biny-project-row-action" onClick={onMenu} title="项目操作" type="button"><Icon name="more" size={14} /></button>
         <ProjectMenu anchorRef={menuButtonRef} onOpenTerminal={onOpenTerminal} onPin={onPin} onRefresh={onRefresh} onRemove={onRemove} onRename={onRename} onReveal={onReveal} open={menuOpen} project={project} />
       </div>
     </div>
@@ -838,7 +838,7 @@ function ProjectMenu({ anchorRef, project, open, onPin, onRefresh, onReveal, onO
       <button onClick={onReveal} role="menuitem" type="button"><Icon name="external" size={15} /><span>在 Finder 中显示</span></button>
       <button onClick={onOpenTerminal} role="menuitem" type="button"><Icon name="terminal" size={15} /><span>在终端中打开</span></button>
       <button onClick={onRename} role="menuitem" type="button"><Icon name="edit" size={15} /><span>重命名项目</span></button>
-      <div className="cindy-sidebar-menu-separator" />
+      <div className="biny-sidebar-menu-separator" />
       <button className="is-danger" onClick={onRemove} role="menuitem" type="button"><Icon name="trash" size={15} /><span>移除项目</span></button>
     </FloatingSidebarMenu>
   );
@@ -847,14 +847,14 @@ function ProjectMenu({ anchorRef, project, open, onPin, onRefresh, onReveal, onO
 function SidebarOrganizationMenu({ anchorRef, open, sort, onSortChange }: { anchorRef: FloatingMenuAnchor; open: boolean; sort: ProjectSort; onSortChange(value: ProjectSort): void }): React.JSX.Element {
   return (
     <FloatingSidebarMenu anchorRef={anchorRef} ariaLabel="项目排序菜单" className="is-narrow" open={open}>
-      <div className="cindy-sidebar-menu-heading">排序方式</div>
+      <div className="biny-sidebar-menu-heading">排序方式</div>
       {([
         ["priority", "优先级"],
         ["recent", "最近打开"],
         ["manual", "手动排序"]
       ] as const).map(([value, label]) => (
         <button aria-checked={sort === value} key={value} onClick={() => onSortChange(value)} role="menuitemradio" type="button">
-          <span className="cindy-sidebar-menu-check">{sort === value ? <Icon name="check" size={14} /> : null}</span>
+          <span className="biny-sidebar-menu-check">{sort === value ? <Icon name="check" size={14} /> : null}</span>
           <span>{label}</span>
         </button>
       ))}
@@ -921,7 +921,7 @@ function FloatingSidebarMenu({ anchorRef, ariaLabel, className = "", children, o
 
   if (!presence.present) return null;
   return createPortal(
-    <div aria-label={ariaLabel} className={`cindy-sidebar-menu${className ? ` ${className}` : ""}`} data-menu-phase={presence.phase} data-origin={position?.origin ?? "top-left"} ref={surfaceRef} role="menu" style={{ left: position?.left, top: position?.top, visibility: position ? "visible" : "hidden" }}>
+    <div aria-label={ariaLabel} className={`biny-sidebar-menu${className ? ` ${className}` : ""}`} data-menu-phase={presence.phase} data-origin={position?.origin ?? "top-left"} ref={surfaceRef} role="menu" style={{ left: position?.left, top: position?.top, visibility: position ? "visible" : "hidden" }}>
       {children}
     </div>,
     document.body

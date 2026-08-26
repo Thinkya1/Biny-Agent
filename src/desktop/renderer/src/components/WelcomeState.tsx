@@ -46,20 +46,20 @@ export function WelcomeState({
   onPrefill(prompt: string): void;
 }): React.JSX.Element {
   return (
-    <section aria-label="新任务" className="cindy-welcome-state">
-      <AppIcon className="cindy-welcome-icon" size={56} />
+    <section aria-label="新任务" className="biny-welcome-state">
+      <AppIcon className="biny-welcome-icon" size={56} />
       <h1>你想让我在 biny 中构建什么？</h1>
       <p>{hasProject ? "选择一个方向开始，或直接描述你想完成的事情。" : "打开一个项目后，Biny 就能在你的工作区中开始工作。"}</p>
-      <div className="cindy-welcome-cards">
+      <div className="biny-welcome-cards">
         {WELCOME_CARDS.map((card) => (
-          <button className="cindy-welcome-card" key={card.label} onClick={() => onPrefill(card.prompt)} type="button">
-            <span className="cindy-welcome-card-icon"><Icon name={card.icon} size={17} /></span>
+          <button className="biny-welcome-card" key={card.label} onClick={() => onPrefill(card.prompt)} type="button">
+            <span className="biny-welcome-card-icon"><Icon name={card.icon} size={17} /></span>
             <span>{card.label}</span>
-            <Icon className="cindy-welcome-card-chevron" name="arrow-right" size={14} />
+            <Icon className="biny-welcome-card-chevron" name="arrow-right" size={14} />
           </button>
         ))}
       </div>
-      {!hasProject ? <button className="cindy-welcome-open-project" onClick={onOpenProject} type="button"><Icon name="folder-open" size={15} />打开项目</button> : null}
+      {!hasProject ? <button className="biny-welcome-open-project" onClick={onOpenProject} type="button"><Icon name="folder-open" size={15} />打开项目</button> : null}
     </section>
   );
 }

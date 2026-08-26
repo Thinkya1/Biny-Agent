@@ -323,8 +323,8 @@ export function useSidebarLayout({ persistWidth }: UseSidebarLayoutOptions): Use
       const element = target instanceof Element ? target : undefined;
       const drawer = drawerRef.current;
       const inDrawer = Boolean(drawer && target instanceof Node && drawer.contains(target));
-      const inTrigger = Boolean(element?.closest(".cindy-sidebar-peek-trigger"));
-      const inChrome = Boolean(element?.closest(".cindy-sidebar-topbar-floating"));
+      const inTrigger = Boolean(element?.closest(".biny-sidebar-peek-trigger"));
+      const inChrome = Boolean(element?.closest(".biny-sidebar-topbar-floating"));
       if (inDrawer || inTrigger || inChrome || event.clientX <= PEEK_TRIGGER_WIDTH) {
         keepPeekOpen();
         if ((inTrigger || event.clientX <= PEEK_TRIGGER_WIDTH) && peekPhaseRef.current === "idle") scheduleOpen();

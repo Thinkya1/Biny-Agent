@@ -59,10 +59,10 @@ export function useDesktopSettingsActions({
     return await window.biny.testModelConfiguration(requireProject(projectIdRef.current), configuration);
   }, [projectIdRef]);
 
-  const fetchModelCatalog = useCallback(async (providerAlias: string) => {
+  const fetchModelCatalog = useCallback(async (providerAlias: string, force = false) => {
     const fetchCatalog = window.biny.fetchModelCatalog;
     if (typeof fetchCatalog !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await fetchCatalog(requireProject(projectIdRef.current), providerAlias);
+    return await fetchCatalog(requireProject(projectIdRef.current), providerAlias, force);
   }, [projectIdRef]);
 
   const fetchModelCatalogCandidate = useCallback(async (configuration: DesktopModelConfigurationInput) => {

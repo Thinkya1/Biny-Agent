@@ -36,9 +36,13 @@ export function createDesktopWindow(
     minWidth: 800,
     minHeight: 600,
     show: false,
-    backgroundColor: themeBackgroundColor(preference),
+    // macOS 用 vibrancy 材质做窗口底色（玻璃侧栏），透明背景才不会把它盖住；
+    // 其他平台保持跟随主题的不透明底色，避免加载期闪白。
+    backgroundColor: process.platform === "darwin" ? "#00000000" : themeBackgroundColor(preference),
     title: "Biny",
     titleBarStyle: "hidden",
+    vibrancy: process.platform === "darwin" ? "sidebar" : undefined,
+    visualEffectState: process.platform === "darwin" ? "active" : undefined,
     titleBarOverlay: process.platform === "darwin" ? true : undefined,
     trafficLightPosition: process.platform === "darwin" ? { x: 14, y: 16 } : undefined,
     webPreferences: {
@@ -51,6 +55,8 @@ export function createDesktopWindow(
   });
 
   const syncBackgroundColor = (): void => {
+    // macOS 的窗口底色是系统材质，会随主题自动变化，无需手动同步。
+    if (process.platform === "darwin") return;
     if (!window.isDestroyed()) window.setBackgroundColor(themeBackgroundColor(state.themePreference()));
   };
   nativeTheme.on("updated", syncBackgroundColor);

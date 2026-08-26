@@ -467,8 +467,12 @@ async function testGlobalInstructionFile(): Promise<void> {
     const workspace = new WorkspaceContext(workspaceRoot, [], 32 * 1024, globalFile);
     await workspace.initialize();
     const status = workspace.status();
-    // 全局指令在项目指令之前加载。
-    assert.equal(status.loadedInstructions[0], globalFile);
+    // 全局指令在项目指令之前加载；status 会把 home 下的路径规范化成 ~/ 形式，
+    // 而沙箱里 TMPDIR 恰好落在 home 下，期望值得跟着规范化。
+    const expectedGlobal = globalFile.startsWith(os.homedir())
+      ? path.join("~", path.relative(os.homedir(), globalFile))
+      : globalFile;
+    assert.equal(status.loadedInstructions[0], expectedGlobal);
     assert.equal(status.loadedInstructions[1], "AGENTS.md");
 
     // 软链全局文件应被忽略。

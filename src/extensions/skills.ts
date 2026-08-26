@@ -242,10 +242,16 @@ type SkillBundleSource = SkillBundle | (() => SkillBundle);
  * Skill 指令提前塞进上下文。未知 Skill 保留原输入，让模型自行处理。
  */
 export async function expandSkillCommand(bundle: SkillBundle, input: string): Promise<string> {
-  if (!input.startsWith("/skill:")) return input;
-  const spaceIndex = input.indexOf(" ");
-  const skillName = spaceIndex === -1 ? input.slice("/skill:".length) : input.slice("/skill:".length, spaceIndex);
-  const args = spaceIndex === -1 ? "" : input.slice(spaceIndex + 1).trim();
+  const normalized = input.trim().replace(/\u00a0/g, " ");
+  const prefix = normalized.startsWith("/skills:")
+    ? "/skills:"
+    : normalized.startsWith("/skill:")
+      ? "/skill:"
+      : undefined;
+  if (!prefix) return input;
+  const spaceIndex = normalized.indexOf(" ");
+  const skillName = spaceIndex === -1 ? normalized.slice(prefix.length) : normalized.slice(prefix.length, spaceIndex);
+  const args = spaceIndex === -1 ? "" : normalized.slice(spaceIndex + 1).trim();
   const skill = bundle.skills.find((candidate) => candidate.name === skillName);
   if (!skill) return input;
 
@@ -631,7 +637,7 @@ async function collectSkillFiles(
   }
   if (stat.isSymbolicLink()) {
     // 全局 Skill 根本身是用户主动登记的入口，允许其第一层目录软链指向
-    // Claude/Codex/Cindy 等已有技能；进入技能目录后仍禁止内部软链。
+    // Claude/Codex/Biny 等已有技能；进入技能目录后仍禁止内部软链。
     if (!allowDirectDirectorySymlink || path.dirname(target) !== rootPath) return;
     const canonical = await fs.realpath(target);
     if (!allowedDirectorySymlinks.some((directory) => isPathInside(directory, canonical))) return;

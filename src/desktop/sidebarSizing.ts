@@ -5,7 +5,7 @@
  * 保存或重新打开窗口时跳回另一组值。
  */
 export const DEFAULT_SIDEBAR_WIDTH = 260;
-/** Cindy rail 需要容纳 macOS 红绿灯和顶部按钮簇，视觉宽度固定为 78px。 */
+/** Biny rail 需要容纳 macOS 红绿灯和顶部按钮簇，视觉宽度固定为 78px。 */
 export const SIDEBAR_RAIL_WIDTH = 78;
 /** 原始拖拽宽度低于 120px 时进入 rail；达到 120px 才退出 rail。 */
 export const SIDEBAR_RAIL_THRESHOLD = 120;

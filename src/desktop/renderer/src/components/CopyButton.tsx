@@ -14,6 +14,8 @@ interface CopyButtonProps {
   className?: string;
   size?: number;
   resolveValue?: () => string;
+  /** 图标旁展示文字标签（复制成功变为「已复制」）。 */
+  showLabel?: boolean;
 }
 
 export function CopyButton({
@@ -21,13 +23,14 @@ export function CopyButton({
   label = "复制",
   className = "copy-button",
   size = 12,
-  resolveValue
+  resolveValue,
+  showLabel = false
 }: CopyButtonProps): React.JSX.Element {
   const [copied, setCopied] = useState(false);
   return (
     <button
       aria-label={copied ? "已复制" : label}
-      className={className}
+      className={`${className}${copied ? " is-copied" : ""}`}
       onClick={() => {
         // 去掉结尾换行：代码块渲染时会带一个，复制到别处会多出一空行。
         const text = (resolveValue?.() ?? value).replace(/\n$/, "");
@@ -41,6 +44,7 @@ export function CopyButton({
       type="button"
     >
       <Icon name={copied ? "check" : "copy"} size={size} />
+      {showLabel ? <span className="copy-button-text" data-copied={copied || undefined}>{copied ? "已复制" : label}</span> : null}
     </button>
   );
 }

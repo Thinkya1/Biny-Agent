@@ -307,7 +307,7 @@ function testSlashCommandParity(): void {
 }
 
 function testPersonalizationSelectors(): void {
-  assert.deepEqual(personalitySelectOptions.map((option) => option.value), ["inherit", "none", "friendly", "pragmatic"]);
+  assert.deepEqual(personalitySelectOptions.map((option) => option.value), ["inherit", "none", "friendly", "pragmatic", "buddy"]);
   assert.deepEqual(memoryPolicySelectOptions.map((option) => option.value), ["inherit", "both", "use", "contribute", "off"]);
   const override = {
     ...defaultChatPersonalizationOverride,

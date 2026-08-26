@@ -1,5 +1,5 @@
 /**
- * Cindy 风格的本地扩展管理页。
+ * Biny 风格的本地扩展管理页。
  *
  * 页面只负责筛选、选择和编辑状态；文件发现、路径解析、远程发现和保存都通过 `window.biny` 交给主进程。
  */
@@ -178,11 +178,11 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
   }, [loadCatalog, onError]);
 
   if (tab === "skills" && discoveryOpen) {
-    return <div className="cindy-extension-page"><SkillDiscoveryView onBack={() => setDiscoveryOpen(false)} onError={onError} onInstalled={loadCatalog} /></div>;
+    return <div className="biny-extension-page"><SkillDiscoveryView onBack={() => setDiscoveryOpen(false)} onError={onError} onInstalled={loadCatalog} /></div>;
   }
 
   return (
-    <div className="cindy-extension-page">
+    <div className="biny-extension-page">
       <ExtensionHeader
         tab={tab}
         query={query}
@@ -196,9 +196,9 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
         importing={importing}
         loading={loading}
       />
-      <div className="cindy-extension-body">
-        {diagnosticMessages.length ? <div className="cindy-extension-warning" role="status"><Icon name="warning" size={15} /><div>{diagnosticMessages.map((warning) => <div key={warning}>{warning}</div>)}</div></div> : null}
-        {successMessage ? <div className="cindy-extension-success" role="status"><Icon name="check" size={15} />{successMessage}<button aria-label="关闭提示" onClick={() => setSuccessMessage(undefined)} type="button"><Icon name="close" size={13} /></button></div> : null}
+      <div className="biny-extension-body">
+        {diagnosticMessages.length ? <div className="biny-extension-warning" role="status"><Icon name="warning" size={15} /><div>{diagnosticMessages.map((warning) => <div key={warning}>{warning}</div>)}</div></div> : null}
+        {successMessage ? <div className="biny-extension-success" role="status"><Icon name="check" size={15} />{successMessage}<button aria-label="关闭提示" onClick={() => setSuccessMessage(undefined)} type="button"><Icon name="close" size={13} /></button></div> : null}
         {tab === "skills" ? (
           <SkillCatalogContent
             skills={visibleSkills}
@@ -256,22 +256,22 @@ const ExtensionHeader = memo(function ExtensionHeader({
   importing: boolean;
 }): React.JSX.Element {
   return (
-    <header className="cindy-extension-header">
-      <div className="cindy-extension-tabs" role="tablist" aria-label="扩展类型">
+    <header className="biny-extension-header">
+      <div className="biny-extension-tabs" role="tablist" aria-label="扩展类型">
         <button aria-selected={tab === "plugins"} className={tab === "plugins" ? "is-active" : ""} onClick={() => onTab("plugins")} role="tab" type="button">插件</button>
         <button aria-selected={tab === "skills"} className={tab === "skills" ? "is-active" : ""} onClick={() => onTab("skills")} role="tab" type="button">技能</button>
       </div>
-      <label className="cindy-extension-search">
+      <label className="biny-extension-search">
         <Icon name="search" size={15} />
         <input aria-label={tab === "skills" ? "搜索技能" : "搜索插件"} onChange={(event) => onQuery(event.target.value)} placeholder={tab === "skills" ? "搜索技能" : "搜索插件"} value={query} />
         {query ? <button aria-label="清空搜索" onClick={() => onQuery("")} type="button"><Icon name="close" size={13} /></button> : null}
       </label>
       {tab === "skills" ? <>
-        <button className="cindy-extension-import cindy-extension-import-existing" onClick={onImportExisting} type="button"><span className="cindy-extension-import-dot" data-visible={unmanagedCount > 0} /><Icon name="archive" size={15} />导入已有</button>
-        <button className="cindy-extension-import" disabled={importing} onClick={onImport} type="button"><Icon name="add" size={15} />{importing ? "添加中…" : "添加 Skill"}</button>
-        <button className="cindy-extension-discover" onClick={onDiscover} type="button"><Icon name="spark" size={15} />发现技能</button>
+        <button className="biny-extension-import biny-extension-import-existing" onClick={onImportExisting} type="button"><span className="biny-extension-import-dot" data-visible={unmanagedCount > 0} /><Icon name="archive" size={15} />导入已有</button>
+        <button className="biny-extension-import" disabled={importing} onClick={onImport} type="button"><Icon name="add" size={15} />{importing ? "添加中…" : "添加 Skill"}</button>
+        <button className="biny-extension-discover" onClick={onDiscover} type="button"><Icon name="spark" size={15} />发现技能</button>
       </> : null}
-      <button aria-label="刷新扩展列表" className="cindy-extension-refresh" disabled={loading} onClick={onRefresh} title="刷新" type="button"><Icon name="refresh" size={15} /></button>
+      <button aria-label="刷新扩展列表" className="biny-extension-refresh" disabled={loading} onClick={onRefresh} title="刷新" type="button"><Icon name="refresh" size={15} /></button>
     </header>
   );
 });
@@ -319,17 +319,17 @@ const SkillCatalogContent = memo(function SkillCatalogContent({
 }): React.JSX.Element {
   return (
     <>
-      <div className="cindy-extension-heading">
+      <div className="biny-extension-heading">
         <div>
           <h1>技能</h1>
           <p>发现标准 Agent Skills，或导入后安装到 Biny 的受管目录。</p>
         </div>
-        <span className="cindy-extension-count">本地技能 {skills.length}</span>
+        <span className="biny-extension-count">本地技能 {skills.length}</span>
       </div>
       {managedSources.length ? <ManagedSkillSources sources={managedSources} onInstall={onInstallSource} /> : null}
       {loading && !skills.length ? <ExtensionLoading /> : !skills.length ? <ExtensionEmpty icon="wand" title="还没有找到 Skill" detail="将 Skill 放入全局 Agent Skill 目录或项目的 .agents/skills；已有外部 Skill 可通过“导入已有”复制到 Biny。" /> : (
-        <div className={selectedSkill ? "cindy-skill-layout has-detail" : "cindy-skill-layout"}>
-          <div className="cindy-skill-card-grid">
+        <div className={selectedSkill ? "biny-skill-layout has-detail" : "biny-skill-layout"}>
+          <div className="biny-skill-card-grid">
             {skills.map((skill) => <SkillCard key={skill.id} skill={skill} selected={skill.id === selectedSkill?.id} onSelect={onSelect} />)}
           </div>
           {selectedSkill ? (
@@ -358,12 +358,12 @@ const SkillCatalogContent = memo(function SkillCatalogContent({
 
 const SkillCard = memo(function SkillCard({ skill, selected, onSelect }: { skill: DesktopSkillCatalogEntry; selected: boolean; onSelect(skill: DesktopSkillCatalogEntry): void }): React.JSX.Element {
   return (
-    <button aria-pressed={selected} className={`cindy-skill-card${selected ? " is-selected" : ""}`} onClick={() => onSelect(skill)} type="button">
-      <span className="cindy-skill-card-icon"><Icon name="wand" size={17} /></span>
-      <span className="cindy-skill-card-main">
-        <span className="cindy-skill-card-title">{skill.name}</span>
-        <span className="cindy-skill-card-meta">{skill.scope === "global" ? "全局" : "项目"}</span>
-        <span className="cindy-skill-card-description">{skill.description}</span>
+    <button aria-pressed={selected} className={`biny-skill-card${selected ? " is-selected" : ""}`} onClick={() => onSelect(skill)} type="button">
+      <span className="biny-skill-card-icon"><Icon name="wand" size={17} /></span>
+      <span className="biny-skill-card-main">
+        <span className="biny-skill-card-title">{skill.name}</span>
+        <span className="biny-skill-card-meta">{skill.scope === "global" ? "全局" : "项目"}</span>
+        <span className="biny-skill-card-description">{skill.description}</span>
       </span>
       <Icon name="arrow-right" size={15} />
     </button>
@@ -378,10 +378,10 @@ const ManagedSkillSources = memo(function ManagedSkillSources({
   onInstall(sourceId: string): void;
 }): React.JSX.Element {
   return (
-    <section className="cindy-skill-sources" aria-label="受管 Skill 来源">
-      <div className="cindy-skill-sources-heading"><h2>本地来源</h2><span>导入不会自动启用</span></div>
-      <div className="cindy-skill-source-grid">
-        {sources.map((source) => <article className="cindy-skill-source-card" key={source.id}>
+    <section className="biny-skill-sources" aria-label="受管 Skill 来源">
+      <div className="biny-skill-sources-heading"><h2>本地来源</h2><span>导入不会自动启用</span></div>
+      <div className="biny-skill-source-grid">
+        {sources.map((source) => <article className="biny-skill-source-card" key={source.id}>
           <div><h3>{source.name}</h3><p>{source.description}</p></div>
           <button disabled={source.installed} onClick={() => onInstall(source.id)} type="button">{source.installed ? "已安装" : "安装"}</button>
         </article>)}
@@ -424,29 +424,29 @@ const SkillDetail = memo(function SkillDetail({
   const body = preview?.content ? stripFrontmatter(preview.content) : "";
   const isMarkdown = selectedFilePath.toLowerCase().endsWith(".md");
   return (
-    <section className="cindy-skill-detail" aria-label={`${skill.name} 详情`}>
-      <div className="cindy-skill-detail-header">
-        <div className="cindy-skill-detail-title-row">
-          <span className="cindy-skill-detail-icon"><Icon name="wand" size={18} /></span>
+    <section className="biny-skill-detail" aria-label={`${skill.name} 详情`}>
+      <div className="biny-skill-detail-header">
+        <div className="biny-skill-detail-title-row">
+          <span className="biny-skill-detail-icon"><Icon name="wand" size={18} /></span>
           <div><h2>{skill.name}</h2><p>{skill.scope === "global" ? "全局" : "项目"}</p></div>
         </div>
-        <div className="cindy-skill-detail-actions">
+        <div className="biny-skill-detail-actions">
           <button onClick={onOpenDirectory} type="button"><Icon name="folder-open" size={14} />打开目录</button>
           {editing ? <><button onClick={onCancelEdit} type="button">取消</button><button className="is-primary" disabled={saving} onClick={onSave} type="button">{saving ? "保存中…" : "保存"}</button></> : <button onClick={onEdit} type="button"><Icon name="edit" size={14} />编辑</button>}
         </div>
       </div>
-      <div className="cindy-skill-detail-path" title={skill.absolutePath}>{skill.absolutePath}</div>
-      {skill.parseError ? <div className="cindy-skill-parse-error"><Icon name="warning" size={14} />{skill.parseError}</div> : null}
-      <div className="cindy-skill-detail-body">
-        <aside className="cindy-skill-files">
+      <div className="biny-skill-detail-path" title={skill.absolutePath}>{skill.absolutePath}</div>
+      {skill.parseError ? <div className="biny-skill-parse-error"><Icon name="warning" size={14} />{skill.parseError}</div> : null}
+      <div className="biny-skill-detail-body">
+        <aside className="biny-skill-files">
           <h3>文件</h3>
           {skill.files.map((file) => <button aria-current={file.path === selectedFilePath ? "page" : undefined} className={file.path === selectedFilePath ? "is-selected" : ""} key={file.path} onClick={() => onFile(file.path)} type="button"><Icon name="file" size={13} /><span>{file.path}</span></button>)}
         </aside>
-        <div className="cindy-skill-document">
-          {fileLoading ? <ExtensionLoading /> : preview?.binary ? <ExtensionEmpty icon="file" title="无法预览二进制文件" detail="请在文件管理器中打开这个文件。" /> : editing ? <textarea aria-label={`编辑 ${selectedFilePath}`} className="cindy-skill-editor" onChange={(event) => onDraft(event.target.value)} spellCheck={false} value={draft} /> : (
+        <div className="biny-skill-document">
+          {fileLoading ? <ExtensionLoading /> : preview?.binary ? <ExtensionEmpty icon="file" title="无法预览二进制文件" detail="请在文件管理器中打开这个文件。" /> : editing ? <textarea aria-label={`编辑 ${selectedFilePath}`} className="biny-skill-editor" onChange={(event) => onDraft(event.target.value)} spellCheck={false} value={draft} /> : (
             <>
               {selectedFilePath.toLowerCase().endsWith("skill.md") ? <FrontmatterBlock frontmatter={skill.frontmatter} /> : null}
-              {isMarkdown ? <MarkdownBlock content={body} onError={onError} /> : <pre className="cindy-skill-code">{preview?.content ?? ""}</pre>}
+              {isMarkdown ? <MarkdownBlock content={body} onError={onError} /> : <pre className="biny-skill-code">{preview?.content ?? ""}</pre>}
             </>
           )}
         </div>
@@ -457,11 +457,11 @@ const SkillDetail = memo(function SkillDetail({
 
 const FrontmatterBlock = memo(function FrontmatterBlock({ frontmatter }: { frontmatter: Record<string, unknown> }): React.JSX.Element {
   const content = Object.keys(frontmatter).length ? JSON.stringify(frontmatter, null, 2) : "暂无 frontmatter";
-  return <section className="cindy-skill-frontmatter"><h3>FRONTMATTER</h3><pre>{content}</pre></section>;
+  return <section className="biny-skill-frontmatter"><h3>FRONTMATTER</h3><pre>{content}</pre></section>;
 });
 
 const MarkdownBlock = memo(function MarkdownBlock({ content, onError }: { content: string; onError(message: string): void }): React.JSX.Element {
-  return <div className="cindy-skill-markdown"><Markdown
+  return <div className="biny-skill-markdown"><Markdown
     components={{
       a: ({ href, children }) => (
         <a href={href} onClick={(event) => {
@@ -478,12 +478,12 @@ const MarkdownBlock = memo(function MarkdownBlock({ content, onError }: { conten
 const PluginCatalogContent = memo(function PluginCatalogContent({ plugins, loading }: { plugins: DesktopPluginSummary[]; loading: boolean }): React.JSX.Element {
   return (
     <>
-      <div className="cindy-extension-heading">
+      <div className="biny-extension-heading">
         <div><h1>插件</h1><p>管理 Biny 项目配置中的本地插件模块。</p></div>
-        <span className="cindy-extension-count">已配置 {plugins.length}</span>
+        <span className="biny-extension-count">已配置 {plugins.length}</span>
       </div>
-      {loading && !plugins.length ? <ExtensionLoading /> : !plugins.length ? <div className="cindy-extension-empty cindy-plugin-empty"><span><Icon name="plug" size={22} /></span><h2>还没有配置插件</h2><p>在项目配置的 extensions.plugins 中声明 .js、.mjs 或 .cjs 文件或目录。</p></div> : (
-        <div className="cindy-plugin-grid">{plugins.map((plugin) => <PluginCard key={plugin.id} plugin={plugin} />)}</div>
+      {loading && !plugins.length ? <ExtensionLoading /> : !plugins.length ? <div className="biny-extension-empty biny-plugin-empty"><span><Icon name="plug" size={22} /></span><h2>还没有配置插件</h2><p>在项目配置的 extensions.plugins 中声明 .js、.mjs 或 .cjs 文件或目录。</p></div> : (
+        <div className="biny-plugin-grid">{plugins.map((plugin) => <PluginCard key={plugin.id} plugin={plugin} />)}</div>
       )}
     </>
   );
@@ -491,19 +491,19 @@ const PluginCatalogContent = memo(function PluginCatalogContent({ plugins, loadi
 
 const PluginCard = memo(function PluginCard({ plugin }: { plugin: DesktopPluginSummary }): React.JSX.Element {
   return (
-    <article className="cindy-plugin-card">
-      <span className="cindy-skill-card-icon"><Icon name="plug" size={17} /></span>
-      <div><h2>{plugin.name}</h2><p>{plugin.projectName} · {plugin.path}</p><span className={plugin.status === "configured" ? "cindy-plugin-status is-ready" : "cindy-plugin-status is-missing"}>{plugin.status === "configured" ? `${plugin.moduleCount} 个模块` : "路径不可用"}</span></div>
+    <article className="biny-plugin-card">
+      <span className="biny-skill-card-icon"><Icon name="plug" size={17} /></span>
+      <div><h2>{plugin.name}</h2><p>{plugin.projectName} · {plugin.path}</p><span className={plugin.status === "configured" ? "biny-plugin-status is-ready" : "biny-plugin-status is-missing"}>{plugin.status === "configured" ? `${plugin.moduleCount} 个模块` : "路径不可用"}</span></div>
     </article>
   );
 });
 
 function ExtensionLoading(): React.JSX.Element {
-  return <div className="cindy-extension-loading">正在扫描本机扩展…</div>;
+  return <div className="biny-extension-loading">正在扫描本机扩展…</div>;
 }
 
 function ExtensionEmpty({ icon, title, detail }: { icon: "file" | "plug" | "wand"; title: string; detail: string }): React.JSX.Element {
-  return <div className="cindy-extension-empty"><span><Icon name={icon} size={22} /></span><h2>{title}</h2><p>{detail}</p></div>;
+  return <div className="biny-extension-empty"><span><Icon name={icon} size={22} /></span><h2>{title}</h2><p>{detail}</p></div>;
 }
 
 function stripFrontmatter(content: string): string {
