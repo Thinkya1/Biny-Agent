@@ -84,6 +84,8 @@ export interface InteractiveRuntimeHandle {
   /** 释放当前 surface 的 session writer；不传 session 时释放当前 claim。 */
   releaseSessionClaim(session?: string): Promise<void>;
   resumeSession(session: string): Promise<ResumedAgentSession>;
+  /** 开始一个全新的空会话并重置会话级状态，不重建 runtime 基础设施（MCP/索引/技能）。忙碌时拒绝。 */
+  startDraft(): Promise<AgentSessionInfo>;
   runExclusiveOperation<T>(operation: RuntimeOperation, execute: (signal: AbortSignal) => Promise<T>): Promise<T>;
   startBackgroundOperation<T extends { completion: Promise<unknown> }>(
     operation: RuntimeOperation,
@@ -402,6 +404,24 @@ export class InteractiveAgentRuntime {
       if (!alreadyClaimed) await this.releaseSessionClaim(sessionId);
       throw error;
     }
+  }
+
+  /**
+   * 开始一个全新的空会话，不重建 runtime。
+   *
+   * 走 runMaintenanceOperation 的互斥语义：运行中或另一项维护进行时拒绝。会话级状态由
+   * AgentSession.startNewSession 重置；这里额外释放旧会话的 writer claim，新会话在首次
+   * 提交时才建立新的执行 lease。MCP 连接、记忆索引、技能等基础设施全部保留。
+   */
+  async startDraft(): Promise<AgentSessionInfo> {
+    if (this.closed) throw new Error("Agent runtime is closed.");
+    if (this.state.kind !== "idle" || this.activeRun) {
+      throw new Error("Cannot start a new session while the runtime is busy.");
+    }
+    await this.runMaintenanceOperation("draft", async () => await this.commandRuntime.agent.startNewSession());
+    // 草稿已经切走，旧会话的 writer claim 一并释放；否则旧会话会被这个 surface 一直占着。
+    await this.releaseSessionClaim();
+    return this.getSnapshot().info;
   }
 
   /**
@@ -1507,6 +1527,7 @@ function publicOperationName(operation: RuntimeOperation): string {
   if (operation === "refresh_model") return "model refresh";
   if (operation === "model_catalog") return "model catalog refresh";
   if (operation === "resume") return "session resume";
+  if (operation === "draft") return "a new session";
   if (operation === "compact") return "conversation compaction";
   if (operation === "mcp") return "MCP reconnection";
   if (operation === "memory") return "a memory command";

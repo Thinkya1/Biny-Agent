@@ -21,6 +21,7 @@ import { createFileConfigStore, updateConfig } from "../src/config/store.js";
 import { loadProjectSettings, updateProjectSettings } from "../src/config/projectSettings.js";
 import { ConfigRevisionConflictError, configDocumentRevision } from "../src/config/versioned.js";
 import type { CredentialStore } from "../src/config/credentials.js";
+import { DesktopConfigStore } from "../src/desktop/electron/main/DesktopConfigStore.js";
 
 await testGlobalPathResolution();
 testRunBudget();
@@ -37,6 +38,7 @@ await testMcpCredentialReferencesStayOutOfConfig();
 await testVersionedCredentialUpdatesRejectStaleWriters();
 testConfigRevisionMatchesJsonRoundTrip();
 await testConfigUpdatesRequireVersionedStore();
+await testConfigUpdatesBindClassStoreMethods();
 await testCredentialTransactionCompensatesPartialWrites();
 await testDeferredCredentialTransactionKeepsRollbackLineage();
 await testFileConfigStoreDeferredCredentialContract();
@@ -423,6 +425,28 @@ async function testConfigUpdatesRequireVersionedStore(): Promise<void> {
     }, undefined, (current) => current),
     /require a versioned config store/u
   );
+}
+
+async function testConfigUpdatesBindClassStoreMethods(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-config-class-store-"));
+  const credentials: CredentialStore = {
+    persistent: false,
+    get: async () => undefined,
+    set: async () => undefined,
+    delete: async () => undefined
+  };
+  try {
+    const store = new DesktopConfigStore(root, credentials);
+    await store.save(structuredClone(defaultConfig), root);
+    const updated = await updateConfig(store, root, (current) => ({
+      ...current,
+      permission: { ...current.permission, mode: "full-access" }
+    }));
+    assert.equal(updated.permission.mode, "full-access");
+    assert.equal((await store.load(root)).permission.mode, "full-access");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 }
 
 async function testCredentialTransactionCompensatesPartialWrites(): Promise<void> {

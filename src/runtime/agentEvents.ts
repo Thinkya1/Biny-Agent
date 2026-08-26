@@ -17,6 +17,7 @@ export type AgentRunStatus =
 export type AgentBlockedReason = BlockedReason;
 export type RuntimeOperation =
   | "resume"
+  | "draft"
   | "compact"
   | "switch_model"
   | "refresh_model"

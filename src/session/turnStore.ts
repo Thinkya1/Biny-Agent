@@ -175,6 +175,7 @@ function isInterruptedToolExecutionCheckpoint(value: unknown): value is Interrup
     && typeof candidate.operationId === "string"
     && (candidate.state === "not_started"
       || candidate.state === "running"
+      || candidate.state === "admitted"
       || candidate.state === "side_effect_committed"
       || candidate.state === "cancel_requested"
       || candidate.state === "cancelled"

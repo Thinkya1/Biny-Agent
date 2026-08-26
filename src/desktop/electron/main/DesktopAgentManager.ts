@@ -192,6 +192,7 @@ export class DesktopAgentManager {
   private readonly runtimeInitializations = new Map<string, Promise<ManagedRuntime>>();
   private readonly liveEvents = new Map<string, Map<string, AgentHostEvent[]>>();
   private readonly runtimeErrors = new Map<string, string>();
+  private idleRuntimeRebuildTail: Promise<void> = Promise.resolve();
   private readonly pendingSessionReads = new Map<string, {
     initialRevision: string | undefined;
     promise: Promise<SessionCatalogRecord>;
@@ -297,20 +298,24 @@ export class DesktopAgentManager {
   }
 
   async startDraft(projectId: string): Promise<DesktopWorkspaceSnapshot> {
+    await this.ensureDraftRuntime(projectId);
+    return await this.workspaceSnapshot(projectId);
+  }
+
+  /**
+   * 空闲 runtime 只切草稿、不销毁重建：MCP 连接、持久化 store、技能扫描等昂贵基础设施
+   * 全部保留，仅由 AgentSession.startNewSession 重置会话级状态。sendPrompt 等不需要
+   * 快照的调用方走这条轻量路径；startDraft 在此基础上补一份 workspaceSnapshot。
+   */
+  private async ensureDraftRuntime(projectId: string): Promise<void> {
     const managed = this.runtimes.get(projectId);
-    if (managed && runtimeIsBusy(managed.runtime.getSnapshot())) {
+    // 清掉旧的初始化失败闩锁，让「新聊天」始终能作为重试入口。
+    this.runtimeErrors.delete(projectId);
+    if (!managed) return;
+    if (runtimeIsBusy(managed.runtime.getSnapshot())) {
       throw new Error("当前项目仍有任务运行。请先停止它，或稍后再开始新任务。");
     }
-    if (managed) {
-      if (managed.runtime instanceof RuntimeHostClient) {
-        await managed.runtime.restartRuntime();
-      } else {
-        await this.closeManagedRuntime(managed);
-        this.runtimes.delete(projectId);
-      }
-    }
-    this.runtimeErrors.delete(projectId);
-    return await this.workspaceSnapshot(projectId);
+    await managed.runtime.startDraft();
   }
 
   async listProjectBranches(projectId: string): Promise<DesktopGitBranch[]> {
@@ -402,15 +407,14 @@ export class DesktopAgentManager {
     delivery?: "steer" | "followUp",
     personalization?: DesktopChatPersonalizationOverride
   ): Promise<DesktopRunReceipt> {
-    let managed = await this.ensureRuntime(projectId);
-    let runtime = managed.runtime;
+    const managed = await this.ensureRuntime(projectId);
+    const runtime = managed.runtime;
     let snapshot = runtime.getSnapshot();
     // 没有显式选中历史 session 时，第一条消息必须落到新聊天，而不是附加到
     // Desktop 启动前 Host 恰好持有的旧空闲 session。运行中的 Host 仍保持可观察和可 follow-up。
+    // 轻量切草稿：runtime 实例不变，无需重新 ensure，也不算一份没人看的 workspaceSnapshot。
     if (!sessionId && !runtimeIsBusy(snapshot)) {
-      await this.startDraft(projectId);
-      managed = await this.ensureRuntime(projectId);
-      runtime = managed.runtime;
+      await this.ensureDraftRuntime(projectId);
       snapshot = runtime.getSnapshot();
     }
     if (runtimeIsBusy(snapshot)) {
@@ -756,8 +760,8 @@ export class DesktopAgentManager {
     if (saved.revision !== prepared.targetRevision) {
       throw new Error(`全局配置保存后的 revision 与事务候选不一致：${prepared.targetRevision} -> ${saved.revision}。`);
     }
-    this.runtimeErrors.delete(prepared.projectId);
-    await this.rebuildIdleManagedRuntimes();
+    // 设置事务只负责持久化配置并完成 CAS；空闲 Runtime 是派生状态，等事务 journal
+    // 清理完成后由 settingsCommitted 放到后台刷新，避免保存按钮被 Host 重建拖住。
   }
 
   async settingsConfigTransactionStatus(
@@ -1397,6 +1401,7 @@ export class DesktopAgentManager {
 
   /** 设置事务已经复读确认后才调用；重建失败只留在派生状态，不改变 committed 结果。 */
   settingsCommitted(prepared: PreparedDesktopSettingsConfig): void {
+    if (prepared.beforeRevision !== prepared.targetRevision) this.scheduleIdleManagedRuntimeRebuild();
     const before = prepared.before.context.memory.embeddingModel;
     const after = prepared.after.context.memory.embeddingModel;
     if (after === undefined) return;
@@ -1438,7 +1443,7 @@ export class DesktopAgentManager {
    * 拉取服务商的实时模型目录。只有服务商成功返回非空目录时才算成功；失败由 Renderer
    * 明确提示，已有目录状态保持不变，不能把缓存包装成当前账号的实时库存。
    */
-  async fetchModelCatalog(projectId: string, providerAlias: string): Promise<DesktopModelCatalogResult> {
+  async fetchModelCatalog(projectId: string, providerAlias: string, force = false): Promise<DesktopModelCatalogResult> {
     this.projects.requireProject(projectId);
     const config = await this.loadProjectConfig(projectId);
     const provider = config.providers[providerAlias];
@@ -1446,7 +1451,7 @@ export class DesktopAgentManager {
     const catalogs = await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore);
     const runtime = new ModelRuntime(config, catalogs, undefined, this.modelsStore, this.fetcher);
     try {
-      const models = await runtime.refreshModels(providerAlias);
+      const models = await runtime.refreshModels(providerAlias, undefined, force);
       return { providerAlias, source: "fetched", fetchedAt: new Date().toISOString(), models };
     } catch (error) {
       throw new Error(`无法从服务商获取模型列表：${formatModelConnectionError(error)}`, { cause: error });
@@ -1683,6 +1688,13 @@ export class DesktopAgentManager {
     return result;
   }
 
+  async expandSkillCommand(projectId: string, input: string): Promise<string> {
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    return commands
+      ? await commands.expandSkillCommand(input)
+      : await requireRemoteRuntime(runtime).expandSkillCommand(input);
+  }
+
   async runtimeProjection(projectId: string): Promise<DesktopRuntimeProjection> {
     const { runtime, commands } = await this.ensureRuntime(projectId);
     if (commands) {
@@ -1907,6 +1919,7 @@ export class DesktopAgentManager {
     await Promise.allSettled([...this.pendingSessionReads.values()].map(({ promise }) => promise));
     this.pendingSessionReads.clear();
     await Promise.allSettled(this.runtimeInitializations.values());
+    await this.idleRuntimeRebuildTail.catch(() => undefined);
     const managedRuntimes = [...this.runtimes.values()];
     this.runtimes.clear();
     await Promise.all(managedRuntimes.map(async (managed) => await this.closeManagedRuntime(managed, options)));
@@ -1929,7 +1942,7 @@ export class DesktopAgentManager {
     this.runtimes.delete(projectId);
   }
 
-  /** 全局 config 对每个项目 Runtime 生效；提交与补偿都必须刷新同一批空闲实例。 */
+  /** 全局 config 对每个项目 Runtime 生效；显式事务提交与补偿会等待空闲实例刷新。 */
   private async rebuildIdleManagedRuntimes(): Promise<void> {
     const resident = [...this.runtimes.entries()];
     for (const [projectId, managed] of resident) {
@@ -1938,6 +1951,35 @@ export class DesktopAgentManager {
       await this.rebuildManagedRuntime(projectId, managed);
       this.runtimeErrors.delete(projectId);
     }
+  }
+
+  /** 后台派生刷新逐个容错，单个项目的 Host 异常不能阻止其它项目收敛到新配置。 */
+  private async rebuildIdleManagedRuntimesInBackground(): Promise<void> {
+    const resident = [...this.runtimes.entries()];
+    for (const [projectId, managed] of resident) {
+      // 只处理快照中的原实例；并发导航若已经替换了它，不应误关新 Runtime。
+      if (this.runtimes.get(projectId) !== managed || runtimeIsBusy(managed.runtime.getSnapshot())) continue;
+      try {
+        await this.rebuildManagedRuntime(projectId, managed);
+        this.runtimeErrors.delete(projectId);
+      } catch (error) {
+        this.runtimeErrors.set(projectId, error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+
+  /**
+   * 全局即时设置只需先确认当前 Runtime 的写入；其它空闲实例的重建放到后台串行执行，
+   * 避免一个项目的 Host 重启把所有项目的开关点击拖成可见延迟。
+   */
+  private scheduleIdleManagedRuntimeRebuild(): void {
+    const scheduled = this.idleRuntimeRebuildTail
+      .catch(() => undefined)
+      .then(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        await this.rebuildIdleManagedRuntimesInBackground();
+      });
+    this.idleRuntimeRebuildTail = scheduled.catch(() => undefined);
   }
 
   private async closeManagedRuntime(
@@ -2185,6 +2227,9 @@ export class DesktopAgentManager {
     expectedRevision: string
   ): Promise<AgentPersonalizationState> {
     this.assertNoRunningTasks("任务运行期间不能修改个性化或记忆设置。");
+    // 上一次全局设置提交后的空闲实例重建不能和本次 Runtime RPC 并发，
+    // 否则用户连续点击时可能正好撞上 Host 重启；首个点击仍不等待本次写入后的后台任务。
+    await this.idleRuntimeRebuildTail.catch(() => undefined);
     const managed = await this.ensureRuntime(projectId);
     this.assertNoRunningTasks("任务运行期间不能修改个性化或记忆设置。");
     const commands = managed.commands;
@@ -2194,7 +2239,7 @@ export class DesktopAgentManager {
         async () => await commands.agent.updateGlobalPersonalization(update, expectedRevision)
       )
       : await requireRemoteRuntime(managed.runtime).updateGlobalPersonalization(update, expectedRevision);
-    await this.rebuildIdleManagedRuntimes();
+    this.scheduleIdleManagedRuntimeRebuild();
     return state;
   }
 

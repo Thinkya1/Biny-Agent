@@ -80,8 +80,10 @@ export async function updateConfig(
   workspaceRoot: string | undefined,
   update: (config: AgentConfig) => AgentConfig
 ): Promise<AgentConfig> {
-  const loadVersioned = store.loadVersioned;
-  const saveVersioned = store.saveVersioned;
+  // AgentConfigStore 同时支持闭包实现和 class 实现；绑定实例后统一调用，避免桌面端的
+  // DesktopConfigStore 在取出方法后丢失 this，导致权限等即时设置只改了内存而没有落盘。
+  const loadVersioned = store.loadVersioned?.bind(store);
+  const saveVersioned = store.saveVersioned?.bind(store);
   if (loadVersioned === undefined || saveVersioned === undefined) {
     throw new Error("Configuration updates require a versioned config store.");
   }

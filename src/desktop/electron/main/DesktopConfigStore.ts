@@ -12,6 +12,7 @@ import {
   createCredentialStore,
   deferredCredentialTransactionStatus,
   finalizeDeferredCredentialTransaction,
+  hasPendingCredentialTransaction,
   recoverStoredCredentialTransaction,
   rollbackDeferredCredentialTransaction,
   saveConfigAndStoredCredentials,
@@ -37,6 +38,13 @@ export class DesktopConfigStore implements AgentConfigStore {
   ) {}
 
   async load(workspaceRoot = this.root): Promise<AgentConfig> {
+    // 纯读不获取全局写锁：config.json 经 writeStoreFile 的 tmp+rename 原子替换，读不到半写文件；
+    // 真实 Keychain 账号只在 journal 存在期间被改写，所以「锁外确认无待恢复事务」就能安全地
+    // 直接读 config + 水合凭据。这是切换模型等纯读路径的常态。
+    if (!(await hasPendingCredentialTransaction(this.credentialJournalPath()))) {
+      return await this.readAppliedCredentials(workspaceRoot);
+    }
+    // 见到 journal：进全局写锁重查并完成补偿恢复（两段式的慢路径，语义与原先一致）。
     const run = this.writeTail.then(async () => await withGlobalConfigWriteLock(
       this.root,
       async () => await this.loadUnlocked(workspaceRoot)
@@ -191,13 +199,25 @@ export class DesktopConfigStore implements AgentConfigStore {
   }
 
   private async loadUnlocked(workspaceRoot: string): Promise<AgentConfig> {
-    const loadDocument = async (): Promise<AgentConfig> => await loadConfig(workspaceRoot, { globalDir: this.root });
+    // 已持有全局写锁：只读一次文档，恢复流程用它计算 revision，恢复返回后继续复用它水合凭据。
+    // recoverStoredCredentialTransaction 只改写 Keychain 与 journal、不写 config.json，因此无需
+    // 再读第二遍。
+    const document = await this.readDocument(workspaceRoot);
     await recoverStoredCredentialTransaction(
       this.credentials,
       this.credentialJournalPath(),
-      loadDocument
+      async () => document
     );
-    return await applyStoredCredentials(await loadDocument(), this.credentials);
+    return await applyStoredCredentials(document, this.credentials);
+  }
+
+  /** 纯读路径：不拿锁、不做补偿恢复，直接读 config 并水合凭据。调用方已确认无待恢复 journal。 */
+  private async readAppliedCredentials(workspaceRoot: string): Promise<AgentConfig> {
+    return await applyStoredCredentials(await this.readDocument(workspaceRoot), this.credentials);
+  }
+
+  private async readDocument(workspaceRoot: string): Promise<AgentConfig> {
+    return await loadConfig(workspaceRoot, { globalDir: this.root });
   }
 
   private credentialJournalPath(): string {

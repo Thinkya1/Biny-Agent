@@ -8,7 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { AgentConfig } from "./schema.js";
+import type { AgentConfig, McpServerConfig } from "./schema.js";
 import { configDocumentRevision } from "./versioned.js";
 
 export const BINY_KEYCHAIN_SERVICE = "com.biny.agent";
@@ -142,29 +142,53 @@ export function applyStoredCredentials(config: AgentConfig, store: CredentialSto
 
 export async function loadStoredCredentials(config: AgentConfig, store: CredentialStore): Promise<AgentConfig> {
   const next = structuredClone(config);
-  for (const [alias, provider] of Object.entries(next.providers)) {
-    const apiKey = await store.get(providerCredentialAccount(alias, "apiKey"));
-    const refreshToken = await store.get(providerCredentialAccount(alias, "refreshToken"));
+  const providers = Object.entries(next.providers);
+  const mcpServers = Object.values(next.extensions.mcp);
+  // 每次 store.get 都是一次独立的 `security` 子进程；顺序 await 会把凭据水合拖成 O(n) 次
+  // 子进程往返，是切换模型卡顿的来源之一。这里一次性并行发起全部读取，拿到结果后再按
+  // 「有值才覆盖」落回配置，返回形状与优先级语义保持不变。
+  const [providerCredentials, webSearchApiKey, mcpEnvValues, mcpHeaderValues] = await Promise.all([
+    Promise.all(providers.map(async ([alias]) => ({
+      apiKey: await store.get(providerCredentialAccount(alias, "apiKey")),
+      refreshToken: await store.get(providerCredentialAccount(alias, "refreshToken"))
+    }))),
+    store.get(WEB_SEARCH_CREDENTIAL_ACCOUNT),
+    Promise.all(mcpServers.map(async (server) => await readReferencedCredentials(store, server.credentialRefs?.env))),
+    Promise.all(mcpServers.map(async (server) => await readReferencedCredentials(store, server.credentialRefs?.headers)))
+  ]);
+  providers.forEach(([, provider], index) => {
+    const { apiKey, refreshToken } = providerCredentials[index]!;
     if (apiKey) provider.apiKey = apiKey;
     if (provider.oauth && refreshToken) provider.oauth.refreshToken = refreshToken;
-  }
-  const webSearchApiKey = await store.get(WEB_SEARCH_CREDENTIAL_ACCOUNT);
+  });
   if (webSearchApiKey) next.web.search.apiKey = webSearchApiKey;
-  for (const server of Object.values(next.extensions.mcp)) {
-    for (const [key, account] of Object.entries(server.credentialRefs?.env ?? {})) {
-      const value = await store.get(account);
-      if (value === undefined) continue;
-      server.env ??= {};
-      server.env[key] = value;
-    }
-    for (const [key, account] of Object.entries(server.credentialRefs?.headers ?? {})) {
-      const value = await store.get(account);
-      if (value === undefined) continue;
-      server.headers ??= {};
-      server.headers[key] = value;
-    }
-  }
+  mcpServers.forEach((server, index) => {
+    applyReferencedCredentials(server, "env", mcpEnvValues[index]!);
+    applyReferencedCredentials(server, "headers", mcpHeaderValues[index]!);
+  });
   return next;
+}
+
+async function readReferencedCredentials(
+  store: CredentialStore,
+  refs: Record<string, string> | undefined
+): Promise<Array<{ key: string; value: string | undefined }>> {
+  return await Promise.all(Object.entries(refs ?? {}).map(async ([key, account]) => ({
+    key,
+    value: await store.get(account)
+  })));
+}
+
+function applyReferencedCredentials(
+  server: McpServerConfig,
+  location: "env" | "headers",
+  values: Array<{ key: string; value: string | undefined }>
+): void {
+  for (const { key, value } of values) {
+    if (value === undefined) continue;
+    server[location] ??= {};
+    server[location][key] = value;
+  }
 }
 
 export async function saveStoredCredentials(config: AgentConfig, store: CredentialStore, previous?: AgentConfig): Promise<void> {
@@ -276,6 +300,17 @@ export function synchronizeCredentialRevisions(config: AgentConfig, previous: Ag
     }
   }
   config.credentialRevisions = revisions;
+}
+
+/**
+ * 锁外快速判断是否可能存在待恢复/待清理的凭据事务。
+ *
+ * 真实 Keychain 账号只在 journal 存在期间被改写（staging 写入的是事务专用临时 account），
+ * 因此「无 journal」即可让纯读完全绕开全局写锁；一旦见到 journal，调用方必须进全局写锁后
+ * 再调 recoverStoredCredentialTransaction 重查并恢复。
+ */
+export async function hasPendingCredentialTransaction(journalPath: string): Promise<boolean> {
+  return (await readCredentialJournal(journalPath)) !== undefined;
 }
 
 /** load 边界先恢复未完成的凭据事务；无法证明方向时 fail closed，不返回混合状态。 */

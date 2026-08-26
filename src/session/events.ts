@@ -13,6 +13,7 @@ import {
   maxSessionFileBytes,
   readBoundedSessionHandle
 } from "./limits.js";
+import { cachedSessionEvents, sessionFileFingerprint } from "./parseCache.js";
 import { listSessionFiles, readSessionSnapshot } from "./store.js";
 import type { SessionEvent, SessionTurnStatusEvent } from "./recorder.js";
 export type { SessionEvent } from "./recorder.js";
@@ -159,7 +160,7 @@ const sessionEventSchema = z.discriminatedUnion("type", [
     toolCallId: z.string(),
     sequence: z.number().finite(),
     operationId: z.string(),
-    state: z.enum(["not_started", "running", "side_effect_committed", "cancel_requested", "cancelled", "succeeded", "failed", "unknown"]),
+    state: z.enum(["not_started", "running", "admitted", "side_effect_committed", "cancel_requested", "cancelled", "succeeded", "failed", "unknown"]),
     evidence: z.string().optional(),
     retrySafety: z.enum(["safe", "idempotent", "unsafe", "unknown"]).optional(),
     time: z.string().optional()
@@ -249,13 +250,19 @@ export async function readSessionEvents(filePath: string): Promise<SessionEvent[
 export async function readStoredSessionEvents(
   workspaceRoot: string,
   session: string | undefined
-): Promise<{ filePath: string; events: SessionEvent[]; truncated: boolean; summary?: SessionSummary }> {
+): Promise<{ filePath: string; events: SessionEvent[]; truncated: boolean; sizeBytes: number; summary?: SessionSummary }> {
   const snapshot = await readSessionSnapshot(workspaceRoot, session);
-  const events = parseSessionEvents(snapshot.bytes.toString("utf8"), { overflow: "truncate" });
+  // 与 resume 共用同一份解析缓存：只有完整读到文件且没丢事件时才进缓存（超限截断的结果
+  // 不能复用，否则会把"只看到尾部"的视角发给需要完整事件的读取方）。
+  const events = cachedSessionEvents(snapshot.filePath, sessionFileFingerprint(snapshot.stat), () => {
+    const parsed = parseSessionEvents(snapshot.bytes.toString("utf8"), { overflow: "truncate" });
+    return { events: parsed, complete: !snapshot.truncated && parsed.length < maxSessionEvents };
+  });
   return {
     filePath: snapshot.filePath,
     events,
     truncated: snapshot.truncated ?? false,
+    sizeBytes: snapshot.stat.size,
     summary: summarizeSessionEvents(snapshot.fileName, events, snapshot.stat)
   };
 }
@@ -266,7 +273,11 @@ export async function readSessionSummary(
   session: string | undefined
 ): Promise<SessionSummary | undefined> {
   const snapshot = await readSessionSnapshot(workspaceRoot, session);
-  const events = parseSessionEvents(snapshot.bytes.toString("utf8"));
+  // 严格模式解析成功即代表完整读到了文件，可以进缓存；超限截断的视角不进缓存。
+  const events = cachedSessionEvents(snapshot.filePath, sessionFileFingerprint(snapshot.stat), () => ({
+    events: parseSessionEvents(snapshot.bytes.toString("utf8")),
+    complete: !snapshot.truncated
+  }));
   return summarizeSessionEvents(snapshot.fileName, events, snapshot.stat);
 }
 
@@ -395,7 +406,11 @@ export async function listSessionSummaries(workspaceRoot: string): Promise<Sessi
       if (!fileName) continue;
       try {
         const snapshot = await readSessionSnapshot(workspaceRoot, fileName);
-        const events = parseSessionEvents(snapshot.bytes.toString("utf8"));
+        // 未变更的文件直接命中解析缓存，只对新增/变大的文件重新跑逐事件的 zod 校验。
+        const events = cachedSessionEvents(snapshot.filePath, sessionFileFingerprint(snapshot.stat), () => ({
+          events: parseSessionEvents(snapshot.bytes.toString("utf8")),
+          complete: !snapshot.truncated
+        }));
         summaries[index] = summarizeSessionEvents(fileName, events, snapshot.stat);
       } catch {
         // Opening a corrupt session directly still reports the precise error;

@@ -211,13 +211,18 @@ function appendLiveReasoning(existing: string, next: string): string {
     : `${combined.slice(0, LIVE_REASONING_LIMIT - 1).trimEnd()}…`;
 }
 
+/** 完全空的轮次（只有元信息、没有任何可展示内容）不进时间线。 */
+function isVisibleTimelineTurn(turn: TimelineTurn): boolean {
+  return Boolean(turn.user || turn.assistant || turn.steps.length || turn.tools.length || turn.error);
+}
+
 /** 合成完整时间线；末尾过滤掉完全空的轮次（只有元信息、没有任何可展示内容）。 */
 export function buildSessionTimeline(events: SessionEvent[], liveEvents: AgentHostEvent[]): TimelineTurn[] {
   const history = historicalPrefix(events, liveEvents);
   const historicalTurns = buildHistoricalTurns(history);
   // 实时轮次的用户消息序号要接着历史的算，「编辑消息」功能依赖这个序号定位。
   const historicalUserMessages = history.filter((event) => event.type === "user_message").length;
-  return [...historicalTurns, ...buildLiveTurns(liveEvents, historicalUserMessages)].filter((turn) => turn.user || turn.assistant || turn.steps.length || turn.tools.length || turn.error);
+  return [...historicalTurns, ...buildLiveTurns(liveEvents, historicalUserMessages)].filter(isVisibleTimelineTurn);
 }
 
 /**
@@ -355,19 +360,34 @@ function buildHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
 }
 
 /**
- * 由实时事件构建轮次。
+ * 实时事件的可增量折叠器。
  *
  * 实时事件以 `runId` 归属轮次、以 `toolCallId` 归属工具，所以这里用 Map 建索引，`order`
  * 单独记录出现顺序（Map 的插入序不适合在后续补写时依赖）。
  * `activeReasoning` / `activeAssistant` 保存当前正在流式追加的步骤，增量内容要续写而不是新建。
+ *
+ * 状态在闭包里只建一次：`apply` 逐个吸收事件，`snapshot` 产出当前轮次数组。增量复用的关键在
+ * `snapshot`——自上次快照以来没有被事件触及的轮次/工具直接复用上次发布的对象引用，被触及的才克隆，
+ * 这样 React.memo 能跳过没有变化的子树（ToolActivity 按 `tool` 引用记忆）。
  */
-function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: number): TimelineTurn[] {
+interface LiveTimelineFold {
+  apply(event: AgentHostEvent): void;
+  snapshot(): TimelineTurn[];
+}
+
+function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFold {
   const turns = new Map<string, TimelineTurn>();
   const order: string[] = [];
   const toolMaps = new Map<string, Map<string, TimelineTool>>();
   const activeReasoning = new Map<string, TimelineReasoningStep>();
   const activeAssistant = new Map<string, TimelineAssistantStep>();
   let userMessageIndex = initialUserMessageIndex;
+  /** 自上次 snapshot 以来被事件触及的轮次/工具；决定哪些对象需要发布新引用。 */
+  const dirtyTurns = new Set<string>();
+  const dirtyTools = new Set<string>();
+  /** 上次 snapshot 对外发布的对象；未变化的轮次/工具原样复用，保持引用稳定。 */
+  const publishedTurns = new Map<string, TimelineTurn>();
+  const publishedTools = new Map<string, TimelineTool>();
   const turnFor = (event: AgentHostEvent): TimelineTurn => {
     const current = turns.get(event.runId);
     if (current) return current;
@@ -383,7 +403,10 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
     if (!tools) throw new Error("Timeline tool map is missing.");
     markActiveAssistantSummary(turn, event.runId);
     const current = tools.get(event.toolCallId);
-    if (current) return current;
+    if (current) {
+      dirtyTools.add(current.id);
+      return current;
+    }
     const tool: TimelineTool = {
       id: event.toolCallId,
       tool: toolName,
@@ -395,6 +418,7 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
     tools.set(event.toolCallId, tool);
     turn.tools.push(tool);
     turn.steps.push({ kind: "tool", id: tool.id, tool });
+    dirtyTools.add(tool.id);
     return tool;
   };
 
@@ -481,8 +505,9 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
     activeAssistant.delete(runId);
   };
 
-  for (const event of events) {
+  const apply = (event: AgentHostEvent): void => {
     const turn = turnFor(event);
+    dirtyTurns.add(turn.id);
     if (event.type === "message.user") {
       const content = publicUserMessage(event.content);
       if (event.delivery && turn.user) {
@@ -617,7 +642,9 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       finishReasoning(event.runId, event.timestamp);
       turn.usage = event.usage;
       for (const tool of turn.tools) {
-        if (tool.status === "running" || tool.status === "waiting") tool.status = "unknown";
+        if (tool.status !== "running" && tool.status !== "waiting") continue;
+        tool.status = "unknown";
+        dirtyTools.add(tool.id);
       }
     } else if (event.type === "run.incomplete") {
       turn.status = "incomplete";
@@ -629,7 +656,9 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       turn.usage = event.usage;
       settleMetrics(turn);
       for (const tool of turn.tools) {
-        if (tool.status === "running" || tool.status === "waiting") tool.status = "unknown";
+        if (tool.status !== "running" && tool.status !== "waiting") continue;
+        tool.status = "unknown";
+        dirtyTools.add(tool.id);
       }
     } else if (event.type === "run.cancelled") {
       turn.status = "cancelled";
@@ -641,7 +670,9 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       turn.usage = event.usage;
       settleMetrics(turn);
       for (const tool of turn.tools) {
-        if (tool.status === "running" || tool.status === "waiting") tool.status = "unknown";
+        if (tool.status !== "running" && tool.status !== "waiting") continue;
+        tool.status = "unknown";
+        dirtyTools.add(tool.id);
       }
     } else if (event.type === "run.aborted") {
       turn.status = "aborted";
@@ -651,7 +682,9 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
       for (const tool of turn.tools) {
-        if (tool.status === "running" || tool.status === "waiting") tool.status = "unknown";
+        if (tool.status !== "running" && tool.status !== "waiting") continue;
+        tool.status = "unknown";
+        dirtyTools.add(tool.id);
       }
     } else if (event.type === "run.failed") {
       turn.status = "failed";
@@ -662,17 +695,119 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
       finishReasoning(event.runId, event.timestamp);
       settleMetrics(turn);
       for (const tool of turn.tools) {
-        if (tool.status === "running" || tool.status === "waiting") tool.status = "failed";
+        if (tool.status !== "running" && tool.status !== "waiting") continue;
+        tool.status = "failed";
+        dirtyTools.add(tool.id);
       }
     }
-  }
-  return order.map((runId) => turns.get(runId)).filter((turn): turn is TimelineTurn => Boolean(turn)).map((turn) => {
-    turn.assistant = turn.steps
-      .filter((step): step is TimelineAssistantStep => step.kind === "assistant" && !step.summary)
-      .map((step) => step.content)
-      .join("\n\n");
-    return turn;
-  });
+  };
+
+  const snapshot = (): TimelineTurn[] => {
+    const result: TimelineTurn[] = [];
+    for (const runId of order) {
+      const working = turns.get(runId);
+      if (!working) continue;
+      const previous = publishedTurns.get(runId);
+      if (previous && !dirtyTurns.has(runId)) {
+        result.push(previous);
+        continue;
+      }
+      let tools = working.tools;
+      let steps = working.steps;
+      if (working.tools.length > 0) {
+        // 发布引用必须始终经过 publishedTools：干净工具复用旧引用、脏工具克隆新引用，不能在
+        // 两者间来回切换，否则 ToolActivity 的 memo 会因引用抖动失效。步骤里的 tool 引用同步刷新。
+        const publishedById = new Map<string, TimelineTool>();
+        tools = working.tools.map((tool) => {
+          const publishedTool = publishedTools.get(tool.id);
+          const next = publishedTool && !dirtyTools.has(tool.id) ? publishedTool : { ...tool };
+          publishedTools.set(tool.id, next);
+          publishedById.set(tool.id, next);
+          return next;
+        });
+        steps = working.steps.map((step) => step.kind === "tool"
+          ? { ...step, tool: publishedById.get(step.tool.id) ?? step.tool }
+          : step);
+      }
+      const published: TimelineTurn = { ...working, assistant: liveAssistantText(working), tools, steps };
+      publishedTurns.set(runId, published);
+      result.push(published);
+    }
+    dirtyTurns.clear();
+    dirtyTools.clear();
+    return result;
+  };
+
+  return { apply, snapshot };
+}
+
+function liveAssistantText(turn: TimelineTurn): string {
+  return turn.steps
+    .filter((step): step is TimelineAssistantStep => step.kind === "assistant" && !step.summary)
+    .map((step) => step.content)
+    .join("\n\n");
+}
+
+function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: number): TimelineTurn[] {
+  const fold = createLiveTimelineFold(initialUserMessageIndex);
+  for (const event of events) fold.apply(event);
+  return fold.snapshot();
+}
+
+/**
+ * 增量时间线投影器。
+ *
+ * 历史段按 `events` 数组引用记忆（引用不变就不重算），实时段用 LiveTimelineFold 只增量折叠
+ * 新增的 liveEvents。会话切换、`events` 引用变化、`liveEvents` 变短或首条实时用户消息变化时整体重置。
+ * 输出内容与 `buildSessionTimeline` 完全一致，但未变化的轮次保持对象引用稳定，配合 React.memo
+ * 让流式期间每帧只重算、只重渲染变化的轮次。
+ */
+export interface SessionTimelineProjector {
+  update(input: { sessionId: string; events: SessionEvent[]; liveEvents: AgentHostEvent[] }): TimelineTurn[];
+}
+
+export function createSessionTimelineProjector(): SessionTimelineProjector {
+  let sessionId: string | undefined;
+  let eventsRef: SessionEvent[] | undefined;
+  let firstLiveUser: AgentHostEvent | undefined;
+  let historyTurns: TimelineTurn[] = [];
+  let fold: LiveTimelineFold | undefined;
+  let processedLive = 0;
+
+  const rebuild = (events: SessionEvent[], liveEvents: AgentHostEvent[]): void => {
+    const history = historicalPrefix(events, liveEvents);
+    historyTurns = buildHistoricalTurns(history).filter(isVisibleTimelineTurn);
+    const historicalUserMessages = history.filter((event) => event.type === "user_message").length;
+    const nextFold = createLiveTimelineFold(historicalUserMessages);
+    for (const event of liveEvents) nextFold.apply(event);
+    fold = nextFold;
+    processedLive = liveEvents.length;
+  };
+
+  return {
+    update({ sessionId: nextSessionId, events, liveEvents }): TimelineTurn[] {
+      const firstUser = liveEvents.find((event) => event.type === "message.user");
+      const mustReset = fold === undefined
+        || nextSessionId !== sessionId
+        || events !== eventsRef
+        || liveEvents.length < processedLive
+        || firstUser !== firstLiveUser;
+      if (mustReset) {
+        sessionId = nextSessionId;
+        eventsRef = events;
+        firstLiveUser = firstUser;
+        rebuild(events, liveEvents);
+      } else if (liveEvents.length > processedLive && fold !== undefined) {
+        for (let index = processedLive; index < liveEvents.length; index += 1) {
+          const event = liveEvents[index];
+          if (event) fold.apply(event);
+        }
+        processedLive = liveEvents.length;
+      }
+      const liveTurns = (fold ? fold.snapshot() : []).filter(isVisibleTimelineTurn);
+      return [...historyTurns, ...liveTurns];
+    }
+  };
 }
 
 function latestAssistantContent(turn: TimelineTurn): string | undefined {
@@ -702,8 +837,12 @@ function appendHistoricalReasoning(turn: TimelineTurn, content: string | undefin
 function appendHistoricalAssistant(turn: TimelineTurn, content: string | undefined, summary = false): void {
   const visibleContent = summary ? activitySummaryText(content ?? "") : content;
   if (!visibleContent) return;
-  const previous = turn.steps.at(-1);
-  if (previous?.kind === "assistant" && previous.content === visibleContent && previous.summary === summary) return;
+  // 去重要跨整个轮次：tool_call 事件会夹带当时的 assistant 段落作为 summary 步骤，
+  // 中间隔着工具步骤，仅看相邻步骤挡不住同一段落反复出现（截图里的刷屏重复）。
+  const summaryFlag = summary || undefined;
+  const duplicated = turn.steps.some((step) =>
+    step.kind === "assistant" && step.content === visibleContent && step.summary === summaryFlag);
+  if (duplicated) return;
   turn.steps.push({ kind: "assistant", id: `${turn.id}:assistant:${String(turn.steps.filter((step) => step.kind === "assistant").length)}`, content: visibleContent, summary: summary || undefined });
 }
 

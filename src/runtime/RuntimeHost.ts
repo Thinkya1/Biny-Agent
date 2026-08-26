@@ -13,7 +13,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentAttachment, AgentRunMode, ResumedAgentSession } from "../agent/AgentSession.js";
+import type { AgentAttachment, AgentRunMode, AgentSessionInfo, ResumedAgentSession } from "../agent/AgentSession.js";
 import type { ContextStatus } from "../agent/context/types.js";
 import type {
   BehaviorPatternReviewAction,
@@ -91,6 +91,7 @@ const hostCapabilities = [
   "runtime.run.admission",
   "runtime.run.reconnect",
   "runtime.run.continuation",
+  "runtime.start-draft",
   "task.ledger",
   "automation.scheduler",
   "agent.graph",
@@ -1331,6 +1332,9 @@ export class RuntimeHostServer {
           }
           return result;
         }
+      case "runtime.start-draft":
+        this.assertRevision(payload);
+        return await this.startDraftRuntime();
       case "host.info":
         return this.info;
       default:
@@ -1696,6 +1700,14 @@ export class RuntimeHostServer {
     } finally {
       if (this.runtimeRestartPromise === restart) this.runtimeRestartPromise = undefined;
     }
+  }
+
+  /** 让 owner 切到一个全新的空会话（plan draft），不重建 runtime；旧的 writer claim 一并作废。 */
+  async startDraftRuntime(): Promise<AgentSessionInfo> {
+    const info = await this.runtime.startDraft();
+    this.sessionWriterOwners.clear();
+    this.publish({ snapshot: this.runtime.getSnapshot() });
+    return info;
   }
 
   private async performRuntimeRestart(sessionId?: string): Promise<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }> {
@@ -2304,6 +2316,13 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     this.snapshot = result.snapshot;
     this.sequence = result.sequence;
     return result.snapshot;
+  }
+
+  /** 让 owner 切到一个全新的空会话（草稿），返回新会话信息（含新的 sessionId）。 */
+  async startDraft(): Promise<AgentSessionInfo> {
+    const info = await this.requestWithRuntimeRevision<AgentSessionInfo>("runtime.start-draft", {});
+    await this.refreshRuntimeSnapshot();
+    return info;
   }
 
   /** 在运行时空闲时接管另一个配置环境的 owner，保证持久化根仍只有一个 writer。 */
