@@ -91,7 +91,8 @@ export const personalitySelectOptions = [
   { value: "inherit", label: "Inherit", description: "Use the global personality for this chat." },
   { value: "none", label: "None", description: "Use no additional response-style preset." },
   { value: "friendly", label: "Friendly", description: "Use a warm, approachable and collaborative tone." },
-  { value: "pragmatic", label: "Pragmatic", description: "Use a direct, concise and action-oriented tone." }
+  { value: "pragmatic", label: "Pragmatic", description: "Use a direct, concise and action-oriented tone." },
+  { value: "buddy", label: "Buddy 搭子", description: "Talk like a friend texting: opinionated, no filler, no pleasantries." }
 ] as const;
 
 export const memoryPolicySelectOptions = [
@@ -1016,7 +1017,7 @@ export class BinyTui {
     }
     if (action !== undefined) {
       if (!personalitySelectOptions.some((option) => option.value === action)) {
-        this.showTextViewer("Personality", "Usage: /personality [inherit|none|friendly|pragmatic] | instructions [set <text>|inherit|off]");
+        this.showTextViewer("Personality", "Usage: /personality [inherit|none|friendly|pragmatic|buddy] | instructions [set <text>|inherit|off]");
         return;
       }
       await this.applyChatPersonalization({ personality: action as "inherit" | PersonalityPreset });

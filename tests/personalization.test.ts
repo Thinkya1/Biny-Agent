@@ -19,6 +19,7 @@ import {
   chatPersonalizationOverrideSchema,
   defaultChatPersonalizationOverride,
   mergeChatPersonalizationOverride,
+  personalityPresetSchema,
   personalizationSettingsSchema,
   resolveChatPersonalization
 } from "../src/personalization/index.js";
@@ -36,6 +37,7 @@ import { ToolRegistry } from "../src/tools/registry.js";
 
 testUtf8InstructionLimit();
 testOverrideResolutionAndPromptPrivacy();
+testBuddyPersonalityPreset();
 await testGlobalAndProjectMigrations();
 await testCatalogCasAndForkInheritance();
 await testAgentSessionPersonalizationCas();
@@ -137,6 +139,49 @@ function testOverrideResolutionAndPromptPrivacy(): void {
   }, defaultConfig.context.memory, override);
   assert.equal(disabled.personality, "none");
   assert.equal(disabled.customInstructions, "");
+}
+
+function testBuddyPersonalityPreset(): void {
+  // buddy 是完整 preset：schema、prompt 注入、telemetry 摘要与运行策略恢复都要认得它。
+  assert.equal(personalityPresetSchema.parse("buddy"), "buddy");
+  assert.equal(personalizationSettingsSchema.parse({
+    enabled: true,
+    personality: "buddy",
+    customInstructions: ""
+  }).personality, "buddy");
+  const override = mergeChatPersonalizationOverride(defaultChatPersonalizationOverride, {
+    personality: "buddy"
+  });
+  assert.equal(override.personality, "buddy");
+  const resolved = resolveChatPersonalization({
+    enabled: true,
+    personality: "buddy",
+    customInstructions: ""
+  }, {
+    useMemories: true,
+    generateMemories: true,
+    extractModel: undefined,
+    consolidationModel: undefined,
+    excludeExternalContext: true,
+    maxRecalled: 3
+  }, override);
+  assert.equal(resolved.personality, "buddy");
+
+  const prompt = buildSystemPrompt({ mode: "qa", cwd: "/tmp/work", personalization: resolved });
+  assert.match(prompt, /personality="buddy"/u);
+  assert.match(prompt, /像跟朋友发消息一样说话，不是客服。/u);
+  assert.match(prompt, /禁止开场白/u);
+  assert.match(prompt, /emoji 克制/u);
+
+  // telemetry 只保留枚举元字段；buddy 人格正文不能泄进诊断日志。
+  const telemetry = systemPromptForTelemetry(prompt) ?? "";
+  assert.match(telemetry, /personality="buddy"/u);
+  assert.doesNotMatch(telemetry, /omitted="true"/u);
+  assert.doesNotMatch(telemetry, /像跟朋友发消息一样说话/u);
+
+  // TurnStore 续跑恢复运行策略时放行 buddy，不能回退成 undefined。
+  const persisted = personalizationRuntimePolicyFromSystemPrompt(prompt);
+  assert.equal(persisted?.personality, "buddy");
 }
 
 async function testGlobalAndProjectMigrations(): Promise<void> {

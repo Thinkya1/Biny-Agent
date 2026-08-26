@@ -6,6 +6,7 @@
  */
 import type {
   PersonalizationMetadata,
+  PersonalityPreset,
   ResolvedChatPersonalization
 } from "../personalization/index.js";
 import type { PermissionMode } from "../permission/PermissionManager.js";
@@ -25,6 +26,9 @@ Do not modify files unless the user asks for a change.
 const AUTONOMY_AND_BOUNDARIES_PROMPT = `
 For every request, first identify the user's desired outcome, constraints, and explicit success criteria.
 Use those criteria to choose the smallest useful set of actions, then stop when the requested outcome is addressed and report what the available evidence confirms.
+For work that requires two or more actions, create or update a Todo plan before acting when the update_todos tool is available. Keep every item accurate, but treat Todo as advisory control state rather than proof; it must not override files, tests, artifacts, or tool results.
+Before the final response after any file or command change, perform a brief evidence-based review of the original request, the current workspace, and the tool results. If the review finds remaining work, continue it instead of claiming completion; never treat an assistant stop or an intention to act as proof that the task is finished.
+When the task involved file or command changes, call attempt_completion with a concise summary and the concrete evidence instead of ending with unstructured text; the declaration is independently verified before the run closes.
 Do not invent extra acceptance requirements or run broad project validation merely because files changed; run checks when the user asks for them, the task explicitly requires them, or a tool workflow requires them.
 Treat the current permission mode as the approval boundary: in-scope local actions may proceed according to that mode, while external side effects, destructive or costly actions, and scope-expanding work require approval or clarification. The runtime permission policy remains authoritative even when a tool appears available.
 If the outcome, success criteria, or approval boundary is ambiguous, ask the user instead of guessing.
@@ -126,6 +130,7 @@ export function personalizationRuntimePolicyFromSystemPrompt(
     personality !== "none"
     && personality !== "friendly"
     && personality !== "pragmatic"
+    && personality !== "buddy"
   ) return undefined;
   if (configVersion !== 1 || !Number.isSafeInteger(maxRecalled) || maxRecalled < 1) return undefined;
   if (
@@ -240,12 +245,27 @@ function stableCompare(left: string, right: string): number {
   return left === right ? 0 : left < right ? -1 : 1;
 }
 
+/**
+ * 每种人格预设对应的完整语气指导。none 之外的分支会直接注入 system prompt，
+ * 所以 buddy 给的是整段人格卡而不是一句描述，避免模型把预设收敛成"平均客服"。
+ * Record 以 PersonalityPreset 为键：新增预设而不补指导会在 typecheck 期就报错。
+ */
+const PERSONALITY_GUIDANCE: Record<PersonalityPreset, string> = {
+  none: "No additional personality preset is active.",
+  friendly: "Use a warm, approachable and collaborative tone. Be encouraging without praise filler, and explain unfamiliar details plainly.",
+  pragmatic: "Be direct, concise and action-oriented. Lead with the outcome, concrete evidence and relevant tradeoffs.",
+  buddy: `像跟朋友发消息一样说话，不是客服。
+- 短句，口语化，自然停顿；不写公文腔、不堆结构化列表。
+- 禁止开场白："好的""当然""没问题""我很乐意""收到""你好！"——直接从事情本身开始。
+- 禁止结尾客套："还需要我帮你做什么吗？""希望对你有帮助"——做完就停。
+- 有观点：被问方案优劣时给出明确判断和理由，禁止"各有优劣"式和稀泥。
+- 技术内容保持准确、具体、有证据（文件路径、行号、实测结果）；放松的是语气，不是事实。
+- emoji 克制：大部分消息一个都不用。
+- 没做成或不确定就直接说，不找借口、不假装完成。`
+};
+
 function personalizationPrompt(personalization: ResolvedChatPersonalization, telosPrompt?: string): string {
-  const personalityGuidance = personalization.personality === "friendly"
-    ? "Use a warm, approachable and collaborative tone. Be encouraging without praise filler, and explain unfamiliar details plainly."
-    : personalization.personality === "pragmatic"
-      ? "Be direct, concise and action-oriented. Lead with the outcome, concrete evidence and relevant tradeoffs."
-      : "No additional personality preset is active.";
+  const personalityGuidance = PERSONALITY_GUIDANCE[personalization.personality];
   const customInstructions = personalization.customInstructions
     ? `Custom instructions:\n${escapeXmlText(personalization.customInstructions)}`
     : "Custom instructions: (none)";
@@ -271,7 +291,7 @@ function personalizationMetadataFromSystemPrompt(
   const attributes = personalizationAttributes(systemPrompt);
   if (!attributes) return undefined;
   const personality = attributes.personality;
-  if (personality !== "none" && personality !== "friendly" && personality !== "pragmatic") return undefined;
+  if (personality !== "none" && personality !== "friendly" && personality !== "pragmatic" && personality !== "buddy") return undefined;
   if (attributes.configVersion !== "1" || typeof attributes.instructionsHash !== "string") return undefined;
   return { personality, configVersion: 1, instructionsHash: attributes.instructionsHash };
 }

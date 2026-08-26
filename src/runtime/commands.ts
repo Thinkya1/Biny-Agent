@@ -220,7 +220,7 @@ export async function executeRuntimeCommand(
 function personalityPatch(args: string[]): ChatPersonalizationOverridePatch | undefined {
   const action = args[0]?.toLowerCase();
   if (!action) return undefined;
-  if (action === "inherit" || action === "none" || action === "friendly" || action === "pragmatic") {
+  if (action === "inherit" || action === "none" || action === "friendly" || action === "pragmatic" || action === "buddy") {
     return { personality: action as "inherit" | PersonalityPreset };
   }
   if (action === "instructions") {
@@ -234,7 +234,7 @@ function personalityPatch(args: string[]): ChatPersonalizationOverridePatch | un
       if (value) return { customInstructions: { mode: "replace", value } };
     }
   }
-  throw new Error("Usage: /personality [inherit|none|friendly|pragmatic] | instructions [set <text>|inherit|off]");
+  throw new Error("Usage: /personality [inherit|none|friendly|pragmatic|buddy] | instructions [set <text>|inherit|off]");
 }
 
 function memoryPolicyPatch(action: string | undefined): ChatPersonalizationOverridePatch | undefined {

@@ -12,7 +12,7 @@ import type { EmbeddingModelRef } from "../llm/embedding/types.js";
 export const PERSONALIZATION_CONFIG_VERSION = 1 as const;
 export const PERSONALIZATION_CUSTOM_INSTRUCTIONS_MAX_BYTES = 4 * 1024;
 
-export const personalityPresetSchema = z.enum(["none", "friendly", "pragmatic"]);
+export const personalityPresetSchema = z.enum(["none", "friendly", "pragmatic", "buddy"]);
 export type PersonalityPreset = z.infer<typeof personalityPresetSchema>;
 
 const customInstructionsSchema = z.string().superRefine((value, context) => {
@@ -144,7 +144,7 @@ export const chatCustomInstructionsOverrideSchema = z.object({
 });
 
 export const chatPersonalizationOverrideSchema = z.object({
-  personality: z.enum(["inherit", "none", "friendly", "pragmatic"]),
+  personality: z.enum(["inherit", "none", "friendly", "pragmatic", "buddy"]),
   customInstructions: chatCustomInstructionsOverrideSchema,
   useMemories: z.union([z.literal("inherit"), z.boolean()]),
   contributeMemories: z.union([z.literal("inherit"), z.boolean()])

@@ -6,7 +6,8 @@ import { useSettingsDraft } from "./SettingsDraftContext.js";
 const personalityOptions: Array<{ value: DesktopPersonality; label: string; detail: string }> = [
   { value: "none", label: "默认", detail: "保持简洁、中性的 Biny 默认表达。" },
   { value: "friendly", label: "友好", detail: "更温和、主动解释，并保留技术准确性。" },
-  { value: "pragmatic", label: "务实", detail: "优先结论、约束与可执行的下一步。" }
+  { value: "pragmatic", label: "务实", detail: "优先结论、约束与可执行的下一步。" },
+  { value: "buddy", label: "搭子", detail: "像朋友发消息：短句、有观点、不客套。" }
 ];
 
 export function SettingsPersonalizationDraft({ sessionRunning }: { sessionRunning: boolean }): React.JSX.Element {
@@ -55,7 +56,7 @@ export function SettingsPersonalizationDraft({ sessionRunning }: { sessionRunnin
             <span className="settings-scope-badge is-chat">聊天</span>
           </div>
           <div className="chat-override-grid">
-            <label><span>人格</span><select onChange={(event) => updateChat({ personality: event.target.value as DesktopChatPersonalizationOverride["personality"] })} value={chat.personality}><option value="inherit">继承全局</option><option value="none">默认</option><option value="friendly">友好</option><option value="pragmatic">务实</option></select></label>
+            <label><span>人格</span><select onChange={(event) => updateChat({ personality: event.target.value as DesktopChatPersonalizationOverride["personality"] })} value={chat.personality}><option value="inherit">继承全局</option><option value="none">默认</option><option value="friendly">友好</option><option value="pragmatic">务实</option><option value="buddy">搭子</option></select></label>
             <label><span>自定义指令</span><select onChange={(event) => updateChat({ customInstructions: { mode: event.target.value as DesktopChatPersonalizationOverride["customInstructions"]["mode"], value: event.target.value === "replace" ? chat.customInstructions.value ?? "" : undefined } })} value={chat.customInstructions.mode}><option value="inherit">继承全局</option><option value="replace">替换为本聊天指令</option><option value="disabled">本聊天停用</option></select></label>
             <label><span>使用记忆</span><select onChange={(event) => updateChat({ useMemories: inheritedBoolean(event.target.value) })} value={String(chat.useMemories)}><option value="inherit">继承全局</option><option value="true">使用</option><option value="false">不使用</option></select></label>
             <label><span>生成记忆</span><select onChange={(event) => updateChat({ contributeMemories: inheritedBoolean(event.target.value) })} value={String(chat.contributeMemories)}><option value="inherit">继承全局</option><option value="true">生成</option><option value="false">不生成</option></select></label>
