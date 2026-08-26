@@ -17,7 +17,7 @@ export function AddMenu({ anchorRef, open, planActive, onPickFiles, onPlanModeCh
   const presence = useClosingPresence(open);
   if (!presence.present) return null;
   return (
-    <ComposerPopover anchorRef={anchorRef} className={`t-dropdown composer-popover cindy-composer-popover add-menu ${presenceClass(presence.phase)}`} phase={presence.phase}>
+    <ComposerPopover anchorRef={anchorRef} className={`t-dropdown composer-popover biny-composer-popover add-menu ${presenceClass(presence.phase)}`} phase={presence.phase}>
       <div role="menu">
         <div className="popover-heading">添加</div>
         <button className="menu-option" onClick={onPickFiles} role="menuitem" type="button">
@@ -42,7 +42,7 @@ export function PermissionMenu({ anchorRef, mode, open, onChange }: {
   const presence = useClosingPresence(open);
   if (!presence.present) return null;
   return (
-    <ComposerPopover anchorRef={anchorRef} className={`t-dropdown composer-popover cindy-composer-popover permission-menu ${presenceClass(presence.phase)}`} phase={presence.phase}>
+    <ComposerPopover anchorRef={anchorRef} className={`t-dropdown composer-popover biny-composer-popover permission-menu ${presenceClass(presence.phase)}`} phase={presence.phase}>
       <div role="menu">
         <div className="popover-heading">权限模式</div>
         {permissionOptions.map((option) => (

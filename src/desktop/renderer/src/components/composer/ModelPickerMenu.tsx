@@ -251,7 +251,7 @@ export function ModelPickerMenu({
     <>
       {createPortal(
         <div
-          className={`composer-popover cindy-composer-popover model-picker-popover ${presenceClass(presence.phase)}`}
+          className={`composer-popover biny-composer-popover model-picker-popover ${presenceClass(presence.phase)}`}
           data-origin={parentPosition?.origin ?? "bottom-left"}
           data-popover-phase={presence.phase}
           ref={parentSurfaceRef}
@@ -290,7 +290,7 @@ export function ModelPickerMenu({
         ? createPortal(
             <div
               aria-label={activeSection === "model" ? "选择模型" : "选择推理强度"}
-              className={`composer-popover cindy-composer-popover model-picker-submenu-portal ${presenceClass(presence.phase)}`}
+              className={`composer-popover biny-composer-popover model-picker-submenu-portal ${presenceClass(presence.phase)}`}
               data-composer-menu="model"
               data-popover-phase={presence.phase}
               ref={submenuRef}

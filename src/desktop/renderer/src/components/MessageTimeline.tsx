@@ -4,23 +4,26 @@
  * 数据由 `buildSessionTimeline` 算好，这里只做渲染和局部交互（展开思考、复制、编辑重发、
  * 回滚文件等）。整体用 memo 包住，因为流式输出期间父组件会高频重渲染。
  */
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatMessage, ChatMessageBubble } from "@astryxdesign/core/Chat";
 import type { PermissionResult } from "../../../../permission/PermissionManager.js";
 import { splitAttachmentReferences, type AttachmentReference } from "../../../attachmentReferences.js";
 import { copyToClipboard } from "../copyToClipboard.js";
 import { useInlineImage } from "../inlineImage.js";
-import { listChangedFiles, type TimelineReasoningStep, type TimelineStep, type TimelineTurn } from "../sessionTimeline.js";
+import { listChangedFiles, type TimelineReasoningStep, type TimelineRunStatus, type TimelineStep, type TimelineTurn } from "../sessionTimeline.js";
 import { reasoningDetailText } from "../reasoningPresentation.js";
-import { turnMetrics } from "../chatDshModel.js";
+import { turnMetrics } from "../chatModel.js";
 import { speak, speechSupported } from "../speech.js";
 import { CopyButton } from "./CopyButton.js";
 import { Icon } from "./Icon.js";
 import { MarkdownContent } from "./MarkdownContent.js";
+import { useTypewriter } from "./useTypewriter.js";
 import { ToolActivity } from "./ToolActivity.js";
-import { ThinkRow } from "./chat-dsh/ThinkRow.js";
-import { CompactionRow, RunErrorRow } from "./chat-dsh/NoticeRow.js";
-import { MessageClock } from "./chat-dsh/MessageClock.js";
+import { CompactionRow } from "./chat/NoticeRow.js";
+import { RunErrorCard } from "./chat/RunErrorCard.js";
+import { MessageClock } from "./chat/MessageClock.js";
+import { ThinkingBlock } from "./chat/ThinkingBlock.js";
+import { ExecutionGroup, type ExecutionGroupStep } from "./chat/ExecutionGroup.js";
 
 interface MessageTimelineProps {
   projectId: string;
@@ -39,18 +42,34 @@ interface MessageTimelineProps {
 
 export const MessageTimeline = memo(function MessageTimeline({ projectId, sessionId, turns, onPreviewFile, onOpenExternal, onResolvePermission, onResume, onRetry, onEditUserMessage, onCreateBranch, onRollbackFiles, onDeleteUserMessage }: MessageTimelineProps): React.JSX.Element {
   const [editing, setEditing] = useState<{ turnId: string; value: string; userMessageIndex: number }>();
+  // 供稳定回调读取最新编辑状态：submitEditing 若直接依赖 editing，每次击键都会得到新引用，
+  // 进而让所有 Turn 的 memo 失效。用 ref 读取后，回调引用在整个编辑过程保持稳定。
+  const editingRef = useRef(editing);
+  useEffect(() => {
+    editingRef.current = editing;
+  }, [editing]);
 
-  const startEditing = (turn: TimelineTurn): void => {
+  // 这些回调作为 prop 传给被 React.memo 包裹的 Turn，必须保持引用稳定：流式期间父组件每帧
+  // 重渲染，只有回调与 turn 引用都稳定，没有变化的轮次才会被 memo 跳过。
+  const startEditing = useCallback((turn: TimelineTurn): void => {
     if (turn.userMessageIndex === undefined) return;
     // 编辑框里只放用户真正输入的那部分；附件清单是发送时补的，重发也带不回原来的附件。
     setEditing({ turnId: turn.id, value: splitAttachmentReferences(turn.user).text, userMessageIndex: turn.userMessageIndex });
-  };
+  }, []);
 
-  const submitEditing = async (): Promise<void> => {
-    if (!editing || !sessionId) return;
-    await onEditUserMessage(editing.value, editing.userMessageIndex);
+  const cancelEditing = useCallback((): void => setEditing(undefined), []);
+
+  const changeEditing = useCallback((value: string): void => {
+    // 只有正在被编辑的那一轮会渲染输入框并触发 onChange，无需再按 turnId 过滤。
+    setEditing((current) => current ? { ...current, value } : current);
+  }, []);
+
+  const submitEditing = useCallback(async (): Promise<void> => {
+    const current = editingRef.current;
+    if (!current || !sessionId) return;
+    await onEditUserMessage(current.value, current.userMessageIndex);
     setEditing(undefined);
-  };
+  }, [onEditUserMessage, sessionId]);
 
   return (
     <div className="message-timeline">
@@ -60,9 +79,9 @@ export const MessageTimeline = memo(function MessageTimeline({ projectId, sessio
           onCreateBranch={onCreateBranch}
           onDeleteUserMessage={onDeleteUserMessage}
           editing={editing?.turnId === turn.id ? editing : undefined}
-          onCancelEdit={() => setEditing(undefined)}
-          onChangeEdit={(value) => setEditing((current) => current?.turnId === turn.id ? { ...current, value } : current)}
-          onEditUserMessage={() => startEditing(turn)}
+          onCancelEdit={cancelEditing}
+          onChangeEdit={changeEditing}
+          onStartEdit={startEditing}
           onSubmitEdit={submitEditing}
           onPreviewFile={onPreviewFile}
           onOpenExternal={onOpenExternal}
@@ -89,7 +108,7 @@ const Turn = memo(function Turn({
   onRetry,
   onCancelEdit,
   onChangeEdit,
-  onEditUserMessage,
+  onStartEdit,
   onSubmitEdit,
   onCreateBranch,
   onRollbackFiles,
@@ -105,23 +124,14 @@ const Turn = memo(function Turn({
   onRetry(input: string): void;
   onCancelEdit(): void;
   onChangeEdit(value: string): void;
-  onEditUserMessage(): void;
+  onStartEdit(turn: TimelineTurn): void;
   onSubmitEdit(): Promise<void>;
   onCreateBranch(): void;
   onRollbackFiles(turn: TimelineTurn): void;
   onDeleteUserMessage(turnId: string): void;
 }): React.JSX.Element {
-  const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(() => new Set());
   const running = turn.status === "running" || turn.status === "waiting_permission";
   const executionSteps = turn.steps.length ? turn.steps : fallbackExecutionSteps(turn);
-  const toggleReasoning = (stepId: string): void => {
-    setExpandedReasoning((current) => {
-      const next = new Set(current);
-      if (next.has(stepId)) next.delete(stepId);
-      else next.add(stepId);
-      return next;
-    });
-  };
   return (
     <section className={`timeline-turn is-${turn.status}`}>
       {turn.user ? (
@@ -133,7 +143,7 @@ const Turn = memo(function Turn({
           onDelete={() => onDeleteUserMessage(turn.id)}
           onCancelEdit={onCancelEdit}
           onChangeEdit={onChangeEdit}
-          onEdit={onEditUserMessage}
+          onEdit={() => onStartEdit(turn)}
           onOpenExternal={onOpenExternal}
           onPreviewFile={onPreviewFile}
           onRegenerate={() => onRetry(turn.user)}
@@ -147,18 +157,16 @@ const Turn = memo(function Turn({
         <div className="agent-response">
         {executionSteps.length || turn.skills.length ? (
           <ExecutionTimeline
-            expandedReasoning={expandedReasoning}
             onPreviewFile={onPreviewFile}
             onOpenExternal={onOpenExternal}
             onResolvePermission={onResolvePermission}
-            onToggleReasoning={toggleReasoning}
             projectId={projectId}
             running={running}
             steps={executionSteps}
             skills={turn.skills}
           />
         ) : null}
-        {!executionSteps.some((step) => step.kind === "assistant") && turn.assistant ? <MarkdownContent content={turn.assistant} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} /> : null}
+        {!executionSteps.some((step) => step.kind === "assistant") && turn.assistant ? <TypewriterMarkdown active={running} content={turn.assistant} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} /> : null}
 
         {turn.assistant ? (
           <AssistantActions
@@ -172,25 +180,15 @@ const Turn = memo(function Turn({
         ) : null}
 
         {/* 底部不再展示统计与模型行；运行信息只保留在 hover 揭示的时钟里。 */}
-        {turn.error && turn.status === "failed" ? <RunErrorRow message={turn.error} /> : null}
-
-        {turn.error && (
-          turn.status === "blocked"
-          || turn.status === "incomplete"
-          || turn.status === "cancelled"
-          || turn.status === "aborted"
-        ) ? (
-          <div className="run-error">
-            {/* blocked 是「运行被阻塞」而非失败：琥珀点 + 阻塞文案（DSH max-tokens 同款语义）。 */}
-            <RunErrorRow
-              message={turn.error}
-              title={turn.status === "blocked" ? "任务被阻塞" : "本轮运行失败"}
-              variant={turn.status === "blocked" ? "warning" : "error"}
-            />
-            {turn.resumable ? (
-              <button className="run-error-resume" onClick={() => void onResume()} type="button">继续运行</button>
-            ) : null}
-          </div>
+        {/* 失败/阻塞/未完成/取消/中止统一收敛成一张错误卡片：图标 + 标题 + 人话错误 + 继续/重试。 */}
+        {turn.error && isRunErrorStatus(turn.status) ? (
+          <RunErrorCard
+            message={turn.error}
+            onResume={() => void onResume()}
+            onRetry={turn.user ? () => onRetry(turn.user) : undefined}
+            resumable={turn.resumable}
+            status={turn.status}
+          />
         ) : null}
         </div>
       </ChatMessage>
@@ -210,22 +208,34 @@ function fallbackExecutionSteps(turn: TimelineTurn): TimelineStep[] {
   }];
 }
 
+/** 流式打字机版 Markdown：仅 reveal 新增量，历史/完结内容直出 */
+const TypewriterMarkdown = memo(function TypewriterMarkdown({ active, content, onOpenExternal, onPreviewFile, projectId }: {
+  active: boolean;
+  content: string;
+  onOpenExternal(url: string): void;
+  onPreviewFile(path: string): void;
+  projectId: string;
+}): React.JSX.Element {
+  const typed = useTypewriter(content, active);
+  return (
+    <div className={active ? "with-streaming-cursor" : undefined}>
+      <MarkdownContent content={typed} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} />
+    </div>
+  );
+});
+
 function ExecutionTimeline({
-  expandedReasoning,
   onPreviewFile,
   onOpenExternal,
   onResolvePermission,
-  onToggleReasoning,
   projectId,
   running,
   skills,
   steps
 }: {
-  expandedReasoning: Set<string>;
   onPreviewFile(path: string): void;
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
-  onToggleReasoning(stepId: string): void;
   projectId: string;
   running: boolean;
   skills: string[];
@@ -240,9 +250,33 @@ function ExecutionTimeline({
           <span className="execution-skills-list">{skills.join(" · ")}</span>
         </div>
       ) : null}
-      {steps.map((step) => {
+      {groupExecutionSteps(steps).map((entry) => {
+        // 连续的工具 + 思考步骤聚合成一个可展开块（Alma 同款）；单个步骤不套聚合壳。
+        if (Array.isArray(entry)) {
+          if (entry.length === 1) {
+            const only = entry[0];
+            // noUncheckedIndexedAccess：entry[0] 类型含 undefined，先收窄再判 kind。
+            if (!only) return null;
+            if (only.kind === "tool") {
+              return <ToolActivity key={only.id} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} onResolvePermission={onResolvePermission} projectId={projectId} tool={only.tool} />;
+            }
+            return <ReasoningStepView key={only.id} running={running} step={only} />;
+          }
+          return (
+            <ExecutionGroup
+              key={entry[0]?.id ?? "execution-group"}
+              onOpenExternal={onOpenExternal}
+              onPreviewFile={onPreviewFile}
+              onResolvePermission={onResolvePermission}
+              projectId={projectId}
+              running={running}
+              steps={entry}
+            />
+          );
+        }
+        const step = entry;
         if (step.kind === "reasoning") {
-          // 上下文压缩标记渲染为独立的压缩通知行（DSH CompactionItem 形态）。
+          // 上下文压缩标记渲染为独立的压缩通知行。
           if (step.notice === "compaction") {
             return (
               <section className="execution-step" key={step.id}>
@@ -250,18 +284,7 @@ function ExecutionTimeline({
               </section>
             );
           }
-          return (
-            <ReasoningStepView
-              key={step.id}
-              expanded={expandedReasoning.has(step.id)}
-              onToggle={() => onToggleReasoning(step.id)}
-              running={running}
-              step={step}
-            />
-          );
-        }
-        if (step.kind === "tool") {
-          return <ToolActivity key={step.id} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} onResolvePermission={onResolvePermission} projectId={projectId} tool={step.tool} />;
+          return <ReasoningStepView key={step.id} running={running} step={step} />;
         }
         if (step.kind === "user") {
           return (
@@ -270,6 +293,7 @@ function ExecutionTimeline({
             </div>
           );
         }
+        if (step.kind === "tool") return null;
         if (step.summary) {
           return (
             <ActivitySummaryStep
@@ -281,10 +305,44 @@ function ExecutionTimeline({
             />
           );
         }
-        return <div className="execution-step execution-assistant-step" key={step.id}><MarkdownContent content={step.content} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} /></div>;
+        return <div className="execution-step execution-assistant-step" key={step.id}><TypewriterMarkdown active={running} content={step.content} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} /></div>;
       })}
     </div>
   );
+}
+
+/**
+ * 把连续的可聚合步骤（工具调用 + 非压缩通知的思考）收成一组；其余步骤原样保留顺序。
+ *
+ * 思考不再把工具组切断：reasoning 步骤与相邻 tool 步骤进同一个聚合块。压缩标记
+ * （notice === "compaction"）、assistant 正文/摘要、用户插话仍然是分组断点。
+ */
+function groupExecutionSteps(steps: TimelineStep[]): Array<TimelineStep | ExecutionGroupStep[]> {
+  const grouped: Array<TimelineStep | ExecutionGroupStep[]> = [];
+  for (const step of steps) {
+    if (!isGroupableStep(step)) {
+      grouped.push(step);
+      continue;
+    }
+    const last = grouped.at(-1);
+    if (Array.isArray(last)) last.push(step);
+    else grouped.push([step]);
+  }
+  return grouped;
+}
+
+function isGroupableStep(step: TimelineStep): step is ExecutionGroupStep {
+  if (step.kind === "tool") return true;
+  return step.kind === "reasoning" && step.notice !== "compaction";
+}
+
+/** 失败/阻塞/未完成/取消/中止：这些终态的错误输出统一走 RunErrorCard。 */
+function isRunErrorStatus(status: TimelineRunStatus): boolean {
+  return status === "failed"
+    || status === "blocked"
+    || status === "incomplete"
+    || status === "cancelled"
+    || status === "aborted";
 }
 
 function ActivitySummaryStep({ content, onOpenExternal, onPreviewFile, projectId }: {
@@ -300,9 +358,7 @@ function ActivitySummaryStep({ content, onOpenExternal, onPreviewFile, projectId
   );
 }
 
-function ReasoningStepView({ expanded, onToggle, running, step }: {
-  expanded: boolean;
-  onToggle(): void;
+function ReasoningStepView({ running, step }: {
   running: boolean;
   step: TimelineReasoningStep;
 }): React.JSX.Element {
@@ -311,10 +367,9 @@ function ReasoningStepView({ expanded, onToggle, running, step }: {
   // statuses such as “分析完成” look like generated content.
   const text = reasoningDetailText(step);
   return (
-    <section className={`execution-step execution-reasoning${expanded ? " is-open" : ""}`}>
-      <ThinkRow
-        expanded={expanded}
-        onToggle={onToggle}
+    <section className="execution-step execution-reasoning">
+      <ThinkingBlock
+        durationMs={step.durationMs}
         running={running && !step.completed}
         text={text}
       />

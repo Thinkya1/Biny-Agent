@@ -25,10 +25,10 @@ export function SendOrStopButton({
     : disabledReason ?? (disabled ? "输入内容或附件后发送消息" : "发送消息");
 
   return (
-    <span className={`cindy-send-button-anchor${stopPending ? " is-pending" : ""}`} aria-busy={stopPending || undefined}>
+    <span className={`biny-send-button-anchor${stopPending ? " is-pending" : ""}`} aria-busy={stopPending || undefined}>
       <ComposerActionButton
         active={running}
-        className={`cindy-send-button${running ? " is-stop" : ""}`}
+        className={`biny-send-button${running ? " is-stop" : ""}`}
         disabled={isDisabled}
         disabledReason={!running && disabled ? disabledReason ?? "输入内容或附件后发送消息" : undefined}
         label={label}

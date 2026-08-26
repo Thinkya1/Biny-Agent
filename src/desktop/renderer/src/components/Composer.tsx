@@ -2,17 +2,17 @@
  * 桌面端聊天输入区。
  *
  * Astryx ChatComposer 只负责输入框、附件抽屉和发送按钮的视觉与基础交互；模型切换、
- * 权限变更、附件保存和 Agent 执行仍沿用 Biny 原有的数据流。Slash command 继续由
- * Biny 自己的菜单处理，避免把桌面命令协议复制到组件库的 typeahead 状态里。
+ * 权限变更、附件保存和 Agent 执行仍沿用 Biny 原有的数据流。Slash command 使用
+ * Astryx 输入控件内置的 trigger 菜单，避免在组件里复制一套会和 contentEditable 键盘状态冲突的补全逻辑。
  */
 import { ChatComposer, ChatComposerDrawer, ChatComposerInput } from "@astryxdesign/core/Chat";
 import type { ChatComposerInputHandle } from "@astryxdesign/core/Chat";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentSessionInfo, InteractiveAgentRunMode } from "../../../../agent/AgentSession.js";
 import type { ModelChoice } from "../../../../llm/ModelManager.js";
 import { modelThinkingSelections, thinkingSelectionForModel, type ThinkingSelection } from "../../../../llm/modelThinking.js";
 import type { PermissionMode } from "../../../../permission/PermissionManager.js";
-import type { DesktopAttachment, DesktopProject, DesktopSlashCommand } from "../../../protocol.js";
+import type { DesktopAttachment, DesktopProject, DesktopSkillCatalogEntry } from "../../../protocol.js";
 import { DESKTOP_SLASH_COMMANDS } from "../../../protocol.js";
 import { catalogForConnection } from "../providerCatalog.js";
 import { formatContextUsage, type ContextUsage } from "../usagePresentation.js";
@@ -25,6 +25,10 @@ import { permissionIcon, permissionLabel, thinkingLabel } from "./composer/compo
 import { Icon } from "./Icon.js";
 import { ProviderBrandGlyph } from "./ProviderBrandGlyph.js";
 import { SendOrStopButton } from "./composer/SendOrStopButton.js";
+import { useBreathingCaret } from "./composer/useBreathingCaret.js";
+import { useTypedPlaceholder } from "./composer/useTypedPlaceholder.js";
+import { isSkillSlashCommand, normalizeSkillSlashCommand } from "./composer/desktopSlashCommands.js";
+import { createDesktopSlashTrigger } from "./composer/desktopSlashTrigger.js";
 
 interface ComposerProps {
   project?: DesktopProject;
@@ -37,6 +41,7 @@ interface ComposerProps {
   memoryToggleBusy: boolean;
   memoryToggleDisabled: boolean;
   memoryToggleDisabledReason?: string;
+  permissionModePending: boolean;
   running: boolean;
   runtimeBusy: boolean;
   activeElsewhere: boolean;
@@ -44,8 +49,10 @@ interface ComposerProps {
   modelSetupRequired: boolean;
   focusToken: number;
   prefillInput?: string;
+  skills: DesktopSkillCatalogEntry[];
   onSend(input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp"): Promise<void>;
   onSlashCommand(command: string): Promise<void>;
+  onExpandSkillCommand(input: string): Promise<string>;
   onStop(): Promise<void>;
   onToggleMemory(): Promise<void>;
   onPermissionMode(mode: PermissionMode): Promise<void>;
@@ -70,6 +77,7 @@ export const Composer = memo(function Composer({
   memoryToggleBusy,
   memoryToggleDisabled,
   memoryToggleDisabledReason,
+  permissionModePending,
   running,
   runtimeBusy,
   activeElsewhere,
@@ -77,8 +85,10 @@ export const Composer = memo(function Composer({
   modelSetupRequired,
   focusToken,
   prefillInput,
+  skills,
   onSend,
   onSlashCommand,
+  onExpandSkillCommand,
   onStop,
   onToggleMemory,
   onPermissionMode,
@@ -93,10 +103,11 @@ export const Composer = memo(function Composer({
   const [menu, setMenu] = useState<ComposerMenu>(null);
   const [busy, setBusy] = useState(false);
   const [stopPending, setStopPending] = useState(false);
-  const [slashIndex, setSlashIndex] = useState(0);
-  const [slashDismissed, setSlashDismissed] = useState(false);
   const [optimisticModel, setOptimisticModel] = useState<PendingModelSelection>();
   const inputRef = useRef<ChatComposerInputHandle>(null);
+  const editorWrapRef = useRef<HTMLDivElement>(null);
+  const breathingCaretRef = useRef<HTMLDivElement>(null);
+  useBreathingCaret(editorWrapRef, breathingCaretRef);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const addAnchorRef = useRef<HTMLDivElement>(null);
   const permissionAnchorRef = useRef<HTMLDivElement>(null);
@@ -115,8 +126,6 @@ export const Composer = memo(function Composer({
     setPendingAttachments([]);
     setMode("chat");
     setMenu(null);
-    setSlashIndex(0);
-    setSlashDismissed(false);
   }, [project?.id]);
 
   useEffect(() => {
@@ -126,7 +135,6 @@ export const Composer = memo(function Composer({
   useEffect(() => {
     if (prefillInput === undefined) return;
     setInput(prefillInput);
-    setSlashDismissed(false);
     inputRef.current?.focus();
   }, [prefillInput]);
 
@@ -155,11 +163,7 @@ export const Composer = memo(function Composer({
     };
   }, [menu]);
 
-  const slashQuery = input.startsWith("/") && input.length > 0 && !/\s/.test(input) ? input : "";
-  const slashMatches = slashQuery && !slashDismissed
-    ? DESKTOP_SLASH_COMMANDS.filter((command) => command.name.startsWith(slashQuery))
-    : [];
-  const slashMenuOpen = slashMatches.length > 0 && !busy;
+  const desktopSlashTriggers = useMemo(() => [createDesktopSlashTrigger(skills)], [skills]);
 
   const runSlash = async (command: string): Promise<void> => {
     if (!project || busy) return;
@@ -175,18 +179,9 @@ export const Composer = memo(function Composer({
     }
   };
 
-  const chooseSlashCommand = (command: DesktopSlashCommand): void => {
-    if (command.requiresArgs) {
-      setInput(`${command.name} `);
-      inputRef.current?.focus();
-      return;
-    }
-    void runSlash(command.name);
-  };
-
   const submit = async (delivery?: "steer" | "followUp", submittedInput = input): Promise<void> => {
     const value = submittedInput.trim() || (attachments.length ? "请分析这些附件。" : "");
-    if (!project || !value || busy || pendingAttachments.length) return;
+    if (!project || !value || busy || pendingAttachments.length || permissionModePending || memoryToggleBusy) return;
     const pendingModelSwitch = modelSwitchPromiseRef.current;
     if (pendingModelSwitch) {
       // 斜杠命令也应看到已确认的 Runtime 状态；否则紧接着执行 `/status` 或再次切模
@@ -208,11 +203,14 @@ export const Composer = memo(function Composer({
     const sentAttachments = attachments;
     setBusy(true);
     try {
+      const sendValue = isSkillSlashCommand(value)
+        ? await onExpandSkillCommand(normalizeSkillSlashCommand(value))
+        : value;
       // 模型标签已经即时更新，但真正的 Runtime 切换仍需完成后才能发送，
       // 否则用户紧接着按 Enter 时可能把消息发给旧模型。
       setInput("");
       setAttachments([]);
-      await onSend(value, mode, sentAttachments, delivery);
+      await onSend(sendValue, mode, sentAttachments, delivery);
     } catch (submitError) {
       setInput(value);
       setAttachments(sentAttachments);
@@ -337,13 +335,17 @@ export const Composer = memo(function Composer({
   const usage = formatContextUsage(contextUsage);
   const inputDisabled = sessionWriterConflict || activeElsewhere || busy;
   const attachmentCount = attachments.length + pendingAttachments.length;
-  const sendDisabled = running
+  const sendDisabled = permissionModePending || memoryToggleBusy || (running
     ? false
-    : (!input.trim() && !attachments.length) || !project || sessionWriterConflict || activeElsewhere || modelSetupRequired || busy || pendingAttachments.length > 0;
+    : (!input.trim() && !attachments.length) || !project || sessionWriterConflict || activeElsewhere || modelSetupRequired || busy || pendingAttachments.length > 0);
   const sendDisabledReason = !project
     ? "请先打开一个项目。"
       : modelSetupRequired
         ? "还没有可用的模型连接，请先配置模型。"
+        : permissionModePending
+          ? "正在确认权限模式，请稍候。"
+        : memoryToggleBusy
+          ? "正在确认当前聊天的记忆状态，请稍候。"
         : sessionWriterConflict
           ? "会话已在另一个应用中打开，请先在那里关闭后重试。"
         : activeElsewhere
@@ -356,6 +358,8 @@ export const Composer = memo(function Composer({
             ? "输入消息或添加附件后发送。"
             : undefined;
   const placeholder = running ? "可以继续补充要求…" : "hi biny";
+  // 空输入时 placeholder 逐字打出，让输入框保持「活」的感觉
+  const typedPlaceholder = useTypedPlaceholder(placeholder, input.trim().length === 0);
   const modelSwitchPending = Boolean(optimisticModel);
   const modelSwitchDisabled = sessionWriterConflict || activeElsewhere || running || runtimeBusy || busy;
   const modelSwitchDisabledReason = !project
@@ -371,9 +375,11 @@ export const Composer = memo(function Composer({
         : busy
           ? "当前附件或命令正在处理，请稍候。"
           : undefined;
-  const permissionSwitchDisabled = !project || sessionWriterConflict || activeElsewhere || runtimeBusy || busy;
+  const permissionSwitchDisabled = !project || permissionModePending || sessionWriterConflict || activeElsewhere || runtimeBusy || busy;
   const permissionDisabledReason = !project
     ? "请先打开一个项目。"
+    : permissionModePending
+      ? "正在确认权限模式，请稍候。"
     : sessionWriterConflict
       ? "会话已在另一个应用中打开。"
       : activeElsewhere
@@ -391,13 +397,11 @@ export const Composer = memo(function Composer({
 
   const handleInputChange = (value: string): void => {
     setInput(value);
-    setSlashIndex(0);
-    setSlashDismissed(false);
   };
 
   return (
     <div
-      className={`composer-container cindy-composer-frame${running ? " is-running" : ""}`}
+      className={`composer-container biny-composer-frame${running ? " is-running" : ""}`}
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
         if (event.defaultPrevented) return;
@@ -406,7 +410,7 @@ export const Composer = memo(function Composer({
       }}
     >
       <ChatComposer
-        className={`cindy-composer${running ? " is-running" : ""}`}
+        className={`biny-composer${running ? " is-running" : ""}`}
         density="compact"
         drawer={attachmentCount ? (
           <ChatComposerDrawer count={attachmentCount} label="附件">
@@ -419,7 +423,7 @@ export const Composer = memo(function Composer({
           </ChatComposerDrawer>
         ) : undefined}
         footerActions={(
-          <div className="cindy-composer-footer-start">
+          <div className="biny-composer-footer-start">
             <input
               hidden
               multiple
@@ -434,7 +438,7 @@ export const Composer = memo(function Composer({
               <ComposerActionButton
                 aria-expanded={menu === "add"}
                 aria-haspopup="menu"
-                className="cindy-composer-add"
+                className="biny-composer-add"
                 data-composer-menu="add"
                 disabled={!project || busy || running}
                 disabledReason={!project ? "请先打开一个项目。" : running ? "当前对话正在运行，请等待结束后再添加附件。" : busy ? "当前附件或命令正在处理，请稍候。" : undefined}
@@ -462,7 +466,7 @@ export const Composer = memo(function Composer({
             {mode === "plan" ? (
               <ComposerActionButton
                 active
-                className="cindy-plan-pill"
+                className="biny-plan-pill"
                 label="退出规划模式"
                 onClick={() => setMode("chat")}
                 tooltip="规划模式已启用，点击关闭"
@@ -473,7 +477,7 @@ export const Composer = memo(function Composer({
             ) : null}
             <div className="composer-menu-anchor" ref={permissionAnchorRef}>
               <ComposerActionButton
-                className="cindy-permission-pill"
+                className="biny-permission-pill"
                 data-composer-menu="permission"
                 disabled={permissionSwitchDisabled}
                 disabledReason={permissionDisabledReason}
@@ -482,6 +486,7 @@ export const Composer = memo(function Composer({
                 aria-haspopup="menu"
                 data-permission-mode={permissionMode}
                 label={permissionLabel(permissionMode)}
+                loading={permissionModePending}
                 onClick={() => setMenu(menu === "permission" ? null : "permission")}
                 tooltip={menu === "permission" ? undefined : "选择当前会话的权限模式"}
               >
@@ -502,55 +507,26 @@ export const Composer = memo(function Composer({
           </div>
         )}
         input={(
-          <div className="cindy-composer-editor">
-            {slashMenuOpen ? (
-              <div className="composer-popover slash-menu desktop-composer-menu" role="menu">
-                <div className="popover-heading">命令</div>
-                {slashMatches.map((command, index) => (
-                  <button
-                    className={`menu-option${index === slashIndex ? " is-selected" : ""}`}
-                    key={command.name}
-                    onClick={() => chooseSlashCommand(command)}
-                    onMouseEnter={() => setSlashIndex(index)}
-                    role="menuitem"
-                    type="button"
-                  >
-                    <span className="menu-option-copy"><strong>{command.name}</strong><small>{command.description}</small></span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
+          <div className="biny-composer-editor" ref={editorWrapRef}>
             <ChatComposerInput
-              className="cindy-composer-input"
+              className="biny-composer-input"
+              debounceMs={0}
               handleRef={inputRef}
               label="任务输入"
               maxRows={6}
               onFiles={(files) => void addFiles(files)}
               onKeyDown={(event) => {
-                if (slashMenuOpen) {
-                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                    event.preventDefault();
-                    const step = event.key === "ArrowDown" ? 1 : -1;
-                    setSlashIndex((current) => (current + step + slashMatches.length) % slashMatches.length);
-                    return;
-                  }
-                  if (event.key === "Escape") {
-                    event.preventDefault();
-                    setSlashDismissed(true);
-                    return;
-                  }
-                  if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing)) {
-                    event.preventDefault();
-                    const selected = slashMatches[Math.min(slashIndex, slashMatches.length - 1)];
-                    if (selected) chooseSlashCommand(selected);
-                    return;
-                  }
-                }
+                // trigger 菜单会先消费 ↑↓/Enter/Tab/Escape；这里只接管运行中的
+                // Cmd/Ctrl+Enter，其余 Enter 交给 ChatComposerInput 的提交逻辑。
                 if (event.key !== "Enter" || event.shiftKey || event.altKey || event.nativeEvent.isComposing) return;
-                event.preventDefault();
-                void submit(running && (event.metaKey || event.ctrlKey) ? "steer" : undefined);
+                if (running && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  void submit("steer");
+                }
               }}
+              triggers={desktopSlashTriggers}
             />
+            <div ref={breathingCaretRef} className="biny-breathing-caret" aria-hidden="true" />
           </div>
         )}
         isDisabled={inputDisabled}
@@ -558,17 +534,17 @@ export const Composer = memo(function Composer({
         onChange={handleInputChange}
         onStop={() => void requestStop()}
         onSubmit={(value) => void submit(undefined, value)}
-        placeholder={placeholder}
+        placeholder={typedPlaceholder}
         status={running && input.trim()
           ? { message: "按 Enter 将补充要求排入当前会话；⌘ Enter 立即转向", type: "warning" }
           : undefined}
         statusPosition="bottom"
         sendActions={(
-          <div className="cindy-composer-footer-end">
+          <div className="biny-composer-footer-end">
             <div className="composer-menu-anchor">
               <ComposerActionButton
                 aria-pressed={memoryEnabled}
-                className="cindy-memory-toggle"
+                className="biny-memory-toggle"
                 data-memory-enabled={memoryEnabled ? "true" : "false"}
                 disabled={memoryToggleDisabled}
                 disabledReason={memoryToggleDisabledReason}
@@ -582,7 +558,7 @@ export const Composer = memo(function Composer({
             </div>
             <div className="composer-menu-anchor" ref={modelAnchorRef}>
               <ComposerActionButton
-                className="cindy-model-pill"
+                className="biny-model-pill"
                 data-composer-menu="model"
                 disabled={modelSwitchDisabled}
                 disabledReason={modelSwitchDisabledReason}

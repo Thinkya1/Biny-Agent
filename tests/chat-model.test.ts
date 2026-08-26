@@ -1,6 +1,6 @@
 /**
- * chat-dsh 纯函数测试：工具行模型（变体/状态）、指标格式化（token/时长/时钟/吞吐）、
- * 轮次指标派生，以及 sessionTimeline 的 TTFT/解码指标与压缩标记。
+ * chatModel 纯函数测试：工具行模型（变体/状态）、轮次级错误呈现（标题/语义色/人话映射）、
+ * 指标格式化（token/时长/时钟/吞吐）、轮次指标派生，以及 sessionTimeline 的 TTFT/解码指标与压缩标记。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -15,12 +15,15 @@ import {
   formatRunDuration,
   formatTokens,
   formatTokensPerSecond,
+  humanizeRunError,
+  runErrorPresentation,
   toolRowState,
   turnMetrics,
   VARIANT_TITLES,
-} from "../src/desktop/renderer/src/chatDshModel.js";
+} from "../src/desktop/renderer/src/chatModel.js";
 import {
   buildSessionTimeline,
+  createSessionTimelineProjector,
   type TimelineTool,
 } from "../src/desktop/renderer/src/sessionTimeline.js";
 import { MarkdownContent } from "../src/desktop/renderer/src/components/MarkdownContent.js";
@@ -178,4 +181,97 @@ test("context.retrying 步骤带压缩标记且文案不带前缀", () => {
   assert.ok(step && step.kind === "reasoning");
   assert.equal(step.notice, "compaction");
   assert.equal(step.status, "已压缩 12 条消息，正在恢复请求");
+});
+
+test("增量投影：追加实时事件时历史轮次与未触及工具引用稳定、内容与全量一致", () => {
+  const base = { sessionId: "s1", runId: "r1", timestamp: "2026-05-15T10:00:00.000Z" };
+  const events = [
+    { type: "user_message", content: "历史问题", time: "2026-05-15T09:00:00.000Z" },
+    { type: "assistant_message", content: "历史回答", time: "2026-05-15T09:00:05.000Z" },
+  ];
+  const liveStart = [
+    { ...base, type: "message.user", messageId: "m1", content: "实时问题" },
+    { ...base, type: "run.started", messageId: "m1", input: "实时问题", mode: "normal", model: { alias: "a", provider: "p", label: "p/m", reasoning: "" }, skills: [] },
+    { ...base, type: "tool.started", toolCallId: "tool-a", tool: "run_command", args: { command: "ls" }, display: { kind: "command", command: "ls", cwd: "/w" } },
+  ];
+  // 追加的 assistant.delta 只触及实时轮次正文，不触及工具。
+  const assistantDelta = { ...base, type: "assistant.delta", timestamp: "2026-05-15T10:00:01.000Z", content: "你好" };
+  // 追加的 tool.progress 触及 tool-a。
+  const toolProgress = { ...base, type: "tool.progress", toolCallId: "tool-a", tool: "run_command", update: { kind: "stdout", text: "out\n" } };
+
+  const projector = createSessionTimelineProjector();
+  const first = projector.update({ sessionId: "s1", events, liveEvents: liveStart });
+  assert.deepEqual(first, buildSessionTimeline(events, liveStart));
+
+  const liveAfterDelta = [...liveStart, assistantDelta];
+  const second = projector.update({ sessionId: "s1", events, liveEvents: liveAfterDelta });
+  assert.deepEqual(second, buildSessionTimeline(events, liveAfterDelta));
+  assert.equal(second[0], first[0]); // 历史轮次对象引用不变（Turn memo 跳过子树）
+  assert.notEqual(second[1], first[1]); // 进行中的实时轮次发布了新引用
+  assert.equal(second[1]?.tools[0], first[1]?.tools[0]); // 未触及的工具引用不变（ToolActivity memo 生效）
+
+  const liveAfterProgress = [...liveAfterDelta, toolProgress];
+  const third = projector.update({ sessionId: "s1", events, liveEvents: liveAfterProgress });
+  assert.deepEqual(third, buildSessionTimeline(events, liveAfterProgress));
+  assert.equal(third[0], first[0]); // 历史轮次依旧稳定
+  assert.notEqual(third[1]?.tools[0], second[1]?.tools[0]); // 被触及的工具发布了新引用
+  assert.equal(third[1]?.tools[0]?.command?.stdout, "out\n");
+});
+
+test("增量投影：events 引用变化或实时流收缩时整体重置", () => {
+  const base = { sessionId: "s1", runId: "r1", timestamp: "2026-05-15T10:00:00.000Z" };
+  const events = [
+    { type: "user_message", content: "历史问题", time: "2026-05-15T09:00:00.000Z" },
+    { type: "assistant_message", content: "历史回答", time: "2026-05-15T09:00:05.000Z" },
+  ];
+  const live = [{ ...base, type: "message.user", messageId: "m1", content: "实时问题" }];
+  const projector = createSessionTimelineProjector();
+  const first = projector.update({ sessionId: "s1", events, liveEvents: live });
+
+  // liveEvents 变短（会话刷新/切换）→ 重置，历史轮次重新计算得到新引用。
+  const reset = projector.update({ sessionId: "s1", events, liveEvents: [] });
+  assert.deepEqual(reset, buildSessionTimeline(events, []));
+  assert.notEqual(reset[0], first[0]);
+
+  // events 换了引用（终态刷新后 openSession 返回新数组）→ 同样整体重置。
+  const newEvents = [...events];
+  const afterReload = projector.update({ sessionId: "s1", events: newEvents, liveEvents: [] });
+  assert.notEqual(afterReload[0], reset[0]);
+
+  // 切到另一个会话 → 重置。
+  const other = projector.update({ sessionId: "s2", events: [], liveEvents: [] });
+  assert.deepEqual(other, []);
+});
+
+test("runErrorPresentation 按终态区分标题与语义色", () => {
+  assert.deepEqual(runErrorPresentation("blocked"), { title: "任务被阻塞", variant: "warning" });
+  assert.deepEqual(runErrorPresentation("cancelled"), { title: "已取消", variant: "warning" });
+  assert.deepEqual(runErrorPresentation("aborted"), { title: "已中止", variant: "warning" });
+  assert.deepEqual(runErrorPresentation("incomplete"), { title: "本轮运行未完成", variant: "error" });
+  assert.deepEqual(runErrorPresentation("failed"), { title: "本轮运行失败", variant: "error" });
+});
+
+test("humanizeRunError 把网络/运行时错误码映射成人话", () => {
+  // 连接 / 响应超时（undici 原始码）
+  assert.equal(humanizeRunError("TypeError: fetch failed (UND_ERR_CONNECT_TIMEOUT)"), "网络连接超时，请检查代理或网络后重试。");
+  assert.equal(humanizeRunError("UND_ERR_HEADERS_TIMEOUT"), "服务器响应超时，请稍后重试。");
+  // 连接中断 / 拒绝 / 域名解析
+  assert.equal(humanizeRunError("Error: read ECONNRESET"), "连接被中断，请检查网络或代理后重试。");
+  assert.equal(humanizeRunError("connect ECONNREFUSED 127.0.0.1:443"), "无法连接到服务器，请确认服务可用或代理配置正确。");
+  assert.equal(humanizeRunError("getaddrinfo ENOTFOUND api.example.com"), "域名解析失败，请检查网络或代理设置。");
+  // 通用网络失败兜底
+  assert.equal(humanizeRunError("TypeError: fetch failed"), "网络请求失败，请检查网络或代理后重试。");
+});
+
+test("humanizeRunError 映射鉴权/限流/服务端/上下文/取消", () => {
+  assert.equal(humanizeRunError("HTTP 401 Unauthorized"), "鉴权失败，请检查 API Key 是否正确。");
+  assert.equal(humanizeRunError("429 Too Many Requests"), "请求过于频繁或额度不足，请稍后重试。");
+  assert.equal(humanizeRunError("500 Internal Server Error"), "服务端暂时不可用，请稍后重试。");
+  assert.equal(humanizeRunError("This model's maximum context length is 200000 tokens"), "超出模型上下文长度，请压缩上下文或开启新会话。");
+  assert.equal(humanizeRunError("The operation was aborted"), "操作已被取消。");
+});
+
+test("humanizeRunError 可读文案保留首行，空串原样返回", () => {
+  assert.equal(humanizeRunError("Something unexpected happened.\nMore detail here."), "Something unexpected happened.");
+  assert.equal(humanizeRunError("   "), "");
 });

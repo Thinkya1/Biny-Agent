@@ -1,17 +1,16 @@
 /**
- * DSH 风格聊天行的纯函数模型。
+ * 聊天行的纯函数模型。
  *
- * 复刻 deepseek-harness ui-tool 的 tool-call-model（figma 122:9479）：把工具名分类成
- * 视觉变体、派生行标题与状态语义；以及 message-chrome 的时间/指标格式化（日期感知时钟、
- * 用时、首 token 延迟、解码吞吐）。全部为纯函数，不依赖 React，便于单测。
+ * 把工具名分类成视觉变体、派生行标题与状态语义；以及消息时钟的时间/指标格式化
+ * （日期感知时钟、用时、首 token 延迟、解码吞吐）。全部为纯函数，不依赖 React，便于单测。
  */
-import type { TimelineTool, TimelineTurn } from "./sessionTimeline.js";
+import type { TimelineRunStatus, TimelineTool, TimelineTurn } from "./sessionTimeline.js";
 import type { IconName } from "./components/Icon.js";
 
 /** 工具行视觉变体（标题字面量来自 DSH figma 设计）。 */
 export type ToolRowVariant = "search" | "read" | "bash" | "write" | "edit" | "git" | "process" | "skill" | "others";
 
-/** 行状态语义；颜色由 StateDot 自供。 */
+/** 行状态语义；驱动工具行图标芯片的着色与呼吸光环。 */
 export type ToolRowState = "running" | "ok" | "error" | "stopped";
 
 /** 变体 leading 图标名（Biny Icon 名；DSH figma 表：search/read/bash/write/edit/code/others）。 */
@@ -21,10 +20,10 @@ export const VARIANT_ICON_NAMES: Record<ToolRowVariant, IconName> = {
   bash: "terminal",
   write: "edit",
   edit: "edit",
-  git: "diff",
+  git: "branch",
   process: "activity",
   skill: "wand",
-  others: "spark",
+  others: "wrench",
 };
 
 /** 变体行标题（DSH figma 字面量，非翻译文案）。 */
@@ -83,6 +82,48 @@ export function toolRowState(tool: TimelineTool): ToolRowState {
 export function firstLine(text: string): string {
   const newline = text.indexOf("\n");
   return newline === -1 ? text : text.slice(0, newline);
+}
+
+/** 轮次级失败/未完成的卡片呈现：标题（区分语义）+ 语义色（error 红 / warning 琥珀）。 */
+export function runErrorPresentation(status: TimelineRunStatus): { title: string; variant: "error" | "warning" } {
+  switch (status) {
+    // blocked 是「运行被阻塞」（如 max-tokens）而非失败：琥珀警示。
+    case "blocked": return { title: "任务被阻塞", variant: "warning" };
+    case "cancelled": return { title: "已取消", variant: "warning" };
+    case "aborted": return { title: "已中止", variant: "warning" };
+    case "incomplete": return { title: "本轮运行未完成", variant: "error" };
+    case "failed":
+    default: return { title: "本轮运行失败", variant: "error" };
+  }
+}
+
+/**
+ * 把轮次级原始错误（多为网络/运行时错误码，如 UND_ERR_*、ECONNRESET、HTTP 5xx）映射成人话。
+ * 已是可读文案的保留首行；命中已知模式时给出可操作的提示。完整原文由调用方放 tooltip。
+ */
+export function humanizeRunError(message: string): string {
+  const text = message.trim();
+  if (!text) return "";
+  const lower = text.toLowerCase();
+  const has = (...patterns: RegExp[]): boolean => patterns.some((pattern) => pattern.test(lower));
+  // 网络 / 连接（undici、Node、fetch）
+  if (has(/und_err_connect_timeout/, /\betimedout\b/, /esockettimedout/, /connect(?:ion)? timeout/)) return "网络连接超时，请检查代理或网络后重试。";
+  if (has(/und_err_headers_timeout/, /und_err_body_timeout/)) return "服务器响应超时，请稍后重试。";
+  if (has(/und_err_socket/, /socket hang up/, /\beconnreset\b/)) return "连接被中断，请检查网络或代理后重试。";
+  if (has(/\beconnrefused\b/)) return "无法连接到服务器，请确认服务可用或代理配置正确。";
+  if (has(/\benotfound\b/, /\beai_again\b/)) return "域名解析失败，请检查网络或代理设置。";
+  if (has(/und_err_/, /fetch failed/, /network ?error/, /failed to fetch/)) return "网络请求失败，请检查网络或代理后重试。";
+  // 鉴权 / 限流 / 服务端
+  if (has(/\b401\b/, /unauthorized/, /invalid[_ ]api[_ ]?key/, /incorrect api key/, /authentication failed/)) return "鉴权失败，请检查 API Key 是否正确。";
+  if (has(/\b403\b/, /forbidden/, /permission denied/)) return "没有访问权限，请检查账号权限或模型配额。";
+  if (has(/\b429\b/, /rate limit/, /too many requests/, /quota/, /insufficient/)) return "请求过于频繁或额度不足，请稍后重试。";
+  if (has(/\b5\d{2}\b/, /internal server error/, /bad gateway/, /service unavailable/, /overloaded/)) return "服务端暂时不可用，请稍后重试。";
+  // 上下文长度（含 max_tokens 阻塞）
+  if (has(/context length/, /maximum context/, /context window/, /too many tokens/, /prompt is too long/, /max[_ ]tokens?/)) return "超出模型上下文长度，请压缩上下文或开启新会话。";
+  // 取消 / 中止
+  if (has(/abort/, /cancel/)) return "操作已被取消。";
+  // 兜底：保留可读首行。
+  return firstLine(text);
 }
 
 /** 折叠的 token 计数：517 / 12.2K / 517K / 1.2M（一位小数仅在三位数以下）。 */

@@ -85,7 +85,7 @@ function MarkdownCodeBlock({ code, language }: { code: string; language?: string
     <div className="markdown-code-block">
       <div className="markdown-code-header">
         <span className="markdown-code-language">{language ?? "文本"}</span>
-        <CopyButton className="markdown-code-copy" label="复制代码" value={code} />
+        <CopyButton className="markdown-code-copy" label="复制代码" showLabel value={code} />
       </div>
       <pre><code className="hljs" dangerouslySetInnerHTML={{ __html: highlighted.html }} /></pre>
     </div>

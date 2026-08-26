@@ -19,16 +19,16 @@ export function AttachmentList({ attachments, onRemove, onRemovePending, pending
   pending: PendingAttachment[];
 }): React.JSX.Element {
   return (
-    <div className="cindy-composer-attachments" aria-label="待发送附件">
+    <div className="biny-composer-attachments" aria-label="待发送附件">
       {attachments.map((attachment, index) => (
-        <div className="cindy-attachment-chip" key={`${attachment.path}-${String(index)}`}>
+        <div className="biny-attachment-chip" key={`${attachment.path}-${String(index)}`}>
           <Icon name={attachment.mimeType.startsWith("image/") ? "spark" : "file"} size={13} />
-          <span className="cindy-attachment-copy">
+          <span className="biny-attachment-copy">
             <span>{attachment.name}</span>
             <small>已就绪</small>
           </span>
           <ComposerActionButton
-            className="cindy-attachment-remove"
+            className="biny-attachment-remove"
             label={`移除 ${attachment.name}`}
             onClick={() => onRemove(index)}
             tooltip={`移除附件 ${attachment.name}`}
@@ -38,15 +38,15 @@ export function AttachmentList({ attachments, onRemove, onRemovePending, pending
         </div>
       ))}
       {pending.map((attachment) => (
-        <div className={`cindy-attachment-chip is-${attachment.status}`} key={attachment.id}>
+        <div className={`biny-attachment-chip is-${attachment.status}`} key={attachment.id}>
           <Icon name={attachment.status === "error" ? "warning" : "file"} size={13} />
-          <span className="cindy-attachment-copy">
+          <span className="biny-attachment-copy">
             <span>{attachment.name}</span>
             <small>{attachment.status === "error" ? attachment.error ?? "上传失败" : "上传中…"}</small>
           </span>
-          {attachment.status === "uploading" ? <span aria-label="上传中" className="cindy-attachment-spinner" /> : null}
+          {attachment.status === "uploading" ? <span aria-label="上传中" className="biny-attachment-spinner" /> : null}
           <ComposerActionButton
-            className="cindy-attachment-remove"
+            className="biny-attachment-remove"
             label={`移除 ${attachment.name}`}
             onClick={() => onRemovePending(attachment.id)}
             tooltip={attachment.status === "error" ? `移除失败附件 ${attachment.name}` : `取消附件 ${attachment.name}`}

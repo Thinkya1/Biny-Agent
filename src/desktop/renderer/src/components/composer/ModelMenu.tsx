@@ -91,7 +91,7 @@ export function ModelMenu({
   return (
     <ComposerPopover
       anchorRef={anchorRef}
-      className={`t-dropdown composer-popover cindy-composer-popover model-menu ${presenceClass(presence.phase)}`}
+      className={`t-dropdown composer-popover biny-composer-popover model-menu ${presenceClass(presence.phase)}`}
       onPointerEnter={onPointerEnter}
       onPointerLeave={onPointerLeave}
       phase={presence.phase}

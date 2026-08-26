@@ -11,5 +11,5 @@
 @import "@astryxdesign/theme-neutral/theme.css";
 @import "../styles.css" layer(legacy);
 @import "./desktop-v2.css" layer(desktop);
-@import "./cindy.css" layer(desktop);
-@import "./chat-dsh.css" layer(desktop);
+@import "./biny.css" layer(desktop);
+@import "./chat.css" layer(desktop);

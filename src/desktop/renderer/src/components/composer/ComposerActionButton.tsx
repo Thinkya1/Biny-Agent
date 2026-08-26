@@ -76,7 +76,7 @@ export const ComposerActionButton = forwardRef<HTMLButtonElement, ComposerAction
         aria-busy={loading || undefined}
         aria-disabled={keepFocusable || undefined}
         aria-label={rest["aria-label"] ?? label}
-        className={className ? `cindy-composer-action ${className}` : "cindy-composer-action"}
+        className={className ? `biny-composer-action ${className}` : "biny-composer-action"}
         data-active={active ? "true" : undefined}
         data-loading={loading ? "true" : undefined}
         disabled={disabled && !keepFocusable}
@@ -85,7 +85,7 @@ export const ComposerActionButton = forwardRef<HTMLButtonElement, ComposerAction
         ref={setButtonRef}
         type={type}
       >
-        <span className="cindy-composer-action-content">{children}</span>
+        <span className="biny-composer-action-content">{children}</span>
       </button>
       {content ? tooltipApi.renderTooltip(content) : null}
     </>
