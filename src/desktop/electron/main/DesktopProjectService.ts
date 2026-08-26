@@ -22,6 +22,7 @@ import {
   type InteractiveRuntimeSnapshot
 } from "../../../runtime/agentEvents.js";
 import { readStoredSessionEvents } from "../../../session/events.js";
+import { isSessionNearLimit, maxSessionEvents, maxSessionFileBytes } from "../../../session/limits.js";
 import {
   listSessionCatalog,
   querySessionCatalog,
@@ -408,10 +409,20 @@ export class DesktopProjectService {
       undefined,
       undefined
     );
+    const sizeBytes = stored.sizeBytes;
+    const eventCount = stored.events.length;
     return {
       session,
       events: stored.events,
-      liveEvents: [...(liveEvents.get(sessionId) ?? [])]
+      liveEvents: [...(liveEvents.get(sessionId) ?? [])],
+      // 接近上限时让渲染层提示分叉；一个会话越接近 16MB，每次打开/回放的 IO 与解析就越贵。
+      limits: {
+        nearSizeLimit: isSessionNearLimit(sizeBytes, eventCount),
+        sizeBytes,
+        eventCount,
+        maxSizeBytes: maxSessionFileBytes,
+        maxEvents: maxSessionEvents
+      }
     };
   }
 

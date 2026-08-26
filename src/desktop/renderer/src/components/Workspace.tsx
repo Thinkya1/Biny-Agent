@@ -7,7 +7,7 @@
 import type { PermissionResult } from "../../../../permission/PermissionManager.js";
 import { useEffect, useRef, useState } from "react";
 import { ThinkingOrb } from "thinking-orbs";
-import type { DesktopProject, DesktopRuntimeMutation, DesktopRuntimeProjection, DesktopSessionWriterConflict } from "../../../protocol.js";
+import type { DesktopProject, DesktopRuntimeMutation, DesktopRuntimeProjection, DesktopSessionLimits, DesktopSessionWriterConflict } from "../../../protocol.js";
 import type { TimelineTurn } from "../sessionTimeline.js";
 import { pickThinkingMessage } from "../thinkingMessages.js";
 import { Icon } from "./Icon.js";
@@ -39,6 +39,8 @@ interface WorkspaceProps {
   onRetry(input: string): void;
   onRetryWriterConflict(): Promise<void>;
   writerConflict?: DesktopSessionWriterConflict;
+  /** 会话体量接近持久化上限时的预警信息；未接近时缺省。 */
+  sessionLimits?: DesktopSessionLimits;
   onEditUserMessage(input: string, userMessageIndex: number): Promise<void>;
   onCreateBranch(): void;
   onRollbackFiles(turn: TimelineTurn): void;
@@ -74,6 +76,7 @@ export function Workspace({
   onRetry,
   onRetryWriterConflict,
   writerConflict,
+  sessionLimits,
   onEditUserMessage,
   onCreateBranch,
   onRollbackFiles,
@@ -87,10 +90,13 @@ export function Workspace({
   const streaming = running || turns.some((turn) => turn.status === "running" || turn.status === "waiting_permission");
   const isHome = !loading && !runtimeError && !projectId;
   const showWelcome = !loading && !runtimeError && !sessionId && !streaming && turns.length === 0;
+  // 上限预警按会话 dismiss：换会话要重新提示，同会话点掉后不再打扰。
+  const [limitBannerDismissedFor, setLimitBannerDismissedFor] = useState<string>();
+  const showLimitBanner = Boolean(sessionLimits?.nearSizeLimit && sessionId && limitBannerDismissedFor !== sessionId);
 
   if (isHome) {
     return (
-      <div className="workspace cindy-workspace cindy-workspace-home">
+      <div className="workspace biny-workspace biny-workspace-home">
         <RuntimePanel
           onClose={() => onRuntimePanelOpenChange(false)}
           onError={onRuntimeError}
@@ -99,29 +105,29 @@ export function Workspace({
           open={runtimePanelOpen && Boolean(projectId)}
           projection={runtimeProjection}
         />
-        <div className="cindy-home-content">
+        <div className="biny-home-content">
           <WelcomeState hasProject={false} onOpenProject={onOpenProject} onPrefill={onPrefillPrompt} />
-          <div className="cindy-home-composer">{children}</div>
+          <div className="biny-home-composer">{children}</div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="workspace cindy-workspace cindy-workspace-chat">
-      <div className="cindy-workspace-main">
-        <header className="cindy-chat-toolbar">
-          <div className="cindy-chat-drag-region">
-            <div className="cindy-chat-title">
+    <div className="workspace biny-workspace biny-workspace-chat">
+      <div className="biny-workspace-main">
+        <header className="biny-chat-toolbar">
+          <div className="biny-chat-drag-region">
+            <div className="biny-chat-title">
               <strong>{sessionTitle ?? project?.name ?? "Biny"}</strong>
               {project ? <span>{project.name}{project.branch ? ` · ${project.branch}` : ""}</span> : <span>打开一个本地项目开始</span>}
             </div>
           </div>
-          <div className="cindy-chat-actions">
+          <div className="biny-chat-actions">
             <button
               aria-expanded={inspectorOpen}
               aria-label={inspectorOpen ? "收起工作区工具" : "打开工作区工具"}
-              className={`cindy-toolbar-button${inspectorOpen ? " is-active" : ""}`}
+              className={`biny-toolbar-button${inspectorOpen ? " is-active" : ""}`}
               disabled={!projectId}
               onClick={onToggleInspector}
               title={inspectorOpen ? "收起工作区工具" : "打开工作区工具"}
@@ -139,9 +145,19 @@ export function Workspace({
           open={runtimePanelOpen}
           projection={runtimeProjection}
         />
-        <div className="cindy-chat-body">
+        <div className="biny-chat-body">
+          {showLimitBanner && sessionLimits && sessionId ? (
+            <div className="biny-session-limit-banner" role="status">
+              <span>
+                这个会话已写入 {(sessionLimits.sizeBytes / 1048576).toFixed(1)} MB / {Math.round(sessionLimits.maxSizeBytes / 1048576)} MB（{sessionLimits.eventCount.toLocaleString()} 个事件）。
+                越大打开和回放越慢，建议分叉出新会话继续。
+              </span>
+              <button onClick={onCreateBranch} type="button">分叉新会话</button>
+              <button aria-label="忽略" className="biny-session-limit-dismiss" onClick={() => setLimitBannerDismissedFor(sessionId)} type="button">×</button>
+            </div>
+          ) : null}
           {loading ? <LoadingState /> : runtimeError ? <RuntimeError error={runtimeError} onOpenProject={onOpenProject} /> : showWelcome ? (
-            <div className="cindy-chat-welcome"><WelcomeState hasProject={Boolean(projectId)} onOpenProject={onOpenProject} onPrefill={onPrefillPrompt} /></div>
+            <div className="biny-chat-welcome"><WelcomeState hasProject={Boolean(projectId)} onOpenProject={onOpenProject} onPrefill={onPrefillPrompt} /></div>
           ) : (turns.length > 0 || thinking) && projectId ? (
             <ChatScroll>
               <MessageTimeline
@@ -162,14 +178,14 @@ export function Workspace({
               {thinking ? <ThinkingStatus key={thinkingStartedAt ?? "thinking"} startedAt={thinkingStartedAt} /> : null}
             </ChatScroll>
           ) : (
-            <div className="cindy-chat-empty"><Icon name="message" size={20} /><span>开始一段新的对话</span></div>
+            <div className="biny-chat-empty"><Icon name="message" size={20} /><span>开始一段新的对话</span></div>
           )}
         </div>
-        <div className="cindy-chat-composer">
+        <div className="biny-chat-composer">
           {writerConflict ? <SessionWriterConflictBanner onRetry={onRetryWriterConflict} /> : children}
         </div>
       </div>
-      {streaming ? <span className="cindy-streaming-state" aria-hidden="true" /> : null}
+      {streaming ? <span className="biny-streaming-state" aria-hidden="true" /> : null}
     </div>
   );
 }
@@ -187,10 +203,10 @@ function ThinkingStatus({ startedAt }: { startedAt?: string }): React.JSX.Elemen
   }, [startedAt]);
 
   return (
-    <div className="cindy-thinking-status" role="status">
-      <ThinkingOrb aria-label={thinkingMessage} className="cindy-thinking-status-orb" size={20} state="connecting" theme="auto" />
-      <span className="cindy-thinking-status-label dsh-thinking-shimmer">{thinkingMessage}…</span>
-      <span className="cindy-thinking-status-duration">{elapsedSeconds}s</span>
+    <div className="biny-thinking-status" role="status">
+      <ThinkingOrb aria-label={thinkingMessage} className="biny-thinking-status-orb" size={20} state="connecting" theme="auto" />
+      <span className="biny-thinking-status-label chat-shimmer-text">{thinkingMessage}…</span>
+      <span className="biny-thinking-status-duration">{elapsedSeconds}s</span>
     </div>
   );
 }
@@ -220,19 +236,19 @@ function ChatScroll({ children }: { children: React.ReactNode }): React.JSX.Elem
   };
 
   return (
-    <div className={`cindy-chat-scroll${scrollActive ? " is-scroll-active" : ""}`} onScroll={revealScrollbar} onWheel={revealScrollbar}>
+    <div className={`biny-chat-scroll${scrollActive ? " is-scroll-active" : ""}`} onScroll={revealScrollbar} onWheel={revealScrollbar}>
       {children}
     </div>
   );
 }
 
 function LoadingState(): React.JSX.Element {
-  return <div className="cindy-status-state" role="status"><ThinkingOrb aria-label="正在恢复会话" className="thinking-orb" size={20} state="connecting" theme="auto" /><span>正在恢复会话…</span></div>;
+  return <div className="biny-status-state" role="status"><ThinkingOrb aria-label="正在恢复会话" className="thinking-orb" size={20} state="connecting" theme="auto" /><span>正在恢复会话…</span></div>;
 }
 
 function RuntimeError({ error, onOpenProject }: { error: string; onOpenProject(): void }): React.JSX.Element {
   return (
-    <div className="cindy-runtime-error" role="alert">
+    <div className="biny-runtime-error" role="alert">
       <Icon name="warning" size={22} />
       <h2>Agent Runtime 无法启动</h2>
       <p>{error}</p>
@@ -254,9 +270,9 @@ function SessionWriterConflictBanner({ onRetry }: { onRetry(): Promise<void> }):
     }
   };
   return (
-    <div aria-live="polite" className="cindy-session-writer-conflict" role="alert">
+    <div aria-live="polite" className="biny-session-writer-conflict" role="alert">
       <Icon name="lock" size={17} />
-      <div className="cindy-session-writer-conflict-copy">
+      <div className="biny-session-writer-conflict-copy">
         <strong>已在另一个应用中打开</strong>
         <span>请先在那边关闭会话，才能在这里继续。</span>
       </div>

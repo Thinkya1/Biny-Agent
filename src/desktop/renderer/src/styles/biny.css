@@ -1,0 +1,8670 @@
+/**
+ * 桌面端视觉层。
+ *
+ * 颜色和尺寸集中在根节点 token；选择器全部挂在根节点下，旧的消息、设置和检查器样式仍
+ * 可安全复用，不会污染 Renderer 的其他浮层。
+ */
+@property --biny-sidebar-animated-visual-width {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+
+@property --biny-sidebar-animated-flow-width {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+
+@property --biny-sidebar-animated-toolbar-left {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 150px;
+}
+
+@property --biny-inspector-animated-flow-width {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+
+:root {
+  --biny-surface: var(--surface);
+  --biny-surface-elevated: var(--surface-raised);
+  --biny-surface-soft: var(--surface-soft);
+  --biny-surface-hover: var(--surface-hover);
+  --biny-sidebar-surface: var(--sidebar);
+  --biny-border: var(--border);
+  --biny-text: var(--text);
+  --biny-text-secondary: var(--text-secondary);
+  --biny-text-tertiary: var(--text-tertiary);
+  --biny-focus: var(--accent);
+  --biny-send-bg: var(--surface-raised);
+  --biny-send-icon: var(--text);
+  --biny-pill: var(--surface-raised);
+  --biny-border-strong: var(--border-strong);
+  --biny-surface-selected: var(--surface-selected);
+  --biny-danger: var(--red);
+  --biny-danger-bg: var(--red-bg);
+  --biny-success: var(--green);
+  --biny-success-bg: var(--green-bg);
+  --biny-warning: var(--amber);
+  --biny-warning-bg: var(--amber-bg);
+  --biny-code: var(--code);
+  --biny-placeholder: var(--text-tertiary);
+  --biny-selection-surface: var(--surface-selected);
+  --biny-selection-text: var(--mark-ink);
+  --biny-selection-muted: var(--text-secondary);
+  --biny-shadow-color: var(--shadow);
+  --biny-shadow-soft: var(--shadow);
+  --biny-shadow-heavy: var(--shadow);
+  --biny-shadow-sidebar: var(--shadow);
+  --biny-overlay: rgb(0 0 0 / 20%);
+  --biny-overlay-hover: rgb(0 0 0 / 8%);
+  --biny-overlay-pressed: rgb(0 0 0 / 14%);
+  --biny-shadow: 0 1px 2px var(--shadow);
+  /* 扩展、发现和 MCP 页面共用这组节奏，避免每个卡片自行拼接间距。 */
+  --biny-space-2: 8px;
+  --biny-space-3: 12px;
+  --biny-space-4: 16px;
+  --biny-space-5: 24px;
+  --biny-radius-control: 8px;
+  --biny-radius-card: 10px;
+  --biny-radius-dialog: 14px;
+  --biny-shadow-dialog: 0 12px 36px var(--biny-shadow-heavy);
+  --biny-motion-quick: 140ms;
+  --biny-motion-base: 180ms;
+  --biny-ease-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
+  --page-slide-dur: 200ms;
+  --page-fade-dur: 200ms;
+  --page-slide-distance: 8px;
+  --page-blur: 3px;
+  --page-stagger: 0ms;
+  --page-exit-enabled: 1;
+  --page-slide-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --page-fade-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --biny-composer-radius: 18px;
+  --biny-composer-shadow-rest: 0 1px 2px var(--biny-shadow-color), 0 5px 14px var(--biny-shadow-soft);
+  --biny-composer-shadow-focus: 0 0 0 1px color-mix(in srgb, var(--biny-focus) 16%, transparent), 0 1px 2px var(--biny-shadow-color), 0 5px 14px var(--biny-shadow-soft);
+  --color-overlay: var(--biny-overlay);
+  --color-overlay-hover: var(--biny-overlay-hover);
+  --color-overlay-pressed: var(--biny-overlay-pressed);
+}
+
+:root[data-theme="dark"] {
+  --biny-overlay: rgb(0 0 0 / 42%);
+  --biny-overlay-hover: rgb(0 0 0 / 16%);
+  --biny-overlay-pressed: rgb(0 0 0 / 24%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --biny-overlay: rgb(0 0 0 / 42%);
+    --biny-overlay-hover: rgb(0 0 0 / 16%);
+    --biny-overlay-pressed: rgb(0 0 0 / 24%);
+  }
+}
+
+.desktop-root.biny-root {
+  /* 每个语义层都单独映射，浅色模式不能依赖深色 token 的透明度反转。 */
+  --biny-light-surface: #ffffff;
+  --biny-light-surface-elevated: #ffffff;
+  --biny-light-surface-soft: #f7f7f7;
+  --biny-light-surface-hover: #f2f2f2;
+  --biny-light-surface-selected: #ececec;
+  --biny-light-sidebar-surface: #f6f6f6;
+  --biny-light-border: #e8e8e8;
+  --biny-light-border-strong: #d5d5d5;
+  --biny-light-text: #0d0d0d;
+  --biny-light-text-secondary: #5d5d5d;
+  --biny-light-text-tertiary: #8f8f8f;
+  --biny-light-focus: #339cff;
+  --biny-light-send-bg: #1a1c1f;
+  --biny-light-send-icon: #ffffff;
+  --biny-light-pill: #ffffff;
+  --biny-light-danger: #d54848;
+  --biny-light-danger-bg: rgb(213 72 72 / 12%);
+  --biny-light-success: #2a9366;
+  --biny-light-success-bg: rgb(42 147 102 / 12%);
+  --biny-light-warning: #a66f00;
+  --biny-light-warning-bg: rgb(166 111 0 / 13%);
+  --biny-light-code: #f7f7f7;
+  --biny-light-placeholder: #92969e;
+  /* 会话列表选中底色对齐 DSH：用中性 hover 级底色，不再用蓝色高亮。 */
+  --biny-light-selection-surface: rgba(0, 0, 0, 0.06);
+  --biny-light-selection-text: #ffffff;
+  --biny-light-selection-muted: #1a1c1f;
+  --biny-light-shadow-color: rgb(26 28 31 / 8%);
+  --biny-light-shadow-soft: rgb(26 28 31 / 11%);
+  --biny-light-shadow-heavy: rgb(26 28 31 / 18%);
+  --biny-light-shadow-sidebar: rgb(26 28 31 / 12%);
+  --biny-dark-surface-soft: #202020;
+  --biny-dark-surface-selected: rgba(255, 255, 255, 0.10);
+  --biny-dark-border-strong: #454545;
+  --biny-dark-text-tertiary: #737373;
+  --biny-dark-danger: #f06b6b;
+  --biny-dark-danger-bg: rgb(240 107 107 / 14%);
+  --biny-dark-success: #67c692;
+  --biny-dark-success-bg: rgb(103 198 146 / 14%);
+  --biny-dark-warning: #e0b15d;
+  --biny-dark-warning-bg: rgb(224 177 93 / 14%);
+  --biny-dark-code: #202020;
+  --biny-dark-placeholder: #737373;
+  --biny-dark-selection-surface: rgba(255, 255, 255, 0.08);
+  --biny-dark-selection-text: #ffffff;
+  --biny-dark-selection-muted: rgb(255 255 255 / 78%);
+  --biny-dark-shadow-color: rgb(0 0 0 / 34%);
+  --biny-dark-shadow-soft: rgb(0 0 0 / 24%);
+  --biny-dark-shadow-heavy: rgb(0 0 0 / 42%);
+  --biny-dark-shadow-sidebar: rgb(0 0 0 / 30%);
+  --biny-dark-surface: #181818;
+  --biny-dark-surface-elevated: #222222;
+  --biny-dark-surface-hover: #262626;
+  --biny-dark-sidebar-surface: #141414;
+  --biny-dark-border: #2e2e2e;
+  --biny-dark-text: #ececec;
+  --biny-dark-text-secondary: #a1a1a1;
+  --biny-surface: var(--biny-light-surface);
+  --biny-surface-elevated: var(--biny-light-surface-elevated);
+  --biny-surface-soft: var(--biny-light-surface-soft);
+  --biny-surface-hover: var(--biny-light-surface-hover);
+  --biny-surface-selected: var(--biny-light-surface-selected);
+  --biny-sidebar-surface: var(--biny-light-sidebar-surface);
+  --biny-border: var(--biny-light-border);
+  --biny-border-real: var(--biny-light-border);
+  --biny-border-strong: var(--biny-light-border-strong);
+  --biny-text: var(--biny-light-text);
+  --biny-text-secondary: var(--biny-light-text-secondary);
+  --biny-text-tertiary: var(--biny-light-text-tertiary);
+  --biny-focus: var(--biny-light-focus);
+  --biny-send-bg: var(--biny-light-send-bg);
+  --biny-send-icon: var(--biny-light-send-icon);
+  --biny-pill: var(--biny-light-pill);
+  --biny-danger: var(--biny-light-danger);
+  --biny-danger-bg: var(--biny-light-danger-bg);
+  --biny-success: var(--biny-light-success);
+  --biny-success-bg: var(--biny-light-success-bg);
+  --biny-warning: var(--biny-light-warning);
+  --biny-warning-bg: var(--biny-light-warning-bg);
+  --biny-code: var(--biny-light-code);
+  --biny-placeholder: var(--biny-light-placeholder);
+  --biny-selection-surface: var(--biny-light-selection-surface);
+  --biny-selection-text: var(--biny-light-selection-text);
+  --biny-selection-muted: var(--biny-light-selection-muted);
+  --biny-shadow-color: var(--biny-light-shadow-color);
+  --biny-shadow-soft: var(--biny-light-shadow-soft);
+  --biny-shadow-heavy: var(--biny-light-shadow-heavy);
+  --biny-shadow-sidebar: var(--biny-light-shadow-sidebar);
+  --biny-overlay: rgb(0 0 0 / 20%);
+  --biny-overlay-hover: rgb(0 0 0 / 8%);
+  --biny-overlay-pressed: rgb(0 0 0 / 14%);
+  --biny-shadow: 0 1px 2px var(--biny-shadow-color);
+  --accent: var(--biny-focus);
+  --bg: var(--biny-surface);
+  --sidebar: var(--biny-sidebar-surface);
+  --surface: var(--biny-surface);
+  --surface-raised: var(--biny-surface-elevated);
+  --surface-soft: var(--biny-surface-soft);
+  --surface-hover: var(--biny-surface-hover);
+  --surface-selected: var(--biny-surface-selected);
+  --user-bubble: var(--biny-surface-hover);
+  --composer-surface: var(--biny-surface-elevated);
+  --text: var(--biny-text);
+  --text-secondary: var(--biny-text-secondary);
+  --text-tertiary: var(--biny-text-tertiary);
+  --border: var(--biny-border);
+  --border-strong: var(--biny-border-strong);
+  --shadow: var(--biny-shadow-color);
+  --green: var(--biny-success);
+  --green-bg: var(--biny-success-bg);
+  --red: var(--biny-danger);
+  --red-bg: var(--biny-danger-bg);
+  --amber: var(--biny-warning);
+  --amber-bg: var(--biny-warning-bg);
+  --blue: var(--biny-focus);
+  --code: var(--biny-code);
+  --mark-ink: var(--biny-selection-text);
+  --danger: var(--biny-danger);
+  --color-background-body: var(--biny-surface);
+  --color-background-surface: var(--biny-surface-elevated);
+  --color-background-card: var(--biny-surface-elevated);
+  --color-background-popover: var(--biny-surface-elevated);
+  --color-background-muted: var(--biny-surface);
+  --color-background-gray: var(--biny-surface-hover);
+  --color-accent: var(--biny-focus);
+  --color-accent-muted: var(--biny-surface-selected);
+  --color-neutral: color-mix(in srgb, var(--biny-border) 55%, transparent);
+  --color-overlay: var(--biny-overlay);
+  --color-overlay-hover: var(--biny-overlay-hover);
+  --color-overlay-pressed: var(--biny-overlay-pressed);
+  --color-text-primary: var(--biny-text);
+  --color-text-secondary: var(--biny-text-secondary);
+  --color-text-disabled: var(--biny-text-tertiary);
+  --color-text-accent: var(--biny-focus);
+  --color-text-red: var(--biny-danger);
+  --color-text-yellow: var(--biny-warning);
+  --color-icon-accent: var(--biny-focus);
+  --color-icon-primary: var(--biny-text);
+  --color-icon-secondary: var(--biny-text-secondary);
+  --color-icon-disabled: var(--biny-text-tertiary);
+  --color-success: var(--biny-success);
+  --color-success-muted: var(--biny-success-bg);
+  --color-error: var(--biny-danger);
+  --color-error-muted: var(--biny-danger-bg);
+  --color-warning: var(--biny-warning);
+  --color-warning-muted: var(--biny-warning-bg);
+  --color-border: var(--biny-border);
+  --color-border-emphasized: var(--biny-border-strong);
+  --color-shadow: var(--biny-shadow-color);
+  --color-background-red: var(--biny-danger-bg);
+  --color-border-red: var(--biny-danger);
+  --color-icon-red: var(--biny-danger);
+  --color-background-yellow: var(--biny-warning-bg);
+  --color-border-yellow: var(--biny-warning);
+  --color-icon-yellow: var(--biny-warning);
+  --color-background-green: var(--biny-success-bg);
+  --color-border-green: var(--biny-success);
+  --color-icon-green: var(--biny-success);
+  --color-background-blue: var(--biny-surface-selected);
+  --color-border-blue: var(--biny-focus);
+  --color-icon-blue: var(--biny-focus);
+  --color-text-blue: var(--biny-focus);
+  --color-background-gray: var(--biny-surface-hover);
+  --color-border-gray: var(--biny-border);
+  --color-icon-gray: var(--biny-text-secondary);
+  --color-text-gray: var(--biny-text-secondary);
+  --shadow-low: var(--biny-shadow);
+  --shadow-med: 0 8px 24px var(--biny-shadow-heavy);
+  --shadow-high: 0 16px 40px var(--biny-shadow-heavy);
+  /* 标题从第二个 chrome 按钮右侧留出 7px，避免收起后被固定层盖住。 */
+  --biny-sidebar-chrome-width: 148px;
+  --biny-chat-toolbar-inline-padding: 18px;
+  --biny-sidebar-transition: 250ms cubic-bezier(0.22, 1, 0.36, 1);
+  --biny-sidebar-content-fade-duration: 180ms;
+  --biny-sidebar-content-fade: var(--biny-sidebar-content-fade-duration) ease;
+  /* 所有会改变侧栏几何边界的层都消费同一组共享插值值，避免各自启动过渡。 */
+  --biny-sidebar-animated-visual-width: var(--biny-sidebar-visual-width, 0px);
+  --biny-sidebar-animated-flow-width: var(--biny-sidebar-flow-width, 0px);
+  --biny-sidebar-animated-toolbar-left: max(150px, var(--biny-sidebar-visual-width, 0px));
+  --biny-inspector-animated-flow-width: var(--biny-inspector-flow-width, 0px);
+  transition:
+    --biny-sidebar-animated-visual-width var(--biny-sidebar-transition),
+    --biny-sidebar-animated-flow-width var(--biny-sidebar-transition),
+    --biny-sidebar-animated-toolbar-left var(--biny-sidebar-transition),
+    --biny-inspector-animated-flow-width var(--biny-sidebar-transition);
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--biny-surface);
+  color: var(--biny-text);
+  font-family: var(--font-sans);
+  font-size: calc(var(--app-font-size, 14) * 1px);
+  line-height: 1.4;
+}
+
+:root[data-theme="dark"] .desktop-root.biny-root {
+  --biny-surface: var(--biny-dark-surface);
+  --biny-surface-elevated: var(--biny-dark-surface-elevated);
+  --biny-surface-soft: var(--biny-dark-surface-soft);
+  --biny-surface-hover: var(--biny-dark-surface-hover);
+  --biny-surface-selected: var(--biny-dark-surface-selected);
+  --biny-sidebar-surface: var(--biny-dark-sidebar-surface);
+  --biny-border: var(--biny-dark-border);
+  --biny-border-real: var(--biny-dark-border);
+  --biny-border-strong: var(--biny-dark-border-strong);
+  --biny-text: var(--biny-dark-text);
+  --biny-text-secondary: var(--biny-dark-text-secondary);
+  --biny-text-tertiary: var(--biny-dark-text-tertiary);
+  --biny-focus: #339cff;
+  --biny-send-bg: #f5f5f5;
+  --biny-send-icon: #181818;
+  --biny-pill: #2a2a2a;
+  --biny-danger: var(--biny-dark-danger);
+  --biny-danger-bg: var(--biny-dark-danger-bg);
+  --biny-success: var(--biny-dark-success);
+  --biny-success-bg: var(--biny-dark-success-bg);
+  --biny-warning: var(--biny-dark-warning);
+  --biny-warning-bg: var(--biny-dark-warning-bg);
+  --biny-code: var(--biny-dark-code);
+  --biny-placeholder: var(--biny-dark-placeholder);
+  --biny-selection-surface: var(--biny-dark-selection-surface);
+  --biny-selection-text: var(--biny-dark-selection-text);
+  --biny-selection-muted: var(--biny-dark-selection-muted);
+  --biny-shadow-color: var(--biny-dark-shadow-color);
+  --biny-shadow-soft: var(--biny-dark-shadow-soft);
+  --biny-shadow-heavy: var(--biny-dark-shadow-heavy);
+  --biny-shadow-sidebar: var(--biny-dark-shadow-sidebar);
+  --biny-overlay: rgb(0 0 0 / 42%);
+  --biny-overlay-hover: rgb(0 0 0 / 16%);
+  --biny-overlay-pressed: rgb(0 0 0 / 24%);
+  --biny-shadow: 0 1px 2px rgb(0 0 0 / 14%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .desktop-root.biny-root {
+    --biny-surface: var(--biny-dark-surface);
+    --biny-surface-elevated: var(--biny-dark-surface-elevated);
+    --biny-surface-soft: var(--biny-dark-surface-soft);
+    --biny-surface-hover: var(--biny-dark-surface-hover);
+    --biny-surface-selected: var(--biny-dark-surface-selected);
+    --biny-sidebar-surface: var(--biny-dark-sidebar-surface);
+    --biny-border: var(--biny-dark-border);
+    --biny-border-real: var(--biny-dark-border);
+    --biny-border-strong: var(--biny-dark-border-strong);
+    --biny-text: var(--biny-dark-text);
+    --biny-text-secondary: var(--biny-dark-text-secondary);
+    --biny-text-tertiary: var(--biny-dark-text-tertiary);
+    --biny-focus: #339cff;
+    --biny-send-bg: #f5f5f5;
+    --biny-send-icon: #181818;
+    --biny-pill: #2a2a2a;
+    --biny-danger: var(--biny-dark-danger);
+    --biny-danger-bg: var(--biny-dark-danger-bg);
+    --biny-success: var(--biny-dark-success);
+    --biny-success-bg: var(--biny-dark-success-bg);
+    --biny-warning: var(--biny-dark-warning);
+    --biny-warning-bg: var(--biny-dark-warning-bg);
+    --biny-code: var(--biny-dark-code);
+    --biny-placeholder: var(--biny-dark-placeholder);
+    --biny-selection-surface: var(--biny-dark-selection-surface);
+    --biny-selection-text: var(--biny-dark-selection-text);
+    --biny-selection-muted: var(--biny-dark-selection-muted);
+    --biny-shadow-color: var(--biny-dark-shadow-color);
+    --biny-shadow-soft: var(--biny-dark-shadow-soft);
+    --biny-shadow-heavy: var(--biny-dark-shadow-heavy);
+    --biny-shadow-sidebar: var(--biny-dark-shadow-sidebar);
+    --biny-overlay: rgb(0 0 0 / 42%);
+    --biny-overlay-hover: rgb(0 0 0 / 16%);
+    --biny-overlay-pressed: rgb(0 0 0 / 24%);
+    --biny-shadow: 0 1px 2px rgb(0 0 0 / 14%);
+  }
+}
+
+:root[data-theme="dark"] .desktop-root.biny-root .biny-sidebar {
+  background: var(--biny-dark-sidebar-surface);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .desktop-root.biny-root .biny-sidebar {
+    background: var(--biny-dark-sidebar-surface);
+  }
+}
+
+.biny-app-shell {
+  display: flex;
+  position: relative;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--biny-surface);
+}
+
+/* 原生拖拽预览必须直接反映 pointer 位置，不能等待共享状态过渡。 */
+.desktop-root.biny-root[data-sidebar-resizing="true"] {
+  transition: none;
+}
+
+/* 右侧分隔条拖拽时直接跟手，松开后再恢复统一的流宽度动画。 */
+.desktop-root.biny-root[data-inspector-resizing="true"] {
+  transition: none;
+}
+
+/* peek 抽屉已经离屏，交换回普通 collapsed 流布局时必须跳过第二段宽度动画。 */
+.desktop-root.biny-root[data-sidebar-transition="peek-exited"] {
+  transition: none;
+}
+
+/*
+ * 侧栏块和聊天主区是两个独立的 flex sibling。DOM 仍把主区放在前面，
+ * 让 floating chrome 位于主区顶部 chrome 之后；order 只负责恢复视觉上的左侧布局。
+ * pin spacer 与 aside 共用这个块，固定 peek 切回流内时不会再产生两套布局边界。
+ */
+.biny-sidebar-block {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex: 0 0 auto;
+  order: -1;
+  overflow: visible;
+}
+
+/* macOS 玻璃侧栏：窗口开 vibrancy 后，根层和外壳让出背景，只有左侧栏透出系统材质；
+   主区与右侧栏仍由各自的不透明背景覆盖。 */
+:root[data-platform="darwin"] .desktop-root.biny-root,
+:root[data-platform="darwin"] .biny-app-shell {
+  background: transparent;
+}
+
+/* body 默认铺不透明主色，会盖住 vibrancy 材质；macOS 上让位，主区白底由 content-shell 负责。 */
+:root[data-platform="darwin"] body {
+  background: transparent;
+}
+
+:root[data-platform="darwin"] .biny-sidebar {
+  background: transparent;
+}
+
+/* 顶栏视觉层整体让出侧栏区域：macOS 玻璃要一路贯到红绿灯后面，
+   白色顶条只能从侧栏右缘开始铺。宽度变量本身已注册 @property，动画自动同步。 */
+:root[data-platform="darwin"] .biny-sidebar-topbar-visual {
+  left: var(--biny-sidebar-animated-visual-width);
+  width: calc(100% - var(--biny-sidebar-animated-visual-width));
+}
+
+:root[data-platform="darwin"] .biny-sidebar-topbar-visual::before {
+  background: transparent;
+}
+
+/* peek 浮层盖在页面内容上，系统材质透的是桌面而不是内容，这里换内容级毛玻璃。 */
+:root[data-platform="darwin"] .biny-sidebar.is-peek-overlay {
+  background: color-mix(in srgb, var(--biny-sidebar-surface) 82%, transparent);
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
+}
+
+/* 三栏由同一个 flex 容器管理：左侧栏、Chat 工作区和右侧 Inspector 只改变自身宽度。 */
+.biny-content-shell {
+  order: 0;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+}
+
+.biny-app-shell > .desktop-inspector-wrap {
+  order: 1;
+  flex: 0 0 var(--biny-inspector-animated-flow-width);
+  box-sizing: border-box;
+  width: var(--biny-inspector-animated-flow-width);
+  min-width: 0;
+  /* 左侧栏也在同一个 flex 流里；先扣掉它，才能真正给 Chat 主区保留 320px。 */
+  max-width: max(320px, calc(100% - var(--biny-sidebar-animated-flow-width, 0px) - 320px));
+  overflow: hidden;
+  z-index: 102;
+  border-left: 1px solid var(--biny-border);
+  background: var(--biny-surface);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  transition:
+    transform var(--biny-sidebar-content-fade) cubic-bezier(0.22, 1, 0.36, 1),
+    opacity var(--biny-sidebar-content-fade);
+  will-change: flex-basis, width, transform, opacity;
+}
+
+.biny-app-shell > .desktop-inspector-wrap.is-opening,
+.biny-app-shell > .desktop-inspector-wrap.is-closing {
+  opacity: 0;
+  transform: translateX(18px);
+  pointer-events: none;
+}
+
+.biny-app-shell > .desktop-inspector-wrap.is-open {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+.biny-app-shell > .desktop-inspector-wrap.is-resizing {
+  transition: none;
+}
+
+.biny-root .desktop-inspector-header {
+  display: flex;
+  min-height: 46px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px;
+  border-bottom: 1px solid transparent;
+  background: var(--biny-surface);
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.biny-root .desktop-inspector-header.is-tool {
+  border-bottom-color: var(--biny-border);
+}
+
+.biny-root .desktop-inspector-header button {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.desktop-inspector-close {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.desktop-inspector-close:hover,
+.desktop-inspector-close:focus-visible {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.desktop-inspector-close:active {
+  transform: translateY(1px);
+}
+
+.biny-inspector-header-spacer {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+}
+
+.biny-inspector-back {
+  display: inline-flex;
+  min-width: 0;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px 0 5px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.biny-inspector-back:hover,
+.biny-inspector-back:focus-visible {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-inspector-back:active {
+  transform: translateY(1px);
+}
+
+.desktop-inspector {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--biny-surface);
+}
+
+.desktop-inspector-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.biny-inspector-pages {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.t-page-slide {
+  position: relative;
+}
+.t-page-slide .t-page[data-page-id="1"] {
+  --t-page-from-x: calc(var(--page-slide-distance) * -1);
+}
+.t-page-slide .t-page[data-page-id="2"] {
+  --t-page-from-x: var(--page-slide-distance);
+}
+.t-page-slide .t-page {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(calc(var(--t-page-from-x, 0px) * var(--page-exit-enabled)));
+  filter: blur(calc(var(--page-blur) * var(--page-exit-enabled)));
+  transition:
+    opacity   var(--page-fade-dur)  var(--page-fade-ease),
+    transform var(--page-slide-dur) var(--page-slide-ease),
+    filter    var(--page-slide-dur) var(--page-slide-ease);
+  will-change: opacity, transform, filter;
+}
+.t-page-slide[data-page="1"] .t-page[data-page-id="1"],
+.t-page-slide[data-page="2"] .t-page[data-page-id="2"] {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+  filter: blur(0);
+  transition-delay: var(--page-stagger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-page-slide .t-page { transition: none !important; }
+}
+
+.biny-inspector-launcher-page,
+.biny-inspector-tool-page {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.biny-inspector-launcher {
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  justify-content: center;
+  padding: 18px 12px 14px;
+}
+
+.biny-inspector-launcher-spacer {
+  display: none;
+}
+
+.biny-inspector-launcher-list {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.biny-inspector-launcher-item {
+  display: flex;
+  min-width: 0;
+  min-height: 56px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: var(--biny-surface-soft);
+  color: var(--biny-text);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.biny-inspector-launcher-item > svg {
+  flex: 0 0 auto;
+  color: var(--biny-text-secondary);
+}
+
+.biny-inspector-launcher-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-inspector-launcher-item:hover,
+.biny-inspector-launcher-item:focus-visible {
+  border-color: var(--biny-border);
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+  transform: translateY(-1px);
+}
+
+.biny-inspector-launcher-item:active {
+  transform: translateY(0);
+}
+
+.biny-inspector-launcher-item kbd {
+  margin-left: auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--biny-surface-selected);
+  color: var(--biny-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.biny-inspector-launcher-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 10px 3px 0;
+  color: var(--biny-danger);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.biny-inspector-launcher-error svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.biny-inspector-command {
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 14px 14px;
+}
+
+.biny-inspector-command-intro {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: 9px;
+  color: var(--biny-text-secondary);
+}
+
+.biny-inspector-command-intro > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.biny-inspector-command-intro h2,
+.biny-inspector-command-intro p {
+  margin: 0;
+}
+
+.biny-inspector-command-intro h2 {
+  color: var(--biny-text);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.biny-inspector-command-intro p {
+  margin-top: 3px;
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.biny-inspector-command-state,
+.biny-inspector-command-result {
+  min-height: 0;
+  flex: 1 1 auto;
+  border: 1px solid var(--biny-border);
+  border-radius: 10px;
+  background: var(--biny-surface-soft);
+}
+
+.biny-inspector-command-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px;
+  color: var(--biny-text-secondary);
+  text-align: center;
+  font-size: 12px;
+}
+
+.biny-inspector-command-state.is-error {
+  color: var(--biny-danger);
+}
+
+.biny-inspector-command-result {
+  display: flex;
+  overflow: hidden;
+  flex-direction: column;
+}
+
+.biny-inspector-command-result-title {
+  flex: 0 0 auto;
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--biny-border);
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.biny-inspector-command-result pre {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  margin: 0;
+  padding: 11px;
+  color: var(--biny-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.biny-inspector-command-actions {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.biny-inspector-command-actions button,
+.biny-inspector-side-chat-form button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  background: var(--biny-surface-elevated);
+  color: var(--biny-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.biny-inspector-command-actions button:hover:not(:disabled),
+.biny-inspector-command-actions button:focus-visible,
+.biny-inspector-side-chat-form button:hover:not(:disabled),
+.biny-inspector-side-chat-form button:focus-visible {
+  border-color: var(--biny-border-strong);
+  background: var(--biny-surface-hover);
+}
+
+.biny-inspector-command-actions button:active:not(:disabled),
+.biny-inspector-side-chat-form button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.biny-inspector-command-actions button:disabled,
+.biny-inspector-side-chat-form button:disabled {
+  opacity: 0.52;
+  cursor: default;
+}
+
+.biny-inspector-side-chat-form {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.biny-inspector-side-chat-form textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 68px;
+  max-height: 160px;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid var(--biny-border);
+  border-radius: 10px;
+  outline: none;
+  background: var(--biny-surface-elevated);
+  color: var(--biny-text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.biny-inspector-side-chat-form textarea::placeholder {
+  color: var(--biny-placeholder);
+}
+
+.biny-inspector-side-chat-form textarea:focus {
+  border-color: var(--biny-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--biny-focus) 18%, transparent);
+}
+
+.biny-inspector-side-chat-form button {
+  align-self: flex-end;
+}
+
+.biny-inspector-view-content {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  animation: biny-inspector-view-enter var(--biny-motion-base) var(--biny-ease-emphasized) both;
+}
+
+@keyframes biny-inspector-view-enter {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* 右侧 Inspector 在所有桌面宽度里都留在三栏 flex 流中；展开只会平滑挤压主区，不覆盖内容。 */
+
+/* Peek 固定展开时先由这个流内占位条推动主区，避免 fixed 侧栏切回流布局时发生二次回弹。 */
+.biny-sidebar-pin-spacer {
+  box-sizing: border-box;
+  width: 0;
+  min-width: 0;
+  height: 100%;
+  flex: 0 0 0;
+  order: -2;
+  pointer-events: none;
+  background: var(--biny-sidebar-surface);
+  flex-basis: 0;
+  will-change: width, flex-basis;
+}
+
+/* pinning 时占位条跟随共享流宽度；结束时瞬间交给普通流中的 aside。 */
+.biny-root[data-sidebar-transition="pinning"] .biny-sidebar-pin-spacer[data-active="true"] {
+  width: var(--biny-sidebar-animated-flow-width);
+  flex-basis: var(--biny-sidebar-animated-flow-width);
+}
+
+/* 收起后只在窗口左缘保留一个很窄的 hover 命中区，不遮住主区正常交互。 */
+.biny-sidebar-peek-trigger {
+  position: fixed;
+  z-index: 90;
+  top: 46px;
+  bottom: 0;
+  left: 0;
+  width: 12px;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-sidebar.is-peek-overlay {
+  position: fixed;
+  z-index: 90;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  box-sizing: border-box;
+  box-shadow: 8px 0 28px var(--biny-shadow-sidebar);
+  transform: translateX(0);
+  transition: transform var(--biny-sidebar-content-fade) cubic-bezier(0.4, 0, 0.2, 1), opacity var(--biny-sidebar-content-fade) cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: width, transform, opacity;
+}
+
+/* Biny 的 peek 入场不是挂载后瞬间出现，而是用 ease-out 的滑入 keyframe 先从屏外进入。 */
+@keyframes biny-sidebar-peek-in {
+  from {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.biny-sidebar.is-peek-peeking {
+  animation: biny-sidebar-peek-in var(--biny-sidebar-content-fade-duration) cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.biny-sidebar.is-peek-closing {
+  transform: translateX(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.biny-content-shell {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  background: var(--biny-surface);
+  /* 内容区默认不可拖动；窗口拖动只由顶部 chrome 的明确区域提供，避免新增控件漏标 no-drag 后失去点击。 */
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-sidebar {
+  /* 左栏所有“指向后出现操作”的反馈共用同一节奏，避免项目和会话行各自抢拍。 */
+  --biny-sidebar-hover-duration: 120ms;
+  --biny-sidebar-row-duration: 160ms;
+  --biny-sidebar-hover-ease: cubic-bezier(0.2, 0, 0, 1);
+  position: relative;
+  z-index: 3;
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  flex: 0 0 auto;
+  flex-direction: column;
+  /*
+   * 外壳是唯一的视觉裁剪边界。body/footer 可能暂时保留上一次展开盒宽，
+   * 但不能在外壳的 width 过渡期间溢出到主区，否则顶部背景和下方主体会不同步。
+   * 侧栏菜单使用窗口级 portal，resizer 改为完全落在这个裁剪盒内。
+   */
+  overflow: hidden;
+  /* 视觉分隔线由独立层绘制；这里保留边框盒尺寸，避免拖拽时布局宽度跳变。 */
+  border-right: 1px solid transparent;
+  background: var(--biny-sidebar-surface);
+  color: var(--biny-text);
+  will-change: width;
+}
+
+.biny-sidebar.is-hidden {
+  overflow: hidden;
+  border-right-color: transparent;
+}
+
+/* 原生拖拽期间要跟手；松手或键盘/状态切换时再使用 Biny 风格缓出过渡。 */
+.biny-sidebar.is-resizing,
+.biny-root[data-sidebar-resizing="true"] .biny-sidebar {
+  will-change: width;
+}
+
+.biny-sidebar-body,
+.biny-sidebar-footer {
+  width: var(--biny-sidebar-content-width);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  transition: opacity var(--biny-sidebar-content-fade), visibility 0s linear 0s;
+  will-change: opacity;
+}
+
+.biny-sidebar.is-hidden > .biny-sidebar-body,
+.biny-sidebar.is-hidden > .biny-sidebar-footer {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--biny-sidebar-content-fade), visibility 0s linear var(--biny-sidebar-content-fade-duration);
+}
+
+.biny-sidebar-topbar-spacer {
+  height: 46px;
+  min-height: 46px;
+  flex: 0 0 46px;
+}
+
+.biny-sidebar-topbar {
+  display: flex;
+  height: 46px;
+  min-height: 46px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px 0 80px;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+/*
+ * 顶部背景和按钮命中层分离：背景只负责把侧栏表面与主体连成一个整体，不能声明为窗口拖拽区；
+ * 真正的拖动区域由下方标题栏和侧栏 chrome 提供，避免背景层吞掉主内容按钮的点击。
+ * 伪元素的宽度和 aside 使用同一个视觉宽度变量、同一个过渡时长，因此收起和
+ * 展开时左侧深色表面不会先被顶部 chrome 切成另一块。
+ */
+.biny-sidebar-topbar-visual {
+  position: fixed;
+  z-index: 99;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: 100%;
+  height: 46px;
+  /* 这是纯视觉层；pointer-events 关闭后，下面的标题拖动区/按钮命中层负责实际交互。 */
+  pointer-events: none;
+  background: var(--biny-surface);
+}
+
+.biny-sidebar-topbar-visual::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--biny-sidebar-animated-visual-width);
+  background: var(--biny-sidebar-surface);
+  content: "";
+  pointer-events: none;
+  will-change: width;
+}
+
+.biny-sidebar-topbar-floating {
+  position: fixed;
+  z-index: 100;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  display: block;
+  /*
+   * 外层是和 aside 同宽的透明动画壳；真正的按钮命中层在内部保持固定宽度，
+   * 这样顶部控制既能跟侧栏同帧进出，又不会把 Electron 命中依赖在零宽外层上。
+   */
+  width: var(--biny-sidebar-animated-visual-width);
+  height: 46px;
+  min-height: 46px;
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+  /* 外层覆盖的只是侧栏当前视觉区域；按钮子层单独接管实际命中，空白处用于拖动窗口。 */
+  pointer-events: auto;
+  -webkit-app-region: drag;
+  app-region: drag;
+  will-change: width;
+}
+
+.biny-sidebar-topbar-hit-layer {
+  display: flex;
+  width: var(--biny-sidebar-chrome-width);
+  height: 46px;
+  min-height: 46px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px 0 80px;
+  pointer-events: auto;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+/* 分隔线必须压在 floating chrome 上方，但不能参与 Electron 鼠标命中。 */
+.biny-topbar-divider {
+  position: fixed;
+  z-index: 121;
+  top: 45px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  pointer-events: none;
+  background: transparent;
+}
+
+/* 只要任一侧栏存在，聊天区域顶部显示分隔线；仅剩聊天区时隐藏。 */
+.biny-root:not([data-sidebar-mode="collapsed"]) .biny-topbar-divider,
+.biny-root[data-right-sidebar-visible="true"] .biny-topbar-divider {
+  background: var(--biny-border);
+}
+
+/* 侧栏分隔线必须压在 floating chrome 上方，但不能参与 Electron 鼠标命中。 */
+.biny-sidebar-divider {
+  position: absolute;
+  z-index: 120;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  pointer-events: none;
+  background: var(--biny-border);
+  left: var(--biny-sidebar-animated-flow-width);
+  will-change: left;
+}
+
+.biny-root[data-sidebar-mode="collapsed"] .biny-sidebar-divider,
+.biny-root[data-sidebar-mode="peek"] .biny-sidebar-divider {
+  display: none;
+}
+
+.biny-sidebar-topbar-floating .biny-chrome-button {
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* Composer 的所有动作按钮都明确脱离 Electron drag region。 */
+.biny-composer-action,
+.biny-send-button-anchor {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-composer-action {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, opacity 160ms ease, transform 160ms ease;
+}
+
+.biny-composer-action-content {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: inherit;
+}
+
+.biny-composer-action:hover:not(:disabled):not([aria-disabled="true"]),
+.biny-composer-action[data-active="true"] {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-composer-action[data-active="true"] {
+  background: var(--biny-surface-selected);
+  color: var(--biny-text);
+}
+
+.biny-composer-action:active:not(:disabled):not([aria-disabled="true"]) {
+  transform: translateY(1px);
+}
+
+.biny-composer-action:focus-visible {
+  outline: 2px solid var(--biny-focus);
+  outline-offset: 2px;
+}
+
+.biny-composer-action[aria-disabled="true"],
+.biny-composer-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.biny-composer-action[data-loading="true"] {
+  cursor: progress;
+}
+
+.biny-chrome-button,
+.biny-toolbar-button,
+.biny-composer-add {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.biny-chrome-button:hover:not(:disabled),
+.biny-toolbar-button:hover:not(:disabled),
+.biny-composer-add:hover:not(:disabled) {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-chrome-button:active:not(:disabled),
+.biny-toolbar-button:active:not(:disabled),
+.biny-composer-add:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.biny-navigation-button:not(:disabled) {
+  /* 有历史可切换时比不可用态稍亮，但仍保持窗口 chrome 的低对比度。 */
+  color: color-mix(in srgb, var(--biny-text-secondary) 72%, var(--biny-text));
+}
+
+.biny-navigation-button:disabled {
+  color: var(--biny-text-tertiary);
+  cursor: default;
+  opacity: 0.42;
+}
+
+.biny-chrome-button:focus-visible,
+.biny-toolbar-button:focus-visible,
+.biny-composer-add:focus-visible,
+.biny-sidebar-settings-item:focus-visible,
+.biny-sidebar-nav-item:focus-visible,
+.biny-session-item:focus-visible,
+.biny-project-item:focus-visible,
+.biny-send-button:focus-visible,
+.biny-permission-pill:focus-visible,
+.biny-model-pill:focus-visible,
+.biny-memory-toggle:focus-visible {
+  outline: 2px solid var(--biny-focus);
+  outline-offset: 2px;
+}
+
+.biny-sidebar-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+.biny-sidebar-scroll {
+  min-height: 100%;
+  /* 一级导航和底部设置项共用 16px 内容起点；会话列表的额外缩进保留树形层级。 */
+  padding: 4px 0 12px;
+}
+
+.biny-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px 8px;
+}
+
+.biny-sidebar-nav-item,
+.biny-session-item,
+.biny-project-item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--biny-sidebar-row-duration) var(--biny-sidebar-hover-ease), color var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), transform var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+/* 侧栏主体可能位于窗口拖拽区之下；可交互节点统一明确接管命中。 */
+.biny-sidebar-nav-item,
+.biny-sidebar-section-trigger,
+.biny-sidebar-section-action,
+.biny-project-row,
+.biny-project-row-action,
+.biny-sidebar-session-toggle,
+.biny-sidebar-session-item,
+.biny-sidebar-session-expand,
+.biny-sidebar-menu,
+.biny-sidebar-menu button {
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* Biny 的悬停底色不贴住侧栏边缘；缩进后的内容起点仍保持 16px。 */
+.biny-sidebar-nav-item {
+  width: 100%;
+  margin: 0;
+  padding-inline: 10px;
+}
+
+.biny-sidebar-nav-item:hover:not(:disabled),
+.biny-session-item:hover,
+.biny-project-item:hover,
+.biny-session-item.is-selected,
+.biny-project-item.is-selected {
+  background: var(--biny-surface-hover);
+}
+
+.biny-sidebar-nav-item.is-active {
+  background: var(--biny-surface-selected);
+  color: var(--biny-text);
+}
+
+.biny-sidebar-nav-item:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.biny-sidebar-nav-item svg,
+.biny-session-item svg,
+.biny-project-item svg {
+  flex: 0 0 auto;
+  color: var(--biny-text-secondary);
+}
+
+.biny-sidebar-nav-item:hover:not(:disabled) svg,
+.biny-sidebar-nav-item.is-active svg {
+  color: currentColor;
+}
+
+.biny-dialogue-section {
+  margin-top: 24px;
+  padding: 0 12px;
+}
+
+.biny-dialogue-section h2 {
+  margin: 0 12px 10px;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.biny-dialogue-empty {
+  margin: 0 12px;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+}
+
+.biny-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.biny-session-item {
+  gap: 9px;
+  padding-right: 10px;
+  font-size: 13px;
+}
+
+.biny-session-item span:last-child,
+.biny-project-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.biny-project-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 24px 12px 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--biny-border);
+}
+
+.biny-project-item {
+  height: 30px;
+  gap: 9px;
+  padding: 0 10px;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+}
+
+.biny-project-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.biny-sidebar-footer {
+  display: flex;
+  min-height: 44px;
+  flex: 0 0 44px;
+  align-items: stretch;
+  padding: 0;
+  border-top: 1px solid var(--biny-border);
+}
+
+.biny-sidebar-settings-item {
+  display: flex;
+  width: calc(100% - 12px);
+  height: 40px;
+  align-items: center;
+  gap: 8px;
+  margin-inline: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.biny-sidebar-settings-item svg {
+  flex: 0 0 auto;
+  color: var(--biny-text-secondary);
+}
+
+.biny-sidebar-settings-item:hover {
+  background: var(--biny-surface-hover);
+}
+
+.biny-sidebar-settings-item:active {
+  transform: translateY(1px);
+}
+
+.biny-sidebar-settings-item:hover svg {
+  color: var(--biny-text);
+}
+
+.biny-sidebar-settings-item {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-sidebar-resizer,
+.desktop-inspector-resizer {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  user-select: none;
+  touch-action: none;
+}
+
+.biny-sidebar-resizer {
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  pointer-events: auto;
+  cursor: col-resize;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-scroll {
+  padding-inline: 0;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-nav {
+  gap: 6px;
+  padding: 8px 0 0;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-nav-item {
+  width: 32px;
+  height: 32px;
+  justify-content: center;
+  gap: 0;
+  margin-inline: auto;
+  padding: 0;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-nav-item > span,
+.biny-sidebar.is-compact .biny-sidebar-section-label,
+.biny-sidebar.is-compact .biny-sidebar-section-chevron,
+.biny-sidebar.is-compact .biny-sidebar-section-actions,
+.biny-sidebar.is-compact .biny-sidebar-section-content {
+  display: none;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-section {
+  margin-top: 10px;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-section:not(.has-compact-icon) {
+  display: none;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-section.has-compact-divider {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--biny-border);
+}
+
+.biny-sidebar.is-compact .biny-sidebar-section-header {
+  justify-content: center;
+  padding: 0;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-section-trigger {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  justify-content: center;
+  gap: 0;
+  margin-inline: auto;
+  padding: 0;
+}
+
+.biny-sidebar-section-icon {
+  display: none;
+  color: var(--biny-text-secondary);
+}
+
+.biny-sidebar.is-compact .biny-sidebar-section-icon {
+  display: inline-flex;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-footer {
+  display: flex;
+  justify-content: center;
+  padding: 0;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-settings-item {
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  justify-content: center;
+  gap: 0;
+  margin: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.biny-sidebar.is-compact .biny-sidebar-settings-item > span {
+  display: none;
+}
+
+/* 左侧项目树：段标题、项目文件夹和其下会话共用同一条文字对齐线。 */
+.biny-sidebar-section {
+  margin-top: 16px;
+}
+
+.biny-sidebar-section-header {
+  display: flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 2px;
+  margin-inline: 6px;
+  padding: 0;
+}
+
+.biny-sidebar-section-trigger {
+  display: flex;
+  min-width: 0;
+  height: 26px;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), color var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-sidebar-section-trigger:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-sidebar-section-chevron {
+  display: inline-grid;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  place-items: center;
+  opacity: 0;
+  color: var(--biny-text-secondary);
+  transform: rotate(-90deg);
+  transition: opacity var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), transform var(--biny-sidebar-row-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-sidebar-section-trigger:hover .biny-sidebar-section-chevron,
+.biny-sidebar-section-trigger:focus-visible .biny-sidebar-section-chevron,
+.biny-sidebar-section.is-expanded .biny-sidebar-section-chevron {
+  opacity: 1;
+}
+
+.biny-sidebar-section-trigger:focus-visible,
+.biny-sidebar-section-action:focus-visible,
+.biny-project-row:focus-visible,
+.biny-project-row-action:focus-visible,
+.biny-sidebar-session-toggle:focus-visible,
+.biny-sidebar-session-item:focus-visible,
+.biny-sidebar-session-pin:focus-visible,
+.biny-sidebar-session-more:focus-visible,
+.biny-sidebar-session-expand:focus-visible {
+  outline: 2px solid var(--biny-focus);
+  outline-offset: 2px;
+}
+
+.biny-sidebar-section.is-expanded .biny-sidebar-section-chevron {
+  transform: rotate(0);
+}
+
+.biny-sidebar-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.biny-sidebar-section-header:hover .biny-sidebar-section-actions,
+.biny-sidebar-section-header:focus-within .biny-sidebar-section-actions {
+  opacity: 1;
+}
+
+.biny-sidebar-section-action {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  cursor: pointer;
+  transition: background var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), color var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), transform var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-sidebar-section-action:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-sidebar-section-action:active {
+  transform: translateY(1px);
+}
+
+.biny-sidebar-section-content {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 180ms var(--biny-sidebar-hover-ease), opacity var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-sidebar-section-content > div {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.biny-sidebar-section.is-expanded .biny-sidebar-section-content {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.biny-project-group {
+  position: relative;
+  margin: 1px 8px;
+}
+
+.biny-project-group.is-dragging {
+  opacity: 0.45;
+}
+
+.biny-project-group.is-drop-before::before,
+.biny-project-group.is-drop-after::after {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 2px;
+  content: "";
+  background: var(--biny-focus);
+}
+
+.biny-project-group.is-drop-before::before {
+  top: -2px;
+}
+
+.biny-project-group.is-drop-after::after {
+  bottom: -2px;
+}
+
+.biny-project-row-wrap {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  border-radius: 8px;
+  cursor: grab;
+  transition: background var(--biny-sidebar-row-duration) var(--biny-sidebar-hover-ease), color var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-project-row-wrap:active {
+  cursor: grabbing;
+}
+
+.biny-project-row-wrap:hover,
+.biny-project-row-wrap.is-active {
+  background: var(--biny-surface-hover);
+}
+
+.biny-project-row-wrap.is-active {
+  background: var(--biny-surface-selected, var(--biny-surface-hover));
+}
+
+.biny-project-row {
+  display: flex;
+  min-width: 0;
+  height: 32px;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 50px 0 16px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.biny-project-row:hover,
+.biny-project-row.is-active {
+  color: var(--biny-text);
+}
+
+.biny-project-row > svg {
+  flex: 0 0 auto;
+  color: var(--biny-text-secondary);
+}
+
+.biny-project-row-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-project-status {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--biny-text-secondary);
+  opacity: 0.7;
+}
+
+.biny-project-status.is-running {
+  background: var(--biny-focus);
+  opacity: 1;
+}
+
+.biny-project-status.is-failed {
+  background: var(--biny-danger);
+  opacity: 1;
+}
+
+.biny-project-row-actions {
+  position: absolute;
+  z-index: 2;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(4px);
+  transition: opacity var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), transform var(--biny-sidebar-row-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-project-row-wrap:hover .biny-project-row-actions,
+.biny-project-row-wrap:focus-within .biny-project-row-actions,
+.biny-project-row-actions.is-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.biny-project-row-action {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  cursor: pointer;
+  transition: background var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), color var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), transform var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-project-row-action:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-project-row-action:active {
+  transform: translateY(1px);
+}
+
+/* 这些图标按钮跨越不同的布局父级，显式固定基础控制样式，避免主题/浏览器默认样式改变其颜色。 */
+.biny-chrome-button,
+.biny-sidebar-section-action,
+.biny-project-row-action {
+  border-color: transparent;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  opacity: 1;
+}
+
+.biny-chrome-button svg,
+.biny-sidebar-section-action svg,
+.biny-project-row-action svg {
+  color: currentColor;
+  stroke: currentColor;
+}
+
+.biny-sidebar-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 8px 2px 28px;
+}
+
+.biny-sidebar-session-list.is-indented {
+  padding-left: 28px;
+}
+
+/* 整行高亮（参考 DSH 会话列表）：选中/悬停底色覆盖到展开箭头的整行宽度，
+   而不是只盖在标题 pill 上，避免选中区域看起来短一截。 */
+.biny-sidebar-session-tree-row {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0;
+  border-radius: 8px;
+  transition: background var(--biny-sidebar-row-duration) var(--biny-sidebar-hover-ease), color var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-sidebar-session-tree-row:hover,
+.biny-sidebar-session-tree-row:has(.biny-sidebar-session-entry:focus-within) {
+  background: var(--biny-surface-hover);
+}
+
+.biny-sidebar-session-tree-row.is-selected {
+  background: var(--biny-selection-surface);
+}
+
+.biny-sidebar-session-entry {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 32px;
+  flex: 1 1 auto;
+  align-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.biny-sidebar-session-entry.is-archived {
+  color: var(--biny-text-secondary);
+  opacity: 0.72;
+}
+
+.biny-sidebar-session-toggle {
+  display: grid;
+  width: 16px;
+  height: 32px;
+  flex: 0 0 16px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  cursor: pointer;
+}
+
+.biny-sidebar-session-toggle:not(.is-empty):hover {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-sidebar-session-toggle[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+.biny-sidebar-session-toggle:disabled {
+  cursor: default;
+}
+
+.biny-sidebar-session-toggle.is-empty {
+  pointer-events: none;
+}
+
+.biny-sidebar-session-item {
+  display: flex;
+  min-width: 0;
+  min-height: 32px;
+  width: auto;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.biny-sidebar-session-entry:hover .biny-sidebar-session-item,
+.biny-sidebar-session-entry:focus-within .biny-sidebar-session-item,
+.biny-sidebar-session-entry.is-selected .biny-sidebar-session-item {
+  background: transparent;
+}
+
+.biny-sidebar-session-entry.is-selected .biny-sidebar-session-item {
+  color: var(--biny-text);
+}
+
+.biny-sidebar-session-unread {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--biny-accent);
+}
+
+.biny-sidebar-session-title {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: opacity var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), transform var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-sidebar-session-running {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--biny-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--biny-focus) 15%, transparent);
+}
+
+.biny-sidebar-session-running.is-waiting {
+  background: var(--biny-warning);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--biny-warning) 15%, transparent);
+}
+
+.biny-sidebar-session-meta {
+  max-width: 52px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  color: var(--biny-text-tertiary);
+  font-size: 11.5px;
+  line-height: 1;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: opacity var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), transform var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-sidebar-session-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  height: 24px;
+  align-items: center;
+  gap: 1px;
+  border-radius: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(4px);
+  transition: opacity var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), transform var(--biny-sidebar-row-duration) var(--biny-sidebar-hover-ease), background var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-sidebar-session-actions > button {
+  pointer-events: none;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* 行尾操作浮在标题上方；悬停时补一块与行背景同色的底，把下方穿过的文字遮住，
+   避免标题文字从按钮下面透出来（对应 DSH：悬停时标题在操作前收缩截断）。 */
+.biny-sidebar-session-entry:hover .biny-sidebar-session-actions,
+.biny-sidebar-session-entry:focus-within .biny-sidebar-session-actions {
+  background: var(--biny-surface-hover);
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.biny-sidebar-session-entry.is-selected .biny-sidebar-session-actions {
+  background: var(--biny-selection-surface);
+}
+
+.biny-sidebar-session-entry:hover .biny-sidebar-session-actions > button,
+.biny-sidebar-session-entry:focus-within .biny-sidebar-session-actions > button {
+  pointer-events: auto;
+}
+
+.biny-sidebar-session-entry:hover .biny-sidebar-session-meta,
+.biny-sidebar-session-entry:focus-within .biny-sidebar-session-meta {
+  opacity: 0;
+  transform: translateX(4px);
+}
+
+/* 选中行不需要再展示时间，直接让位给标题与行尾操作。 */
+.biny-sidebar-session-entry.is-selected .biny-sidebar-session-meta {
+  display: none;
+}
+
+.biny-sidebar-session-pin,
+.biny-sidebar-session-more {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  cursor: pointer;
+  transition: background var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), color var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease), transform var(--biny-sidebar-hover-duration) var(--biny-sidebar-hover-ease);
+}
+
+.biny-sidebar-session-pin:hover,
+.biny-sidebar-session-pin:focus-visible,
+.biny-sidebar-session-more:hover,
+.biny-sidebar-session-more:focus-visible {
+  background: color-mix(in srgb, var(--biny-text) 8%, transparent);
+  color: var(--biny-text);
+}
+
+.biny-sidebar-session-pin:active,
+.biny-sidebar-session-more:active {
+  transform: translateY(1px);
+}
+
+/* 已置顶的会话：图钉换主题强调色，和普通灰区分开。 */
+.biny-sidebar-session-pin.is-active {
+  color: var(--biny-focus);
+}
+
+.biny-sidebar-session-expand {
+  display: block;
+  min-height: 27px;
+  margin: 1px 8px 2px 32px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.biny-sidebar-session-expand:hover {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-sidebar-empty-row {
+  min-height: 30px;
+  margin: 0 8px;
+  padding: 5px 8px;
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+}
+
+.biny-sidebar-project-empty {
+  margin-left: 24px;
+}
+
+.biny-sidebar-menu {
+  position: fixed;
+  /* 菜单必须盖住侧栏分隔线，否则浮层中间会出现一条不可见但可见的切线。 */
+  z-index: 130;
+  width: 222px;
+  padding: 5px;
+  border: 1px solid var(--biny-border);
+  border-radius: 11px;
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 10px 28px var(--biny-shadow-heavy);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px) scale(0.98);
+  transition: opacity var(--biny-motion-quick) ease, transform var(--biny-motion-base) var(--biny-ease-emphasized);
+  will-change: opacity, transform;
+}
+
+.biny-sidebar-menu[data-origin="bottom-left"] {
+  transform-origin: bottom left;
+}
+
+.biny-sidebar-menu[data-origin="top-left"] {
+  transform-origin: top left;
+}
+
+.biny-sidebar-menu[data-menu-phase="open"] {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+
+.biny-sidebar-menu.is-narrow {
+  width: 166px;
+}
+
+.biny-sidebar-menu button {
+  display: flex;
+  width: 100%;
+  height: 30px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--biny-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--biny-motion-quick) ease, color var(--biny-motion-quick) ease, transform var(--biny-motion-quick) ease;
+}
+
+.biny-sidebar-menu button:hover {
+  background: var(--biny-surface-hover);
+}
+
+.biny-sidebar-menu button:active {
+  transform: translateY(1px);
+}
+
+.biny-sidebar-menu button.is-danger {
+  color: var(--biny-danger);
+}
+
+.biny-sidebar-menu-heading {
+  padding: 4px 8px 3px;
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+}
+
+.biny-sidebar-menu-check {
+  display: inline-grid;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  place-items: center;
+}
+
+.biny-sidebar-menu-separator {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--biny-border);
+}
+
+.biny-workspace {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--biny-surface);
+  color: var(--biny-text);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-workspace-home {
+  display: block;
+}
+
+.biny-home-content {
+  position: absolute;
+  top: calc(50% + 42px);
+  left: 50%;
+  display: flex;
+  width: min(934px, calc(100% - 88px));
+  flex-direction: column;
+  align-items: stretch;
+  gap: 24px;
+  max-height: calc(100% - 48px);
+  overflow-y: auto;
+  padding: 12px 0;
+  box-sizing: border-box;
+  transform: translate(-50%, -50%);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-home-composer {
+  width: 100%;
+}
+
+.biny-composer-stack {
+  width: 100%;
+  min-width: 0;
+}
+
+.biny-composer-stack > .biny-composer-frame {
+  width: 100%;
+  max-width: none;
+}
+
+.biny-workspace-context-bar {
+  display: flex;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 7px;
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+}
+
+.biny-workspace-context-label {
+  flex: 0 0 auto;
+  color: var(--biny-text-tertiary);
+  font-size: 11px;
+}
+
+.biny-workspace-context-selectors {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.biny-workspace-context-anchor {
+  position: relative;
+  min-width: 0;
+}
+
+.biny-workspace-context-trigger {
+  display: inline-flex;
+  max-width: min(360px, 42vw);
+  min-height: 26px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  transition: background var(--biny-motion-quick) ease, color var(--biny-motion-quick) ease;
+}
+
+.biny-workspace-context-trigger:hover:not(:disabled),
+.biny-workspace-context-trigger[aria-expanded="true"] {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-workspace-context-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.biny-workspace-context-trigger > span:not(.biny-workspace-context-dirty) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-workspace-context-divider {
+  color: var(--biny-text-tertiary);
+  font-size: 13px;
+  user-select: none;
+}
+
+.biny-workspace-context-dirty {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--biny-warning);
+}
+
+.biny-workspace-context-menu {
+  width: min(340px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  padding: 5px;
+  border: 1px solid var(--biny-border);
+  border-radius: 11px;
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 16px 40px var(--biny-shadow-heavy);
+}
+
+.biny-workspace-context-menu-surface {
+  min-width: 0;
+}
+
+.biny-workspace-context-search {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 4px;
+  padding: 0 9px;
+  border: 1px solid var(--biny-border-subtle);
+  border-radius: 7px;
+  color: var(--biny-text-tertiary);
+  background: var(--biny-surface-soft);
+}
+
+.biny-workspace-context-search:focus-within {
+  border-color: var(--biny-border-strong);
+  color: var(--biny-text-secondary);
+}
+
+.biny-workspace-context-search input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  color: var(--biny-text);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+}
+
+.biny-workspace-context-search input::placeholder {
+  color: var(--biny-text-tertiary);
+}
+
+.biny-workspace-context-options {
+  max-height: min(310px, calc(100vh - 180px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.biny-workspace-context-option,
+.biny-workspace-context-menu-action {
+  display: flex;
+  width: 100%;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.biny-workspace-context-option:hover:not(:disabled),
+.biny-workspace-context-option.is-selected,
+.biny-workspace-context-menu-action:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-workspace-context-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.biny-workspace-context-option-leading {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+}
+
+.biny-workspace-context-option-leading > svg {
+  flex: 0 0 auto;
+  color: var(--biny-text-tertiary);
+}
+
+.biny-workspace-context-option-leading > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.biny-workspace-context-option-leading strong,
+.biny-workspace-context-option-leading small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-workspace-context-option-leading strong {
+  color: var(--biny-text);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.biny-workspace-context-option-leading small {
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+}
+
+.biny-workspace-context-option-check {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  place-items: center;
+  color: var(--biny-focus);
+}
+
+.biny-workspace-context-menu-empty {
+  padding: 14px 9px;
+  color: var(--biny-text-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.biny-workspace-context-menu-separator {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--biny-border-subtle);
+}
+
+.biny-workspace-context-menu-action {
+  color: var(--biny-text-secondary);
+}
+
+.biny-workspace-context-menu-action > svg {
+  color: var(--biny-focus);
+}
+
+.biny-workspace-context-create {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 5px 4px 3px;
+}
+
+.biny-workspace-context-create > label {
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+}
+
+.biny-workspace-context-create > input {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--biny-border);
+  border-radius: 7px;
+  outline: 0;
+  color: var(--biny-text);
+  background: var(--biny-surface-soft);
+  font: inherit;
+  font-size: 12px;
+}
+
+.biny-workspace-context-create > input:focus {
+  border-color: var(--biny-focus);
+}
+
+.biny-workspace-context-create > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.biny-workspace-context-create button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--biny-border);
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.biny-workspace-context-create button:last-child {
+  border-color: var(--biny-focus);
+  color: var(--biny-surface);
+  background: var(--biny-focus);
+}
+
+.biny-workspace-context-create button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.biny-welcome-state {
+  display: flex;
+  width: min(820px, 100%);
+  min-width: 0;
+  margin: 0 auto;
+  align-items: center;
+  flex-direction: column;
+  gap: 12px;
+  text-align: center;
+}
+
+.biny-welcome-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  box-shadow: 0 8px 24px var(--biny-shadow-soft);
+}
+
+.biny-welcome-state h1 {
+  margin: 2px 0 0;
+  color: var(--biny-text);
+  font-size: clamp(21px, 2.2vw, 28px);
+  font-weight: 620;
+  letter-spacing: -0.02em;
+}
+
+.biny-welcome-state > p {
+  max-width: 520px;
+  margin: 0 0 7px;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+}
+
+.biny-welcome-cards {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  text-align: left;
+}
+
+.biny-welcome-card {
+  display: flex;
+  min-width: 0;
+  min-height: 68px;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid var(--biny-border);
+  border-radius: 12px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 3px 12px var(--biny-shadow-soft);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  transition: border-color var(--biny-motion-quick) ease, background var(--biny-motion-quick) ease, transform var(--biny-motion-quick) ease;
+}
+
+.biny-welcome-card:hover {
+  border-color: var(--biny-border-strong);
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+  transform: translateY(-1px);
+}
+
+.biny-welcome-card:active {
+  transform: translateY(0);
+}
+
+.biny-welcome-card-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--biny-focus);
+  background: var(--biny-surface-selected);
+}
+
+.biny-welcome-card > span:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+}
+
+.biny-welcome-card-chevron {
+  flex: 0 0 auto;
+  color: var(--biny-text-tertiary);
+}
+
+.biny-welcome-open-project {
+  display: inline-flex;
+  min-height: 31px;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  padding: 0 12px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.biny-welcome-open-project:hover {
+  border-color: var(--biny-border-strong);
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-composer {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-height: 140px;
+  flex-direction: column;
+  box-sizing: border-box;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-composer-radius);
+  background: var(--biny-surface-elevated);
+  box-shadow: var(--biny-shadow);
+  color: var(--biny-text);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-composer:focus-within {
+  border-color: color-mix(in srgb, var(--biny-focus) 65%, var(--biny-border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--biny-focus) 16%, transparent), var(--biny-shadow);
+}
+
+.biny-composer-editor {
+  position: relative;
+  min-height: 83px;
+  flex: 1 1 auto;
+  padding: 12px 12px 2px;
+}
+
+.biny-composer-input {
+  display: block;
+  width: 100%;
+  min-height: 24px;
+  max-height: 128px;
+  padding: 0;
+  overflow-y: auto;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--biny-text);
+  font: inherit;
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.biny-composer-input::placeholder {
+  color: var(--biny-placeholder);
+  opacity: 1;
+}
+
+.biny-composer-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
+.biny-composer-footer {
+  display: flex;
+  min-height: 45px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 10px 8px 11px;
+}
+
+.biny-composer-footer-start,
+.biny-composer-footer-end {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.biny-composer-footer-end {
+  justify-content: flex-end;
+}
+
+/* “+” 与 chrome 工具按钮共用 28px 规则；在 composer 底栏里与 pill/发送按钮统一成 30px。 */
+.biny-composer .biny-composer-add {
+  width: 30px;
+  height: 30px;
+}
+
+/* astryx 壳层在 sendActions 与发送按钮之间只给 4px 间距，补齐到底栏统一的 8px。 */
+.biny-composer-footer-end + .biny-send-button-anchor {
+  margin-left: 4px;
+}
+
+.biny-permission-pill,
+.biny-model-pill,
+.biny-thinking-pill,
+.biny-plan-pill {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  font: inherit;
+  /* 跟随应用字号，与选择菜单内的文字保持一致；line-height:1 收紧文字行盒，
+     让 flex 居中作用于字形本身，否则文字会比旁边的 chevron 视觉上略高。 */
+  font-size: calc(13px * var(--font-scale));
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* 底栏所有控件统一 30px 高、8px 圆角；记忆开关之前只有宽度，实际高度比旁边 pill 矮一截。 */
+.biny-memory-toggle {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  background: var(--biny-pill);
+  color: var(--biny-text-secondary);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--biny-border) 70%, transparent);
+}
+
+.biny-memory-toggle[data-memory-enabled="true"] {
+  background: var(--biny-surface-selected);
+  color: var(--biny-text);
+}
+
+.biny-memory-toggle:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-permission-pill:hover:not(:disabled),
+.biny-model-pill:hover:not(:disabled),
+.biny-thinking-pill:hover:not(:disabled),
+.biny-plan-pill:hover:not(:disabled) {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-permission-pill svg:first-child {
+  color: var(--biny-text-secondary);
+}
+
+.biny-permission-pill[data-permission-mode="auto"] svg:first-child {
+  color: var(--biny-focus);
+}
+
+.biny-permission-pill[data-permission-mode="read-only"] svg:first-child {
+  color: var(--biny-text-secondary);
+}
+
+.biny-permission-pill[data-permission-mode="full-access"] svg:first-child {
+  color: var(--biny-warning);
+}
+
+.biny-permission-pill svg:last-child,
+.biny-model-pill svg:last-child,
+.biny-thinking-pill svg:last-child {
+  color: var(--biny-text-secondary);
+}
+
+.biny-permission-pill:disabled,
+.biny-model-pill:disabled,
+.biny-thinking-pill:disabled,
+.biny-memory-toggle:disabled,
+.biny-composer-add:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.biny-model-pill {
+  max-width: 220px;
+  padding-inline: 8px;
+  overflow: hidden;
+  background: var(--biny-pill);
+  color: var(--biny-text);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--biny-border) 70%, transparent);
+}
+
+.biny-model-pill .biny-composer-action-content,
+.biny-thinking-pill .biny-composer-action-content {
+  min-width: 0;
+}
+
+.biny-model-pill .biny-composer-action-content > span:not(.model-trigger-brand),
+.biny-thinking-pill .biny-composer-action-content > span:not(.model-trigger-brand) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-thinking-pill {
+  max-width: 130px;
+  padding-inline: 8px;
+  color: var(--biny-text-secondary);
+}
+
+.biny-thinking-pill svg:first-child {
+  color: var(--biny-focus);
+}
+
+.biny-model-picker {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  border-radius: 8px;
+  background: var(--biny-pill);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--biny-border) 70%, transparent);
+}
+
+.biny-model-picker .composer-menu-anchor {
+  display: inline-flex;
+  height: 100%;
+}
+
+.biny-model-picker .biny-model-pill,
+.biny-model-picker .biny-thinking-pill {
+  max-width: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.biny-model-picker .biny-model-pill {
+  padding-right: 5px;
+  padding-left: 8px;
+  background: transparent;
+  border-radius: 8px 0 0 8px;
+}
+
+.biny-model-picker .biny-thinking-pill {
+  padding-right: 8px;
+  padding-left: 5px;
+  color: var(--biny-text-secondary);
+  border-radius: 0 8px 8px 0;
+}
+
+.model-trigger-brand {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.model-trigger-brand .provider-logo {
+  width: 15px;
+  height: 15px;
+}
+
+.model-trigger-thinking {
+  color: var(--biny-text-secondary);
+  font-size: calc(12px * var(--font-scale));
+}
+
+.biny-mic-button {
+  width: 28px;
+  height: 28px;
+}
+
+.biny-send-button {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 50%;
+  background: var(--biny-send-bg);
+  color: var(--biny-send-icon);
+  cursor: pointer;
+  transition: transform var(--biny-motion-quick) ease, opacity var(--biny-motion-quick) ease, background var(--biny-motion-quick) ease, color var(--biny-motion-quick) ease;
+}
+
+.biny-send-button.is-stop {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-send-button:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+.biny-send-button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.biny-send-button.is-stop:not(:disabled):hover {
+  background: var(--biny-surface-selected);
+}
+
+.biny-send-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.biny-composer-attachments {
+  display: flex;
+  gap: 6px;
+  padding: 9px 12px 0;
+  overflow-x: auto;
+}
+
+.biny-attachment-chip {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  background: var(--biny-pill);
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.biny-attachment-chip.is-uploading {
+  color: var(--biny-text-secondary);
+}
+
+.biny-attachment-chip.is-error {
+  border-color: color-mix(in srgb, var(--biny-danger) 45%, var(--biny-border));
+  color: var(--biny-danger);
+}
+
+.biny-attachment-copy {
+  display: inline-flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.1;
+}
+
+.biny-attachment-copy > span {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.biny-attachment-copy small {
+  overflow: hidden;
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.biny-attachment-chip.is-error .biny-attachment-copy small {
+  color: var(--biny-danger);
+}
+
+.biny-attachment-spinner {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  border: 1.5px solid color-mix(in srgb, var(--biny-focus) 30%, transparent);
+  border-top-color: var(--biny-focus);
+  border-radius: 50%;
+  animation: biny-composer-spin 700ms linear infinite;
+}
+
+.biny-attachment-chip button {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.biny-composer-error {
+  position: absolute;
+  right: 14px;
+  bottom: -24px;
+  color: var(--biny-danger);
+  font-size: 12px;
+}
+
+.biny-composer .composer-hint {
+  position: absolute;
+  bottom: -24px;
+  left: 12px;
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+}
+
+.biny-composer .composer-popover {
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  top: auto;
+}
+
+.biny-composer .permission-menu,
+.biny-composer .thinking-level-menu {
+  left: 0;
+}
+
+.biny-composer .model-menu {
+  right: 0;
+  left: auto;
+}
+
+/*
+ * Astryx ChatComposer 适配：只替换输入区的内部实现，外层宽度、圆角和 Biny 的颜色
+ * 继续由桌面端样式控制。组件库的稳定类名只用于定位 shell/drawer/input，避免依赖
+ * StyleX 生成的短类名。
+ */
+.biny-composer-frame {
+  width: min(820px, calc(100% - 32px));
+  margin-inline: auto;
+}
+
+/* 对话态的输入框与消息时间线共用同一条内容宽度，避免两边的留白逐渐漂移。 */
+.biny-chat-composer > .biny-composer-frame {
+  width: 100%;
+  max-width: none;
+}
+
+.biny-composer {
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.biny-composer:focus-within {
+  border: 0;
+  box-shadow: none;
+}
+
+.biny-composer > .astryx-chat-composer-drawer {
+  color: var(--biny-text);
+  background-color: var(--biny-surface-elevated);
+  background-image: none;
+}
+
+.biny-composer > div:not(.astryx-chat-composer-drawer) {
+  min-height: 108px;
+  box-sizing: border-box;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-composer-radius);
+  background: var(--biny-surface-elevated);
+  box-shadow: var(--biny-composer-shadow-rest);
+  color: var(--biny-text);
+}
+
+.biny-composer > div:not(.astryx-chat-composer-drawer):focus-within {
+  border-color: var(--biny-border);
+  box-shadow: var(--biny-composer-shadow-rest);
+}
+
+/* ChatComposer 的 status slot 参与正常布局，不再悬浮覆盖输入区。 */
+.biny-composer > [role="alert"],
+.biny-composer > [role="status"] {
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 0 0 var(--biny-composer-radius) var(--biny-composer-radius);
+  box-shadow: none;
+  font-size: 12px;
+}
+
+.biny-composer-editor {
+  position: relative;
+  min-height: 56px;
+  flex: 1 1 auto;
+  padding: 0;
+}
+
+.biny-composer-input {
+  min-height: 56px;
+  color: var(--biny-text);
+}
+
+.biny-composer-input > [contenteditable="true"] {
+  min-height: 22px;
+  padding: 0;
+  color: var(--biny-text);
+  font: inherit;
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.biny-composer-input > [aria-hidden="true"] {
+  padding: 0;
+  color: var(--biny-placeholder);
+  font: inherit;
+  font-size: 15px;
+  line-height: 22px;
+}
+
+/* 呼吸灯光标：隐藏原生 caret，用自绘元素做 opacity + 辉光的呼吸动画。
+ * data-breathing-caret 由 useBreathingCaret 维护，仅在 caret 定位成功、
+ * 编辑器聚焦且选区折叠时为 "on"，因此原生 caret 永远有兜底。 */
+.biny-breathing-caret {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  width: 2px;
+  height: 20px;
+  border-radius: 1px;
+  background: var(--biny-focus);
+  pointer-events: none;
+  visibility: hidden;
+  will-change: transform;
+  /* 位置变化的滑行过渡：拼音上屏、正常打字时光标平滑滑过去而不是瞬移。
+   * 换行/重新出现时由 JS 加 .is-snapping 关掉过渡，避免斜向滑行。 */
+  transition: transform 0.12s cubic-bezier(0.2, 0, 0, 1),
+    height 0.12s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.biny-breathing-caret.is-snapping {
+  transition: none;
+}
+
+.biny-composer-editor[data-breathing-caret="on"] > .biny-breathing-caret {
+  visibility: visible;
+  animation: biny-caret-breathe 1.7s ease-in-out infinite;
+}
+
+.biny-composer-editor[data-breathing-caret="on"] .biny-composer-input [contenteditable="true"] {
+  caret-color: transparent !important;
+}
+
+@keyframes biny-caret-breathe {
+  0%,
+  100% {
+    opacity: 0.3;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--biny-focus) 0%, transparent);
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 7px 1px color-mix(in srgb, var(--biny-focus) 60%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .biny-composer-editor[data-breathing-caret="on"] > .biny-breathing-caret {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/*
+ * Desktop slash trigger 由 ChatComposerInput 通过 Portal 渲染到 body；因此这里不能依赖
+ * `.biny-composer` 的祖先选择器。菜单自己负责边界和滚动，行内容再用 ellipsis 收敛长描述。
+ */
+.astryx-trigger-menu {
+  box-sizing: border-box;
+  width: min(560px, calc(100vw - 32px)) !important;
+  max-width: min(560px, calc(100vw - 32px));
+  max-height: min(460px, calc(100vh - 16px)) !important;
+  padding: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.astryx-trigger-menu [role="group"] + [role="group"] {
+  margin-top: 4px;
+}
+
+.astryx-trigger-menu [role="group"] > [aria-hidden="true"] {
+  padding: 5px 9px 3px;
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.astryx-trigger-menu [role="option"] {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 62px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  color: var(--biny-text);
+}
+
+.astryx-trigger-menu [role="option"][aria-selected="true"] {
+  background: var(--biny-surface-hover);
+}
+
+.desktop-slash-option {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+}
+
+.desktop-slash-option-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--biny-focus);
+}
+
+.desktop-slash-option-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.desktop-slash-option-copy strong,
+.desktop-slash-option-title,
+.desktop-slash-option-copy small,
+.desktop-slash-option-copy code {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-slash-option-copy strong {
+  color: var(--biny-text);
+  font-family: var(--font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 17px;
+}
+
+.desktop-slash-option-title {
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.desktop-slash-option-copy small {
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.desktop-slash-option-copy code {
+  color: var(--biny-text-tertiary);
+  font-family: var(--font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.desktop-slash-option-kind {
+  flex: 0 0 auto;
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.desktop-slash-option.is-skill .desktop-slash-option-icon,
+.desktop-slash-option.is-skill .desktop-slash-option-copy strong {
+  color: var(--biny-focus);
+}
+
+.biny-composer-input [data-astryx-token] {
+  display: inline-flex;
+  max-width: 100%;
+  vertical-align: baseline;
+}
+
+.desktop-skill-token {
+  display: inline-flex;
+  max-width: min(280px, 100%);
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--biny-focus) 60%, var(--biny-border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--biny-focus) 13%, transparent);
+  color: var(--biny-focus);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 22px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.desktop-skill-token > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 640px) {
+  .astryx-trigger-menu {
+    width: min(460px, calc(100vw - 20px)) !important;
+    max-width: min(460px, calc(100vw - 20px));
+  }
+}
+
+.biny-composer .biny-composer-footer-start,
+.biny-composer .biny-composer-footer-end {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.biny-composer .biny-composer-footer-end {
+  justify-content: flex-end;
+}
+
+.biny-composer .biny-composer-attachments {
+  padding: 0;
+}
+
+.biny-attachment-remove {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--biny-text-tertiary);
+}
+
+.biny-attachment-remove:hover:not(:disabled):not([aria-disabled="true"]) {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-send-button-anchor {
+  position: relative;
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.biny-send-button-anchor.is-pending::after {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid color-mix(in srgb, var(--biny-send-icon) 35%, transparent);
+  border-top-color: var(--biny-send-icon);
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+  animation: biny-composer-spin 700ms linear infinite;
+}
+
+.biny-send-button-anchor.is-pending .biny-send-button {
+  opacity: 0.72;
+}
+
+.biny-composer-popover {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px) scale(0.98);
+  transition: opacity var(--biny-motion-quick) ease, transform var(--biny-motion-base) var(--biny-ease-emphasized);
+  will-change: opacity, transform;
+}
+
+.biny-composer-popover[data-origin="top-left"] {
+  transform-origin: top left;
+}
+
+.biny-composer-popover[data-origin="top-right"] {
+  transform-origin: top right;
+}
+
+.biny-composer-popover[data-origin="bottom-left"] {
+  transform-origin: bottom left;
+}
+
+.biny-composer-popover[data-origin="bottom-right"] {
+  transform-origin: bottom right;
+}
+
+.biny-composer-popover[data-popover-phase="open"] {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+
+.biny-composer-popover button {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* 模型和思考菜单都从左侧 footer 控件向上展开，保持与 MakaAgent 相同的紧凑宽度。 */
+.biny-composer-popover.model-menu {
+  width: 286px;
+}
+
+.biny-composer-popover.thinking-level-menu {
+  width: 240px;
+}
+
+.biny-composer-popover.permission-menu {
+  width: min(360px, calc(100vw - 16px));
+  padding: 8px;
+}
+
+.biny-composer-popover.permission-menu .popover-heading {
+  padding: 6px 10px 8px;
+  font-size: 12px;
+}
+
+.biny-composer-popover.permission-menu .menu-option {
+  min-height: 56px;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+}
+
+.biny-composer-popover.permission-menu .menu-option.is-selected {
+  background: var(--biny-surface-hover);
+}
+
+.permission-option-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: var(--biny-text-secondary);
+}
+
+.permission-option-auto.is-selected .permission-option-icon {
+  color: var(--biny-focus);
+}
+
+.permission-option-full-access.is-selected .permission-option-icon {
+  color: var(--biny-warning);
+}
+
+.biny-composer-popover.permission-menu .permission-option-copy {
+  gap: 2px;
+}
+
+.biny-composer-popover.permission-menu .permission-option-copy strong {
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.permission-option.is-selected .permission-option-copy strong {
+  font-weight: 600;
+}
+
+.biny-composer-popover.permission-menu .permission-option-copy small {
+  overflow: visible;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.permission-option-trailing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 4px;
+}
+
+.permission-option-trailing .risk-label {
+  color: var(--biny-warning);
+  background: var(--biny-warning-bg);
+}
+
+.permission-option-check {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: var(--biny-focus);
+  opacity: 0;
+}
+
+.permission-option.is-selected .permission-option-check {
+  opacity: 1;
+}
+
+.permission-option-full-access.is-selected .permission-option-check {
+  color: var(--biny-warning);
+}
+
+@keyframes biny-composer-spin {
+  to { transform: rotate(360deg); }
+}
+
+.biny-composer-frame .composer-hint {
+  position: absolute;
+  bottom: -24px;
+  left: 12px;
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+}
+
+.biny-workspace-main {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  /* DSH 内容列 748px；两侧留白随视口收缩，最小 32px（16px 清除区 + 16px 内边距）。 */
+  --biny-chat-content-width: min(748px, calc(100% - 64px));
+}
+
+/* 固定窗口 chrome 占用顶部 46px；聊天信息行从它下面开始，避免被 chrome 背景盖住。 */
+.biny-root:not([data-sidebar-mode="collapsed"]):not([data-sidebar-mode="peek"]) .biny-workspace-chat {
+  box-sizing: border-box;
+  padding-top: 46px;
+}
+
+.biny-chat-toolbar {
+  position: fixed;
+  z-index: 101;
+  top: 0;
+  right: 0;
+  /* 标题栏和侧栏共用同一时钟，避免 raw visual width 在展开首帧瞬移。 */
+  left: var(--biny-sidebar-animated-toolbar-left);
+  box-sizing: border-box;
+  display: flex;
+  height: 46px;
+  min-height: 46px;
+  align-items: center;
+  gap: 14px;
+  padding: 0 var(--biny-chat-toolbar-inline-padding);
+  border-bottom: 1px solid transparent;
+  background: var(--biny-surface);
+  transition: padding-left var(--biny-sidebar-transition), opacity var(--biny-sidebar-content-fade);
+  /* 整条顶部默认用于拖动；右侧操作容器单独退出拖动区。 */
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.biny-root[data-sidebar-resizing="true"] .biny-chat-toolbar {
+  transition: none;
+}
+
+/* 收起态的窗口 chrome 已经占据顶部 46px，聊天标题不能再生成第二行。 */
+.biny-root[data-sidebar-mode="collapsed"] .biny-content-shell,
+.biny-root[data-sidebar-mode="peek"] .biny-content-shell {
+  box-sizing: border-box;
+  padding-top: 46px;
+}
+
+.biny-chat-navigation {
+  display: flex;
+  align-items: center;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-chat-navigation .navigation-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.biny-chat-navigation .navigation-controls button {
+  color: var(--biny-text-secondary);
+}
+
+.biny-chat-drag-region {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  min-height: 46px;
+  flex: 1 1 auto;
+  align-items: center;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.biny-chat-title {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 9px;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.biny-chat-title strong,
+.biny-chat-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-chat-title strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.biny-chat-title span {
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+}
+
+.biny-chat-actions {
+  position: relative;
+  z-index: 122;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* 右上角操作区必须是独立的鼠标命中层，不能被整条标题栏的拖动区域吞掉。 */
+.biny-chat-actions > .biny-toolbar-button {
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-usage-control {
+  position: relative;
+  display: inline-flex;
+}
+
+.biny-usage-popover {
+  position: absolute;
+  z-index: 6;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(320px, calc(100vw - 32px));
+  padding: 14px;
+  border: 1px solid var(--biny-border);
+  border-radius: 14px;
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 10px 28px var(--biny-shadow-soft);
+  color: var(--biny-text);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px) scale(0.98);
+  transform-origin: bottom right;
+  transition: opacity var(--biny-motion-quick) ease, transform var(--biny-motion-base) var(--biny-ease-emphasized);
+  will-change: opacity, transform;
+}
+
+.biny-usage-popover[data-popover-phase="open"] {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+
+.biny-usage-popover-header,
+.biny-usage-total,
+.biny-usage-stat {
+  display: flex;
+  align-items: center;
+}
+
+.biny-usage-popover-header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.biny-usage-popover-header > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.biny-usage-popover-header strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.biny-usage-popover-header span,
+.biny-usage-note,
+.biny-usage-warning,
+.biny-usage-stat span,
+.biny-usage-total span {
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+}
+
+.biny-usage-total {
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--biny-border);
+  border-radius: 10px;
+  background: var(--biny-surface);
+}
+
+.biny-usage-total strong {
+  color: var(--biny-text);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.biny-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.biny-usage-stat {
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: var(--biny-surface-soft);
+}
+
+.biny-usage-stat strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--biny-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-usage-warning,
+.biny-usage-note {
+  margin: 10px 1px 0;
+  line-height: 1.45;
+}
+
+.biny-usage-warning {
+  color: var(--biny-text);
+}
+
+.biny-runtime-panel {
+  position: absolute;
+  z-index: 4;
+  top: 52px;
+  right: var(--biny-chat-toolbar-inline-padding);
+  width: min(420px, calc(100% - 24px));
+  max-height: min(620px, calc(100% - 76px));
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--biny-border);
+  border-radius: 14px;
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 10px 28px var(--biny-shadow-soft);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px) scale(0.985);
+  transform-origin: top right;
+  transition: opacity var(--biny-motion-quick) ease, transform var(--biny-motion-base) var(--biny-ease-emphasized);
+  will-change: opacity, transform;
+}
+
+.biny-runtime-panel[data-panel-phase="open"] {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+
+.biny-runtime-panel-header,
+.biny-runtime-summary,
+.biny-runtime-row,
+.biny-runtime-panel-footer {
+  display: flex;
+  align-items: center;
+}
+
+.biny-runtime-panel-header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.biny-runtime-panel-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.biny-runtime-panel-header > div,
+.biny-runtime-row-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.biny-runtime-panel-header span,
+.biny-runtime-panel-footer,
+.biny-runtime-row-copy small,
+.biny-runtime-empty {
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+}
+
+.biny-runtime-panel-icon,
+.biny-runtime-row-action {
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  cursor: pointer;
+  transition: background var(--biny-motion-quick) ease, color var(--biny-motion-quick) ease, transform var(--biny-motion-quick) ease;
+}
+
+.biny-runtime-panel-icon {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+}
+
+.biny-runtime-panel-icon:hover:not(:disabled),
+.biny-runtime-row-action:hover:not(:disabled) {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-runtime-panel-icon:active:not(:disabled),
+.biny-runtime-row-action:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.biny-runtime-panel-icon:disabled,
+.biny-runtime-row-action:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+.biny-runtime-summary {
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.biny-runtime-summary span {
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: var(--biny-surface-soft);
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+}
+
+.biny-runtime-section {
+  margin-top: 14px;
+}
+
+.biny-runtime-section h3 {
+  margin: 0 0 6px;
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.biny-runtime-empty {
+  margin: 0;
+}
+
+.biny-runtime-row {
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 34px;
+  padding: 5px 0;
+  border-top: 1px solid var(--biny-border-subtle);
+}
+
+.biny-runtime-row-copy > span {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.biny-runtime-row-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.biny-runtime-row-action {
+  min-height: 24px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.biny-runtime-panel-footer {
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--biny-border-subtle);
+}
+
+.biny-chat-toolbar button,
+.biny-chat-composer,
+.biny-runtime-error,
+.biny-status-state,
+.desktop-inspector-wrap {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* 文件树保持箭头槽位、目录/文件图标、名称三列对齐。 */
+.biny-root .file-browser-tree {
+  border-left-color: var(--biny-border);
+  background: var(--biny-surface-elevated);
+}
+
+.biny-root .file-preview-panel {
+  border-left: 0;
+  background: var(--biny-sidebar-surface);
+}
+
+.biny-root .file-browser-path {
+  min-height: 38px;
+  align-items: center;
+  padding: 0 8px 0 10px;
+  border-bottom-color: var(--biny-border);
+  background: var(--biny-sidebar-surface);
+}
+
+.biny-root .file-browser-current-path {
+  padding-top: 0;
+}
+
+.biny-root .file-browser-path-actions {
+  margin-top: 0;
+}
+
+.biny-root .file-browser-body.is-browser-only .file-browser-tree {
+  width: 100%;
+  border-left: 0;
+}
+
+.biny-root .file-browser-content {
+  background: var(--biny-surface);
+}
+
+.biny-root .file-tree-row {
+  height: 28px;
+  gap: 6px;
+  border-radius: 6px;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+}
+
+.biny-root .file-tree-row:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-root .file-tree-disclosure {
+  width: 16px;
+  flex-basis: 16px;
+  color: var(--biny-text-secondary);
+}
+
+.biny-root .file-tree-disclosure.is-file-slot {
+  transform: none;
+}
+
+.biny-root .file-tree-folder-icon,
+.biny-root .file-type-marker {
+  flex: 0 0 16px;
+}
+
+.biny-root .file-tree-folder-icon {
+  color: var(--biny-text-secondary);
+}
+
+.biny-root .file-type-marker {
+  width: 16px;
+  height: 17px;
+}
+
+.biny-chat-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-chat-welcome {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 32px 28px;
+}
+
+.biny-chat-welcome .biny-welcome-state {
+  flex: 0 1 820px;
+}
+
+.biny-chat-scroll {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  margin: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 28px 0 36px;
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-chat-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.biny-chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.biny-chat-scroll::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  background-clip: padding-box;
+  transition: background-color 160ms ease;
+}
+
+.biny-chat-scroll.is-scroll-active,
+.biny-chat-scroll:hover {
+  scrollbar-color: var(--biny-border-strong) transparent;
+}
+
+.biny-chat-scroll.is-scroll-active::-webkit-scrollbar-thumb,
+.biny-chat-scroll:hover::-webkit-scrollbar-thumb {
+  background: var(--biny-border-strong);
+  background-clip: padding-box;
+}
+
+.biny-chat-scroll .desktop-message-list,
+.biny-chat-scroll .message-timeline {
+  width: var(--biny-chat-content-width);
+  max-width: 100%;
+  margin-inline: auto;
+}
+
+/* ChatMessage 的用户列默认按内容收缩；这里撑满内容列，避免短消息被压成窄列后提前换行。 */
+.biny-chat-scroll .user-message {
+  width: 100%;
+}
+
+.biny-chat-scroll article.user-message > div {
+  width: 100%;
+  min-width: 0;
+}
+
+.biny-chat-scroll .user-bubble {
+  max-width: min(720px, 100%);
+  overflow-wrap: break-word;
+}
+
+/* 顶部消息的操作菜单不能向滚动容器外弹出，否则会被 scroll viewport 裁成只剩删除项。 */
+.biny-chat-scroll .user-message-menu,
+.biny-chat-scroll .assistant-message-menu {
+  min-width: 184px;
+  width: 184px;
+  padding: 4px;
+  border: 1px solid var(--biny-border);
+  border-radius: 12px;
+  background: var(--biny-surface-elevated);
+  box-shadow: none;
+}
+
+.biny-chat-scroll .user-message-menu {
+  top: calc(100% + 4px);
+  bottom: auto;
+}
+
+.biny-chat-scroll .message-menu-item {
+  min-height: 32px;
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+}
+
+.biny-chat-scroll .message-menu-item.is-danger {
+  color: var(--biny-danger);
+}
+
+.biny-chat-scroll .user-message.is-editing > * {
+  background: transparent;
+  box-shadow: none;
+}
+
+.biny-chat-scroll .user-message.is-editing .user-message-editor {
+  width: min(620px, 86%);
+  border-color: var(--biny-border);
+  border-radius: 12px;
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 2px 8px var(--biny-shadow-soft);
+}
+
+.biny-chat-composer {
+  position: relative;
+  width: var(--biny-chat-content-width);
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 0 0 18px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-session-writer-conflict {
+  display: flex;
+  min-height: 74px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border: 1px solid var(--biny-border);
+  border-radius: 14px;
+  background: var(--biny-surface-elevated);
+  color: var(--biny-text-secondary);
+  box-shadow: 0 2px 8px var(--biny-shadow-soft);
+}
+
+.biny-session-writer-conflict > svg {
+  flex: 0 0 auto;
+  color: var(--biny-warning);
+}
+
+.biny-session-writer-conflict-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.biny-session-writer-conflict-copy strong {
+  color: var(--biny-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.biny-session-writer-conflict-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.biny-session-writer-conflict button {
+  flex: 0 0 auto;
+  min-width: 58px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.biny-session-writer-conflict button:hover:not(:disabled) {
+  background: var(--biny-border);
+}
+
+.biny-session-writer-conflict button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.biny-composer-status {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 8px 0;
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 思考状态行：作为消息流内部的一行（对齐消息列宽度），不横跨整个聊天面板。 */
+.biny-thinking-status {
+  display: flex;
+  width: min(840px, calc(100% - 72px));
+  min-width: 0;
+  height: 32px;
+  flex: none;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  margin: 0 auto;
+  padding: 10px 0 0;
+  color: var(--biny-text-secondary);
+}
+
+.biny-thinking-status-orb {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+}
+
+.biny-thinking-status-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-thinking-status-duration {
+  flex: 0 0 auto;
+  color: var(--biny-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.biny-composer-status-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.biny-composer-status-button {
+  display: inline-flex;
+  height: 24px;
+  min-width: 26px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background var(--biny-motion-quick) ease, color var(--biny-motion-quick) ease, transform var(--biny-motion-quick) ease;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-composer-status-button:hover:not(:disabled),
+.biny-composer-status-button.is-open,
+.biny-composer-status-button[aria-expanded="true"] {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-composer-status-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.biny-composer-status-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.biny-composer-status .biny-usage-popover {
+  top: auto;
+  right: 0;
+  bottom: calc(100% + 8px);
+}
+
+.biny-chat-composer .biny-composer {
+  min-height: 126px;
+}
+
+.biny-chat-empty,
+.biny-status-state {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: var(--biny-text-secondary);
+}
+
+.biny-runtime-error {
+  display: flex;
+  width: min(560px, calc(100% - 48px));
+  height: 100%;
+  margin: 0 auto;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  text-align: center;
+}
+
+.biny-runtime-error svg {
+  color: var(--biny-danger);
+}
+
+.biny-runtime-error h2,
+.biny-runtime-error p,
+.biny-runtime-error small {
+  margin: 0;
+}
+
+.biny-runtime-error p,
+.biny-runtime-error small {
+  color: var(--biny-text-secondary);
+}
+
+.biny-runtime-error button {
+  min-height: 30px;
+  padding: 0 14px;
+  border: 1px solid var(--biny-border);
+  border-radius: 16px;
+  background: var(--biny-surface-elevated);
+  color: var(--biny-text);
+  cursor: pointer;
+}
+
+.biny-root .settings-tabs .settings-nav-list button.is-selected {
+  color: var(--biny-text);
+  background: var(--biny-surface-selected);
+}
+
+.biny-streaming-state {
+  display: none;
+}
+
+@media (max-width: 1000px) {
+  .biny-home-content {
+    width: calc(100% - 32px);
+  }
+
+  .biny-chat-scroll {
+    width: 100%;
+  }
+
+  .biny-composer-footer {
+    gap: 4px;
+  }
+
+  .biny-model-pill {
+    max-width: 170px;
+  }
+}
+
+@media (max-width: 720px) {
+  .biny-sidebar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+  }
+
+  .biny-home-content {
+    top: calc(50% + 28px);
+    width: calc(100% - 24px);
+    transform: translate(-50%, -50%);
+  }
+
+  .biny-welcome-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .biny-workspace-context-label {
+    display: none;
+  }
+
+  .biny-workspace-context-trigger {
+    max-width: 40vw;
+  }
+
+  .biny-chat-welcome {
+    align-items: flex-start;
+    padding: 24px 12px;
+  }
+
+  .biny-composer-footer-end {
+    gap: 2px;
+  }
+
+  .biny-composer-footer-end + .biny-send-button-anchor {
+    margin-left: 0;
+  }
+
+  .biny-model-pill {
+    padding-inline: 5px;
+  }
+
+  .biny-model-pill {
+    max-width: 125px;
+  }
+
+  .biny-chat-toolbar {
+    --biny-chat-toolbar-inline-padding: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-root.biny-root,
+  .biny-sidebar,
+  .biny-sidebar-divider,
+  .biny-sidebar-pin-spacer,
+  .biny-sidebar-body,
+  .biny-sidebar-footer,
+  .biny-sidebar-topbar-floating,
+  .biny-sidebar-settings-item,
+  .biny-sidebar-block,
+  .biny-sidebar-nav-item,
+  .biny-sidebar-section-trigger,
+  .biny-sidebar-section-chevron,
+  .biny-sidebar-section-action,
+  .biny-sidebar-section-content,
+  .biny-project-row-wrap,
+  .biny-project-row-actions,
+  .biny-project-row-action,
+  .biny-sidebar-session-tree-row,
+  .biny-sidebar-session-entry,
+  .biny-sidebar-session-title,
+  .biny-sidebar-session-meta,
+  .biny-sidebar-session-actions,
+  .biny-sidebar-session-pin,
+  .biny-sidebar-session-more,
+  .biny-chat-toolbar,
+  .biny-app-shell > .desktop-inspector-wrap {
+    transition: none !important;
+  }
+
+  .biny-sidebar.is-peek-overlay {
+    transition: none !important;
+  }
+
+  .biny-sidebar-menu,
+  .biny-composer-popover,
+  .biny-usage-popover,
+  .biny-runtime-panel,
+  .biny-memory-toggle,
+  .biny-send-button,
+  .biny-runtime-panel-icon,
+  .biny-runtime-row-action,
+  .biny-composer-status-button {
+    transition: none !important;
+  }
+
+  .biny-sidebar.is-peek-peeking {
+    animation: none !important;
+  }
+
+  .biny-inspector-view-content {
+    animation: none !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* 本地扩展页：保留 Biny 的轻量卡片和分栏密度，但所有操作仍落到 Biny 的 IPC 边界。 */
+/* 展开/rail 模式下固定窗口 chrome 占顶部 46px（聊天页在 .biny-workspace-chat 上让位），
+   扩展页同样要让出，否则页头（插件/技能标签、搜索、刷新）会被不透明顶栏盖住。 */
+.biny-root:not([data-sidebar-mode="collapsed"]):not([data-sidebar-mode="peek"]) .biny-extension-page {
+  box-sizing: border-box;
+  padding-top: 46px;
+}
+
+.biny-extension-page {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--biny-surface);
+  color: var(--biny-text);
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-extension-header {
+  display: flex;
+  box-sizing: border-box;
+  height: 58px;
+  min-height: 58px;
+  flex: 0 0 58px;
+  align-items: center;
+  gap: var(--biny-space-4);
+  padding: 0 24px;
+  border-bottom: 1px solid var(--biny-border);
+  background: var(--biny-surface);
+}
+
+.biny-extension-tabs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.biny-extension-tabs button,
+.biny-extension-refresh,
+.biny-extension-search button,
+.biny-skill-detail-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.biny-extension-tabs button {
+  height: 30px;
+  padding: 0 11px;
+  border-radius: var(--biny-radius-control);
+  font-size: 13px;
+}
+
+.biny-extension-tabs button:hover,
+.biny-extension-tabs button.is-active {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-extension-tabs button.is-active {
+  font-weight: 600;
+}
+
+.biny-extension-search {
+  display: flex;
+  min-width: 180px;
+  height: 32px;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-control);
+  color: var(--biny-text-tertiary);
+  background: var(--biny-surface-soft);
+}
+
+.biny-extension-search:focus-within {
+  border-color: var(--biny-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--biny-focus) 14%, transparent);
+}
+
+.biny-extension-search input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  color: var(--biny-text);
+  background: transparent;
+  font-size: 12px;
+}
+
+.biny-extension-search input::placeholder {
+  color: var(--biny-placeholder);
+}
+
+.biny-extension-search button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 4px;
+}
+
+.biny-extension-search button:hover,
+.biny-extension-refresh:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-extension-import {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-control);
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-soft);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.biny-extension-import:hover {
+  color: var(--biny-text);
+  border-color: var(--biny-focus);
+}
+
+.biny-extension-import:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.biny-extension-refresh {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: var(--biny-radius-control);
+}
+
+.biny-extension-refresh:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.biny-extension-body {
+  display: flex;
+  box-sizing: border-box;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  padding: var(--biny-space-5) 32px 40px;
+}
+
+.biny-extension-body > .biny-extension-warning,
+.biny-extension-body > .biny-extension-success,
+.biny-extension-body > .biny-extension-heading,
+.biny-extension-body > .biny-skill-sources {
+  width: 100%;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+  flex: 0 0 auto;
+}
+
+.biny-extension-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 var(--biny-space-4);
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--biny-warning) 32%, var(--biny-border));
+  border-radius: var(--biny-radius-control);
+  color: var(--biny-warning);
+  background: var(--biny-warning-bg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.biny-extension-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--biny-space-4);
+  margin: 0 0 var(--biny-space-4);
+}
+
+.biny-extension-heading h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.biny-extension-heading p {
+  margin: 6px 0 0;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+}
+
+.biny-extension-count {
+  flex: 0 0 auto;
+  color: var(--biny-text-tertiary);
+  font-size: 12px;
+}
+
+.biny-skill-sources {
+  width: 100%;
+  margin: 0 0 var(--biny-space-4);
+  padding: var(--biny-space-4);
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-card);
+  background: var(--biny-surface-elevated);
+}
+
+.biny-skill-sources-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--biny-space-3);
+  margin-bottom: var(--biny-space-2);
+}
+
+.biny-skill-sources-heading h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.biny-skill-sources-heading span {
+  color: var(--biny-text-tertiary);
+  font-size: 11px;
+}
+
+.biny-skill-source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--biny-space-3);
+}
+
+.biny-skill-source-card {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--biny-space-3);
+  padding: var(--biny-space-3);
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-control);
+  background: var(--biny-surface-soft);
+}
+
+.biny-skill-source-card h3,
+.biny-skill-source-card p {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-skill-source-card h3 {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.biny-skill-source-card p {
+  max-width: 340px;
+  margin-top: 4px;
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+}
+
+.biny-skill-source-card button {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid var(--biny-border);
+  border-radius: 6px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.biny-skill-source-card button:hover:not(:disabled) {
+  color: var(--biny-text);
+  border-color: var(--biny-focus);
+}
+
+.biny-skill-source-card button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.biny-skill-layout {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+.biny-skill-layout.has-detail {
+  display: grid;
+  height: 100%;
+  grid-template-columns: minmax(250px, 0.82fr) minmax(420px, 1.5fr);
+  align-items: stretch;
+  gap: var(--biny-space-4);
+}
+
+.biny-skill-card-grid,
+.biny-plugin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--biny-space-3);
+}
+
+.biny-skill-layout.has-detail .biny-skill-card-grid {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px;
+  align-content: start;
+}
+
+.biny-skill-layout:not(.has-detail) .biny-skill-card-grid {
+  min-height: 0;
+  overflow: auto;
+  align-content: start;
+}
+
+.biny-extension-body > .biny-plugin-grid,
+.biny-extension-body > .biny-extension-loading,
+.biny-extension-body > .biny-extension-empty {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  align-content: start;
+}
+
+.biny-skill-card {
+  display: flex;
+  min-width: 0;
+  min-height: 96px;
+  align-items: flex-start;
+  gap: var(--biny-space-3);
+  padding: var(--biny-space-3);
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-card);
+  color: var(--biny-text);
+  background: var(--biny-surface-elevated);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.biny-skill-card:hover {
+  border-color: var(--biny-border-strong);
+  background: var(--biny-surface-hover);
+  transform: translateY(-1px);
+}
+
+.biny-skill-card.is-selected {
+  border-color: color-mix(in srgb, var(--biny-focus) 58%, var(--biny-border));
+  background: var(--biny-surface-selected);
+}
+
+.biny-skill-card-icon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+}
+
+.biny-skill-card-main {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.biny-skill-card-title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-skill-card-meta,
+.biny-skill-card-description {
+  overflow: hidden;
+  color: var(--biny-text-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+}
+
+.biny-skill-card-description {
+  display: -webkit-box;
+  color: var(--biny-text-secondary);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.biny-skill-card > .icon {
+  margin-top: 5px;
+  color: var(--biny-text-tertiary);
+}
+
+.biny-skill-detail {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-card);
+  background: var(--biny-surface-elevated);
+}
+
+.biny-skill-detail-header {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--biny-space-3);
+  padding: var(--biny-space-3) 16px 10px;
+}
+
+.biny-skill-detail-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--biny-space-3);
+}
+
+.biny-skill-detail-icon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+  color: var(--biny-text-secondary);
+  background: transparent;
+}
+
+.biny-skill-detail-title-row h2 {
+  overflow: hidden;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-skill-detail-title-row p {
+  margin: 3px 0 0;
+  color: var(--biny-text-tertiary);
+  font-size: 11px;
+}
+
+.biny-skill-detail-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.biny-skill-detail-actions button {
+  height: 28px;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--biny-border);
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.biny-skill-detail-actions button:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-skill-detail-actions button.is-primary {
+  border-color: var(--biny-focus);
+  color: var(--biny-send-icon);
+  background: var(--biny-focus);
+}
+
+.biny-skill-detail-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.biny-skill-detail-path {
+  flex: 0 0 auto;
+  overflow: hidden;
+  margin: 0 16px 12px;
+  color: var(--biny-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-skill-parse-error {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  margin: 0 16px 12px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  color: var(--biny-warning);
+  background: var(--biny-warning-bg);
+  font-size: 11px;
+}
+
+.biny-skill-detail-body {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: 148px minmax(0, 1fr);
+  border-top: 1px solid var(--biny-border);
+  overflow: hidden;
+}
+
+.biny-skill-files {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 8px;
+  border-right: 1px solid var(--biny-border);
+  background: var(--biny-surface-soft);
+}
+
+.biny-skill-files h3 {
+  margin: 0 8px 8px;
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.biny-skill-files button {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 29px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.biny-skill-files button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-skill-files button:hover,
+.biny-skill-files button.is-selected {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-skill-files button.is-selected {
+  color: var(--biny-focus);
+  font-weight: 600;
+}
+
+.biny-skill-document {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 16px 18px 24px;
+}
+
+.biny-skill-frontmatter {
+  margin-bottom: 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--biny-border);
+  border-radius: 7px;
+  background: var(--biny-surface-soft);
+}
+
+.biny-skill-frontmatter h3 {
+  margin: 0 0 7px;
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.biny-skill-frontmatter pre,
+.biny-skill-code {
+  margin: 0;
+  color: var(--biny-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.biny-skill-markdown {
+  color: var(--biny-text);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.biny-skill-markdown > :first-child {
+  margin-top: 0;
+}
+
+.biny-skill-markdown h1,
+.biny-skill-markdown h2,
+.biny-skill-markdown h3 {
+  margin: 1.2em 0 0.5em;
+  line-height: 1.3;
+}
+
+.biny-skill-markdown h1 { font-size: 19px; }
+.biny-skill-markdown h2 { font-size: 16px; }
+.biny-skill-markdown h3 { font-size: 14px; }
+
+.biny-skill-markdown p,
+.biny-skill-markdown ul,
+.biny-skill-markdown ol,
+.biny-skill-markdown blockquote {
+  margin: 0.7em 0;
+}
+
+.biny-skill-markdown code {
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: var(--biny-text);
+  background: var(--biny-code);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.biny-skill-markdown pre {
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 7px;
+  background: var(--biny-code);
+}
+
+.biny-skill-markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.biny-skill-markdown a {
+  color: var(--biny-focus);
+}
+
+.biny-skill-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.biny-skill-markdown th,
+.biny-skill-markdown td {
+  padding: 5px 7px;
+  border: 1px solid var(--biny-border);
+  text-align: left;
+}
+
+.biny-skill-editor {
+  display: block;
+  width: 100%;
+  min-height: 350px;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 11px 12px;
+  border: 1px solid var(--biny-focus);
+  border-radius: 7px;
+  outline: 0;
+  color: var(--biny-text);
+  background: var(--biny-surface-soft);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.biny-plugin-grid {
+  width: 100%;
+  margin: 0;
+}
+
+.biny-plugin-empty {
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 48px 8px 0;
+  text-align: left;
+}
+
+.biny-plugin-card {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 15px;
+  border: 1px solid var(--biny-border);
+  border-radius: 10px;
+  background: var(--biny-surface-elevated);
+}
+
+.biny-plugin-card h2 {
+  overflow: hidden;
+  margin: 0 0 5px;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-plugin-card p {
+  overflow: hidden;
+  margin: 0 0 8px;
+  color: var(--biny-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-plugin-status {
+  display: inline-flex;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
+.biny-plugin-status.is-ready {
+  color: var(--biny-success);
+  background: var(--biny-success-bg);
+}
+
+.biny-plugin-status.is-missing {
+  color: var(--biny-danger);
+  background: var(--biny-danger-bg);
+}
+
+.biny-extension-loading,
+.biny-extension-empty {
+  display: flex;
+  min-height: 280px;
+  align-items: center;
+  justify-content: center;
+  color: var(--biny-text-secondary);
+  text-align: center;
+}
+
+.biny-extension-empty {
+  flex-direction: column;
+  gap: 7px;
+}
+
+.biny-extension-empty.biny-plugin-empty {
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 48px 8px 0;
+  text-align: left;
+}
+
+.biny-extension-empty > span {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  color: var(--biny-text-secondary);
+  background: transparent;
+}
+
+.biny-extension-empty h2 {
+  margin: 4px 0 0;
+  color: var(--biny-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.biny-extension-empty p {
+  max-width: 420px;
+  margin: 0;
+  color: var(--biny-text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 980px) {
+  .biny-extension-body {
+    padding-inline: 20px;
+  }
+
+  .biny-skill-layout.has-detail {
+    grid-template-columns: minmax(220px, 0.72fr) minmax(360px, 1.4fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .biny-extension-header {
+    padding-inline: 14px;
+  }
+
+  .biny-extension-body {
+    overflow: auto;
+    padding: 20px 14px 32px;
+  }
+
+  .biny-skill-layout {
+    height: auto;
+    flex: 0 0 auto;
+  }
+
+  .biny-skill-layout:not(.has-detail) .biny-skill-card-grid {
+    height: auto;
+    overflow: visible;
+  }
+
+  .biny-skill-layout.has-detail {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .biny-skill-layout.has-detail .biny-skill-card-grid {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .biny-skill-detail {
+    height: auto;
+    min-height: 390px;
+    width: 100%;
+  }
+}
+
+@media (max-width: 520px) {
+  .biny-extension-header {
+    gap: 8px;
+  }
+
+  .biny-extension-search {
+    min-width: 0;
+  }
+
+  .biny-extension-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .biny-skill-detail-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .biny-skill-detail-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .biny-skill-detail-body {
+    grid-template-columns: 112px minmax(0, 1fr);
+  }
+}
+
+/* Skill 导入与发现：沿用 CC Switch 的三段路径（已有、仓库、skills.sh），但保留 Biny 原有编辑器。 */
+.biny-extension-discover {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--biny-focus) 46%, var(--biny-border));
+  border-radius: var(--biny-radius-control);
+  color: var(--biny-focus);
+  background: var(--biny-surface-selected);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.biny-extension-discover:hover {
+  border-color: var(--biny-focus);
+  background: color-mix(in srgb, var(--biny-focus) 14%, var(--biny-surface));
+}
+
+.biny-extension-import-existing {
+  position: relative;
+}
+
+.biny-extension-import-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--biny-success);
+  opacity: 0;
+}
+
+.biny-extension-import-dot[data-visible="true"] {
+  opacity: 1;
+}
+
+.biny-extension-success {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--biny-success) 34%, var(--biny-border));
+  border-radius: 8px;
+  color: var(--biny-success);
+  background: var(--biny-success-bg);
+  font-size: 12px;
+}
+
+.biny-extension-success button {
+  display: inline-flex;
+  margin-left: auto;
+  padding: 3px;
+  border: 0;
+  border-radius: 5px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.biny-extension-success button:hover {
+  background: color-mix(in srgb, var(--biny-success) 14%, transparent);
+}
+
+.biny-skill-dialog-backdrop {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--biny-overlay);
+}
+
+.biny-skill-import-dialog,
+.biny-skill-repository-dialog {
+  width: min(760px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-dialog);
+  background: var(--biny-surface-elevated);
+  box-shadow: var(--biny-shadow-dialog);
+}
+
+.biny-skill-dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--biny-space-4);
+  padding: 20px 24px 16px;
+}
+
+.biny-skill-dialog-heading h2 {
+  margin: 0;
+  color: var(--biny-text);
+  font-size: 22px;
+  letter-spacing: -0.02em;
+}
+
+.biny-skill-dialog-heading p {
+  margin: 7px 0 0;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+}
+
+.biny-skill-dialog-heading > button {
+  display: inline-flex;
+  padding: 6px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.biny-skill-dialog-heading > button:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-skill-import-select-all {
+  margin: 0 24px 10px;
+  padding: 0;
+  border: 0;
+  color: var(--biny-focus);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.biny-skill-import-list {
+  max-height: 500px;
+  overflow: auto;
+  padding: 0 24px 12px;
+}
+
+.biny-skill-import-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 0;
+  border-top: 1px solid var(--biny-border);
+  cursor: pointer;
+}
+
+.biny-skill-import-item input {
+  width: 17px;
+  height: 17px;
+  margin: 2px 0 0;
+  accent-color: var(--biny-focus);
+}
+
+.biny-skill-import-item-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.biny-skill-import-item-main strong {
+  color: var(--biny-text);
+  font-size: 14px;
+}
+
+.biny-skill-import-item-description {
+  overflow: hidden;
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-skill-import-item-source {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+}
+
+.biny-skill-import-item-source-label {
+  color: var(--biny-text-tertiary);
+}
+
+.biny-skill-import-item-path {
+  color: var(--biny-text-tertiary);
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.biny-skill-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 26px 22px;
+  border-top: 1px solid var(--biny-border);
+}
+
+.biny-skill-dialog-footer button,
+.biny-skill-repository-form button {
+  min-height: 36px;
+  padding: 0 16px;
+  border: 1px solid var(--biny-border);
+  border-radius: 9px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-soft);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.biny-skill-dialog-footer button:hover,
+.biny-skill-repository-form button:hover {
+  color: var(--biny-text);
+  border-color: var(--biny-border-strong);
+}
+
+.biny-skill-dialog-footer button.is-primary,
+.biny-skill-repository-form button {
+  border-color: var(--biny-focus);
+  color: white;
+  background: var(--biny-focus);
+}
+
+.biny-skill-dialog-footer button:disabled,
+.biny-skill-dialog-heading > button:disabled,
+.biny-skill-dialog-footer button.is-primary:disabled,
+.biny-skill-import-select-all:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.biny-skill-import-empty {
+  display: flex;
+  min-height: 210px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 30px;
+  color: var(--biny-success);
+  flex-direction: column;
+  text-align: center;
+}
+
+.biny-skill-import-empty strong {
+  color: var(--biny-text);
+  font-size: 14px;
+}
+
+.biny-skill-import-empty span {
+  max-width: 360px;
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.biny-skill-discovery-page {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--biny-surface);
+}
+
+.biny-skill-discovery-header {
+  display: flex;
+  min-height: 72px;
+  align-items: center;
+  gap: 16px;
+  padding: 0 32px;
+  border-bottom: 1px solid var(--biny-border);
+  background: var(--biny-surface);
+}
+
+.biny-skill-discovery-header h1 {
+  margin: 0;
+  color: var(--biny-text);
+  font-size: 21px;
+  font-weight: 650;
+}
+
+.biny-skill-discovery-back,
+.biny-skill-discovery-header-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.biny-skill-discovery-back {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--biny-border);
+  border-radius: 9px;
+}
+
+.biny-skill-discovery-back:hover,
+.biny-skill-discovery-header-actions button:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-skill-discovery-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-left: auto;
+}
+
+.biny-skill-discovery-header-actions button {
+  gap: 7px;
+  padding: 7px 4px;
+  font-size: 13px;
+}
+
+.biny-skill-discovery-header-actions button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.biny-skill-discovery-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: var(--biny-space-5) 32px 40px;
+}
+
+.biny-skill-discovery-source-tabs {
+  display: flex;
+  width: fit-content;
+  margin: 0 auto var(--biny-space-4);
+  padding: 3px;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-control);
+  background: var(--biny-surface-elevated);
+}
+
+.biny-skill-discovery-source-tabs button {
+  min-width: 92px;
+  height: 30px;
+  border: 0;
+  border-radius: var(--biny-radius-control);
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.biny-skill-discovery-source-tabs button:hover,
+.biny-skill-discovery-source-tabs button.is-active {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-skill-discovery-source-tabs button.is-active {
+  font-weight: 650;
+}
+
+.biny-discovery-filters,
+.biny-skillssh-search-row {
+  display: flex;
+  width: min(1120px, 100%);
+  align-items: center;
+  gap: 12px;
+  margin: 0 auto var(--biny-space-4);
+}
+
+.biny-discovery-search {
+  display: flex;
+  min-width: 0;
+  height: 42px;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  padding: 0 13px;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-control);
+  color: var(--biny-text-tertiary);
+  background: var(--biny-surface-elevated);
+}
+
+.biny-discovery-search:focus-within {
+  border-color: var(--biny-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--biny-focus) 13%, transparent);
+}
+
+.biny-discovery-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: var(--biny-text);
+  background: transparent;
+  font-size: 13px;
+}
+
+.biny-discovery-search input::placeholder {
+  color: var(--biny-placeholder);
+}
+
+.biny-discovery-filters select {
+  width: 168px;
+  height: 42px;
+  padding: 0 10px;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-control);
+  color: var(--biny-text);
+  background: var(--biny-surface-elevated);
+  font-size: 12px;
+}
+
+.biny-discovery-grid {
+  display: grid;
+  width: min(1120px, 100%);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--biny-space-4);
+  margin: 0 auto;
+}
+
+.biny-discovery-card {
+  display: flex;
+  min-width: 0;
+  min-height: 240px;
+  box-sizing: border-box;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-card);
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 1px 2px var(--biny-shadow-color);
+}
+
+.biny-discovery-card:hover {
+  border-color: var(--biny-border-strong);
+}
+
+.biny-discovery-card-content {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 20px 20px 16px;
+  scrollbar-gutter: stable;
+}
+
+.biny-discovery-card h2 {
+  overflow: hidden;
+  margin: 0;
+  color: var(--biny-text);
+  font-size: 17px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-discovery-card-repo {
+  display: flex;
+  align-items: center;
+  gap: var(--biny-space-2);
+  margin-top: var(--biny-space-2);
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+}
+
+.biny-discovery-card-repo span {
+  overflow: hidden;
+  color: var(--biny-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-discovery-card p {
+  overflow-wrap: anywhere;
+  margin: var(--biny-space-3) 0 0;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.biny-discovery-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--biny-space-3);
+  min-height: 56px;
+  box-sizing: border-box;
+  margin-top: auto;
+  padding: 10px 20px;
+  border-top: 1px solid var(--biny-border);
+}
+
+.biny-discovery-card-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 36px;
+  border: 0;
+  border-radius: var(--biny-radius-control);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.biny-discovery-view {
+  padding: 0 8px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+}
+
+.biny-discovery-view:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-discovery-install {
+  min-width: 150px;
+  margin-left: auto;
+  color: white;
+  background: var(--biny-focus);
+}
+
+.biny-discovery-install:hover:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+.biny-discovery-install:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.biny-discovery-placeholder {
+  display: flex;
+  width: min(1120px, 100%);
+  min-height: 240px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 auto;
+  color: var(--biny-text-tertiary);
+  flex-direction: column;
+  text-align: center;
+}
+
+.biny-discovery-placeholder strong {
+  color: var(--biny-text-secondary);
+  font-size: 14px;
+}
+
+.biny-discovery-placeholder span {
+  max-width: 460px;
+  font-size: 12px;
+}
+
+.biny-skillssh-search-row {
+  max-width: 730px;
+}
+
+.biny-discovery-search-button {
+  height: 42px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 9px;
+  color: white;
+  background: var(--biny-focus);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.biny-discovery-search-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.biny-discovery-result-meta {
+  width: min(1120px, 100%);
+  margin: 0 auto 12px;
+  color: var(--biny-text-tertiary);
+  font-size: 12px;
+}
+
+.biny-discovery-load-more {
+  display: block;
+  margin: 24px auto 0;
+  padding: 9px 20px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-elevated);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.biny-discovery-load-more:hover {
+  color: var(--biny-text);
+  border-color: var(--biny-border-strong);
+}
+
+.biny-skill-repository-dialog {
+  width: min(620px, 100%);
+}
+
+.biny-skill-repository-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px auto;
+  gap: 8px;
+  padding: 0 26px 18px;
+}
+
+.biny-skill-repository-form input {
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  outline: 0;
+  color: var(--biny-text);
+  background: var(--biny-surface-soft);
+  font-size: 12px;
+}
+
+.biny-skill-repository-form input:focus {
+  border-color: var(--biny-focus);
+}
+
+.biny-skill-repository-form button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.biny-skill-dialog-error {
+  margin: 0 26px 12px;
+  color: var(--biny-danger);
+  font-size: 12px;
+}
+
+.biny-skill-repository-list {
+  max-height: 360px;
+  overflow: auto;
+  padding: 0 26px 20px;
+}
+
+.biny-skill-repository-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--biny-border);
+}
+
+.biny-skill-repository-row > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.biny-skill-repository-row strong {
+  overflow: hidden;
+  color: var(--biny-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-skill-repository-row span {
+  color: var(--biny-text-tertiary);
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.biny-skill-repository-row button {
+  display: inline-flex;
+  padding: 6px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--biny-text-tertiary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.biny-skill-repository-row button:hover {
+  color: var(--biny-danger);
+  background: var(--biny-danger-bg);
+}
+
+@media (max-width: 760px) {
+  .biny-extension-discover,
+  .biny-extension-import-existing {
+    display: none;
+  }
+
+  .biny-skill-discovery-header,
+  .biny-skill-discovery-body {
+    padding-inline: 16px;
+  }
+
+  .biny-discovery-filters,
+  .biny-skillssh-search-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .biny-discovery-filters select {
+    width: 100%;
+  }
+
+  .biny-discovery-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .biny-skill-repository-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .biny-skill-discovery-header-actions {
+    gap: 4px;
+  }
+
+  .biny-skill-discovery-header-actions button {
+    font-size: 0;
+  }
+
+  .biny-skill-discovery-header-actions button .icon {
+    width: 18px;
+    height: 18px;
+  }
+}
+
+/* MCP 管理页：沿用扩展页的密度，但把市场、已安装和配置编辑拆成清晰的工作区。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.biny-mcp-page {
+  display: flex;
+  width: min(var(--settings-content-max), calc(100% - 56px));
+  min-width: 0;
+  flex: 0 0 auto;
+  flex-direction: column;
+  overflow: visible;
+  color: var(--biny-text);
+  background: transparent;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-mcp-installed-heading,
+.biny-mcp-card-topline {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--biny-space-3);
+}
+
+.biny-mcp-title-icon {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  color: var(--biny-text-secondary);
+  background: transparent;
+}
+
+.biny-mcp-dialog-header h2 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.biny-mcp-dialog-header p {
+  margin: 5px 0 0;
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+}
+
+.biny-mcp-add-button,
+.biny-mcp-primary-button,
+.biny-mcp-install-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--biny-focus);
+  border-radius: 8px;
+  color: var(--biny-send-icon);
+  background: var(--biny-focus);
+  font-size: calc(12px * var(--font-scale));
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.biny-mcp-add-button {
+  height: 36px;
+  padding: 0 14px;
+  flex: 0 0 auto;
+}
+
+.biny-mcp-add-button:hover,
+.biny-mcp-primary-button:hover,
+.biny-mcp-install-button:hover {
+  filter: brightness(1.06);
+}
+
+.biny-mcp-toolbar {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 0 16px;
+  border-bottom: 1px solid var(--biny-border);
+  background: transparent;
+}
+
+.biny-mcp-toolbar-add-button {
+  height: 34px;
+  margin-left: auto;
+  padding-inline: 11px;
+}
+
+.biny-mcp-tabs {
+  display: flex;
+  min-height: 36px;
+  align-items: stretch;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--biny-surface-soft);
+}
+
+.biny-mcp-tabs button,
+.biny-mcp-segmented button,
+.biny-mcp-secondary-button,
+.biny-mcp-danger-button,
+.biny-mcp-link-action,
+.biny-mcp-row-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.biny-mcp-tabs button {
+  min-width: 112px;
+  height: 30px;
+  gap: 7px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.biny-mcp-tabs button:hover,
+.biny-mcp-tabs button.is-active {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-mcp-tabs button.is-active {
+  font-weight: 650;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
+}
+
+.biny-mcp-tabs button span {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 10px;
+  color: var(--biny-text-tertiary);
+  background: var(--biny-surface-selected);
+  font-size: 10px;
+}
+
+.biny-mcp-search {
+  display: flex;
+  min-width: 190px;
+  max-width: 420px;
+  height: 34px;
+  flex: 1 1 280px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  color: var(--biny-text-tertiary);
+  background: var(--biny-surface-soft);
+}
+
+.biny-mcp-search:focus-within {
+  border-color: var(--biny-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--biny-focus) 14%, transparent);
+}
+
+.biny-mcp-search input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  color: var(--biny-text);
+  background: transparent;
+  font-size: 12px;
+}
+
+.biny-mcp-search input::placeholder {
+  color: var(--biny-placeholder);
+}
+
+.biny-mcp-search button,
+.biny-mcp-icon-button {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 30px;
+  padding: 0;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-soft);
+  cursor: pointer;
+}
+
+.biny-mcp-search button {
+  width: 20px;
+  height: 20px;
+  flex-basis: 20px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+}
+
+.biny-mcp-search button:hover,
+.biny-mcp-icon-button:hover:not(:disabled) {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-mcp-icon-button:disabled,
+.biny-mcp-row-actions button:disabled,
+.biny-mcp-secondary-button:disabled,
+.biny-mcp-primary-button:disabled,
+.biny-mcp-danger-button:disabled,
+.biny-mcp-toggle:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.biny-mcp-category {
+  position: relative;
+  display: flex;
+  min-width: 132px;
+  height: 34px;
+  align-items: center;
+  color: var(--biny-text-secondary);
+}
+
+.biny-mcp-category select {
+  width: 100%;
+  height: 100%;
+  appearance: none;
+  padding: 0 30px 0 11px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  outline: 0;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-soft);
+  font-size: 12px;
+}
+
+.biny-mcp-category svg {
+  position: absolute;
+  right: 9px;
+  pointer-events: none;
+}
+
+.biny-mcp-notice {
+  display: flex;
+  max-width: 1180px;
+  align-items: center;
+  gap: 8px;
+  margin: 16px auto 0;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--biny-warning) 34%, var(--biny-border));
+  border-radius: 8px;
+  color: var(--biny-warning);
+  background: var(--biny-warning-bg);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.biny-mcp-body {
+  min-width: 0;
+  flex: 0 0 auto;
+  overflow: visible;
+  padding: var(--biny-space-4) 0 var(--biny-space-5);
+}
+
+.biny-mcp-market-grid,
+.biny-mcp-installed-list {
+  display: grid;
+  width: 100%;
+  margin: 0;
+  gap: var(--biny-space-4);
+}
+
+.biny-mcp-market-grid {
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+}
+
+.biny-mcp-market-card,
+.biny-mcp-installed-card,
+.biny-mcp-details {
+  min-width: 0;
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-radius-card);
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+
+.biny-mcp-market-card,
+.biny-mcp-installed-card {
+  display: flex;
+  min-height: 194px;
+  flex-direction: column;
+  padding: var(--biny-space-4);
+}
+
+.biny-mcp-card-icon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  align-items: center;
+  justify-content: center;
+  color: var(--biny-text-secondary);
+  background: transparent;
+}
+
+.biny-mcp-card-heading {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.biny-mcp-card-heading h2 {
+  overflow: hidden;
+  margin: 0;
+  font-size: calc(14px * var(--font-scale));
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-mcp-card-heading span {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  color: var(--biny-text-tertiary);
+  font-size: calc(11px * var(--font-scale));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-mcp-card-badges,
+.biny-mcp-tags,
+.biny-mcp-capabilities,
+.biny-mcp-detail-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--biny-space-2);
+}
+
+.biny-mcp-card-badges {
+  align-self: flex-start;
+}
+
+.biny-mcp-badge,
+.biny-mcp-tags span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.biny-mcp-badge {
+  padding: 3px 6px;
+  border: 1px solid var(--biny-border);
+  border-radius: 4px;
+}
+
+.biny-mcp-tags span {
+  padding: 0;
+}
+
+.biny-mcp-badge.is-verified {
+  color: var(--biny-success);
+  background: var(--biny-success-bg);
+}
+
+.biny-mcp-badge.is-featured {
+  color: var(--biny-focus);
+  border-color: color-mix(in srgb, var(--biny-focus) 46%, var(--biny-border));
+  background: transparent;
+}
+
+.biny-mcp-card-description {
+  display: -webkit-box;
+  min-height: 36px;
+  margin: var(--biny-space-3) 0 var(--biny-space-2);
+  overflow: hidden;
+  color: var(--biny-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.biny-mcp-tags {
+  min-height: 20px;
+}
+
+.biny-mcp-card-footer,
+.biny-mcp-installed-footer,
+.biny-mcp-secret-heading,
+.biny-mcp-dialog-footer,
+.biny-mcp-dialog-actions,
+.biny-mcp-details-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.biny-mcp-card-footer {
+  margin-top: auto;
+  padding-top: var(--biny-space-3);
+}
+
+.biny-mcp-install-options,
+.biny-mcp-row-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.biny-mcp-install-options {
+  flex: 1 1 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.biny-mcp-install-options::-webkit-scrollbar {
+  display: none;
+}
+
+.biny-mcp-install-button {
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  font-size: calc(11px * var(--font-scale));
+  white-space: nowrap;
+}
+
+.biny-mcp-link-button {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--biny-border);
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.biny-mcp-link-button:hover,
+.biny-mcp-row-actions button:hover:not(:disabled),
+.biny-mcp-link-action:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-mcp-installed-layout {
+  display: grid;
+  width: min(1180px, 100%);
+  grid-template-columns: minmax(360px, 1fr) minmax(300px, 0.62fr);
+  align-items: start;
+  gap: var(--biny-space-4);
+  margin: 0 auto;
+}
+
+.biny-mcp-installed-list {
+  width: auto;
+}
+
+.biny-mcp-installed-card {
+  min-height: 0;
+  gap: 10px;
+}
+
+.biny-mcp-installed-heading {
+  align-items: flex-start;
+}
+
+.biny-mcp-status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+}
+
+.biny-mcp-status i {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.biny-mcp-status.is-connected {
+  color: var(--biny-success);
+}
+
+.biny-mcp-status.is-disconnected {
+  color: var(--biny-warning);
+}
+
+.biny-mcp-status.is-disabled {
+  color: var(--biny-text-tertiary);
+}
+
+.biny-mcp-endpoint {
+  overflow: hidden;
+  margin: 1px 0 2px;
+  color: var(--biny-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-mcp-capabilities {
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+}
+
+.biny-mcp-capabilities span {
+  padding-right: 8px;
+  border-right: 1px solid var(--biny-border);
+}
+
+.biny-mcp-capabilities span:last-child {
+  border-right: 0;
+}
+
+.biny-mcp-capabilities strong {
+  color: var(--biny-text-secondary);
+  font-weight: 600;
+}
+
+.biny-mcp-card-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  color: var(--biny-warning);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.biny-mcp-installed-footer {
+  margin-top: 5px;
+  padding-top: 10px;
+  border-top: 1px solid var(--biny-border);
+}
+
+.biny-mcp-toggle {
+  display: inline-flex;
+  height: 26px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 4px;
+  border: 1px solid var(--biny-border);
+  border-radius: 999px;
+  color: var(--biny-text-tertiary);
+  background: var(--biny-surface-soft);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.biny-mcp-toggle span {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--biny-text-tertiary);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.biny-mcp-toggle.is-on {
+  color: var(--biny-success);
+}
+
+.biny-mcp-toggle.is-on span {
+  background: var(--biny-success);
+  transform: translateX(1px);
+}
+
+.biny-mcp-row-actions button {
+  min-height: 27px;
+  padding: 0 7px;
+  border-radius: 6px;
+  font-size: 10px;
+}
+
+.biny-mcp-row-actions button.is-danger {
+  color: var(--biny-danger);
+}
+
+.biny-mcp-details {
+  position: sticky;
+  top: 0;
+  overflow: hidden;
+}
+
+.biny-mcp-details-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--biny-border);
+}
+
+.biny-mcp-eyebrow {
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+}
+
+.biny-mcp-details-header h2 {
+  overflow: hidden;
+  max-width: 230px;
+  margin: 4px 0 0;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-mcp-details-body {
+  max-height: calc(100vh - 230px);
+  overflow: auto;
+  padding: 14px 16px 18px;
+}
+
+.biny-mcp-detail-summary {
+  padding-bottom: 12px;
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+}
+
+.biny-mcp-detail-section {
+  padding: 13px 0;
+  border-top: 1px solid var(--biny-border);
+}
+
+.biny-mcp-detail-section h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 8px;
+  font-size: 11px;
+}
+
+.biny-mcp-detail-section h3 small {
+  color: var(--biny-text-tertiary);
+  font-weight: 400;
+}
+
+.biny-mcp-detail-section p,
+.biny-mcp-details-empty {
+  margin: 0;
+  color: var(--biny-text-tertiary);
+  font-size: 11px;
+}
+
+.biny-mcp-detail-section ul {
+  display: grid;
+  max-height: 180px;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.biny-mcp-detail-section li {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 7px;
+  border-radius: 5px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-soft);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.biny-mcp-detail-section li span {
+  overflow: hidden;
+  color: var(--biny-text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-mcp-details-empty {
+  padding: 24px 16px;
+}
+
+.biny-mcp-empty {
+  display: flex;
+  min-height: 320px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--biny-text-secondary);
+  text-align: center;
+}
+
+.biny-mcp-empty > span {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  color: var(--biny-text-secondary);
+  background: transparent;
+}
+
+.biny-mcp-empty h2 {
+  margin: 5px 0 0;
+  color: var(--biny-text);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.biny-mcp-empty p {
+  max-width: 450px;
+  margin: 0;
+  color: var(--biny-text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.biny-mcp-dialog-backdrop {
+  position: fixed;
+  z-index: 140;
+  display: flex;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 48%);
+}
+
+.biny-mcp-dialog-backdrop.is-market-install {
+  background: rgb(0 0 0 / 52%);
+  backdrop-filter: blur(8px);
+}
+
+.biny-mcp-dialog {
+  display: flex;
+  width: min(760px, calc(100vw - 48px));
+  max-height: min(850px, calc(100vh - 48px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: var(--biny-radius-dialog);
+  color: var(--biny-text);
+  background: var(--biny-surface-elevated);
+  box-shadow: var(--biny-shadow-dialog);
+}
+
+.biny-mcp-dialog-header {
+  display: flex;
+  min-height: 78px;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--biny-border);
+}
+
+.biny-mcp-dialog-header > div {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.biny-mcp-dialog-scroll {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 20px 24px;
+}
+
+.biny-mcp-clipboard-button {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 19px;
+  padding: 0 11px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-soft);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.biny-mcp-clipboard-button:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-mcp-form-section {
+  margin-bottom: 22px;
+}
+
+.biny-mcp-form-section > h3,
+.biny-mcp-secret-heading h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.biny-mcp-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.biny-mcp-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.biny-mcp-field.is-wide {
+  grid-column: 1 / -1;
+}
+
+.biny-mcp-field > span,
+.biny-mcp-form-label {
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.biny-mcp-field em {
+  color: var(--biny-danger);
+  font-style: normal;
+}
+
+.biny-mcp-field input,
+.biny-mcp-field textarea,
+.biny-mcp-field select,
+.biny-mcp-secret-row input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  outline: 0;
+  color: var(--biny-text);
+  background: var(--biny-surface-soft);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.biny-mcp-field input,
+.biny-mcp-field select {
+  height: 36px;
+  padding: 0 10px;
+}
+
+.biny-mcp-field textarea {
+  min-height: 72px;
+  padding: 9px 10px;
+  resize: vertical;
+}
+
+.biny-mcp-field input:focus,
+.biny-mcp-field textarea:focus,
+.biny-mcp-field select:focus,
+.biny-mcp-secret-row input:focus {
+  border-color: var(--biny-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--biny-focus) 14%, transparent);
+}
+
+.biny-mcp-field input::placeholder,
+.biny-mcp-field textarea::placeholder,
+.biny-mcp-secret-row input::placeholder {
+  color: var(--biny-placeholder);
+}
+
+.biny-mcp-field small,
+.biny-mcp-form-hint,
+.biny-mcp-secret-heading p {
+  margin: -2px 0 0;
+  color: var(--biny-text-tertiary);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.biny-mcp-oauth-note {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 15px;
+  padding: 10px 11px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  color: var(--biny-text-tertiary);
+  background: var(--biny-surface-soft);
+}
+
+.biny-mcp-oauth-note > svg {
+  flex: 0 0 auto;
+  color: var(--biny-focus);
+}
+
+.biny-mcp-oauth-note > div {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.biny-mcp-oauth-note strong {
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+}
+
+.biny-mcp-oauth-note span {
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.biny-mcp-oauth-note button {
+  display: flex;
+  width: 36px;
+  height: 20px;
+  align-items: center;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--biny-border-strong);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.biny-mcp-oauth-note button span {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--biny-text-tertiary);
+}
+
+.biny-mcp-form-label {
+  margin-top: 4px;
+  margin-bottom: 7px;
+}
+
+.biny-mcp-segmented {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.biny-mcp-segmented button {
+  height: 34px;
+  min-width: 150px;
+  padding: 0 15px;
+  border-color: var(--biny-border);
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.biny-mcp-segmented button:hover,
+.biny-mcp-segmented button.is-active {
+  color: var(--biny-text);
+  border-color: var(--biny-focus);
+  background: var(--biny-focus);
+}
+
+.biny-mcp-secret-section {
+  padding-top: 5px;
+  border-top: 1px solid var(--biny-border);
+}
+
+.biny-mcp-secret-heading {
+  align-items: flex-start;
+}
+
+.biny-mcp-secret-heading > div {
+  min-width: 0;
+}
+
+.biny-mcp-secret-heading h3 {
+  margin-bottom: 4px;
+}
+
+.biny-mcp-link-action {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--biny-focus);
+  font-size: 10px;
+}
+
+.biny-mcp-secret-list {
+  display: grid;
+  gap: 7px;
+}
+
+.biny-mcp-secret-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.8fr) minmax(180px, 1.5fr) 30px;
+  align-items: center;
+  gap: 7px;
+}
+
+.biny-mcp-secret-row input {
+  height: 34px;
+  padding: 0 9px;
+}
+
+.biny-mcp-secret-empty {
+  margin: 0;
+  color: var(--biny-text-tertiary);
+  font-size: 11px;
+}
+
+.biny-mcp-test-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 15px;
+  padding: 10px 11px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.biny-mcp-test-result.is-success {
+  color: var(--biny-success);
+  background: var(--biny-success-bg);
+}
+
+.biny-mcp-test-result.is-error {
+  color: var(--biny-warning);
+  background: var(--biny-warning-bg);
+}
+
+.biny-mcp-test-result div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.biny-mcp-test-result span,
+.biny-mcp-test-result small {
+  color: var(--biny-text-secondary);
+  line-height: 1.4;
+}
+
+.biny-mcp-dialog-footer {
+  min-height: 64px;
+  justify-content: flex-end;
+  padding: 12px 20px;
+  border-top: 1px solid var(--biny-border);
+  background: var(--biny-surface);
+}
+
+.biny-mcp-secondary-button,
+.biny-mcp-danger-button,
+.biny-mcp-primary-button {
+  min-height: 34px;
+  padding: 0 13px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.biny-mcp-secondary-button {
+  border-color: var(--biny-border);
+  background: var(--biny-surface-soft);
+}
+
+.biny-mcp-secondary-button:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-mcp-primary-button {
+  color: var(--biny-send-icon);
+  background: var(--biny-focus);
+}
+
+.biny-mcp-danger-button {
+  border-color: var(--biny-danger);
+  color: var(--biny-send-icon);
+  background: var(--biny-danger);
+}
+
+.biny-mcp-confirm-dialog {
+  width: min(390px, calc(100vw - 48px));
+  padding: 22px;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: var(--biny-radius-dialog);
+  text-align: center;
+  background: var(--biny-surface-elevated);
+  box-shadow: var(--biny-shadow-dialog);
+}
+
+.biny-mcp-confirm-icon {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  color: var(--biny-warning);
+  background: var(--biny-warning-bg);
+}
+
+.biny-mcp-confirm-dialog h2 {
+  margin: 13px 0 7px;
+  font-size: 16px;
+}
+
+.biny-mcp-confirm-dialog p {
+  margin: 0;
+  color: var(--biny-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.biny-mcp-dialog-actions {
+  justify-content: center;
+  margin-top: 19px;
+}
+
+@media (max-width: 980px) {
+  .biny-mcp-installed-layout {
+    grid-template-columns: minmax(320px, 1fr) minmax(270px, 0.65fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .biny-mcp-add-button {
+    align-self: flex-end;
+  }
+
+  .biny-mcp-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .biny-mcp-search {
+    order: 3;
+    max-width: none;
+    flex-basis: 100%;
+  }
+
+  .biny-mcp-installed-layout {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .biny-mcp-details {
+    position: static;
+    width: 100%;
+  }
+
+  .biny-mcp-details-body {
+    max-height: none;
+  }
+}
+
+@media (max-width: 540px) {
+  .biny-mcp-category {
+    flex: 1 1 130px;
+  }
+
+  .biny-mcp-market-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .biny-mcp-dialog-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .biny-mcp-dialog {
+    width: 100%;
+    max-height: 94vh;
+    border-radius: 14px 14px 0 0;
+  }
+
+  .biny-mcp-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .biny-mcp-field.is-wide {
+    grid-column: auto;
+  }
+
+  .biny-mcp-secret-row {
+    grid-template-columns: minmax(0, 1fr) 30px;
+  }
+
+  .biny-mcp-secret-row input:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .biny-mcp-segmented button {
+    min-width: 0;
+    flex: 1 1 0;
+  }
+
+  .biny-mcp-installed-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .biny-mcp-row-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+/* 设置中的扩展页沿用统一的设置外壳，只补充扩展列表的独立滚动。 */
+.settings-modal.is-full-page.is-extension-settings {
+  --settings-extension-control-height: 34px;
+  --settings-extension-tabs-height: 36px;
+}
+
+.settings-content.is-extension-settings {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  /* 扩展列表本身负责滚动，不能继承普通设置页给内容预留的底部空白。 */
+  padding-bottom: 0;
+}
+
+.settings-modal.is-full-page .settings-content.is-extension-settings > header {
+  flex: 0 0 auto;
+  padding-inline: max(28px, calc((100% - var(--settings-content-max)) / 2));
+}
+
+/* MCP、技能和插件共用设置页的控件密度，避免页面切换时出现明显缩放跳变。 */
+.settings-modal.is-extension-settings .biny-mcp-toolbar {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 16px;
+}
+
+.settings-modal.is-extension-settings .settings-plugin-toolbar {
+  flex-wrap: wrap;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-tabs {
+  min-height: var(--settings-extension-tabs-height);
+  gap: 0;
+  padding: 3px;
+  border-radius: 9px;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-tabs button {
+  min-width: 112px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: calc(12px * var(--font-scale));
+}
+
+.settings-modal.is-extension-settings .biny-mcp-search,
+.settings-modal.is-extension-settings .biny-mcp-category {
+  height: var(--settings-extension-control-height);
+  border-radius: 8px;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-search {
+  gap: 7px;
+  padding-inline: 10px;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-search input {
+  font-size: calc(12px * var(--font-scale));
+}
+
+.settings-modal.is-extension-settings .biny-mcp-category select {
+  padding-left: 11px;
+  border-radius: 8px;
+  font-size: calc(12px * var(--font-scale));
+}
+
+.settings-modal.is-extension-settings .biny-mcp-toolbar-add-button {
+  height: 36px;
+  padding-inline: 14px;
+  border-radius: 8px;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-toolbar > .biny-mcp-icon-button {
+  width: 30px;
+  height: 30px;
+  flex-basis: 30px;
+  border-radius: 8px;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-market-card,
+.settings-modal.is-extension-settings .biny-mcp-installed-card,
+.settings-modal.is-extension-settings .biny-mcp-details {
+  border-radius: var(--biny-radius-card);
+}
+
+.settings-modal.is-extension-settings .biny-mcp-install-button,
+.settings-modal.is-extension-settings .biny-mcp-link-button {
+  min-height: 30px;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-link-button {
+  width: 30px;
+  height: 30px;
+}
+
+.settings-content > .settings-extension-view {
+  display: flex;
+  width: min(var(--settings-content-max), calc(100% - 56px));
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  height: 0;
+  margin: 0 auto;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+
+.settings-skill-auto-card {
+  position: relative;
+  display: grid;
+  min-height: 160px;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 16px;
+  margin-bottom: 14px;
+  padding: 18px 20px 16px;
+  border: 1px solid var(--biny-border);
+  border-radius: 12px;
+  background: var(--biny-surface-elevated);
+}
+
+.settings-skill-auto-card h3,
+.settings-skill-auto-card p {
+  margin: 0;
+}
+
+.settings-skill-auto-card h3 {
+  font-size: calc(14px * var(--font-scale));
+  font-weight: 650;
+}
+
+.settings-skill-auto-card > div:first-child > p {
+  margin-top: 4px;
+  color: var(--biny-text-secondary);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.settings-skill-checkbox {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: var(--biny-selection-text);
+  background: var(--biny-focus);
+}
+
+.settings-skill-threshold {
+  grid-column: 1 / -1;
+  align-self: end;
+  margin-top: 16px;
+}
+
+.settings-skill-threshold-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--biny-text-secondary);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.settings-skill-threshold-label strong {
+  font-weight: 600;
+}
+
+.settings-skill-slider {
+  position: relative;
+  height: 8px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: var(--biny-border-strong);
+}
+
+.settings-skill-slider::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 16%;
+  border-radius: inherit;
+  background: var(--biny-focus);
+  content: "";
+}
+
+.settings-skill-slider span {
+  position: absolute;
+  top: 50%;
+  left: 16%;
+  width: 18px;
+  height: 18px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--biny-focus);
+  border-radius: 50%;
+  background: var(--biny-surface-elevated);
+}
+
+.settings-skill-threshold > p {
+  margin-top: 8px;
+  color: var(--biny-text-secondary);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.settings-extension-list-heading {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  color: var(--biny-text-secondary);
+  font-size: calc(13px * var(--font-scale));
+}
+
+.settings-extension-list-heading > div,
+.settings-plugin-toolbar,
+.settings-plugin-tabs,
+.settings-plugin-categories {
+  display: flex;
+  align-items: center;
+}
+
+.settings-extension-list-heading > div {
+  gap: 8px;
+}
+
+.settings-extension-list-heading button,
+.settings-plugin-action {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-soft);
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-extension-list-heading button:hover,
+.settings-plugin-action:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.settings-extension-search {
+  display: flex;
+  min-height: 36px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: 8px;
+  color: var(--biny-text-tertiary);
+  background: var(--biny-surface-soft);
+}
+
+.settings-extension-search:focus-within {
+  border-color: var(--biny-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--biny-focus) 14%, transparent);
+}
+
+.settings-extension-search input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  color: var(--biny-text);
+  background: transparent;
+  font-size: calc(12px * var(--font-scale));
+}
+
+.settings-extension-search input::placeholder {
+  color: var(--biny-text-tertiary);
+}
+
+.settings-extension-search > button {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.settings-extension-search > button:hover {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.settings-extension-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 18px 0 12px;
+  scrollbar-gutter: stable;
+}
+
+.settings-extension-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--biny-text-secondary);
+  font-size: calc(13px * var(--font-scale));
+}
+
+.settings-extension-group-title span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: var(--biny-text);
+  background: var(--biny-surface-selected);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.settings-skill-card,
+.settings-plugin-card {
+  position: relative;
+  min-width: 0;
+  margin-bottom: 12px;
+  border: 1px solid var(--biny-border);
+  border-radius: 12px;
+  background: var(--biny-surface-elevated);
+}
+
+.settings-skill-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 18px 20px 16px;
+}
+
+.settings-skill-card.is-disabled {
+  opacity: 0.58;
+}
+
+.settings-skill-card-main {
+  min-width: 0;
+}
+
+.settings-skill-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-skill-card-heading h4,
+.settings-skill-card-heading span,
+.settings-skill-card-main > p {
+  margin: 0;
+}
+
+.settings-skill-card-heading h4 {
+  overflow: hidden;
+  color: var(--biny-text);
+  font-size: calc(14px * var(--font-scale));
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-skill-card-heading span {
+  color: var(--biny-text-tertiary);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.settings-skill-card-main > p {
+  display: -webkit-box;
+  max-width: 100%;
+  margin-top: 7px;
+  overflow: hidden;
+  color: var(--biny-text-secondary);
+  font-size: calc(12px * var(--font-scale));
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.settings-skill-card-footer {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.settings-skill-content-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+}
+
+.settings-skill-content-toggle:hover {
+  color: var(--biny-text);
+}
+
+.settings-skill-content-toggle > svg {
+  transform: rotate(0deg);
+  transition: transform 140ms ease;
+}
+
+.settings-skill-card.is-expanded .settings-skill-content-toggle > svg {
+  transform: rotate(180deg);
+}
+
+.settings-skill-path {
+  min-width: 0;
+  max-width: 48%;
+  padding: 6px 9px;
+  overflow: hidden;
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-selected);
+  font-family: var(--font-mono);
+  font-size: calc(10px * var(--font-scale));
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-extension-switch {
+  display: inline-flex;
+  width: 42px;
+  height: 24px;
+  align-items: center;
+  align-self: start;
+  justify-content: flex-start;
+  padding: 3px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--biny-border-strong);
+  cursor: pointer;
+}
+
+.settings-extension-switch span {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 22%);
+  transition: transform 140ms ease;
+}
+
+.settings-extension-switch.is-on {
+  background: var(--biny-focus);
+}
+
+.settings-extension-switch.is-on span {
+  transform: translateX(18px);
+}
+
+.settings-skill-content {
+  grid-column: 1 / -1;
+  max-height: 300px;
+  overflow: auto;
+  padding: 14px 16px;
+  border-radius: 9px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-code);
+  scrollbar-gutter: stable;
+}
+
+.settings-skill-content > span {
+  color: var(--biny-text-tertiary);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.settings-skill-content pre {
+  margin: 0;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.settings-plugin-toolbar {
+  flex: 0 0 auto;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.settings-plugin-tabs {
+  min-height: 36px;
+  gap: 0;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--biny-surface-selected);
+}
+
+.settings-plugin-tabs button,
+.settings-plugin-categories button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 1px solid transparent;
+  color: var(--biny-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-plugin-tabs button {
+  min-width: 112px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: calc(12px * var(--font-scale));
+  font-weight: 600;
+}
+
+.settings-plugin-tabs button:hover,
+.settings-plugin-tabs button.is-active {
+  color: var(--biny-text);
+  background: var(--biny-surface-elevated);
+}
+
+.settings-plugin-tabs button.is-active {
+  box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
+}
+
+.settings-plugin-toolbar > .settings-plugin-action:first-of-type {
+  margin-left: auto;
+}
+
+.settings-plugin-categories {
+  flex: 0 0 auto;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.settings-plugin-categories button {
+  min-height: 30px;
+  padding: 0 12px;
+  border-color: var(--biny-border-strong);
+  border-radius: 999px;
+  font-size: calc(11px * var(--font-scale));
+}
+
+.settings-plugin-categories button:hover,
+.settings-plugin-categories button.is-active {
+  color: var(--biny-focus);
+  border-color: var(--biny-focus);
+}
+
+.settings-plugin-search {
+  margin-bottom: 14px;
+}
+
+.settings-plugin-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 0 0 12px;
+  scrollbar-gutter: stable;
+}
+
+/* 让长列表只在自己的区域滚动，避免 flex 根据内容撑高后被设置页外壳提前裁切。 */
+.settings-extension-scroll,
+.settings-plugin-list {
+  flex: 1 1 0;
+}
+
+.settings-plugin-card {
+  display: flex;
+  min-height: 100px;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 20px;
+}
+
+.settings-plugin-card-icon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--biny-text-secondary);
+}
+
+.settings-plugin-card h3,
+.settings-plugin-card p {
+  margin: 0;
+}
+
+.settings-plugin-card h3 {
+  font-size: calc(14px * var(--font-scale));
+}
+
+.settings-plugin-card p {
+  margin-top: 5px;
+  color: var(--biny-text-secondary);
+  font-family: var(--font-mono);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.settings-plugin-status {
+  display: inline-flex;
+  margin-top: 9px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: var(--biny-success);
+  background: var(--biny-success-bg);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.settings-plugin-status.is-missing {
+  color: var(--biny-danger);
+  background: var(--biny-danger-bg);
+}
+
+.settings-plugin-card > .settings-extension-switch {
+  margin-left: auto;
+}
+
+.settings-extension-state,
+.settings-plugin-market-placeholder {
+  display: flex;
+  min-height: 180px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--biny-text-tertiary);
+  text-align: center;
+}
+
+.settings-extension-state.is-empty,
+.settings-plugin-market-placeholder {
+  flex: 1 1 auto;
+}
+
+.settings-extension-state h3,
+.settings-extension-state p,
+.settings-plugin-market-placeholder h3,
+.settings-plugin-market-placeholder p {
+  margin: 0;
+}
+
+.settings-extension-state h3,
+.settings-plugin-market-placeholder h3 {
+  color: var(--biny-text-secondary);
+  font-size: calc(14px * var(--font-scale));
+}
+
+.settings-extension-state p,
+.settings-plugin-market-placeholder p {
+  max-width: 360px;
+  color: var(--biny-text-tertiary);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.settings-extension-notice {
+  flex: 0 0 auto;
+  margin: 0 0 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-soft);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.45;
+}
+
+.settings-extension-notice.is-warning {
+  color: var(--biny-warning);
+  background: var(--biny-warning-bg);
+}
+
+.settings-skill-threshold input[type="range"] {
+  width: 100%;
+  margin-top: 8px;
+  accent-color: var(--biny-focus);
+}
+
+.settings-skill-drafts {
+  min-height: 0;
+  flex: 0 0 auto;
+  max-height: min(38vh, 340px);
+  margin-bottom: 12px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.settings-skill-draft-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 10px;
+  padding: 13px 15px;
+  border: 1px solid var(--biny-border);
+  border-radius: 10px;
+  background: var(--biny-surface-soft);
+}
+
+.settings-skill-draft-card > div:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.settings-skill-draft-card p,
+.settings-skill-draft-card pre {
+  margin: 7px 0 0;
+  color: var(--biny-text-secondary);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.settings-skill-draft-card pre {
+  max-height: 120px;
+  overflow: auto;
+  color: var(--biny-text-tertiary);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.settings-skill-draft-editor {
+  display: block;
+  width: 100%;
+  min-height: 150px;
+  margin-top: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--biny-focus);
+  border-radius: 7px;
+  color: var(--biny-text-primary);
+  background: var(--biny-surface-elevated);
+  font: inherit;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.settings-skill-draft-error {
+  color: var(--biny-danger) !important;
+}
+
+.settings-skill-draft-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.settings-skill-draft-actions button,
+.settings-plugin-install-button,
+.settings-plugin-danger-button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-elevated);
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-skill-draft-actions button:first-child,
+.settings-plugin-install-button {
+  color: var(--biny-selection-text);
+  border-color: var(--biny-focus);
+  background: var(--biny-focus);
+}
+
+.settings-plugin-danger-button {
+  margin-left: 4px;
+  color: var(--biny-danger);
+}
+
+.settings-plugin-install-button:disabled,
+.settings-plugin-danger-button:disabled,
+.settings-skill-draft-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.settings-plugin-description {
+  display: block;
+  margin-top: 8px;
+  color: var(--biny-text-secondary);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.45;
+}
+
+/* MCP 应用市场和已安装区统一为单列；详情面板也顺序排在列表之后。 */
+.settings-modal.is-extension-settings .biny-mcp-page {
+  display: flex;
+  width: min(var(--settings-content-max), calc(100% - 56px));
+  min-height: 0;
+  flex: 1 1 0;
+  height: 0;
+  margin: 0 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-body {
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-market-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-modal.is-extension-settings .biny-mcp-installed-layout {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-modal.is-extension-settings .biny-mcp-details {
+  position: static;
+}
+
+.biny-mcp-install-dialog {
+  display: flex;
+  width: min(780px, calc(100vw - 48px));
+  max-height: min(820px, calc(100vh - 48px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: 17px;
+  background: var(--biny-surface-elevated);
+  box-shadow: var(--biny-shadow-dialog);
+}
+
+.biny-mcp-install-summary {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 30px 36px 26px;
+  border-bottom: 1px solid var(--biny-border);
+  background: var(--biny-surface-hover);
+}
+
+.biny-mcp-install-summary-icon {
+  display: inline-flex;
+  width: 72px;
+  height: 72px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 72px;
+  border-radius: 18px;
+  color: var(--biny-focus);
+  background: color-mix(in srgb, var(--biny-focus) 16%, var(--biny-surface-elevated));
+}
+
+.biny-mcp-install-summary-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.biny-mcp-install-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.biny-mcp-install-title-row h2 {
+  overflow: hidden;
+  margin: 0;
+  font-size: 22px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-mcp-install-author {
+  margin: 6px 0 0;
+  color: var(--biny-text-secondary);
+  font-size: 15px;
+}
+
+.biny-mcp-install-description {
+  display: -webkit-box;
+  margin: 18px 0 0;
+  overflow: hidden;
+  color: var(--biny-text-secondary);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.biny-mcp-install-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 20px;
+  padding: 0;
+  border: 0;
+  color: var(--biny-focus);
+  background: transparent;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.biny-mcp-install-link:hover {
+  color: var(--biny-text);
+}
+
+.biny-mcp-install-fields {
+  min-height: 0;
+  overflow: auto;
+  padding: 26px 36px 30px;
+  scrollbar-gutter: stable;
+}
+
+.biny-mcp-install-label {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--biny-text);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.biny-mcp-install-fields > select {
+  width: min(220px, 100%);
+  height: 48px;
+  padding: 0 12px;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: 11px;
+  outline: 0;
+  color: var(--biny-text);
+  background: var(--biny-surface-soft);
+  font-size: 15px;
+}
+
+.biny-mcp-install-fields > select:focus {
+  border-color: var(--biny-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--biny-focus) 14%, transparent);
+}
+
+.biny-mcp-install-prerequisites,
+.biny-mcp-install-parameters {
+  margin-top: 28px;
+}
+
+.biny-mcp-install-prerequisites > strong,
+.biny-mcp-install-parameters > span {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--biny-text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.biny-mcp-install-prerequisites > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.biny-mcp-install-prerequisites span {
+  padding: 5px 10px;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: 999px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-soft);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.biny-mcp-install-parameters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.biny-mcp-install-parameters > span {
+  grid-column: 1 / -1;
+  margin-bottom: -2px;
+}
+
+.biny-mcp-install-parameters label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+}
+
+.biny-mcp-install-parameters input {
+  width: 100%;
+  height: 42px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: 9px;
+  outline: 0;
+  color: var(--biny-text);
+  background: var(--biny-surface-soft);
+  font-size: 13px;
+}
+
+.biny-mcp-install-parameters input:focus {
+  border-color: var(--biny-focus);
+}
+
+.biny-mcp-install-validation {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 18px 0 0;
+  color: var(--biny-warning);
+  font-size: 13px;
+}
+
+.biny-mcp-install-footer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 18px 36px 24px;
+  border-top: 1px solid var(--biny-border);
+}
+
+@media (max-width: 540px) {
+  .biny-mcp-install-dialog {
+    width: 100%;
+    max-height: 94vh;
+    border-radius: 17px 17px 0 0;
+  }
+
+  .biny-mcp-install-summary,
+  .biny-mcp-install-fields {
+    padding-inline: 22px;
+  }
+
+  .biny-mcp-install-summary-icon {
+    width: 56px;
+    height: 56px;
+    flex-basis: 56px;
+  }
+
+  .biny-mcp-install-parameters {
+    grid-template-columns: 1fr;
+  }
+
+  .biny-mcp-install-parameters > span {
+    grid-column: auto;
+  }
+
+  .biny-mcp-install-footer {
+    padding-inline: 22px;
+  }
+}
+
+@media (max-width: 980px) {
+  .settings-skill-card,
+  .settings-skill-auto-card {
+    padding-inline: 32px;
+  }
+
+  .settings-plugin-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .settings-plugin-toolbar > .settings-plugin-action:first-of-type {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 700px) {
+  .settings-content > .settings-extension-view,
+  .settings-modal.is-extension-settings .biny-mcp-page {
+    width: calc(100% - 32px);
+  }
+
+  .settings-skill-auto-card {
+    min-height: 220px;
+    padding: 24px;
+  }
+
+  .settings-skill-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 24px;
+  }
+
+  .settings-skill-card-footer {
+    align-items: flex-start;
+    flex-direction: column-reverse;
+    gap: 12px;
+  }
+
+  .settings-skill-path {
+    max-width: 100%;
+  }
+
+  .settings-plugin-tabs {
+    width: 100%;
+  }
+
+  .settings-plugin-tabs button {
+    min-width: 0;
+    flex: 1 1 0;
+  }
+
+  .settings-plugin-action {
+    flex: 1 1 auto;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 1200px) {
+  .settings-modal.is-extension-settings .biny-mcp-search {
+    order: 3;
+    max-width: none;
+    flex-basis: 100%;
+  }
+
+  .settings-modal.is-extension-settings .biny-mcp-category {
+    order: 4;
+  }
+
+  .settings-modal.is-extension-settings .biny-mcp-toolbar-add-button {
+    order: 5;
+    margin-left: auto;
+  }
+
+  .settings-modal.is-extension-settings .biny-mcp-toolbar > .biny-mcp-icon-button {
+    order: 6;
+  }
+}
+
+/* 会话接近持久化上限时的预警条：落在聊天正文顶部，可一键分叉或忽略。 */
+.biny-session-limit-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 14px 0;
+  padding: 10px 12px 10px 14px;
+  border: 1px solid var(--biny-warning);
+  border-radius: var(--biny-radius-control);
+  background: var(--biny-warning-bg);
+  color: var(--biny-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.biny-session-limit-banner > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.biny-session-limit-banner > button[type="button"]:not(.biny-session-limit-dismiss) {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border: 1px solid var(--biny-warning);
+  border-radius: var(--biny-radius-control);
+  background: var(--biny-warning);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.biny-session-limit-banner > button:not(.biny-session-limit-dismiss):hover {
+  filter: brightness(1.08);
+}
+
+.biny-session-limit-dismiss {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--biny-text-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.biny-session-limit-dismiss:hover {
+  background: var(--biny-border);
+  color: var(--biny-text);
+}
