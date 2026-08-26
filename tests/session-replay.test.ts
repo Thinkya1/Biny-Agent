@@ -42,6 +42,15 @@ function main(): void {
   assert.equal(notStarted.discardedToolCalls[0]?.state, "not_started");
   assert.equal(notStarted.messages.some((message) => hasToolCall(message, "not-started")), false);
 
+  const admitted = replaySessionEvents([
+    { type: "user_message", content: "crash after admission" },
+    { type: "tool_call", tool: "write_file", args: { path: "a.txt" }, toolCallId: "admitted-1", sequence: 1 },
+    { type: "tool_execution", tool: "write_file", toolCallId: "admitted-1", sequence: 1, operationId: "op-admitted-1", state: "admitted" }
+  ]);
+  assert.equal(admitted.recoveredToolResults[0]?.executionStatus, "unknown");
+  assert.equal(admitted.recoveredToolResults[0]?.auditOnly, undefined);
+  assert.equal(admitted.messages.some((message) => hasToolResult(message, "admitted-1")), true);
+
   const sideEffectCommitted = replaySessionEvents([
     { type: "user_message", content: "write once" },
     { type: "tool_call", tool: "write_file", args: { path: "a.txt" }, toolCallId: "write-1", sequence: 1 },

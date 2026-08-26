@@ -115,6 +115,73 @@ async function main(): Promise<void> {
   }
 }
 
+/** 持久化层外置：回合预算内（模型拿全文）但超过行内落盘上限的结果，JSONL 里只留归档引用。 */
+async function testPersistLevelOutlining(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-tool-result-persist-"));
+  let recorder: SessionRecorder | undefined;
+  try {
+    await ensureAgentDirs(workspaceRoot);
+    const config = structuredClone(defaultConfig) as AgentConfig;
+    // 回合预算放大到不会触发模型侧归档，隔离出持久化层的行为。
+    config.context.maxTurnToolResultBytes = 16 * 1024 * 1024;
+    config.permission.mode = "full-access";
+    const registry = new ToolRegistry();
+    registry.register(hugeResultTool());
+    recorder = new SessionRecorder(workspaceRoot, "persist-outline-test");
+    const coordinator = new ToolExecutionCoordinator({
+      workspaceRoot,
+      config,
+      recorder,
+      toolRegistry: registry
+    }, new PermissionManager(config.permission), () => undefined);
+    const tool = nativeTool(coordinator, "huge_result");
+
+    // 模型侧结果保持全文（预算内），不因落盘外置而缩水。
+    const modelFacing = await tool.execute("persist-1", {}) as Record<string, unknown>;
+    assert.equal(JSON.stringify(modelFacing).includes("y".repeat(64 * 1024)), true, "model-facing result must stay full");
+
+    const persistedResults = (await readFile(recorder.filePath, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { type: string; result?: Record<string, unknown> })
+      .filter((event) => event.type === "tool_result");
+    assert.equal(persistedResults.length, 1, "exactly one tool_result event should be persisted");
+    const persisted = persistedResults[0]!;
+    assert.equal(persisted.result?.archived, true, "oversized result must be archived out of the JSONL");
+    assert.equal(typeof persisted.result?.archivePath, "string");
+    assert.equal(typeof persisted.result?.preview, "string");
+    // JSONL 里不允许再出现全文：整份文件必须远小于 64KB 的原始结果。
+    const fileBytes = Buffer.byteLength(await readFile(recorder.filePath, "utf8"), "utf8");
+    assert.equal(fileBytes < 32 * 1024, true, `session file must stay lean, got ${String(fileBytes)} bytes`);
+
+    // 归档文件保留全文，read_tool_result 可取回。
+    const archive = JSON.parse(await readFile(path.join(workspaceRoot, String(persisted.result!.archivePath)), "utf8")) as { output?: string };
+    assert.equal(JSON.parse(archive.output ?? "{}").result, "y".repeat(64 * 1024));
+    await recorder.close();
+  } finally {
+    await recorder?.close().catch(() => undefined);
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+}
+
+function hugeResultTool(): Tool<Record<string, never>, string> {
+  return {
+    name: "huge_result",
+    description: "Return a result that exceeds the inline persistence limit.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    schema: z.object({}),
+    risk: "read",
+    resolveExecution() {
+      return {
+        approvalRule: "huge_result",
+        async execute() {
+          return "y".repeat(64 * 1024);
+        }
+      };
+    }
+  };
+}
+
 function largeResultTool(): Tool<Record<string, never>, string> {
   return {
     name: "large_result",
@@ -145,4 +212,5 @@ function nativeTool(coordinator: ToolExecutionCoordinator, name: string): Execut
 }
 
 await testConcurrentToolResultBudget();
+await testPersistLevelOutlining();
 await main();

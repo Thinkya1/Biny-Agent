@@ -20,7 +20,7 @@ import { validateRuntimeEventStream } from "../src/session/runtimeEvent.js";
 import { ensureAgentDirs, sessionFilePath } from "../src/session/store.js";
 import { TurnStore } from "../src/session/turnStore.js";
 import { ToolRegistry } from "../src/tools/registry.js";
-import type { Tool } from "../src/tools/types.js";
+import type { Tool, ToolExecutionContext } from "../src/tools/types.js";
 
 interface WorkerOptions {
   workspaceRoot: string;
@@ -28,7 +28,7 @@ interface WorkerOptions {
   endpoint: string;
   executionLog: string;
   phase: "initial" | "resumed";
-  crash: "during-tool-b" | "after-tool-b";
+  crash: "during-tool-b" | "after-side-effect-b" | "after-tool-b";
 }
 
 async function main(): Promise<void> {
@@ -40,6 +40,7 @@ async function main(): Promise<void> {
     await testCorruptStateIsIgnored(root);
     await testIsolatedPerSession(root);
     await testAgentSessionResumesAfterCrashDuringToolB();
+    await testAgentSessionResumesAfterCrashAfterSideEffectB();
     await testAgentSessionResumesAfterCrashAfterToolB();
     console.log("turn resume tests passed");
   } finally {
@@ -121,6 +122,10 @@ async function testAgentSessionResumesAfterCrashDuringToolB(): Promise<void> {
   await testAgentSessionCrashRecovery("during-tool-b", 1);
 }
 
+async function testAgentSessionResumesAfterCrashAfterSideEffectB(): Promise<void> {
+  await testAgentSessionCrashRecovery("after-side-effect-b", 1);
+}
+
 async function testAgentSessionResumesAfterCrashAfterToolB(): Promise<void> {
   await testAgentSessionCrashRecovery("after-tool-b", 2);
 }
@@ -138,6 +143,7 @@ async function testAgentSessionCrashRecovery(
   const sessionId = `resume-${crash}`;
   const provider = await startRecoveryProvider(crash);
   try {
+    const sessionFile = await ensureIsolatedSessionFilePath(workspaceRoot, sessionId);
     const initial = spawnWorker({
       workspaceRoot,
       sessionId,
@@ -148,7 +154,13 @@ async function testAgentSessionCrashRecovery(
     });
     const initialResult = crash === "after-tool-b"
       ? await killAfterToolB(initial, provider.afterToolBRequest)
-      : await childResult(initial);
+      : crash === "after-side-effect-b"
+        ? await killAfterPersistedState(
+          initial,
+          sessionFile,
+          '"state":"side_effect_committed"'
+        )
+        : await childResult(initial);
     if (crash === "during-tool-b") {
       assert.equal(initialResult.code, 73, initialResult.stderr);
     } else {
@@ -169,11 +181,15 @@ async function testAgentSessionCrashRecovery(
     const resumedResult = await childResult(resumed);
     assert.equal(resumedResult.code, 0, resumedResult.stderr);
     const outcome = JSON.parse(resumedResult.stdout.trim()) as AgentTurnOutcome;
-    assert.equal(outcome.status, "completed");
-    assert.equal(outcome.steps, crash === "during-tool-b" ? 2 : 3);
+    assert.equal(outcome.status, crash === "during-tool-b" ? "blocked" : "completed");
+    assert.equal(
+      outcome.steps,
+      crash === "during-tool-b" ? 1 : crash === "after-side-effect-b" ? 2 : 3
+    );
+    if (crash === "during-tool-b") assert.match(outcome.error ?? "", /unresolved side effect/u);
     assert.equal(await new TurnStore(workspaceRoot, sessionId).load(), undefined);
 
-    const sessionEvents = await readSessionEvents(isolatedSessionFilePath(workspaceRoot, sessionId));
+    const sessionEvents = await readSessionEvents(sessionFile);
     const runtimeEvents = sessionEvents.filter((event) => event.runtime !== undefined);
     assert.equal(runtimeEvents.length, sessionEvents.length, "new session facts must carry runtime identity");
     assert.deepEqual(
@@ -202,19 +218,24 @@ async function testAgentSessionCrashRecovery(
 
     const executions = (await readFile(executionLog, "utf8")).trim().split("\n");
     assert.equal(executions.filter((entry) => entry === "tool-a:done").length, 1);
-    assert.equal(executions.filter((entry) => entry === "tool-b:done").length, crash === "during-tool-b" ? 0 : 1);
+    assert.equal(executions.filter((entry) => entry === "tool-b:side-effect").length, crash === "after-side-effect-b" ? 1 : 0);
+    assert.equal(executions.filter((entry) => entry === "tool-b:done").length, crash === "after-tool-b" ? 1 : 0);
     assert.equal(
       executions.filter((entry) => entry === "tool-b:start").length,
       1
     );
 
     const resumedRequest = provider.resumedRequests[0];
-    assert.ok(resumedRequest?.includes("call-a"), "resumed context must include tool A");
-    assert.equal(
-      resumedRequest?.includes("call-b"),
-      true,
-      "recovery must expose tool B's assistant call and its persisted or recovered result"
-    );
+    if (crash === "during-tool-b") {
+      assert.equal(provider.resumedRequests.length, 0, "unknown side effects must block before another model request");
+    } else {
+      assert.ok(resumedRequest?.includes("call-a"), "resumed context must include tool A");
+      assert.equal(
+        resumedRequest?.includes("call-b"),
+        true,
+        "recovery must expose tool B's assistant call and its persisted or recovered result"
+      );
+    }
 
     const previousAgentDir = process.env.BINY_AGENT_DIR;
     process.env.BINY_AGENT_DIR = path.join(workspaceRoot, "global-agent");
@@ -260,6 +281,29 @@ async function killAfterToolB(
   await withTimeout(afterToolBRequest, 10_000);
   child.kill("SIGKILL");
   return await childResult(child);
+}
+
+async function killAfterPersistedState(
+  child: ChildProcess,
+  sessionFile: string,
+  stateText: string
+): Promise<ChildResult> {
+  await waitForFileText(sessionFile, stateText, 10_000);
+  child.kill("SIGKILL");
+  return await childResult(child);
+}
+
+async function waitForFileText(filePath: string, text: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if ((await readFile(filePath, "utf8")).includes(text)) return;
+    } catch {
+      // 子进程还没创建 session 文件时继续轮询。
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for ${text} in ${filePath}.`);
 }
 
 interface ChildResult {
@@ -460,16 +504,22 @@ function crashTestTool(name: "tool_a" | "tool_b", options: WorkerOptions): Tool<
     description: `Execute ${name}.`,
     parameters: { type: "object", properties: {}, additionalProperties: false },
     schema: z.object({}),
-    risk: "read",
+    risk: name === "tool_b" ? "write" : "read",
     resolveExecution() {
       return {
         approvalRule: name,
-        async execute() {
+        async execute({ onExecutionState }: ToolExecutionContext) {
           if (name === "tool_a") {
             appendFileSync(options.executionLog, "tool-a:done\n");
             return { completed: true };
           }
           appendFileSync(options.executionLog, "tool-b:start\n");
+          if (options.phase === "initial" && options.crash === "after-side-effect-b") {
+            appendFileSync(options.executionLog, "tool-b:side-effect\n");
+            onExecutionState?.("side_effect_committed", "test side effect marker persisted");
+            setInterval(() => undefined, 1_000);
+            await new Promise<void>(() => undefined);
+          }
           if (options.phase === "initial" && options.crash === "during-tool-b") process.exit(73);
           appendFileSync(options.executionLog, "tool-b:done\n");
           return { completed: true };
@@ -479,10 +529,11 @@ function crashTestTool(name: "tool_a" | "tool_b", options: WorkerOptions): Tool<
   };
 }
 
-function isolatedSessionFilePath(workspaceRoot: string, sessionId: string): string {
+async function ensureIsolatedSessionFilePath(workspaceRoot: string, sessionId: string): Promise<string> {
   const previous = process.env.BINY_AGENT_DIR;
   process.env.BINY_AGENT_DIR = path.join(workspaceRoot, "global-agent");
   try {
+    await ensureAgentDirs(workspaceRoot);
     return sessionFilePath(workspaceRoot, sessionId);
   } finally {
     if (previous === undefined) delete process.env.BINY_AGENT_DIR;

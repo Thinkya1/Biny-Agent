@@ -94,6 +94,8 @@ interface FailedPreparedToolCall {
 
 const externalToolAbortDrainMs = 500;
 const maxArchivedPreviewCharacters = 8_192;
+/** 落盘 JSONL 的行内结果上限：超过就把全文外置到 .biny/tool-results，事件里只留归档引用。 */
+const inlineResultPersistMaxBytes = 32 * 1024;
 
 export interface AgentStepContext {
   assistantContent?: string;
@@ -386,7 +388,7 @@ export class ToolExecutionCoordinator {
     };
     await persistState("not_started");
     const onAbort = (): void => {
-      if (latestState === "running" || latestState === "side_effect_committed") recordState("cancel_requested", "Cancellation was requested while the tool was executing.");
+      if (latestState === "running" || latestState === "admitted" || latestState === "side_effect_committed") recordState("cancel_requested", "Cancellation was requested while the tool was executing.");
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     const finish = (
@@ -533,6 +535,9 @@ export class ToolExecutionCoordinator {
               const blocked = await this.runBeforeToolHooks(call.name, prepared.args, signal);
               if (blocked) return blocked;
               await this.ensureCheckpoint(toolDefinition.risk, call.name);
+              // 这是工具副作用前的持久边界：记录成功后才允许进入 executeResolvedTool。
+              // 崩溃发生在这里之后时，恢复不能再假设工具没有运行。
+              await persistState("admitted");
               return await this.executeResolvedTool(
                 call,
                 prepared.execution,
@@ -587,10 +592,11 @@ export class ToolExecutionCoordinator {
     } = {}
   ): Promise<unknown> {
     const modelResult = await this.applyToolResultBudget(call, sequence, result);
+    const persistedResult = await this.outlineToolResultForPersistence(call, sequence, modelResult);
     await this.context.recorder.recordAndFlush({
       type: "tool_result",
       tool: call.name,
-      result: modelResult,
+      result: persistedResult,
       toolCallId: call.id,
       sequence,
       executionStatus: metadata.executionStatus,
@@ -724,6 +730,54 @@ export class ToolExecutionCoordinator {
         ...shared,
         archiveError: formatToolError(call.name, error),
         summary: "Tool result exceeded the turn output budget and could not be archived; it is not recoverable."
+      };
+    }
+  }
+
+  /**
+   * 持久化层的大结果外置：回合预算只约束模型上下文，落盘 JSONL 的单行仍可能拖到 MB 级，
+   * 让列表扫描、打开会话和回放全部变慢。超过行内上限的结果归档到 .biny/tool-results，
+   * 事件里只留与预算归档一致的 envelope（preview + archivePath）；回放时模型看到的是
+   * preview + 可取回全文的指引，运行中的内存上下文与实时事件不受影响。
+   */
+  private async outlineToolResultForPersistence(
+    call: { id: string; name: string },
+    sequence: number,
+    modelResult: unknown
+  ): Promise<unknown> {
+    // 预算路径已归档的 envelope 只含预览，体积天然达标；二次归档只会撞同名文件。
+    if (typeof modelResult === "object" && modelResult !== null && (modelResult as { archived?: unknown }).archived === true) {
+      return modelResult;
+    }
+    const output = serializeToolResult(modelResult);
+    const resultBytes = Buffer.byteLength(output, "utf8");
+    if (resultBytes <= inlineResultPersistMaxBytes) return modelResult;
+    const preview = toolResultPreview(output, maxArchivedPreviewCharacters);
+    try {
+      const archived = await archiveToolResult({
+        workspaceRoot: this.context.workspaceRoot,
+        sessionId: this.context.recorder.sessionId,
+        toolCallId: call.id,
+        sequence,
+        tool: call.name,
+        result: modelResult,
+        output
+      });
+      return {
+        archived: true,
+        archivePath: archived.archivePath,
+        resultBytes,
+        preview,
+        summary: `Tool result exceeded the ${String(inlineResultPersistMaxBytes)} byte inline persistence limit and was archived. Call read_tool_result with archivePath "${archived.archivePath}" to read it.`
+      };
+    } catch (error) {
+      // 归档失败不能把工具调用变成失败：留预览和错误说明，模型仍能继续。
+      return {
+        archived: true,
+        resultBytes,
+        preview,
+        archiveError: formatToolError(call.name, error),
+        summary: "Tool result exceeded the inline persistence limit and could not be archived; only the preview is available."
       };
     }
   }
@@ -1164,7 +1218,7 @@ function executionStateForResultStatus(status: ToolExecutionResultStatus): ToolE
 
 function terminalResultStatus(state: ToolExecutionState, result: unknown): ToolExecutionResultStatus {
   if (state === "cancelled" || state === "cancel_requested") return "cancelled";
-  if (state === "unknown" || state === "running" || state === "side_effect_committed" || state === "not_started") return "unknown";
+  if (state === "unknown" || state === "running" || state === "admitted" || state === "side_effect_committed" || state === "not_started") return "unknown";
   if (state === "failed") return "failed";
   return failedToolResultMessage(result) ? "failed" : "succeeded";
 }
