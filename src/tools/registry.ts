@@ -19,6 +19,7 @@ import { createListFilesTool } from "./file/listFiles.js";
 import { createSearchFilesTool } from "./search/searchFiles.js";
 import { createGrepSearchTool } from "./search/grepSearch.js";
 import { createRunCommandTool } from "./shell/runCommand.js";
+import { createAttemptCompletionTool } from "./completion.js";
 import { createManagedProcessTools } from "./process/managedProcesses.js";
 import { createGitStatusTool } from "./git/status.js";
 import { createGitCommitTool } from "./git/commit.js";
@@ -118,6 +119,7 @@ export function createToolRegistry(
   registry.register(createApplyPatchTool(context));
   registry.register(createMoveFileTool(context));
   registry.register(createRunCommandTool(context, sandboxConfig));
+  registry.register(createAttemptCompletionTool());
   if (managedProcessService) {
     for (const tool of createManagedProcessTools(context, managedProcessService)) registry.register(tool);
   }

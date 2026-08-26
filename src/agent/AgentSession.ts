@@ -15,6 +15,8 @@ import {
 import { PermissionManager, type PermissionMode } from "../permission/PermissionManager.js";
 import { runPermissionCommand } from "../permission/commands.js";
 import { listSessionSummaries, parseSessionEvents, readSessionEvents, type SessionSummary } from "../session/events.js";
+import { assertSessionFileSize } from "../session/limits.js";
+import { cachedSessionEvents, sessionFileFingerprint } from "../session/parseCache.js";
 import { SessionRecorder, type ReasoningBlock, type SessionEvent } from "../session/recorder.js";
 import { replaySessionEvents, type SessionMessageReference, type SessionReplay } from "../session/replay.js";
 import { runtimeEventsForRun, type RuntimeEventSink, type RuntimeHighWater } from "../session/runtimeEvent.js";
@@ -57,13 +59,18 @@ import type {
   AgentPermissionRequest,
   AgentPermissionResult,
   AgentRuntimeContext,
+  AgentToolEvent,
   AgentSessionEvent,
   AgentTurnOutcome
 } from "./types.js";
+import {
+  CompletionGuard,
+  parseCompletionGuardSnapshot,
+  type CompletionGuardDecision,
+  type CompletionGuardSnapshot
+} from "./completionGuard.js";
+import { evaluateCompletion } from "./completionReview.js";
 import { ContextMemory } from "./context/ContextMemory.js";
-import { ActivityPrivacyPolicy } from "../activity/privacyPolicy.js";
-import { ActivityStore, resolveActivityDirectory } from "../activity/store.js";
-import type { ActivityContextEntry } from "../activity/types.js";
 import { LocalMemory, MemoryRevisionConflictError, redactSecrets } from "./context/LocalMemory.js";
 import { TelosStorage } from "./context/telosStorage.js";
 import { runMemoryCommand } from "./context/memoryCommands.js";
@@ -209,6 +216,7 @@ interface NativeTurnArgs {
   messageReferences: Array<SessionMessageReference | undefined>;
   runOptions: AgentRunOptions & {
     initialToolBudget?: ToolExecutionBudgetSnapshot;
+    initialCompletionEvidence?: CompletionGuardSnapshot;
     previousTerminals?: InterruptedTurnTerminal[];
   };
   abortSignal: AbortSignal;
@@ -249,8 +257,6 @@ export class AgentSession {
   private readonly memoryRetriever: HybridMemoryRetriever;
   private readonly localEmbeddingManager: LocalEmbeddingManager;
   private readonly memoryEmbeddingService: MemoryEmbeddingService;
-  private readonly activityStore = new ActivityStore();
-  private activityStoreDirectory: string | undefined;
   private usageRecords: SessionUsage[] = [];
   private modelRequestRecords: ModelRequestMetrics[] = [];
   private unpersistedRelatedUsage: SessionUsage[] = [];
@@ -374,8 +380,7 @@ export class AgentSession {
       options.config.context.compaction,
       onModelRequest,
       () => this.sideModelRequestContext(),
-      this.memoryRetriever,
-      new ActivityPrivacyPolicy(options.config.activity)
+      this.memoryRetriever
     );
     this.contextMemory.setPersonalization(
       metadataForPersonalization(this.activePersonalization),
@@ -471,6 +476,39 @@ export class AgentSession {
         yield doneEvent(outcome);
         return;
       }
+      const unknownToolNames = new Set(
+        replay.recoveredToolResults
+          .filter((event) => event.executionStatus === "unknown")
+          .map((event) => event.tool)
+      );
+      // resume() 可能已经把合成结果写回 JSONL，不能只看本次 replay 新生成的结果。
+      for (const event of replay.events) {
+        if (
+          event.type === "tool_result"
+          && event.executionStatus === "unknown"
+        ) unknownToolNames.add(event.tool);
+      }
+      if (unknownToolNames.size > 0) {
+        const toolNames = [...unknownToolNames];
+        const message = `Recovery is blocked because ${toolNames.join(", ")} may have produced an unresolved side effect.`;
+        const outcome: AgentTurnOutcome = {
+          status: "blocked",
+          stopReason: "blocked",
+          steps: turn.completedSteps,
+          output: "",
+          error: message,
+          resumable: false,
+          blockedReason: "unsafe_action_required",
+          requiredAction: "Inspect the session facts and workspace, then start a new turn after resolving the unknown tool operation."
+        };
+        this.recordError(message);
+        await this.turnStore.clear().catch(() => undefined);
+        await this.recordTurnOutcome(outcome);
+        yield { type: "error", message };
+        yield { type: "status", status: "blocked" };
+        yield doneEvent(outcome);
+        return;
+      }
       if (
         turn.terminal?.status === "blocked"
         && (turn.terminal.blockedReason === "missing_user_input"
@@ -525,6 +563,9 @@ export class AgentSession {
         recordSessionUserMessage: false,
         completedStepsBeforeRun: turn.completedSteps,
         initialToolBudget: restartToolBudget(readToolBudget(turn.facts), turn.completedSteps === 0),
+        initialCompletionEvidence: restartCompletionEvidence(
+          readCompletionEvidence(turn.facts)
+        ),
         previousTerminals
       });
     } finally {
@@ -535,6 +576,14 @@ export class AgentSession {
   /** 持久记忆存储句柄；读取/自动贡献开关不影响显式 /memory 管理操作。 */
   getLocalMemory(): LocalMemory {
     return this.localMemory;
+  }
+
+  /**
+   * 当前配置下可用的嵌入运行时（本地优先；与记忆检索同一套 LocalEmbeddingRuntime）。
+   * 供 activity_search_semantic 等工具按需取得本地向量能力；未安装/不可用时返回 undefined。
+   */
+  async getEmbeddingRuntime(): Promise<EmbeddingModelRuntime | undefined> {
+    return await this.memoryEmbeddingService.embeddingRuntime();
   }
 
   /** TELOS 由独立存储维护；Desktop/Host 通过 AgentSession 取得同一份本地权威。 */
@@ -730,6 +779,7 @@ export class AgentSession {
     runOptions: AgentRunOptions & {
       completedStepsBeforeRun?: number;
       initialToolBudget?: ToolExecutionBudgetSnapshot;
+      initialCompletionEvidence?: CompletionGuardSnapshot;
       previousTerminals?: InterruptedTurnTerminal[];
       continueMessageReferences?: Array<SessionMessageReference | undefined>;
     } = {}
@@ -846,7 +896,6 @@ export class AgentSession {
       const snapshot = await this.readPersonalizationState();
       this.activeConfig = snapshot.config;
       this.activePersonalization = snapshot.state.resolved;
-      this.contextMemory.setActivityPrivacyPolicy(this.activeConfig.activity);
       turnPersonalization = snapshot.state.resolved;
       this.contextMemory.setPersonalization(
         metadataForPersonalization(turnPersonalization),
@@ -876,8 +925,7 @@ export class AgentSession {
         abortSignal,
         this.supportedAttachments(runOptions.attachments),
         turnPersonalization.useMemories,
-        turnPersonalization.maxRecalled,
-        await this.activityEntriesForTurn(input, abortSignal, model)
+        turnPersonalization.maxRecalled
       );
       if (prepared.compaction) {
         this.persistContextCheckpoint(
@@ -1035,7 +1083,14 @@ export class AgentSession {
     let stepReasoningOutput = "";
     let stepReasoningBlocks: ReasoningBlock[] | undefined;
     const pendingEvents: AgentSessionEvent[] = [];
+    const completionGuard = new CompletionGuard(runOptions.initialCompletionEvidence);
     const emitUpdate = (event: AgentSessionEvent): void => {
+      if (
+        event.type === "tool.started"
+        || event.type === "tool.progress"
+        || event.type === "tool.completed"
+        || event.type === "tool.failed"
+      ) completionGuard.observeToolEvent(event as AgentToolEvent);
       pendingEvents.push(event);
     };
     let observedSteps = 0;
@@ -1056,7 +1111,10 @@ export class AgentSession {
           systemPrompt,
           replay.messages,
           completedStepsBeforeRun + observedSteps + 1,
-          coordinator.getExecutionBudgetSnapshot(),
+          {
+            ...coordinator.getExecutionBudgetSnapshot(),
+            completionEvidence: completionGuard.snapshot()
+          },
           undefined,
           runOptions.previousTerminals,
           coordinator.getExecutionCheckpoints(),
@@ -1107,6 +1165,8 @@ export class AgentSession {
     let hardStepLimitReached = false;
     let softLimitWarningInjected = completedStepsBeforeRun >= runBudget.softStepLimit;
     let contextRecoveryAttempts = 0;
+    let completionDecision: Exclude<CompletionGuardDecision, { kind: "continue" }> | undefined;
+    let pendingCompletionMessages: AgentMessage[] = [];
 
     yield { type: "status", status: "thinking" };
     await recordNativeTelemetry(this.options.config, this.options.workspaceRoot, {
@@ -1191,12 +1251,70 @@ export class AgentSession {
           return prunedMessages;
         },
         getSteeringMessages: async () => {
-          return this.takeQueuedRunMessages(messageQueues, "steer", lastAssistant, referenceByMessage);
+          const completionMessages = pendingCompletionMessages;
+          pendingCompletionMessages = [];
+          return [
+            ...completionMessages,
+            ...this.takeQueuedRunMessages(messageQueues, "steer", lastAssistant, referenceByMessage)
+          ];
         },
         getFollowUpMessages: async () => {
           const next = this.takeQueuedRunMessages(messageQueues, "followUp", lastAssistant, referenceByMessage);
           if (!next.length) messageQueues.accepting = false;
           return next;
+        },
+        shouldStopAfterTurn: async (turn) => {
+          // 工具调用后的 assistant 只代表“工具已经被请求”，必须先让 Loop 消费结构化结果。
+          if (turn.message.content.some((part) => part.type === "toolCall")) return false;
+          completionGuard.noteTextCompletionClaim(agentMessageText(turn.message));
+          const budget = coordinator.getExecutionBudgetSnapshot();
+          let decision = completionGuard.decide({
+            steps: completedStepsBeforeRun + observedSteps,
+            hardStepLimit: runBudget.hardStepLimit,
+            accountedToolCalls: budget.accountedToolCalls,
+            maxToolCalls: runBudget.maxToolCalls,
+            maxRepeatedActionCount: budget.maxRepeatedActionCount,
+            maxRepeatedActions: runBudget.maxRepeatedActions,
+            finishReason: turn.message.stopReason,
+            explicitCompletionExpected: mode !== "plan"
+          });
+          if (decision.kind === "continue") {
+            pendingCompletionMessages.push(decision.feedback);
+            return false;
+          }
+          if (
+            decision.kind === "complete"
+            && turn.message.stopReason === "stop"
+            && mode !== "plan"
+            && completionGuard.requiresSemanticReview()
+          ) {
+            const review = await evaluateCompletion({
+              model: activeModelSettings.model,
+              task: input,
+              messages: turn.context.messages,
+              signal: abortSignal,
+              providerOptions: activeModelSettings.providerOptions,
+              timeoutMs: Math.min(activeModelSettings.timeoutMs ?? 30_000, 30_000),
+              onRequestMetrics: (metrics) => this.recordModelRequest(metrics),
+              requestContext: {
+                ...modelRequestContext(completedStepsBeforeRun + observedSteps),
+                operation: "completion_review"
+              }
+            });
+            if (!review.met) {
+              decision = completionGuard.requestContinuation(
+                `Independent completion review ${review.evaluatorFailed ? "failed" : "did not confirm completion"}: ${review.reason}`,
+                `completion-review:${review.evaluatorFailed ? "failed" : "not-met"}`
+              );
+              if (decision.kind === "continue") {
+                pendingCompletionMessages.push(decision.feedback);
+                return false;
+              }
+            }
+          }
+          completionDecision = decision;
+          // 用户在收口前排入的 steering/follow-up 仍然要先交给模型，不能被内部复核吞掉。
+          return messageQueues.steering.length === 0 && messageQueues.followUps.length === 0;
         }
       }, abortSignal);
 
@@ -1289,7 +1407,10 @@ export class AgentSession {
                 systemPrompt,
                 event.messages,
                 completedStepsBeforeRun + observedSteps,
-                coordinator.getExecutionBudgetSnapshot(),
+                {
+                  ...coordinator.getExecutionBudgetSnapshot(),
+                  completionEvidence: completionGuard.snapshot()
+                },
                 undefined,
                 runOptions.previousTerminals,
                 coordinator.getExecutionCheckpoints(),
@@ -1366,6 +1487,21 @@ export class AgentSession {
         relatedUsage: this.takeRelatedUsage(),
         contextState: this.contextMemory.snapshot()
       });
+      if (!completionDecision) {
+        completionDecision = hardStepLimitReached
+          ? {
+            kind: "incomplete",
+            stopReason: "hard_step_limit",
+            summary: `The run reached its hard limit of ${String(runBudget.hardStepLimit)} provider steps.`
+          }
+          : lastAssistant?.stopReason !== undefined
+            ? { kind: "complete" }
+            : {
+              kind: "failed",
+              stopReason: "missing_terminal_event",
+              summary: "The Agent Loop ended without a canonical terminal completion decision."
+            };
+      }
       let outcome = nativeTurnOutcome(
         hardStepLimitReached,
         content,
@@ -1373,6 +1509,37 @@ export class AgentSession {
         completedStepsBeforeRun + observedSteps,
         usageRecord
       );
+      if (completionDecision.kind === "incomplete") {
+        outcome = {
+          ...outcome,
+          status: "incomplete",
+          stopReason: completionDecision.stopReason,
+          error: completionDecision.summary,
+          resumable: true,
+          blockedReason: undefined,
+          requiredAction: undefined
+        };
+      } else if (completionDecision.kind === "blocked") {
+        outcome = {
+          ...outcome,
+          status: "blocked",
+          stopReason: "blocked",
+          error: completionDecision.summary,
+          resumable: false,
+          blockedReason: completionDecision.blockedReason,
+          requiredAction: completionDecision.requiredAction
+        };
+      } else if (completionDecision.kind === "failed") {
+        outcome = {
+          ...outcome,
+          status: "failed",
+          stopReason: completionDecision.stopReason,
+          error: completionDecision.summary,
+          resumable: false,
+          blockedReason: undefined,
+          requiredAction: undefined
+        };
+      }
       if (content && (outcome.status === "completed" || outcome.status === "incomplete" || outcome.status === "blocked")) {
         yield { type: "assistant.completed", content };
       }
@@ -1384,7 +1551,10 @@ export class AgentSession {
             systemPrompt,
             finalMessages,
             0,
-            coordinator.getExecutionBudgetSnapshot(),
+            {
+              ...coordinator.getExecutionBudgetSnapshot(),
+              completionEvidence: completionGuard.snapshot()
+            },
             {
               status: outcome.status,
               stopReason: outcome.stopReason,
@@ -1495,7 +1665,19 @@ export class AgentSession {
       }
       replacementRecorder = new SessionRecorder(this.persistenceRoot(), sessionIdFromFile(filePath), filePath, this.options.runtimeEventSink);
       replacementRecorder.repairTailForAppend();
-      const replay = replaySessionEvents(parseSessionEvents(replacementRecorder.readText()), { sessionId: replacementRecorder.sessionId });
+      // 解析走缓存：openSession 刚 parse 过的文件这里直接命中。recorder 构造（O_NOFOLLOW + 绑定
+      // 校验）和 repairTailForAppend 已在上面照常执行；缓存只替代"读字节 + JSON.parse + zod"这一步，
+      // 大小上限校验不能省——超限会话即使曾经命中也必须照常拒绝。
+      const resumeRecorder = replacementRecorder;
+      const resumeStat = await fs.stat(resumeRecorder.filePath);
+      assertSessionFileSize(resumeStat.size, resumeRecorder.filePath);
+      const replay = replaySessionEvents(
+        cachedSessionEvents(resumeRecorder.filePath, sessionFileFingerprint(resumeStat), () => ({
+          events: parseSessionEvents(resumeRecorder.readText()),
+          complete: true
+        })),
+        { sessionId: resumeRecorder.sessionId }
+      );
       const catalogRecord = await readSessionCatalogRecord(this.persistenceRoot(), replacementRecorder.sessionId);
       replacementRecorder.restoreToolCallSequence(maxToolCallSequence(replay.events));
       replacementRecorder.restoreMessageParent(replay.messageTree.at(-1)?.id);
@@ -1541,6 +1723,71 @@ export class AgentSession {
       }
       throw error;
     }
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * 开始一个全新的空会话，但不销毁这个 AgentSession。
+   *
+   * 常驻 runtime 的昂贵基础设施（MCP 连接、记忆索引、技能、工具注册、模型管理）全部保留，
+   * 只把会话级状态重置到「刚构造」的样子：换一个全新的 SessionRecorder（新 sessionId）、
+   * 清空用量与上下文、丢掉上一会话的权限授予和计划清单。这样 Desktop 点「新聊天」时不必
+   * 付出整量重建（重连 MCP、重开 store、重扫 skill）的代价。
+   *
+   * 只能在空闲时调用——由 InteractiveAgentRuntime 的 maintenance 临界区保证没有进行中的回合。
+   * 返回新会话的 sessionId。
+   */
+  async startNewSession(): Promise<string> {
+    const release = this.beginOperation("new session");
+    const previousRecorder = this.recorder;
+    let nextRecorder: SessionRecorder | undefined;
+    try {
+      await ensureAgentDirs(this.persistenceRoot());
+      // 先打开新会话的 recorder，再收尾旧会话；若这里失败，当前会话保持原样。
+      nextRecorder = new SessionRecorder(this.persistenceRoot(), undefined, undefined, this.options.runtimeEventSink);
+      // 旧会话可能还有旁路用量（记忆/子代理）没落盘，先补写进旧会话再收尾，不丢账单。
+      // 这与 close() 的收尾一致；此刻 recorder 仍是旧会话，contextMemory 仍是旧上下文。
+      const pendingRelated = this.takeRelatedUsage();
+      if (pendingRelated) {
+        previousRecorder.record({
+          type: "assistant_message",
+          content: "",
+          relatedUsage: pendingRelated,
+          contextState: this.contextMemory.persistedState()
+        });
+      }
+      // 旧 recorder 只是被丢弃；关闭失败不阻断切换到新会话（空草稿关闭时会顺带删除草稿文件）。
+      await previousRecorder.close().catch(() => undefined);
+      // 会话级状态全部回到「刚构造」：历史、用量、权限授予、计划清单都不带入新会话。
+      this.options.permissionManager.resetSession();
+      this.usageRecords = [];
+      this.modelRequestRecords = [];
+      this.unpersistedRelatedUsage = [];
+      this.contextMemory.restore([], undefined);
+      // 工作区快照缓存可能已陈旧（如切了分支）；标记脏，让下一回合重新扫描，而不在切换时扫描。
+      this.contextMemory.invalidateWorkspace();
+      // 新会话没有聊天级覆盖；用当前全局配置按默认覆盖重新解析，避免沿用上一会话的策略。
+      this.activePersonalization = resolveChatPersonalization(
+        this.activeConfig.personalization,
+        this.activeConfig.context.memory,
+        defaultChatPersonalizationOverride
+      );
+      this.contextMemory.setPersonalization(
+        metadataForPersonalization(this.activePersonalization),
+        this.activePersonalization.useMemories
+      );
+      this.contextMessageReferences = [];
+      this.nextSessionMessageIndex = 0;
+      await this.options.todoStore?.useSession(nextRecorder.sessionId);
+      this.recorder = nextRecorder;
+      this.turnStore = new TurnStore(this.persistenceRoot(), nextRecorder.sessionId);
+      return nextRecorder.sessionId;
+    } catch (error) {
+      // 还没到切换点就失败时，丢掉半成品新 recorder，当前会话保持原样。
+      await nextRecorder?.close().catch(() => undefined);
+      throw error;
     } finally {
       release();
     }
@@ -2078,38 +2325,10 @@ export class AgentSession {
     });
   }
 
-  private async activityEntriesForTurn(
-    input: string,
-    signal: AbortSignal,
-    model: AgentModel
-  ): Promise<readonly ActivityContextEntry[]> {
-    const policy = new ActivityPrivacyPolicy(this.activeConfig.activity);
-    // 云模型在策略判断前不会触碰 Activity 查询；因此也不会因为本地检索结果被误带入
-    // provider 请求。未来允许外发时仍需在策略层显式改变，而不是从这里绕过门禁。
-    if (!policy.canUseWithModel(model)) return [];
-    signal.throwIfAborted();
-    try {
-      const directory = resolveActivityDirectory(this.activeConfig.activity.outputDirectory);
-      if (directory !== this.activityStoreDirectory) {
-        await this.activityStore.open(directory);
-        this.activityStoreDirectory = directory;
-      }
-      return this.activityStore.search(input, 8).map((entry) => ({
-        summary: entry.summary,
-        occurredAt: entry.occurredAt,
-        application: entry.application
-      }));
-    } catch {
-      // Activity 是旁路历史证据；存储不可用时不能让正常对话失败。
-      return [];
-    }
-  }
-
   async close(): Promise<void> {
     this.memoryRetriever.close();
     this.memoryEmbeddingService.close();
     await this.localEmbeddingManager.close();
-    await this.activityStore.close();
     const relatedUsage = this.takeRelatedUsage();
     if (relatedUsage) {
       this.recorder.record({
@@ -2455,6 +2674,40 @@ function nativeTurnOutcome(
       resumable: true
     };
   }
+  if (finishReason === "error") {
+    return {
+      status: "failed",
+      stopReason: "provider_error",
+      finishReason,
+      steps,
+      output,
+      usage,
+      error: "The model ended the response with an error."
+    };
+  }
+  if (finishReason === "aborted") {
+    return {
+      status: "cancelled",
+      stopReason: "cancelled",
+      finishReason,
+      steps,
+      output,
+      usage,
+      error: "The model response was aborted before the task was confirmed complete."
+    };
+  }
+  if (finishReason !== undefined && finishReason !== "stop") {
+    return {
+      status: "incomplete",
+      stopReason: "budget_exhausted",
+      finishReason,
+      steps,
+      output,
+      usage,
+      error: `The model ended with a non-terminal reason: ${finishReason}.`,
+      resumable: true
+    };
+  }
   return { status: "completed", stopReason: "model_stop", finishReason, steps, output, usage };
 }
 
@@ -2523,6 +2776,24 @@ function readToolBudget(value: unknown): ToolExecutionBudgetSnapshot | undefined
   return {
     accountedToolCalls: value.accountedToolCalls,
     maxRepeatedActionCount: value.maxRepeatedActionCount
+  };
+}
+
+function readCompletionEvidence(value: unknown): CompletionGuardSnapshot | undefined {
+  if (!isRecord(value)) return undefined;
+  return parseCompletionGuardSnapshot(value.completionEvidence);
+}
+
+function restartCompletionEvidence(
+  evidence: CompletionGuardSnapshot | undefined
+): CompletionGuardSnapshot | undefined {
+  if (!evidence) return undefined;
+  // 用户显式继续代表一次新的有界尝试；continuation 计数重置，但失败和未知副作用事实必须保留。
+  return {
+    ...evidence,
+    continuationAttempts: 0,
+    stagnantAttempts: 0,
+    lastBlockFingerprint: ""
   };
 }
 

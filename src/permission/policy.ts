@@ -32,7 +32,8 @@ export type ToolName =
   | "list_processes"
   | "web_search"
   | "web_fetch"
-  | "update_todos";
+  | "update_todos"
+  | "attempt_completion";
 
 export interface AnalyzePermissionInput {
   toolName: string;
@@ -144,6 +145,16 @@ export function analyzePermissionRequest(input: AnalyzePermissionInput): Permiss
       actionType: "read",
       riskLevel: "low",
       reason: "records the assistant's own plan for this session"
+    };
+  }
+
+  if (input.toolName === "attempt_completion") {
+    // 只记录模型自己的完成声明，不碰工作区；真正的验收由独立 completion review 负责。
+    return {
+      ...base(input),
+      actionType: "read",
+      riskLevel: "low",
+      reason: "records the assistant's completion declaration for runtime verification"
     };
   }
 

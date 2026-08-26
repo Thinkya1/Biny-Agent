@@ -35,6 +35,7 @@ export type AgentTurnStopReason =
   | "model_length"
   | "content_filter"
   | "provider_error"
+  | "missing_terminal_event"
   | "blocked"
   | "cancelled"
   | "aborted"

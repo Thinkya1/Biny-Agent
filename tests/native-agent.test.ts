@@ -32,6 +32,7 @@ async function main(): Promise<void> {
   await testOpenCodeModelSwitchRepairsThinkingMetadata();
   await testModelSwitchDoesNotPersistInferredMetadata();
   await testPersistedProviderCatalog();
+  await testRefreshModelsForceBypassesConditionalGet();
   await testGoogleProviderCatalog();
   await testExtensibleProviderRuntime();
   await testCompatibleSystemRole();
@@ -177,6 +178,61 @@ async function main(): Promise<void> {
     globalThis.fetch = originalFetch;
     if (!closed) await agent.close();
     await rm(workspaceRoot, { recursive: true, force: true });
+  }
+}
+
+async function testRefreshModelsForceBypassesConditionalGet(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "biny-models-force-"));
+  const filePath = path.join(root, "models-store.json");
+  const store = new FileModelsStore(filePath);
+  const cached = {
+    id: "cached-model",
+    displayName: "Cached Model",
+    provider: "catalog",
+    contextWindow: 64_000,
+    maxOutputTokens: 8_000,
+    maxInputTokens: 60_000,
+    capabilities: { tools: true, reasoning: false },
+    reasoningEfforts: [] as string[],
+    reasoningEffortsSource: "inferred" as const
+  };
+  try {
+    await store.write("catalog", { models: [cached], checkedAt: 1, etag: "first-etag" });
+    const config = configSchema.parse({
+      ...defaultConfig,
+      defaultModel: "configured-model",
+      providers: {
+        catalog: {
+          type: "openai-compatible",
+          baseUrl: "https://catalog.example/v1",
+          apiKey: "test-key"
+        }
+      },
+      models: {
+        "configured-model": { provider: "catalog", model: "configured-model" }
+      }
+    });
+    const catalogs = await restoreProviderCatalogs(["catalog"], new FileModelsStore(filePath));
+    const runtime = new ModelRuntime(config, catalogs, undefined, new FileModelsStore(filePath));
+    const originalFetch = globalThis.fetch;
+    let conditionalHeaders: Headers | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      conditionalHeaders = new Headers(init?.headers);
+      return Response.json({ data: [{ id: "fresh-model" }] });
+    }) as typeof fetch;
+    try {
+      const models = await runtime.refreshModels("catalog", undefined, true);
+      // force refresh must skip the conditional cache headers entirely.
+      assert.equal(conditionalHeaders?.get("if-none-match"), null);
+      assert.equal(conditionalHeaders?.get("if-modified-since"), null);
+      assert.equal(models.some((entry) => entry.id === "fresh-model"), true);
+      const persisted = await new FileModelsStore(filePath).read("catalog");
+      assert.equal(persisted?.models.some((entry) => entry.id === "fresh-model"), true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 }
 
