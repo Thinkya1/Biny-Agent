@@ -32,3 +32,4 @@ docs/TUI_INTERACTION_REQUIREMENTS.md
 *.tsbuildinfo
 **pycache**/
 *.pyc
+.alma-snapshots

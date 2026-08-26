@@ -14,7 +14,7 @@
 - **本地 Agent** —— 支持 macOS 桌面端、TUI 和 CLI，三种入口共用同一套 Agent Runtime 与 Session。
 - **模型与 Provider** —— 支持主流模型服务、OpenAI-compatible / Anthropic-compatible 网关和 Ollama；支持流式输出、推理档位和用量统计，上下文用量展示实际占用百分比。
 - **工作区工具** —— 文件读写与补丁、代码搜索、Git、Shell、受管进程、联网搜索/抓取和 Todo。
-- **安全与恢复** —— 统一权限确认、可选的 macOS 工作区沙箱、Git checkpoint/undo；权限模式会保存到共享配置，Desktop 与 TUI 会沿用并同步上次选择，切换模型不会覆盖权限设置，Runtime Host 重建期间的权限切换会刷新快照后自动重试一次；异常中断后可恢复 Session，无法确认副作用的操作不会自动重试。Desktop/TUI 同时打开同一 Session 时，后打开的一端保留历史只读视图，并可在前一端释放后点击“重试”。
+- **安全与恢复** —— 统一权限确认、可选的 macOS 工作区沙箱、Git checkpoint/undo；权限模式会保存到共享配置，Desktop 与 TUI 会沿用并同步上次选择，切换模型不会覆盖权限设置，Runtime Host 重建期间的权限切换会刷新快照后自动重试一次；异常中断后可恢复 Session，无法确认副作用的操作不会自动重试，也不会自动继续模型回合，而是标记为需要检查。Desktop/TUI 同时打开同一 Session 时，后打开的一端保留历史只读视图，并可在前一端释放后点击“重试”。
 - **后台运行** —— Runtime Host 通过本地 SQLite authority 管理 AgentRun、TaskRun、Automation、Goal/Graph 和 Capability 状态；Session/Agent 回合事实仍以 JSONL 为 canonical source，SQLite 中对应的 session event 只是可重建投影。任务可在 Host 重启后继续查询；只有显式恢复或已持久化的 Automation/Graph 唤醒才会再次创建运行。
 - **个性化与来源感知记忆** —— 全局个性化、单一 Markdown 记忆库和会话历史彼此独立；聊天可分别覆盖表达风格、指令、是否读取记忆和是否贡献记忆，新建聊天在发送首条消息前也能选择记忆策略。全局“启用记忆”是总开关，关闭后聊天覆盖不会绕过它。记忆按通用偏好或工作区来源过滤，可选本地或云端 Embedding 做语义检索；Markdown 始终是权威数据，向量不可用时自动降级为词法检索。设置中的“记忆进化”还管理通用/当前项目长期策略、行为模式审核和策略偏差处理。
 - **扩展能力** ——
@@ -66,11 +66,13 @@ pnpm dev -- tui
 
 桌面端在 **设置 → 模型** 中管理模型。CLI、TUI 和 Desktop 共用全局 `~/.biny/config.json`；项目运行参数（不含权限模式）可在 `<project>/.biny/settings.json` 中覆盖。权限模式始终保存到共享全局配置，旧项目文件中的 `permission` 只会在内存中的有效配置里忽略；普通读取和 `doctor` 不会改写磁盘文件。API key 不写入 README、代码或示例快照：macOS 使用 Keychain，其他平台使用 `apiKeyEnv` 环境变量。发现旧配置仍含明文凭据时，具备持久凭据存储的平台会在配置写锁内转存并清除明文；没有持久凭据存储时会明确报错，不会静默丢弃。
 
-Desktop 设置中心共用一份跨分页草稿。外观、模型、个性化、当前聊天覆盖、记忆策略和联网搜索的修改先保留在草稿中；主题和字体可以先预览，放弃草稿时会恢复。设置页底部始终显示保存区：没有改动时“保存全部”置灰，有改动时可立即提交；关闭或返回时如果仍有未保存修改，也会提示保存、放弃或取消。各类“启用”项统一用可勾选的复选框表示状态。任务运行期间仍可编辑草稿，但不能提交，也不能执行会改变 Runtime、记忆库或 Cookie 的即时动作。
+Desktop 设置中心共用一份跨分页草稿。外观、模型、个性化、当前聊天覆盖、记忆策略和联网搜索的修改先保留在草稿中；主题和字体可以先预览，放弃草稿时会恢复。设置页底部始终显示保存区：没有改动时“保存全部”置灰，有改动时可立即提交；配置持久化、复读和 journal 清理完成后保存立即返回，受影响的空闲 Runtime Host 与 Activity sidecar 在后台刷新；关闭或返回时如果仍有未保存修改，也会提示保存、放弃或取消。各类“启用”项统一用可勾选的复选框表示状态。任务运行期间仍可编辑草稿，但不能提交，也不能执行会改变 Runtime、记忆库或 Cookie 的即时动作。
 
-Activity Recorder 的全局策略保存在 `activity.externalPolicy`。当前版本始终按 `local_only` 执行，只有明确标记为 `builtin-llama.cpp` 的可信本地模型可以检索、总结或接收 Activity；云模型不会收到 Activity，也不会自动 fallback。`confirm_external` 和 `external_allowed` 仅用于未来 schema/持久化，提前写入时仍会 fail-closed，并提示当前版本暂不支持。
+Activity Recorder 是事件流优先的本地采集：macOS `AXObserver`/`AXUIElement` 提供前台应用、窗口和焦点控件的最小语义摘要，`CGEventTap` 只记录点击、拖拽、滚轮和键盘活动类型；连续拖拽和滚轮事件会在短窗口内合并，不保存具体键值或完整 AX Tree。只有 AX 无法取得有效上下文时，才使用第一块显示器的整屏 JPEG 和可选 Vision OCR 作为视觉 fallback。
 
-Desktop 设置中心新增 **设置 → 活动记录** 页面，采集开关、4 秒防抖、120 秒心跳、30 秒空闲阈值、1.2 秒输入暂停、12 秒视觉轮询、JPEG 质量 55、OCR 语言、敏感应用、10 GB 存储上限和全局输出目录都通过同一份设置草稿保存。macOS sidecar 负责 ScreenCaptureKit、Vision OCR、前台应用和不含具体键值的输入计数，Electron 主进程负责 0700 全局目录中的 JPEG、SQLite/FTS5、容量淘汰和运行态。未启用或权限未授予时页面显示暂停/等待权限，不伪造运行数据。
+Activity 的全局策略保存在 `activity.externalPolicy`，当前始终按 `local_only` 执行。只有明确标记为 `builtin-llama.cpp` 的可信本地模型可以在 `activity.activityRecallEnabled` 开启后检索、总结或接收脱敏事件摘要；云模型不会执行 Activity 查询，也不会收到事件摘要、截图或 OCR。`confirm_external` 和 `external_allowed` 仅用于未来 schema/持久化，提前写入时仍会 fail-closed，并提示当前版本暂不支持。Activity 回忆默认关闭。
+
+Desktop 设置中心的 **设置 → 活动记录** 页面按“状态、权限、采集、OCR 与输入、敏感应用、存储配额、最近会话、危险区”展示设置；页面只显示摘要和历史统计，不展示截图预览或完整事件树。辅助功能和输入监控用于事件流；屏幕录制只用于视觉 fallback。macOS 权限区的每一项都提供真实的系统设置入口；点击后会先发起对应权限申请，再打开“隐私与安全性”的对应面板。缺少屏幕录制权限时事件仍会继续记录，页面显示“事件记录正常，视觉 fallback 不可用”。JPEG、OCR 和原始事件只保存在全局本地目录；容量限制只淘汰 JPEG，清除操作会删除事件、OCR 和所有 fallback JPEG。
 
 记忆管理只有一个入口：**设置 → 记忆**。其中“记忆进化”按通用策略和当前项目策略分别编辑使命、目标、原则、约束与反目标；保存会生成新的 revision。行为模式必须由用户确认后才会参与策略判断，策略偏差只提供“调整策略、调整行为、忽略或暂缓”的选择，不会自动改写目标。聊天输入框中的眼睛按钮只切换当前聊天的记忆读取与贡献，不改变全局记忆开关。
 
@@ -89,6 +91,10 @@ Desktop 设置中的 **MCP 服务器** 分页管理共享 MCP 配置，不再占
 技能页也会显示当前项目的有效开关来源：项目覆盖优先于全局默认，清除项目覆盖即可恢复继承。自动技能提取默认开启，根回合成功且至少完成 5 次工具调用后在后台生成草稿；抽取内容会先脱敏并排除外部上下文，不会自动启用。草稿需要在设置页预览、编辑并批准，批准后写入当前项目的 `.biny/skills/`。
 
 在 **设置 → 插件** 中，应用市场使用固定的 Biny 官方 Registry；刷新失败时保留上次可用缓存并显示过期状态。市场插件安装到当前项目的 `.biny/plugins/`，默认不启用；已安装插件可以打开目录、启停或卸载。运行时只加载受管清单中已启用的插件，单个插件加载失败不会阻塞其他插件或主 Runtime。
+
+### Desktop 聊天命令与 Skill
+
+桌面聊天输入框输入 `/` 会打开按“对话状态 / 扩展能力 / 工作区 / Skills”分组的补全菜单，菜单显示用途、参数示例和当前 Skill 描述，并自动隐藏 TUI 专用及低层运行时命令。菜单由输入框自身处理 `↑`、`↓`、`Enter`、`Tab` 和 `Esc`，长列表只在菜单内部滚动。选择 `/skills:<name>` 后会插入可识别的 Skill token；发送时才重新读取该 Skill 的 `SKILL.md` 正文并注入本次请求。
 
 连接测试、Cookie 导入/导出/清理，以及记忆条目的增删改和整理不会进入设置草稿，确认后立即执行。本地 Embedding 下载、取消和删除，以及向量索引重建或取消也属于维护动作：它们不随“保存全部”回滚，任务运行期间不可执行，活动本地模型不能直接删除。保存新的 Embedding 选择后，Biny 会在设置事务提交并复读成功后调度后台重建；失败只保留词法降级状态，不撤销已保存设置。
 
@@ -113,6 +119,8 @@ CLI/TUI 的模型请求会自动读取 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROX
     "customInstructions": ""
   },
   "activity": {
+    "enabled": false,
+    "activityRecallEnabled": false,
     "externalPolicy": "local_only"
   },
   "context": {
