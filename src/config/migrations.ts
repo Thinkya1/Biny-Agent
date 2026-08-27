@@ -64,6 +64,18 @@ function migrateMemoryPolicy(document: Record<string, unknown>): void {
     if (memory.extractModel === undefined) memory.extractModel = memory.model;
     if (memory.consolidationModel === undefined) memory.consolidationModel = memory.model;
   }
+  // 嵌入模型曾短暂迁到 activity 设置段，语义检索回归记忆层后迁回 memory.*。
+  const activity = isRecord(document.activity) ? document.activity : undefined;
+  if (activity) {
+    if (memory.embeddingModel === undefined && activity.embeddingModel !== undefined) {
+      memory.embeddingModel = activity.embeddingModel;
+    }
+    if (memory.cloudEmbeddingConsents === undefined && activity.embeddingConsents !== undefined) {
+      memory.cloudEmbeddingConsents = activity.embeddingConsents;
+    }
+    delete activity.embeddingModel;
+    delete activity.embeddingConsents;
+  }
   delete memory.enabled;
   delete memory.autoRemember;
   delete memory.model;

@@ -211,21 +211,21 @@ export class CompletionGuard {
       return {
         kind: "incomplete",
         stopReason: "hard_step_limit",
-        summary: `The run reached its hard limit of ${String(input.hardStepLimit)} provider steps.`
+        summary: `已达到本轮运行的硬步数上限（${String(input.hardStepLimit)} 步）。`
       };
     }
     if (input.accountedToolCalls >= input.maxToolCalls) {
       return {
         kind: "incomplete",
         stopReason: "tool_call_limit",
-        summary: `The run reached its limit of ${String(input.maxToolCalls)} tool calls.`
+        summary: `已达到本轮运行的工具调用上限（${String(input.maxToolCalls)} 次）。`
       };
     }
     if (input.maxRepeatedActionCount >= input.maxRepeatedActions) {
       return {
         kind: "incomplete",
         stopReason: "repeated_action_limit",
-        summary: `The same structured tool action reached its repeat limit of ${String(input.maxRepeatedActions)}.`
+        summary: `同一工具操作的重复次数达到上限（${String(input.maxRepeatedActions)} 次）。`
       };
     }
     if (input.finishReason === "error" || input.finishReason === "aborted" || input.finishReason === "length") {
@@ -242,7 +242,7 @@ export class CompletionGuard {
       if (this.continuationAttempts > 0) {
         return {
           kind: "blocked",
-          summary: `Tool operations with unresolved side effects: ${[...this.unknownToolCalls].join(", ")}.`,
+          summary: `以下工具操作可能产生了未确认的副作用：${[...this.unknownToolCalls].join("、")}。`,
           blockedReason: "unsafe_action_required",
           requiredAction: "Inspect the session facts and workspace before deciding whether the unresolved operation completed; then start a new turn."
         };
@@ -257,7 +257,7 @@ export class CompletionGuard {
     if (permissionFailure) {
       return {
         kind: "blocked",
-        summary: `The tool ${permissionFailure.tool} was not approved, so the requested work is not confirmed complete.`,
+        summary: `工具 ${permissionFailure.tool} 未获批准，无法确认请求的工作已完成。`,
         blockedReason: "permission_denied",
         requiredAction: "Approve the required action or revise the request, then start a new turn."
       };
@@ -328,7 +328,7 @@ export class CompletionGuard {
       return {
         kind: "incomplete",
         stopReason: "budget_exhausted",
-        summary: "The agent could not establish completion after bounded continuation attempts."
+        summary: "多次续跑后仍无法确认任务完成。"
       };
     }
     this.continuationAttempts += 1;

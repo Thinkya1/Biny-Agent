@@ -232,6 +232,10 @@ export class CapabilityStore {
       }
       return result;
     } catch (error) {
+      // result() 失败时已经把 invocation 推进 unknown 终态；此时再 fail/unknown 只会抛出
+      // "already terminal" 掩盖真实错误，因此已终态的 invocation 直接透传原始错误。
+      const current = this.getInvocation(invocation.invocationId);
+      if (current === undefined || isTerminalInvocationStatus(current.status)) throw error;
       const uncertain = timedOut || signal?.aborted === true;
       if (uncertain) this.unknown(invocation.invocationId, error instanceof Error ? error.message : String(error));
       else this.fail(invocation.invocationId, error instanceof Error ? error.message : String(error));

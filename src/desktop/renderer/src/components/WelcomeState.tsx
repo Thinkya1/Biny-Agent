@@ -1,65 +1,73 @@
 /**
- * 新任务的欢迎空态。
+ * 新任务的欢迎空态（Alma 首页式布局）。
  *
- * 快捷卡片只把一段具体提示写入 Composer，不创建会话，也不会直接发起运行；真正发送
- * 仍由输入框的统一提交路径负责。
+ * 结构：hero（图标 + 标题 + 副标题）→ children（Composer 插槽）→ 建议 pill。
+ * 建议 pill 点击即直接提交（对齐 Alma 的行为），不再只是预填。入场动画：
+ * hero 元素用 biny-hero-fade 即时淡入，pill 用 biny-hero-pop 按 220ms + 70ms×i
+ * 阶梯弹入。提交过场（hero 淡出 / Composer 下滑）由 Workspace 的 flight 逻辑负责。
  */
 import { AppIcon } from "./AppIcon.js";
-import { Icon, type IconName } from "./Icon.js";
+import { Icon } from "./Icon.js";
 
-interface WelcomeCard {
-  icon: IconName;
-  label: string;
-  prompt: string;
-}
-
-const WELCOME_CARDS: WelcomeCard[] = [
-  {
-    icon: "search",
-    label: "探索并理解代码",
-    prompt: "请探索并理解这个项目的代码结构、关键模块和运行方式。"
-  },
-  {
-    icon: "spark",
-    label: "构建新功能、应用或工具",
-    prompt: "请帮我在这个项目中构建一个新功能、应用或工具。"
-  },
-  {
-    icon: "code",
-    label: "审查代码并提出修改建议",
-    prompt: "请审查这个项目的代码，指出问题并提出具体的修改建议。"
-  },
-  {
-    icon: "wrench",
-    label: "修复问题和失败",
-    prompt: "请帮我定位并修复这个项目中的问题或失败。"
-  }
+const SUGGESTIONS: string[] = [
+  "探索代码结构，理解项目模块和运行方式",
+  "帮我构建一个新功能",
+  "审查代码，指出问题并给出修改建议",
+  "定位并修复项目中的问题或 bug"
 ];
+
+/** 与 Alma 一致：pill 入场基础延迟 220ms，每个递增 70ms。 */
+const PILL_BASE_DELAY = 220;
+const PILL_STEP_DELAY = 70;
 
 export function WelcomeState({
   hasProject,
+  leaving,
   onOpenProject,
-  onPrefill
+  onPickSuggestion,
+  children
 }: {
   hasProject: boolean;
+  /** 提交过场中：hero 与 pill 淡出并让出指针事件（对齐 Alma 的 willLeave）。 */
+  leaving?: boolean;
   onOpenProject(): void;
-  onPrefill(prompt: string): void;
+  onPickSuggestion(prompt: string): void;
+  children?: React.ReactNode;
 }): React.JSX.Element {
   return (
     <section aria-label="新任务" className="biny-welcome-state">
-      <AppIcon className="biny-welcome-icon" size={56} />
-      <h1>你想让我在 biny 中构建什么？</h1>
-      <p>{hasProject ? "选择一个方向开始，或直接描述你想完成的事情。" : "打开一个项目后，Biny 就能在你的工作区中开始工作。"}</p>
-      <div className="biny-welcome-cards">
-        {WELCOME_CARDS.map((card) => (
-          <button className="biny-welcome-card" key={card.label} onClick={() => onPrefill(card.prompt)} type="button">
-            <span className="biny-welcome-card-icon"><Icon name={card.icon} size={17} /></span>
-            <span>{card.label}</span>
-            <Icon className="biny-welcome-card-chevron" name="arrow-right" size={14} />
-          </button>
-        ))}
+      <div className={`biny-welcome-hero${leaving ? " is-leaving" : ""}`}>
+        <AppIcon className="biny-welcome-icon biny-hero-fade" size={96} />
+        <h1 className="biny-hero-fade">今天聊点什么？</h1>
+        <p className="biny-hero-fade">{hasProject ? "一个想法、半句话、一段粘贴——剩下交给 Biny。" : "打开一个项目后，Biny 就能在你的工作区中开始工作。"}</p>
       </div>
-      {!hasProject ? <button className="biny-welcome-open-project" onClick={onOpenProject} type="button"><Icon name="folder-open" size={15} />打开项目</button> : null}
+      {children}
+      {hasProject ? (
+        <div className={`biny-welcome-pills${leaving ? " is-leaving" : ""}`}>
+          {SUGGESTIONS.map((suggestion, index) => (
+            <button
+              className="biny-welcome-pill biny-hero-pop"
+              disabled={leaving}
+              key={suggestion}
+              onClick={() => onPickSuggestion(suggestion)}
+              style={{ "--hero-delay": `${String(PILL_BASE_DELAY + index * PILL_STEP_DELAY)}ms` } as React.CSSProperties}
+              title={suggestion}
+              type="button"
+            >
+              {suggestion}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <button
+          className="biny-welcome-open-project biny-hero-pop"
+          onClick={onOpenProject}
+          style={{ "--hero-delay": `${String(PILL_BASE_DELAY)}ms` } as React.CSSProperties}
+          type="button"
+        >
+          <Icon name="folder-open" size={15} />打开项目
+        </button>
+      )}
     </section>
   );
 }

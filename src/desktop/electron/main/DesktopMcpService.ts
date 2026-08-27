@@ -21,6 +21,7 @@ import type {
   DesktopMcpTestResult
 } from "../../protocol.js";
 import { McpToolHost, type McpServerStatus } from "../../../extensions/mcp.js";
+import { getSharedProxyAwareFetch } from "../../../network/proxyFetch.js";
 import { ToolRegistry } from "../../../tools/registry.js";
 import type { DesktopProjectService } from "./DesktopProjectService.js";
 
@@ -60,7 +61,7 @@ export class DesktopMcpService {
     private readonly configStore: AgentConfigStore,
     private readonly projects: DesktopProjectService,
     private readonly agents: McpRuntimeBridge,
-    private readonly fetcher: typeof globalThis.fetch = globalThis.fetch
+    private readonly fetcher: typeof globalThis.fetch = getSharedProxyAwareFetch()
   ) {}
 
   async snapshot(projectId?: string): Promise<DesktopMcpSnapshot> {

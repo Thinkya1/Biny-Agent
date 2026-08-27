@@ -50,10 +50,6 @@ async function main(): Promise<void> {
   let activeRunId = "run-host-test";
   const exclusiveOperations: string[] = [];
   let memoryExpectedRevision: number | undefined;
-  const indexedMemoryEntries: string[] = [];
-  let downloadedEmbeddingModel: string | undefined;
-  let removedEmbeddingModel: string | undefined;
-  let embeddingRebuilds = 0;
   let maintenanceRuns = 0;
   let chatExpectedRevision: string | undefined;
   let globalExpectedRevision: string | undefined;
@@ -73,16 +69,6 @@ async function main(): Promise<void> {
     resolved: resolveChatPersonalization(globalPersonalization, memoryPolicy),
     catalogRevision: "catalog-revision-1",
     configRevision: "config-revision-1"
-  });
-  const embeddingStatus = () => ({
-    activeModel: { kind: "local" as const, model: "multilingual-e5-small" as const },
-    models: [],
-    localModels: [],
-    index: { building: 0, failed: 0 },
-    totalEntries: 0,
-    indexedEntries: 0,
-    pendingEntries: 0,
-    failedEntries: 0
   });
   const runtime: FakeRuntime = {
     publish(update): void {
@@ -187,26 +173,14 @@ async function main(): Promise<void> {
       },
       getLocalMemory: () => ({
         loadMaintenanceStatus: async () => ({ state: "idle", eligible: 0, processed: 0, written: 0, failed: 0 }),
-        processEligibleCandidates: async (
-          _options: unknown,
-          derivedIndex?: {
-            indexEntry(entry: { id: string }): Promise<void>;
-            requestRebuild(): void;
-          }
-        ) => {
+        processEligibleCandidates: async () => {
           maintenanceRuns += 1;
-          if (maintenanceRuns === 1) {
-            await derivedIndex?.indexEntry({ id: "maintenance-entry-1" });
-          } else {
-            derivedIndex?.requestRebuild();
-          }
           return { scanned: 1, processed: 1, written: 1, failed: 0, startedAt: "", finishedAt: "" };
         },
         getOverview: async () => ({
           storeRevision: 7,
           entryCount: 0,
           candidateCount: 0,
-          indexChars: 0,
           origins: { user: 0, currentWorkspace: 0, otherWorkspaces: 0 }
         }),
         listMemoryEntries: async () => ({ entries: [], storeRevision: 7 }),
@@ -220,17 +194,6 @@ async function main(): Promise<void> {
           revision: options.expectedRevision + 1
         })
       }),
-      indexMemoryEntry: async (entry: { id: string }) => { indexedMemoryEntries.push(entry.id); },
-      removeMemoryEmbeddingEntries: () => undefined,
-      memoryEmbeddingStatus: async () => embeddingStatus(),
-      downloadMemoryEmbeddingModel: async (model: string) => { downloadedEmbeddingModel = model; },
-      cancelMemoryEmbeddingDownload: (model: string) => model === "multilingual-e5-small",
-      removeMemoryEmbeddingModel: async (model: string) => {
-        removedEmbeddingModel = model;
-        return { filesDeleted: 2, bytesFreed: 128 };
-      },
-      rebuildMemoryEmbeddingIndex: async () => { embeddingRebuilds += 1; },
-      cancelMemoryEmbeddingRebuild: () => true
     }
   } as unknown as CommandRuntime;
   const hostPaths = runtimeHostPaths(workspace);
@@ -245,9 +208,12 @@ async function main(): Promise<void> {
   const hostSocket = await fs.lstat(hostPaths.endpoint);
   assert.equal(hostSocket.mode & 0o077, 0, "Runtime Host socket must not be group/world accessible");
   assert.equal(interruptedStarts, 0, "普通 Host 启动不得自动恢复中断回合");
+  // registration 落盘前 lock 就必须携带 owner pid；注册窗口内的竞争进程据此判活。
+  const ownerRegistration = JSON.parse(await readFile(hostPaths.registrationPath, "utf8")) as { pid?: unknown };
+  assert.equal((await readFile(hostPaths.lockPath, "utf8")).trim(), String(ownerRegistration.pid));
   const client = await connectRuntimeHost(workspace, { clientId: "test-client", surface: "tui" });
   assert.ok(client);
-  await waitUntil(() => indexedMemoryEntries.includes("maintenance-entry-1"));
+  await waitUntil(() => maintenanceRuns >= 1);
   assert.equal(client.getSnapshot().info.sessionId, "session-host-test");
   assert.equal(client.hostInfo?.hostEpoch, host.info.hostEpoch);
   assert.equal(client.hostInfo?.capabilities.includes("personalization"), true);
@@ -381,7 +347,6 @@ async function main(): Promise<void> {
     }
   });
   assert.equal(memoryExpectedRevision, 7, "v3 memory CAS must not be replaced by the Runtime Host snapshot revision");
-  assert.equal(indexedMemoryEntries.includes("memory-entry-1"), true, "committed Markdown writes must update the active vector index");
   assert.deepEqual(
     exclusiveOperations.slice(exclusiveOperationsBeforeMemory),
     ["memory"],
@@ -398,22 +363,6 @@ async function main(): Promise<void> {
     failed: 0
   });
 
-  assert.equal((await client.memoryEmbeddingStatus()).activeModel?.kind, "local");
-  await client.downloadMemoryEmbeddingModel("multilingual-e5-small");
-  assert.equal(downloadedEmbeddingModel, "multilingual-e5-small");
-  assert.deepEqual(await client.cancelMemoryEmbeddingDownload("multilingual-e5-small"), {
-    cancelled: true,
-    status: embeddingStatus()
-  });
-  const deletedEmbedding = await client.deleteMemoryEmbeddingModel("paraphrase-multilingual-MiniLM-L12-v2");
-  assert.equal(removedEmbeddingModel, "paraphrase-multilingual-MiniLM-L12-v2");
-  assert.equal(deletedEmbedding.filesDeleted, 2);
-  assert.equal(deletedEmbedding.bytesFreed, 128);
-  await client.rebuildMemoryEmbeddingIndex();
-  assert.equal(embeddingRebuilds, 1);
-  await client.memory("consolidate-v3", { selector: "current_workspace", expectedRevision: 8 });
-  await waitUntil(() => embeddingRebuilds === 2);
-  assert.deepEqual(await client.cancelMemoryEmbeddingRebuild(), { cancelled: true, status: embeddingStatus() });
 
   // 同一 run 的取消可绕过滞后的 revision；Host 改为按 runId 匹配而不是取消当前运行。
   currentSnapshot = { ...currentSnapshot, revision: currentSnapshot.revision + 1 };
@@ -429,6 +378,18 @@ async function main(): Promise<void> {
   const staleCancellation = await client.cancelRunRequest("run-host-test");
   assert.equal(staleCancellation.accepted, false, "Host must reject a cancellation for a superseded run");
   assert.equal(cancellationRequests, 2, "a stale cancellation must not reach the newer run");
+
+  // startInterruptedTurn 非瞬时失败时，调用方拿不到的 completion 不得成为 unhandled rejection。
+  // 前面的取消用例绕过了 revision 断言；这里先广播一次快照把客户端 revision 对齐到 Host。
+  runtime.publish({ snapshot: currentSnapshot });
+  await waitUntil(() => client.getSnapshot().revision === currentSnapshot.revision);
+  const originalStartInterrupted = runtime.startInterruptedTurn;
+  runtime.startInterruptedTurn = async () => { throw new Error("Cannot continue an interrupted turn while the runtime is busy."); };
+  try {
+    await assert.rejects(client.startInterruptedTurn(), /runtime is busy/u);
+  } finally {
+    runtime.startInterruptedTurn = originalStartInterrupted;
+  }
 
   const secondClient = await connectRuntimeHost(workspace, { clientId: "test-client-2", surface: "desktop" });
   assert.ok(secondClient);
@@ -446,14 +407,24 @@ async function main(): Promise<void> {
   assert.equal(replayedTypes.includes("run.started"), true);
   unsubscribeReplay();
   await secondClient.close();
+  // close() 必须了结挂起的 waitForIdle：busy 快照下挂起的等待不能永久悬置、泄漏 listener。
+  runtime.publish({ snapshot: { ...currentSnapshot, state: runningSnapshot.state } });
+  await waitUntil(() => client.getSnapshot().state.kind === "runs");
+  const idleWait = client.waitForIdle();
   await client.close();
+  await idleWait;
   await host.close();
   currentSnapshot = snapshot;
   const explicitResumeHost = await startRuntimeHost(workspace, runtime, commands, { resumeInterrupted: true });
   assert.equal(interruptedStarts, 1, "只有显式恢复开关才允许启动中断回合");
-  await waitUntil(() => embeddingRebuilds === 3);
   await explicitResumeHost.close();
   assert.equal(await connectRuntimeHost(workspace, { clientId: "after-close", surface: "tui" }), undefined);
+
+  // 注册窗口回归：registration 尚未落盘时，lock 内的活 pid 必须阻止第二个 owner 接管。
+  await fs.writeFile(hostPaths.lockPath, `${String(process.pid)}\n`, { mode: 0o600 });
+  await assert.rejects(startRuntimeHost(workspace, runtime, commands), /already running/u);
+  assert.equal(await readFile(hostPaths.lockPath, "utf8"), `${String(process.pid)}\n`, "存活 owner 的 lock 不得被当作 stale 删除");
+  await fs.rm(hostPaths.lockPath, { force: true });
 
   const incompatibleRegistration = {
     protocolVersion: 2,

@@ -8,6 +8,7 @@ import { createFileConfigStore, type AgentConfigStore } from "../src/config/stor
 import { configSchema, defaultConfig } from "../src/config/schema.js";
 import { ModelManager } from "../src/llm/ModelManager.js";
 import { PermissionManager, type PermissionRequestContext } from "../src/permission/PermissionManager.js";
+import { analyzePermissionRequest } from "../src/permission/policy.js";
 import { subagentAccessMode } from "../src/runtime/subagentAccess.js";
 import { SessionRecorder } from "../src/session/recorder.js";
 import { ensureAgentDirs } from "../src/session/store.js";
@@ -26,6 +27,8 @@ const baseRequest: PermissionRequestContext = {
 async function main(): Promise<void> {
   testEvaluationOrder();
   testScopedGrants();
+  testMoveFileEvaluatesBothPaths();
+  testPathRulesMatchAnyDepth();
   testSubagentAccessInheritsMode();
   testDesktopPermissionOptions();
   await testPermissionModeWriteKeepsOtherSettings();
@@ -85,6 +88,57 @@ function testScopedGrants(): void {
   assert.equal(manager.evaluate({ ...baseRequest, targetPath: "another/file.ts" }).decision, "allow");
   manager.resetSession();
   assert.equal(manager.evaluate(baseRequest).decision, "ask");
+}
+
+function testMoveFileEvaluatesBothPaths(): void {
+  const manager = new PermissionManager({ mode: "full-access", allowTools: [], denyPaths: ["release/"] });
+  const input = { toolName: "move_file", sessionId: "test-session", projectRoot: "/workspace" };
+
+  // denyPaths 必须同时看 from 和 to:只看 from 会让「移动到受保护路径」绕过项目策略。
+  const bypass = analyzePermissionRequest({ ...input, args: { from: "ok.txt", to: "release/config.yaml" } });
+  assert.deepEqual(manager.evaluate(bypass), {
+    decision: "deny",
+    reason: "Target path is denied by project policy: release/"
+  });
+
+  // 风险取 from/to 两者较高者。
+  const toSensitive = analyzePermissionRequest({ ...input, args: { from: "ok.txt", to: ".env" } });
+  assert.equal(toSensitive.riskLevel, "high");
+  assert.equal(toSensitive.reason, "modifies a sensitive file");
+  assert.equal(toSensitive.targetPath, "ok.txt");
+  assert.equal(toSensitive.secondaryTargetPath, ".env");
+
+  const fromSensitive = analyzePermissionRequest({ ...input, args: { from: ".env", to: "ok.txt" } });
+  assert.equal(fromSensitive.riskLevel, "high");
+  assert.equal(fromSensitive.reason, "modifies a sensitive file");
+
+  const toShellProfile = analyzePermissionRequest({ ...input, args: { from: "ok.txt", to: ".zshrc" } });
+  assert.equal(toShellProfile.riskLevel, "critical");
+
+  const benign = analyzePermissionRequest({ ...input, args: { from: "a.txt", to: "b.txt" } });
+  assert.equal(benign.riskLevel, "medium");
+  assert.equal(benign.targetPath, "a.txt");
+  assert.equal(benign.secondaryTargetPath, "b.txt");
+}
+
+function testPathRulesMatchAnyDepth(): void {
+  const manager = new PermissionManager({ mode: "ask", allowTools: [], denyPaths: [".env", "secrets/"] });
+  // 无斜杠规则按 basename 匹配任意层级。
+  assert.equal(manager.evaluate({ ...baseRequest, targetPath: "packages/api/.env" }).decision, "deny");
+  // 顶层行为不变。
+  assert.equal(manager.evaluate({ ...baseRequest, targetPath: ".env" }).decision, "deny");
+  assert.equal(manager.evaluate({ ...baseRequest, targetPath: ".env.local" }).decision, "deny");
+  // 带尾斜杠的目录规则匹配任意层级同名目录。
+  assert.equal(manager.evaluate({ ...baseRequest, targetPath: "packages/api/secrets/key.pem" }).decision, "deny");
+  assert.equal(manager.evaluate({ ...baseRequest, targetPath: "packages/api/secrets" }).decision, "deny");
+  assert.equal(manager.evaluate({ ...baseRequest, targetPath: "secrets/key.pem" }).decision, "deny");
+  // 不命中时不误伤:basename 不同或目录名只是前缀都不算。
+  assert.equal(manager.evaluate({ ...baseRequest, targetPath: "src/config/env.ts" }).decision, "ask");
+  assert.equal(manager.evaluate({ ...baseRequest, targetPath: "packages/api/secretsmith/key.pem" }).decision, "ask");
+  assert.equal(manager.evaluate({ ...baseRequest, targetPath: "src/.env.example" }).decision, "ask");
+
+  const defaults = new PermissionManager({ mode: "full-access" });
+  assert.equal(defaults.evaluate({ ...baseRequest, targetPath: "packages/api/node_modules/pkg/index.js" }).decision, "deny");
 }
 
 function testSubagentAccessInheritsMode(): void {

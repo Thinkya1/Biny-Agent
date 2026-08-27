@@ -93,6 +93,7 @@ await testDesktopOpenSessionSkipsGlobalSessionScan();
 await testDesktopOpenSessionReturnsWriterConflictReadOnlyDocument();
 await testDesktopOpenSessionReturnsConsistentMetadataSnapshot();
 await testDesktopMessageEditFork();
+await testDesktopPromptIdempotency();
 await testWorkspaceFilePreview();
 await testWorkspaceDirectoryListing();
 await testDesktopGitInspectionDisablesHelpers();
@@ -688,6 +689,54 @@ async function testDesktopMessageEditFork(): Promise<void> {
     assert.equal(forked.events[0]?.type === "user_message" ? forked.events[0].content : undefined, "第一条");
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopPromptIdempotency(): Promise<void> {
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-prompt-idempotency-data-"));
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const receipt = { sessionId: "session-1", runId: "run-1", messageId: "message-1" } as const;
+    const internals = agents as unknown as {
+      sendPromptOnce: () => Promise<typeof receipt>;
+      editPromptOnce: () => Promise<typeof receipt>;
+    };
+    let executions = 0;
+    const executeOnce = async (): Promise<typeof receipt> => {
+      executions += 1;
+      await Promise.resolve();
+      return receipt;
+    };
+    internals.sendPromptOnce = executeOnce;
+    internals.editPromptOnce = executeOnce;
+
+    const firstSend = agents.sendPrompt("project-1", undefined, "相同消息", "chat", [], undefined, undefined, "send-key");
+    const secondSend = agents.sendPrompt("project-1", undefined, "相同消息", "chat", [], undefined, undefined, "send-key");
+    assert.deepEqual(await Promise.all([firstSend, secondSend]), [receipt, receipt]);
+    assert.equal(executions, 1, "同一发送操作键只能执行一次");
+
+    const firstEdit = agents.editPrompt("project-1", "session-1", 0, "相同消息", "chat", [], "edit-key");
+    const secondEdit = agents.editPrompt("project-1", "session-1", 0, "相同消息", "chat", [], "edit-key");
+    assert.deepEqual(await Promise.all([firstEdit, secondEdit]), [receipt, receipt]);
+    assert.equal(executions, 2, "同一编辑操作键只能执行一次");
+
+    let failedExecutions = 0;
+    internals.sendPromptOnce = async (): Promise<typeof receipt> => {
+      failedExecutions += 1;
+      throw new Error("模拟发送失败");
+    };
+    const failedSend = agents.sendPrompt("project-1", undefined, "失败消息", "chat", [], undefined, undefined, "failed-key");
+    await assert.rejects(failedSend, /模拟发送失败/u);
+    await assert.rejects(
+      agents.sendPrompt("project-1", undefined, "失败消息", "chat", [], undefined, undefined, "failed-key"),
+      /模拟发送失败/u
+    );
+    assert.equal(failedExecutions, 1, "失败操作的重复 IPC 也不能再次执行");
+  } finally {
+    await agents?.closeAll();
     await rm(desktopRoot, { recursive: true, force: true });
   }
 }
@@ -1513,7 +1562,6 @@ async function testDesktopGlobalWriteGateAndRuntimeRefresh(): Promise<void> {
       }, 0),
       /任务运行期间/u
     );
-    await assert.rejects(agents.rebuildMemoryEmbeddingIndex(first.id), /任务运行期间/u);
     await assert.rejects(
       agents.saveMemorySettings(first.id, {
         expectedRevision: current.revision,
@@ -2534,14 +2582,14 @@ async function testDesktopMemoryV3CasAndOriginFilters(): Promise<void> {
 
     const policy = await agents.saveMemorySettings(project.id, {
       expectedRevision: updated.configRevision,
-      settings: { ...updated.settings, enabled: true, useMemories: true, generateMemories: true, maxRecalled: 4 }
+      settings: { ...updated.settings, enabled: true, useMemories: true, generateMemories: true, excludeExternalContext: false }
     });
-    assert.equal(policy.settings.maxRecalled, 4);
+    assert.equal(policy.settings.excludeExternalContext, false);
     assert.notEqual(policy.configRevision, updated.configRevision);
     await assert.rejects(
       agents.saveMemorySettings(project.id, {
         expectedRevision: updated.configRevision,
-        settings: { ...policy.settings, maxRecalled: 5 }
+        settings: { ...policy.settings, excludeExternalContext: true }
       }),
       /Global config revision conflict/u
     );
@@ -3218,7 +3266,9 @@ function testDesktopUsagePresentation(): void {
   }), {
     percent: 1,
     used: "5,561",
-    max: "1,000,000",
+    // 主展示分母不含预留：显示可用输入额度 950,000，原始窗口只在 tooltip 解释字段里。
+    max: "950,000",
+    window: "1,000,000",
     actual: "5,561",
     available: "944,439",
     reserved: "50,000",

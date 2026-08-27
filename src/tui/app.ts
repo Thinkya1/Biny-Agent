@@ -62,7 +62,7 @@ import { modelThinkingOptions, selectedThinkingForModel } from "./modelOptions.j
 import { createInitialTuiState, tuiReducer } from "./reducer.js";
 import { editorTheme, theme } from "./theme/index.js";
 import { formatSessionAge } from "./transcriptText.js";
-import type { PermissionChoice, TuiLaunchMode, TuiPermissionRequest, TuiState, TuiStatus } from "./types.js";
+import type { PermissionChoice, TuiLaunchMode, TuiState, TuiStatus } from "./types.js";
 import type { AgentAttachment, AgentRunMode } from "../agent/AgentSession.js";
 import type { SkillDefinition } from "../extensions/skills.js";
 import type {
@@ -160,6 +160,8 @@ export class BinyTui {
   private sessionCacheHitRate: number | undefined;
   private overlay: OverlayHandle | undefined;
   private permissionDialog: PermissionDialog | undefined;
+  /** 当前权限弹层对应的请求 id；同一请求的重复同步不重置用户已选选项和确认输入。 */
+  private permissionDialogRequestId: string | undefined;
   /** 与 pi 一致：空闲时 Ctrl+C 需要在短时间内连续按两次才退出。 */
   private lastCtrlCAt = 0;
   private exiting = false;
@@ -525,7 +527,8 @@ export class BinyTui {
       try {
         await pendingModelSwitch;
       } catch {
-        // applyModel 已经展示具体失败原因；保留输入，避免误发到旧模型。
+        // applyModel 已经展示具体失败原因；Editor 提交时已清空输入，这里恢复，避免误发到旧模型。
+        this.setEditorText(text);
         return;
       }
     }
@@ -591,12 +594,6 @@ export class BinyTui {
   private handleGlobalKey(data: string): { consume?: boolean } | undefined {
     const busy = runtimeIsBusy(this.runtimeSnapshot);
 
-    if (matchesKey(data, "ctrl+s") && busy && !this.overlay) {
-      this.dismissAutocomplete();
-      void this.steerCurrentInput();
-      return { consume: true };
-    }
-
     // 连续两次 Ctrl+C 始终退出（弹层打开时也一样，和 Codex 体感一致）；
     // 单次 Ctrl+C 在弹层打开时交给弹层自己处理（选择器取消、查看器关闭），
     // 避免「想退出却发现被弹层卡住」。
@@ -623,6 +620,12 @@ export class BinyTui {
         this.sessionWriterConflictView?.handleInput(data);
       }
       // 冲突状态只允许 Retry 和退出，普通输入不能落入 Editor。
+      return { consume: true };
+    }
+    // steer 消费的是编辑器内容，必须排在冲突遮罩之后，避免冲突期间改写已隐藏的编辑器。
+    if (matchesKey(data, "ctrl+s") && busy && !this.overlay) {
+      this.dismissAutocomplete();
+      void this.steerCurrentInput();
       return { consume: true };
     }
     if (matchesKey(data, "escape")) {
@@ -753,6 +756,7 @@ export class BinyTui {
     this.overlay?.hide();
     this.overlay = undefined;
     this.permissionDialog = undefined;
+    this.permissionDialogRequestId = undefined;
     this.ui.setFocus(this.editor);
     this.ui.requestRender();
   }
@@ -787,18 +791,23 @@ export class BinyTui {
 
   /** 权限请求进出时同步弹层，避免请求切换后还留着上一份确认状态。 */
   private syncPermissionDialog(): void {
-    const request = tuiPermissionRequest(this.runtimeSnapshot);
-    if (!request) {
+    const pending = pendingPermission(this.runtimeSnapshot);
+    if (!pending) {
       if (this.permissionDialog) this.closeOverlay();
       return;
     }
     if (this.permissionDialog) {
-      this.permissionDialog.setRequest(request);
+      // 并行工具的进度事件会反复触发同步；同一请求只刷新展开状态，
+      // 换成新请求时才允许 setRequest 重置已选选项和已输入的确认词。
+      if (pending.requestId !== this.permissionDialogRequestId) {
+        this.permissionDialog.setRequest({ ...pending.request });
+        this.permissionDialogRequestId = pending.requestId;
+      }
       this.permissionDialog.setDetailsExpanded(this.state.permissionDetailsExpanded);
       return;
     }
     const dialog = new PermissionDialog(
-      request,
+      { ...pending.request },
       (choice) => {
         this.closeOverlay();
         this.answerPermission(choice);
@@ -809,8 +818,10 @@ export class BinyTui {
       Math.max(10, this.ui.terminal.rows - 4)
     );
     dialog.setDetailsExpanded(this.state.permissionDetailsExpanded);
-    this.permissionDialog = dialog;
     this.showOverlay(dialog, { maxHeight: "100%" });
+    // showOverlay 内部会先 closeOverlay 清空弹层引用，归属登记必须放在之后。
+    this.permissionDialog = dialog;
+    this.permissionDialogRequestId = pending.requestId;
   }
 
   private answerPermission(choice: PermissionChoice): void {
@@ -886,6 +897,11 @@ export class BinyTui {
       return;
     }
 
+    if (command === "/resume" && runtimeIsBusy(this.runtimeSnapshot)) {
+      this.notify("当前任务仍在运行，请先取消后再恢复会话。");
+      return;
+    }
+
     if (command === "/resume" && !args[0]) {
       await this.showSessionPicker();
       return;
@@ -912,6 +928,10 @@ export class BinyTui {
     }
 
     if (command === "/permissions") {
+      if (runtimeIsBusy(this.runtimeSnapshot)) {
+        this.notify("当前任务仍在运行，请先取消后再修改权限设置。");
+        return;
+      }
       if (args.length === 0) {
         this.showPermissionModePicker();
         return;
@@ -1004,7 +1024,9 @@ export class BinyTui {
         description: `${model.provider}  ${model.description ?? model.model}`
       })),
       onSelect: (item) => {
-        void this.selectModel(item.value);
+        // 远程 listModels 等在 Host 断连时会抛错，就地提示而不是 unhandled rejection。
+        void this.selectModel(item.value)
+          .catch((error: unknown) => this.notify(`切换模型失败：${describeError(error)}`));
       }
     });
   }
@@ -1266,7 +1288,9 @@ export class BinyTui {
         description: option.description
       })),
       onSelect: (item) => {
-        void this.applyPermissionMode(item.value as PermissionMode);
+        // applyPermissionMode 在 runtime 忙时会被 runExclusiveOperation 拒绝，就地提示而不是 unhandled rejection。
+        void this.applyPermissionMode(item.value as PermissionMode)
+          .catch((error: unknown) => this.notify(`切换权限模式失败：${describeError(error)}`));
       }
     });
   }
@@ -1310,7 +1334,9 @@ export class BinyTui {
         description: summary.firstUserMessage.replace(/\s+/g, " ").slice(0, 80)
       })),
       onSelect: (item) => {
-        void this.resumeSession(item.value);
+        // resumeSession 会把非 writer-conflict 错误（runtime 忙、会话损坏）重抛，必须就地提示。
+        void this.resumeSession(item.value)
+          .catch((error: unknown) => this.notify(`恢复会话失败：${describeError(error)}`));
       }
     });
   }
@@ -1343,7 +1369,11 @@ export class BinyTui {
     this.editorContainer.removeChild(this.editor);
     this.sessionWriterConflictView = new SessionWriterConflictComponent(
       this.sessionWriterConflict,
-      () => { void this.retrySessionWriterConflict(); }
+      () => {
+        // resumeSession 会把非冲突错误重抛，回调里必须兜住，避免 unhandled rejection。
+        void this.retrySessionWriterConflict()
+          .catch((error: unknown) => this.notify(`恢复会话失败：${describeError(error)}`));
+      }
     );
     this.editorContainer.addChild(this.sessionWriterConflictView);
     this.ui.setFocus(this.sessionWriterConflictView);
@@ -1394,33 +1424,38 @@ export class BinyTui {
     if (this.exiting) return;
     this.exiting = true;
     this.status.dispose();
-    const runtime = this.runtime;
-    if (runtime) {
-      let snapshot = this.runtimeSnapshot;
-      try {
-        snapshot ??= runtime.getSnapshot();
-      } catch {
-        // runtime 可能正处于 Host 断线或初始化失败；仍需继续清理 TUI。
+    try {
+      const runtime = this.runtime;
+      if (runtime) {
+        let snapshot = this.runtimeSnapshot;
+        try {
+          snapshot ??= runtime.getSnapshot();
+        } catch {
+          // runtime 可能正处于 Host 断线或初始化失败；仍需继续清理 TUI。
+        }
+        if (snapshot) {
+          const { info } = snapshot;
+          this.exitSummary = { sessionId: info.sessionId, sessionFile: info.sessionFile };
+        }
+        // 只有当前进程创建的 owner 才能在退出时取消自己的 AgentRun。附着到共享 Host
+        // 的 TUI 只是观察者，断开时不能结束其他客户端正在执行的任务。
+        if (snapshot && runtimeIsBusy(snapshot) && !(runtime instanceof RuntimeHostClient)) {
+          await drainRuntimeBeforeExit(runtime);
+        }
+        this.unsubscribe?.();
+        this.unsubscribe = undefined;
+        await this.runtimeHost?.close();
+        await runtime.close();
+      } else {
+        this.unsubscribe?.();
+        this.unsubscribe = undefined;
       }
-      if (snapshot) {
-        const { info } = snapshot;
-        this.exitSummary = { sessionId: info.sessionId, sessionFile: info.sessionFile };
-      }
-      // 只有当前进程创建的 owner 才能在退出时取消自己的 AgentRun。附着到共享 Host
-      // 的 TUI 只是观察者，断开时不能结束其他客户端正在执行的任务。
-      if (snapshot && runtimeIsBusy(snapshot) && !(runtime instanceof RuntimeHostClient)) {
-        await drainRuntimeBeforeExit(runtime);
-      }
-      this.unsubscribe?.();
-      this.unsubscribe = undefined;
-      await this.runtimeHost?.close();
-      await runtime.close();
-    } else {
-      this.unsubscribe?.();
-      this.unsubscribe = undefined;
+    } catch {
+      // 关闭 Host/runtime 失败不能中断退出：终端必须恢复，run() 的等待者必须被唤醒。
+    } finally {
+      this.ui.stop();
+      this.resolveExit?.();
     }
-    this.ui.stop();
-    this.resolveExit?.();
   }
 }
 
@@ -1534,10 +1569,4 @@ export function selectDialogRow(
 ): number {
   const belowEditor = Math.max(0, contentHeight - chromeTailHeight);
   return Math.min(belowEditor, Math.max(0, terminalHeight - dialogHeight));
-}
-
-function tuiPermissionRequest(snapshot: InteractiveRuntimeSnapshot | undefined): TuiPermissionRequest | undefined {
-  const pending = pendingPermission(snapshot);
-  if (!pending) return undefined;
-  return { ...pending.request };
 }

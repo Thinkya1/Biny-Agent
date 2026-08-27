@@ -2,6 +2,7 @@
 import { runRuntimeHostProcess } from "../../runtime/hostProcess.js";
 
 export async function runtimeHostCommand(): Promise<void> {
-  const commandIndex = process.argv.lastIndexOf("runtime-host");
+  // 命令名只认第一次出现；后续同值参数（如 --session-id runtime-host）不能截到这里。
+  const commandIndex = process.argv.indexOf("runtime-host");
   await runRuntimeHostProcess(commandIndex < 0 ? [] : process.argv.slice(commandIndex + 1));
 }

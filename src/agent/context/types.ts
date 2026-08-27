@@ -6,7 +6,6 @@
  */
 import type { ProjectContext } from "../../project/ProjectContext.js";
 import type { ContextComponentUsage } from "../../session/metadata.js";
-import type { MemoryRecallReport } from "./memoryTypes.js";
 
 export interface LoadedInstruction {
   path: string;
@@ -110,8 +109,7 @@ export interface ContextStatus {
   compaction: CompactionStatus;
   budget: ContextBudgetStatus;
   memoryEnabled: boolean;
-  memoryTopics: string[];
-  memoryRecall?: MemoryRecallReport;
+  memoryOverviewChars?: number;
 }
 
 export interface MemoryEntry {

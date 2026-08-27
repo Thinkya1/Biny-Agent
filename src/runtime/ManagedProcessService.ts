@@ -246,7 +246,11 @@ export class ManagedProcessService {
       return cloneSnapshot(snapshot);
     } catch (error) {
       if (options.signal?.aborted) {
-        await this.stop(processId, "start_process aborted").catch(() => undefined);
+        // 与下方非 abort 失败路径对齐：只有默认 cleanup 生命周期的进程在 abort 时被回收，
+        // 显式 retain 的进程保留给调用方排查现场。
+        if (snapshot.lifecycle === "cleanup") {
+          await this.stop(processId, "start_process aborted").catch(() => undefined);
+        }
       } else {
         this.refreshRecord(record);
         if (snapshot.state === "starting") snapshot.state = "failed";

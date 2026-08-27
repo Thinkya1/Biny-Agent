@@ -12,6 +12,7 @@
  * 都匹配的请求才会拿到对应的 cookie（`cookieHeaderFor`）。跨域跳转必须重新匹配一次，
  * 不能把上一跳的 Cookie 头原样带过去。
  */
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -72,9 +73,15 @@ export async function readCookieJar(filePath: string): Promise<StoredCookie[]> {
 /** 按 0600 写盘，并用临时文件 + 改名替换，避免读到写了一半的 jar。 */
 export async function writeCookieJar(filePath: string, cookies: StoredCookie[]): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temporaryPath = `${filePath}.tmp`;
-  await fs.writeFile(temporaryPath, serializeCookieJar(cookies), { encoding: "utf8", mode: 0o600 });
-  await fs.rename(temporaryPath, filePath);
+  // 临时名必须带随机成分：并发写同一个 jar 时，固定名字会让两个写操作互相截断。
+  const temporaryPath = `${filePath}.${String(process.pid)}-${randomBytes(8).toString("hex")}.tmp`;
+  try {
+    await fs.writeFile(temporaryPath, serializeCookieJar(cookies), { encoding: "utf8", mode: 0o600 });
+    await fs.rename(temporaryPath, filePath);
+  } catch (error) {
+    await fs.unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
   await fs.chmod(filePath, 0o600);
 }
 

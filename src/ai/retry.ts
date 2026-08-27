@@ -90,8 +90,13 @@ function errorMessage(error: unknown): string {
 }
 
 function retryDelayMs(response: Response): number | undefined {
-  const milliseconds = Number(response.headers.get("retry-after-ms"));
-  if (Number.isFinite(milliseconds) && milliseconds >= 0) return milliseconds;
+  // 头缺失时 headers.get 返回 null，而 Number(null) === 0 会通过校验变成零退避；
+  // 必须先判空再转数值，缺失时继续走标准 Retry-After 或指数退避。
+  const retryAfterMs = response.headers.get("retry-after-ms");
+  if (retryAfterMs) {
+    const milliseconds = Number(retryAfterMs);
+    if (Number.isFinite(milliseconds) && milliseconds >= 0) return milliseconds;
+  }
   const retryAfter = response.headers.get("retry-after");
   if (!retryAfter) return undefined;
   const seconds = Number(retryAfter);

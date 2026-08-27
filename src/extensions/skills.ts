@@ -73,6 +73,8 @@ interface SkillFileSnapshot {
 
 interface SkillFileCandidate {
   path: string;
+  /** 收集该候选时所属的根；全局根的第一层跨根软链会以软链目标为新根，与扫描根不同。 */
+  rootPath: string;
   snapshot: SkillFileSnapshot;
 }
 
@@ -93,7 +95,9 @@ export async function loadSkills(options: LoadSkillsOptions): Promise<SkillBundl
         if (!absolutePath) continue;
         const files: SkillFileCandidate[] = [];
         await collectSkillFiles(repositoryRoot, absolutePath, files, seen);
-        await appendSkillDefinitions(skills, warnings, repositoryRoot, canonicalWorkspace, files, "project", seenNames, options, sourceForProjectSkill(files[0]?.path, canonicalWorkspace));
+        // 目标目录按构造就是各级 .agents/skills，source 固定为 agents；当候选落在
+        // canonicalWorkspace 之外（工作区是仓库子目录）时不能靠相对路径推断。
+        await appendSkillDefinitions(skills, warnings, canonicalWorkspace, files, "project", seenNames, options, "agents");
       }
       continue;
     }
@@ -101,7 +105,7 @@ export async function loadSkills(options: LoadSkillsOptions): Promise<SkillBundl
     if (!absolutePath) continue;
     const files: SkillFileCandidate[] = [];
     await collectSkillFiles(canonicalWorkspace, absolutePath, files, seen);
-    await appendSkillDefinitions(skills, warnings, canonicalWorkspace, canonicalWorkspace, files, "project", seenNames, options, sourceForProjectSkill(files[0]?.path, canonicalWorkspace));
+    await appendSkillDefinitions(skills, warnings, canonicalWorkspace, files, "project", seenNames, options, sourceForProjectSkill(files[0]?.path, canonicalWorkspace));
   }
 
   // 显式传 globalRoot 时只扫描该目录（测试和嵌入方可隔离）；默认与 SkillHub 使用相同根目录。
@@ -124,7 +128,7 @@ export async function loadSkills(options: LoadSkillsOptions): Promise<SkillBundl
     try {
       const globalFiles: SkillFileCandidate[] = [];
       await collectSkillFiles(canonicalPath, canonicalPath, globalFiles, globalSeen, true, allowedGlobalDirectories);
-      await appendSkillDefinitions(skills, warnings, canonicalPath, canonicalWorkspace, globalFiles, "global", seenNames, options, sourceForGlobalRoot(configuredPath));
+      await appendSkillDefinitions(skills, warnings, canonicalWorkspace, globalFiles, "global", seenNames, options, sourceForGlobalRoot(configuredPath));
     } catch (error) {
       warnings.push(`Skipped skill root ${canonicalPath}: ${errorMessage(error)}`);
     }
@@ -176,7 +180,6 @@ function officialProjectSkillTargets(workspaceRoot: string, repositoryRoot: stri
 async function appendSkillDefinitions(
   skills: SkillDefinition[],
   warnings: string[],
-  rootPath: string,
   projectRoot: string,
   files: SkillFileCandidate[],
   scope: SkillScope,
@@ -187,7 +190,7 @@ async function appendSkillDefinitions(
   for (const candidate of files.sort((left, right) => left.path.localeCompare(right.path))) {
     if (skills.length >= maxDiscoveredSkillCount) break;
     try {
-      const skill = await readSkillMetadata(rootPath, projectRoot, candidate, scope, source);
+      const skill = await readSkillMetadata(projectRoot, candidate, scope, source);
       if (!resolveSkillActivation({
         ref: skill.ref,
         globalDefaults: options.globalDefaults,
@@ -415,7 +418,9 @@ function resolveSkill(bundle: SkillBundle, requested: string, requestedPath?: st
   return selected;
 }
 
-async function readSkillMetadata(rootPath: string, projectRoot: string, candidate: SkillFileCandidate, scope: SkillScope, source: SkillRootSource): Promise<SkillDefinition> {
+async function readSkillMetadata(projectRoot: string, candidate: SkillFileCandidate, scope: SkillScope, source: SkillRootSource): Promise<SkillDefinition> {
+  // 绑定校验与展示路径都按候选自己的根计算，兼容全局根第一层软链指向其他受支持根的场景。
+  const rootPath = candidate.rootPath;
   const content = await readBoundedSkillFile(rootPath, candidate, maxSkillMetadataBytes);
   const standardSkill = path.basename(candidate.path) === "SKILL.md";
   let frontmatter: SkillFrontmatter = {};
@@ -601,7 +606,7 @@ async function readSkillResourceFresh(skill: SkillDefinition, resourcePath: stri
   const stat = await fs.lstat(resourcePath, { bigint: true });
   const content = await readBoundedSkillFile(
     path.dirname(skill.filePath),
-    { path: resourcePath, snapshot: skillSnapshot(stat) },
+    { path: resourcePath, rootPath: path.dirname(skill.filePath), snapshot: skillSnapshot(stat) },
     maxSkillResourceBytes,
     true
   );
@@ -616,7 +621,7 @@ async function readSkillFileFresh(rootPath: string, filePath: string, maxBytes: 
   if (!stat.isFile()) throw new Error(`Skill path is not a file: ${filePath}`);
   if (stat.nlink !== 1n) throw new Error(`Skill files cannot be hardlinks: ${filePath}`);
   if (await escapesRoot(rootPath, filePath)) throw new Error(`Skill file escapes its root: ${filePath}`);
-  return await readBoundedSkillFile(rootPath, { path: filePath, snapshot: skillSnapshot(stat) }, maxBytes, true);
+  return await readBoundedSkillFile(rootPath, { path: filePath, rootPath, snapshot: skillSnapshot(stat) }, maxBytes, true);
 }
 
 async function collectSkillFiles(
@@ -639,7 +644,13 @@ async function collectSkillFiles(
     // 全局 Skill 根本身是用户主动登记的入口，允许其第一层目录软链指向
     // Claude/Codex/Biny 等已有技能；进入技能目录后仍禁止内部软链。
     if (!allowDirectDirectorySymlink || path.dirname(target) !== rootPath) return;
-    const canonical = await fs.realpath(target);
+    let canonical: string;
+    try {
+      canonical = await fs.realpath(target);
+    } catch {
+      // 悬空或失效的软链只跳过自身，不能拖垮同根下的其他技能。
+      return;
+    }
     if (!allowedDirectorySymlinks.some((directory) => isPathInside(directory, canonical))) return;
     const linkedStat = await fs.lstat(canonical, { bigint: true });
     if (!linkedStat.isDirectory()) return;
@@ -651,7 +662,7 @@ async function collectSkillFiles(
     if (stat.nlink !== 1n) throw new Error(`Skill files cannot be hardlinks: ${target}`);
     if (path.extname(target).toLowerCase() === ".md" && !seen.has(target)) {
       seen.add(target);
-      files.push({ path: target, snapshot: skillSnapshot(stat) });
+      files.push({ path: target, rootPath, snapshot: skillSnapshot(stat) });
     }
     return;
   }
@@ -670,7 +681,8 @@ async function collectSkillFiles(
   }
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === ".git") continue;
-    await collectSkillFiles(rootPath, path.join(target, entry.name), files, seen);
+    // 软链许可继续下传：是否放行由目标是否根的第一层（dirname 校验）决定。
+    await collectSkillFiles(rootPath, path.join(target, entry.name), files, seen, allowDirectDirectorySymlink, allowedDirectorySymlinks);
     if (files.length >= maxDiscoveredSkillCount) return;
   }
 }

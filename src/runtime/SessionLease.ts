@@ -140,7 +140,15 @@ export class SessionLeaseStore {
         break;
       } catch (error) {
         if (!isErrorCode(error, "EEXIST")) throw error;
-        const existing = this.readLease(leasePath, sessionId);
+        let existing: LeaseRecord;
+        try {
+          existing = this.readLease(leasePath, sessionId);
+        } catch {
+          // createLease 的崩溃窗口会留下 0 字节/半截 JSON 锁。它不是有效的归属证明，
+          // 按 stale 回收后重试，否则该 session 会被永远无法解析的锁永久锁死。
+          this.retireStaleLease(leasePath);
+          continue;
+        }
         if (isProcessAlive(existing.pid)) throw new SessionLeaseError(existing.pid, sessionId);
         this.retireStaleLease(leasePath);
       }

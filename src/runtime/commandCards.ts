@@ -359,24 +359,11 @@ function contextDetailRows(context: ContextStatus): CommandCardRow[] {
   rows.push(detailRow(
     "Memory",
     context.memoryEnabled
-      ? context.memoryTopics.length ? `use enabled (${context.memoryTopics.join(", ")})` : "use enabled"
-      : "use disabled (stored data retained)"
+      ? context.memoryOverviewChars
+        ? `enabled; overview ${formatCount(context.memoryOverviewChars)} chars injected, entries recalled on demand`
+        : "enabled (no memory overview this turn)"
+      : "disabled (stored data retained)"
   ));
-  const recall = context.memoryRecall;
-  if (recall) {
-    rows.push(detailRow(
-      "Memory recall",
-      `included user=${String(recall.origins.included.user)}, current=${String(recall.origins.included.currentWorkspace)}, other=${String(recall.origins.included.otherWorkspaces)}; `
-      + `trimmed user=${String(recall.origins.trimmed.user)}, current=${String(recall.origins.trimmed.currentWorkspace)}, other=${String(recall.origins.trimmed.otherWorkspaces)}; `
-      + `omitted=${String(recall.omitted.length)}`
-    ));
-    if (recall.budgetOmission) {
-      rows.push(detailRow(
-        "Memory budget",
-        `${formatCount(recall.budgetOmission.usedChars)}/${formatCount(recall.budgetOmission.maxChars)} chars; ${String(recall.budgetOmission.omitted)} omitted`
-      ));
-    }
-  }
   const composition = budget.components?.filter((component) => component.requestedTokens > 0) ?? [];
   for (const component of composition) {
     rows.push(detailRow(

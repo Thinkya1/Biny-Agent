@@ -44,13 +44,18 @@ interface ComposerProps {
   permissionModePending: boolean;
   running: boolean;
   runtimeBusy: boolean;
-  activeElsewhere: boolean;
   sessionWriterConflict: boolean;
   modelSetupRequired: boolean;
   focusToken: number;
   prefillInput?: string;
+  /** 建议 pill 直达提交：nonce 变化时以该文本走统一提交路径（首页 pill 点击即发送）。 */
+  submitDraft?: { text: string; nonce: number };
+  /** submitDraft 被领取后回调清掉源头——draft 是单次信号，不清的话 Composer 每次重挂载（过场落地、新建任务回首页）都会把旧草稿再发一遍。 */
+  onSubmitDraftConsumed?(): void;
+  /** 内联进底栏的工作区/分支选择器（Alma 式：文件夹图标 + 项目名 位于工具栏左组）。 */
+  workspaceContext?: React.ReactNode;
   skills: DesktopSkillCatalogEntry[];
-  onSend(input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp"): Promise<void>;
+  onSend(input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string): Promise<void>;
   onSlashCommand(command: string): Promise<void>;
   onExpandSkillCommand(input: string): Promise<string>;
   onStop(): Promise<void>;
@@ -80,11 +85,13 @@ export const Composer = memo(function Composer({
   permissionModePending,
   running,
   runtimeBusy,
-  activeElsewhere,
   sessionWriterConflict,
   modelSetupRequired,
   focusToken,
   prefillInput,
+  submitDraft,
+  onSubmitDraftConsumed,
+  workspaceContext,
   skills,
   onSend,
   onSlashCommand,
@@ -115,6 +122,7 @@ export const Composer = memo(function Composer({
   const modelSwitchQueueRef = useRef<Promise<void>>(Promise.resolve());
   const modelSwitchPromiseRef = useRef<Promise<void> | undefined>(undefined);
   const modelSwitchRequestRef = useRef(0);
+  const submitFlightRef = useRef(false);
 
   useEffect(() => {
     modelSwitchRequestRef.current += 1;
@@ -181,47 +189,61 @@ export const Composer = memo(function Composer({
 
   const submit = async (delivery?: "steer" | "followUp", submittedInput = input): Promise<void> => {
     const value = submittedInput.trim() || (attachments.length ? "请分析这些附件。" : "");
-    if (!project || !value || busy || pendingAttachments.length || permissionModePending || memoryToggleBusy) return;
-    const pendingModelSwitch = modelSwitchPromiseRef.current;
-    if (pendingModelSwitch) {
-      // 斜杠命令也应看到已确认的 Runtime 状态；否则紧接着执行 `/status` 或再次切模
-      // 时，命令可能与上一轮切换并发竞争。
-      try {
-        await pendingModelSwitch;
-      } catch {
-        // startModelSwitch 已提示具体错误；保留输入，避免继续操作旧模型。
+    if (!project || !value || busy || submitFlightRef.current || pendingAttachments.length || permissionModePending || memoryToggleBusy) return;
+    submitFlightRef.current = true;
+    try {
+      const pendingModelSwitch = modelSwitchPromiseRef.current;
+      if (pendingModelSwitch) {
+        // 斜杠命令也应看到已确认的 Runtime 状态；否则紧接着执行 `/status` 或再次切模
+        // 时，命令可能与上一轮切换并发竞争。
+        try {
+          await pendingModelSwitch;
+        } catch {
+          // startModelSwitch 已提示具体错误；保留输入，避免继续操作旧模型。
+          return;
+        }
+      }
+      const [slashName] = value.split(/\s+/, 1);
+      const slashCommand = DESKTOP_SLASH_COMMANDS.find((command) => command.name === slashName);
+      if (slashCommand && (value === slashCommand.name || slashCommand.acceptsArgs)) {
+        await runSlash(value);
         return;
       }
-    }
-    const [slashName] = value.split(/\s+/, 1);
-    const slashCommand = DESKTOP_SLASH_COMMANDS.find((command) => command.name === slashName);
-    if (slashCommand && (value === slashCommand.name || slashCommand.acceptsArgs)) {
-      await runSlash(value);
-      return;
-    }
-    if (sessionWriterConflict || activeElsewhere) return;
-    const sentAttachments = attachments;
-    setBusy(true);
-    try {
-      const sendValue = isSkillSlashCommand(value)
-        ? await onExpandSkillCommand(normalizeSkillSlashCommand(value))
-        : value;
-      // 模型标签已经即时更新，但真正的 Runtime 切换仍需完成后才能发送，
-      // 否则用户紧接着按 Enter 时可能把消息发给旧模型。
-      setInput("");
-      setAttachments([]);
-      await onSend(sendValue, mode, sentAttachments, delivery);
-    } catch (submitError) {
-      setInput(value);
-      setAttachments(sentAttachments);
-      onWarning(errorMessage(submitError));
+      if (sessionWriterConflict) return;
+      const sentAttachments = attachments;
+      setBusy(true);
+      try {
+        const sendValue = isSkillSlashCommand(value)
+          ? await onExpandSkillCommand(normalizeSkillSlashCommand(value))
+          : value;
+        // 模型标签已经即时更新，但真正的 Runtime 切换仍需完成后才能发送，
+        // 否则用户紧接着按 Enter 时可能把消息发给旧模型。
+        setInput("");
+        setAttachments([]);
+        await onSend(sendValue, mode, sentAttachments, delivery, globalThis.crypto.randomUUID());
+      } catch (submitError) {
+        setInput(value);
+        setAttachments(sentAttachments);
+        onWarning(errorMessage(submitError));
+      } finally {
+        setBusy(false);
+      }
     } finally {
-      setBusy(false);
+      submitFlightRef.current = false;
     }
   };
 
+  // 建议 pill 直达提交：nonce 每次自增，文本走与手动输入完全相同的提交路径。
+  // 先领走再提交：draft 是单次信号，App 侧不清掉的话每次重挂载都会重复发送。
+  useEffect(() => {
+    if (!submitDraft) return;
+    onSubmitDraftConsumed?.();
+    void submit(undefined, submitDraft.text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只对 nonce 变化响应，submit 取当帧闭包
+  }, [submitDraft]);
+
   const addFiles = async (files: File[]): Promise<void> => {
-    if (!project || !files.length || busy || running || sessionWriterConflict) return;
+    if (!project || !files.length || busy || submitFlightRef.current || running || sessionWriterConflict) return;
     setBusy(true);
     try {
       const existing = new Set([
@@ -333,11 +355,11 @@ export const Composer = memo(function Composer({
     startModelSwitch(alias, nextThinking);
   };
   const usage = formatContextUsage(contextUsage);
-  const inputDisabled = sessionWriterConflict || activeElsewhere || busy;
+  const inputDisabled = sessionWriterConflict || busy;
   const attachmentCount = attachments.length + pendingAttachments.length;
   const sendDisabled = permissionModePending || memoryToggleBusy || (running
     ? false
-    : (!input.trim() && !attachments.length) || !project || sessionWriterConflict || activeElsewhere || modelSetupRequired || busy || pendingAttachments.length > 0);
+    : (!input.trim() && !attachments.length) || !project || sessionWriterConflict || modelSetupRequired || busy || pendingAttachments.length > 0);
   const sendDisabledReason = !project
     ? "请先打开一个项目。"
       : modelSetupRequired
@@ -348,8 +370,6 @@ export const Composer = memo(function Composer({
           ? "正在确认当前聊天的记忆状态，请稍候。"
         : sessionWriterConflict
           ? "会话已在另一个应用中打开，请先在那里关闭后重试。"
-        : activeElsewhere
-        ? "另一个会话正在运行，请先切回该会话。"
         : busy
           ? "当前附件或命令正在处理，请稍候。"
           : pendingAttachments.length
@@ -357,17 +377,15 @@ export const Composer = memo(function Composer({
           : !input.trim() && !attachments.length
             ? "输入消息或添加附件后发送。"
             : undefined;
-  const placeholder = running ? "可以继续补充要求…" : "hi biny";
+  const placeholder = running ? "可以继续补充要求…" : "随便说点什么…";
   // 空输入时 placeholder 逐字打出，让输入框保持「活」的感觉
   const typedPlaceholder = useTypedPlaceholder(placeholder, input.trim().length === 0);
   const modelSwitchPending = Boolean(optimisticModel);
-  const modelSwitchDisabled = sessionWriterConflict || activeElsewhere || running || runtimeBusy || busy;
+  const modelSwitchDisabled = sessionWriterConflict || running || runtimeBusy || busy;
   const modelSwitchDisabledReason = !project
     ? "请先打开一个项目。"
     : sessionWriterConflict
       ? "会话已在另一个应用中打开。"
-      : activeElsewhere
-      ? "另一个会话正在运行，请先切回该会话。"
       : running
         ? "当前对话正在运行，等结束后再切换模型。"
         : runtimeBusy
@@ -375,15 +393,13 @@ export const Composer = memo(function Composer({
         : busy
           ? "当前附件或命令正在处理，请稍候。"
           : undefined;
-  const permissionSwitchDisabled = !project || permissionModePending || sessionWriterConflict || activeElsewhere || runtimeBusy || busy;
+  const permissionSwitchDisabled = !project || permissionModePending || sessionWriterConflict || runtimeBusy || busy;
   const permissionDisabledReason = !project
     ? "请先打开一个项目。"
     : permissionModePending
       ? "正在确认权限模式，请稍候。"
     : sessionWriterConflict
       ? "会话已在另一个应用中打开。"
-      : activeElsewhere
-      ? "另一个会话正在运行，请先切回该会话。"
       : running
         ? "当前对话正在运行，请等待结束后再切换权限模式。"
         : runtimeBusy
@@ -475,6 +491,7 @@ export const Composer = memo(function Composer({
                 <span>规划</span>
               </ComposerActionButton>
             ) : null}
+            {workspaceContext}
             <div className="composer-menu-anchor" ref={permissionAnchorRef}>
               <ComposerActionButton
                 className="biny-permission-pill"
@@ -491,7 +508,6 @@ export const Composer = memo(function Composer({
                 tooltip={menu === "permission" ? undefined : "选择当前会话的权限模式"}
               >
                 <Icon name={permissionIcon(permissionMode)} size={13} />
-                <span>{permissionLabel(permissionMode)}</span>
                 <Icon name="chevron" size={11} />
               </ComposerActionButton>
               <PermissionMenu
@@ -502,6 +518,41 @@ export const Composer = memo(function Composer({
                   setMenu(null);
                   void onPermissionMode(nextMode).catch((permissionError) => onWarning(permissionErrorMessage(permissionError)));
                 }}
+              />
+            </div>
+            <div className="composer-menu-anchor" ref={modelAnchorRef}>
+              <ComposerActionButton
+                className="biny-model-pill"
+                data-composer-menu="model"
+                disabled={modelSwitchDisabled}
+                disabledReason={modelSwitchDisabledReason}
+                loading={modelSwitchPending}
+                active={menu === "model"}
+                aria-expanded={menu === "model"}
+                aria-haspopup="menu"
+                label={thinkingAvailable && currentThinking ? `${modelName} · ${thinkingLabel(currentThinking)}` : modelName}
+                onClick={() => setMenu(menu === "model" ? null : "model")}
+                tooltip={menu === "model" ? undefined : "模型与推理强度"}
+              >
+                {selectedModel ? <span className="model-trigger-brand"><ProviderBrandGlyph type={selectedModelCatalog?.iconTone ?? selectedModel.providerType} /></span> : null}
+                <span>{modelName}</span>
+                {thinkingAvailable && currentThinking ? <span className="model-trigger-thinking">{thinkingLabel(currentThinking)}</span> : null}
+                <Icon name="chevron" size={11} />
+              </ComposerActionButton>
+              <ModelPickerMenu
+                anchorRef={modelAnchorRef}
+                currentAlias={currentAlias}
+                currentModelName={modelName}
+                currentThinking={currentThinking}
+                models={models}
+                onClose={() => setMenu(null)}
+                onSelectModel={chooseModel}
+                onSelectThinking={(thinking) => {
+                  setMenu(null);
+                  if (currentAlias) startModelSwitch(currentAlias, thinking);
+                }}
+                open={menu === "model"}
+                thinkingLevels={thinkingLevels}
               />
             </div>
           </div>
@@ -553,43 +604,8 @@ export const Composer = memo(function Composer({
                 onClick={() => { void onToggleMemory(); }}
                 tooltip={memoryEnabled ? "隐身模式已关闭 - 点击禁用记忆功能" : "隐身模式已开启 - 点击启用记忆功能"}
               >
-                <Icon name={memoryEnabled ? "eye" : "eye-off"} size={16} />
+                <Icon name={memoryEnabled ? "brain-spark" : "brain-off"} size={20} />
               </ComposerActionButton>
-            </div>
-            <div className="composer-menu-anchor" ref={modelAnchorRef}>
-              <ComposerActionButton
-                className="biny-model-pill"
-                data-composer-menu="model"
-                disabled={modelSwitchDisabled}
-                disabledReason={modelSwitchDisabledReason}
-                loading={modelSwitchPending}
-                active={menu === "model"}
-                aria-expanded={menu === "model"}
-                aria-haspopup="menu"
-                label={thinkingAvailable && currentThinking ? `${modelName} · ${thinkingLabel(currentThinking)}` : modelName}
-                onClick={() => setMenu(menu === "model" ? null : "model")}
-                tooltip={menu === "model" ? undefined : "模型与推理强度"}
-              >
-                {selectedModel ? <span className="model-trigger-brand"><ProviderBrandGlyph type={selectedModelCatalog?.iconTone ?? selectedModel.providerType} /></span> : null}
-                <span>{modelName}</span>
-                {thinkingAvailable && currentThinking ? <span className="model-trigger-thinking">{thinkingLabel(currentThinking)}</span> : null}
-                <Icon name="chevron" size={11} />
-              </ComposerActionButton>
-              <ModelPickerMenu
-                anchorRef={modelAnchorRef}
-                currentAlias={currentAlias}
-                currentModelName={modelName}
-                currentThinking={currentThinking}
-                models={models}
-                onClose={() => setMenu(null)}
-                onSelectModel={chooseModel}
-                onSelectThinking={(thinking) => {
-                  setMenu(null);
-                  if (currentAlias) startModelSwitch(currentAlias, thinking);
-                }}
-                open={menu === "model"}
-                thinkingLevels={thinkingLevels}
-              />
             </div>
             {usage ? (
               <span className="context-usage" role="status">
@@ -598,6 +614,9 @@ export const Composer = memo(function Composer({
                   <span>上下文使用量</span>
                   <strong>{usage.percent}% 已占用</strong>
                   <strong>{usage.used} / {usage.max} tokens</strong>
+                  {usage.reserved ? (
+                    <span>模型窗口 {usage.window}，其中 {usage.reserved} 为输出等预留</span>
+                  ) : null}
                 </span>
               </span>
             ) : null}

@@ -269,6 +269,8 @@ export class McpToolHost {
     const attempt = (async () => {
       const previous = managed.client;
       managed.client = undefined;
+      // 旧 client 一旦摘除就不再处于连接态；若后续 startServer 失败，状态不会滞留「已连接」。
+      managed.status.connected = false;
       if (previous) {
         try {
           await previous.close();

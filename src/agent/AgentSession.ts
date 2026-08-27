@@ -71,9 +71,19 @@ import {
 } from "./completionGuard.js";
 import { evaluateCompletion } from "./completionReview.js";
 import { ContextMemory } from "./context/ContextMemory.js";
-import { LocalMemory, MemoryRevisionConflictError, redactSecrets } from "./context/LocalMemory.js";
+import { LocalMemory, withFreshRevision, redactSecrets } from "./context/LocalMemory.js";
 import { TelosStorage } from "./context/telosStorage.js";
 import { runMemoryCommand } from "./context/memoryCommands.js";
+import { MemoryVectorIndex } from "./context/MemoryVectorIndex.js";
+import {
+  HybridMemoryRetriever,
+  memoryEntryContentHash
+} from "./context/HybridMemoryRetriever.js";
+import {
+  MemoryEmbeddingService,
+  type MemoryEmbeddingRuntimeStatus
+} from "./context/MemoryEmbeddingService.js";
+import { parseMemoryCitations } from "./context/memoryCitations.js";
 import { WorkspaceContext } from "./context/WorkspaceContext.js";
 import type { CompactionResult, ContextStatus } from "./context/types.js";
 import { recordNativeTelemetry } from "../observability/telemetry.js";
@@ -110,16 +120,7 @@ import {
   type GlobalPersonalizationUpdate,
   type ResolvedChatPersonalization
 } from "../personalization/index.js";
-import { MemoryVectorIndex } from "./context/MemoryVectorIndex.js";
-import {
-  HybridMemoryRetriever,
-  memoryEntryContentHash
-} from "./context/HybridMemoryRetriever.js";
-import {
-  MemoryEmbeddingService,
-  type MemoryEmbeddingRuntimeStatus
-} from "./context/MemoryEmbeddingService.js";
-import type { MemoryEntry, MemorySearchOptions, MemorySearchResult } from "./context/memoryTypes.js";
+import type { MemorySearchOptions, MemorySearchResult } from "./context/memoryTypes.js";
 
 export interface AgentSessionOptions {
   workspaceRoot: string;
@@ -244,7 +245,6 @@ interface ActiveRunMessageQueues {
 }
 
 const maxQueuedRunMessages = 100;
-const memoryMutationCommands = new Set(["add", "forget", "delete", "compact", "consolidate"]);
 
 /**
  * Stateful core agent for one workspace. Hosts use this public surface instead
@@ -254,8 +254,8 @@ export class AgentSession {
   private readonly contextMemory: ContextMemory;
   private readonly localMemory: LocalMemory;
   private readonly telosStorage: TelosStorage;
-  private readonly memoryRetriever: HybridMemoryRetriever;
   private readonly localEmbeddingManager: LocalEmbeddingManager;
+  private readonly memoryRetriever: HybridMemoryRetriever;
   private readonly memoryEmbeddingService: MemoryEmbeddingService;
   private usageRecords: SessionUsage[] = [];
   private modelRequestRecords: ModelRequestMetrics[] = [];
@@ -296,7 +296,6 @@ export class AgentSession {
     const onModelRequest = async (metrics: ModelRequestMetrics): Promise<void> => {
       await this.recordModelRequest(metrics);
     };
-    const memoryConfig = options.config.context.memory;
     // 抽取与整理可使用不同模型。getter 读取 root-turn 快照，因此外部配置变更不会让运行中的
     // turn 漂移；下一根回合才会切换。按 alias 缓存 adapter，避免每个候选重复创建。
     const memoryModels = new Map<string, AgentModel>();
@@ -315,7 +314,7 @@ export class AgentSession {
       persistenceRoot,
       () => memoryModel("extractModel"),
       onUsage,
-      memoryConfig.maxRecalled,
+      undefined,
       onModelRequest,
       () => this.sideModelRequestContext(),
       () => memoryModel("consolidationModel")
@@ -364,6 +363,23 @@ export class AgentSession {
       },
       closeVectorIndex: false
     });
+    // 压缩摘要可切换到更便宜的模型。与 memoryModel 一样读取 root-turn 快照；解析失败只
+    // 打 warning 并回退当前对话模型，绝不让配置问题阻断会话压缩。按 alias 缓存成功结果。
+    const summaryModels = new Map<string, AgentModel>();
+    const resolveSummaryModel = (): AgentModel => {
+      const alias = this.activeConfig.context.compaction.summaryModel;
+      if (!alias) return getModel();
+      const cached = summaryModels.get(alias);
+      if (cached) return cached;
+      try {
+        const created = createNativeModelForConfig(this.activeConfig, alias);
+        summaryModels.set(alias, created);
+        return created;
+      } catch (error) {
+        console.warn(`[biny] 压缩摘要模型 ${alias} 解析失败，回退当前对话模型：${errorMessage(error)}`);
+        return getModel();
+      }
+    };
     this.contextMemory = new ContextMemory(
       getModel,
       workspace,
@@ -377,7 +393,7 @@ export class AgentSession {
         const fallback = options.config.context.maxInputTokens ?? defaultModelContextWindow;
         return { contextWindow: fallback, maxInputTokens: fallback, maxOutputTokens: undefined };
       },
-      options.config.context.compaction,
+      { ...options.config.context.compaction, resolveSummaryModel },
       onModelRequest,
       () => this.sideModelRequestContext(),
       this.memoryRetriever
@@ -457,7 +473,7 @@ export class AgentSession {
       try {
         replay = await this.reconcileInterruptedToolExecutions(turn.runtimeHighWater);
       } catch (error) {
-        const message = `Recovery is blocked because the session runtime high-water could not be verified: ${errorMessage(error)}`;
+        const message = `无法校验会话运行高水位，恢复已阻塞：${errorMessage(error)}`;
         const outcome: AgentTurnOutcome = {
           status: "blocked",
           stopReason: "blocked",
@@ -490,7 +506,7 @@ export class AgentSession {
       }
       if (unknownToolNames.size > 0) {
         const toolNames = [...unknownToolNames];
-        const message = `Recovery is blocked because ${toolNames.join(", ")} may have produced an unresolved side effect.`;
+        const message = `${toolNames.join("、")} 可能产生了未确认的副作用，恢复已阻塞。`;
         const outcome: AgentTurnOutcome = {
           status: "blocked",
           stopReason: "blocked",
@@ -579,11 +595,31 @@ export class AgentSession {
   }
 
   /**
-   * 当前配置下可用的嵌入运行时（本地优先；与记忆检索同一套 LocalEmbeddingRuntime）。
-   * 供 activity_search_semantic 等工具按需取得本地向量能力；未安装/不可用时返回 undefined。
+   * 当前配置下可用的嵌入运行时（记忆语义召回与活动语义搜索共用）。
+   * 配置位于 context.memory.embeddingModel；本地模型直接构造运行时，云端模型要求
+   * 已确认隐私同意。未配置或不可用时返回 undefined（调用方降级为文本检索）。
    */
   async getEmbeddingRuntime(): Promise<EmbeddingModelRuntime | undefined> {
-    return await this.memoryEmbeddingService.embeddingRuntime();
+    const ref = this.activeConfig.context.memory.embeddingModel;
+    if (!ref) return undefined;
+    if (ref.kind === "local") return await this.localEmbeddingManager.createRuntime(ref.model);
+    const providers = new ProviderRegistry(this.activeConfig);
+    const descriptor = providers.listEmbeddingModels().find((candidate) => (
+      candidate.ref.kind === "provider"
+      && candidate.ref.provider === ref.provider
+      && candidate.ref.model === ref.model
+    ));
+    if (!descriptor?.endpoint || descriptor.available === false) {
+      throw new Error(`Embedding model ${ref.provider}/${ref.model} is currently unavailable.`);
+    }
+    const endpointHash = descriptor.privacyEndpointHash;
+    if (!endpointHash) throw new Error(`Embedding endpoint identity is unavailable for ${ref.provider}.`);
+    const confirmed = Object.values(this.activeConfig.context.memory.cloudEmbeddingConsents)
+      .some((consent) => consent.endpointHash === endpointHash);
+    if (!confirmed) {
+      throw new Error(`Cloud embedding privacy confirmation is required for ${ref.provider}.`);
+    }
+    return providers.createEmbeddingRuntime(ref);
   }
 
   /** TELOS 由独立存储维护；Desktop/Host 通过 AgentSession 取得同一份本地权威。 */
@@ -591,7 +627,7 @@ export class AgentSession {
     return this.telosStorage;
   }
 
-  /** 手动浏览使用同一套混合检索，但不应用自动注入的跨项目硬门禁。 */
+  /** 手动浏览与自动召回共用混合检索；跨项目内容仅在显式选择对应 origin 时可见。 */
   async searchMemory(query: string, paths: string[], options: MemorySearchOptions = {}): Promise<MemorySearchResult> {
     return await this.memoryRetriever.retrieve(query, paths, {
       limit: options.limit ?? this.localMemory.recallLimit,
@@ -725,16 +761,8 @@ export class AgentSession {
   }
 
   async runMemoryCommand(args: string[]): Promise<string> {
-    const action = args[0]?.toLowerCase() ?? "list";
     const searchMemory = this.searchMemory.bind(this);
-    if (!memoryMutationCommands.has(action)) return await runMemoryCommand(this.localMemory, args, searchMemory);
-    const before = await this.localMemory.listMemoryEntries({ origins: ["all"] }).catch(() => undefined);
-    try {
-      return await runMemoryCommand(this.localMemory, args, searchMemory);
-    } finally {
-      // /memory 是 TUI/CLI 的同库写入口。索引同步失败不能遮蔽命令本身的存储结果。
-      if (before) await this.reconcileMemoryEmbeddingChanges(before.entries).catch(() => undefined);
-    }
+    return await runMemoryCommand(this.localMemory, args, searchMemory);
   }
 
   /** Desktop/TUI 的公开交互入口，只接受 chat / plan 策略。 */
@@ -924,8 +952,7 @@ export class AgentSession {
         baseSystemPrompt,
         abortSignal,
         this.supportedAttachments(runOptions.attachments),
-        turnPersonalization.useMemories,
-        turnPersonalization.maxRecalled
+        turnPersonalization.useMemories
       );
       if (prepared.compaction) {
         this.persistContextCheckpoint(
@@ -1180,7 +1207,10 @@ export class AgentSession {
         model: activeModelSettings.model,
         tools: nativeContext.tools,
         modelOptions: {
-          maxOutputTokens: activeModelSettings.maxOutputTokens,
+          // 与 prepareNextTurn 对齐：全局聊天参数显式配置时覆盖模型别名默认；未配置则不下发温度。
+          // 首个请求也必须带，否则纯单步问答永远用不上用户配置。
+          maxOutputTokens: this.activeConfig.chat.maxOutputTokens ?? activeModelSettings.maxOutputTokens,
+          temperature: this.activeConfig.chat.temperature,
           reasoning: activeModelSettings.reasoning,
           providerOptions: activeModelSettings.providerOptions,
           timeoutMs: activeModelSettings.timeoutMs,
@@ -1205,7 +1235,9 @@ export class AgentSession {
             model: settings.model,
             tools,
             modelOptions: {
-              maxOutputTokens: settings.maxOutputTokens,
+              // 全局聊天参数显式配置时覆盖模型别名默认；未配置则不下发温度。
+              maxOutputTokens: this.activeConfig.chat.maxOutputTokens ?? settings.maxOutputTokens,
+              temperature: this.activeConfig.chat.temperature,
               reasoning: settings.reasoning,
               providerOptions: settings.providerOptions,
               timeoutMs: settings.timeoutMs,
@@ -1301,10 +1333,13 @@ export class AgentSession {
                 operation: "completion_review"
               }
             });
-            if (!review.met) {
+            // 评审器自身故障（模型配置/网络/解析错误）不代表工作未完成：结构性检查已通过，
+            // 采信完成声明正常收口。否则同一基础设施错误会以相同指纹反复打回，
+            // 停滞计数耗尽后把正常回合误判成 incomplete。故障痕迹留在 operation=completion_review 的请求指标里。
+            if (!review.met && !review.evaluatorFailed) {
               decision = completionGuard.requestContinuation(
-                `Independent completion review ${review.evaluatorFailed ? "failed" : "did not confirm completion"}: ${review.reason}`,
-                `completion-review:${review.evaluatorFailed ? "failed" : "not-met"}`
+                `Independent completion review did not confirm completion: ${review.reason}`,
+                "completion-review:not-met"
               );
               if (decision.kind === "continue") {
                 pendingCompletionMessages.push(decision.feedback);
@@ -1570,7 +1605,7 @@ export class AgentSession {
           outcome = {
             ...outcome,
             resumable: false,
-            error: `${outcome.error ?? `${outcome.status} (${outcome.stopReason})`} Checkpoint persistence failed: ${errorMessage(error)}`
+            error: `${outcome.error ?? `${outcome.status} (${outcome.stopReason})`}；检查点持久化失败：${errorMessage(error)}`
           };
         }
       } else {
@@ -1584,12 +1619,13 @@ export class AgentSession {
             resumable: false,
             blockedReason: undefined,
             requiredAction: undefined,
-            error: `Turn checkpoint cleanup failed: ${errorMessage(error)}`
+            error: `轮次检查点清理失败：${errorMessage(error)}`
           };
         }
       }
       await this.recordTurnOutcome(outcome);
       if (outcome.status === "completed") {
+        await this.recordCitedMemories(content).catch(() => undefined);
         await this.enqueueCompletedMemoryCandidate(
           input,
           content,
@@ -1859,6 +1895,20 @@ export class AgentSession {
     this.recordModelUsage(usage, operation, modelAlias);
   }
 
+  /**
+   * 解析回答末尾的记忆引用块并回写使用统计（仅计入真实存在的条目）。
+   * 失败只丢一次统计，不影响回合结果；session JSONL 保留原始块供审计与渲染角标。
+   */
+  private async recordCitedMemories(answer: string): Promise<void> {
+    if (!answer.includes("<memory-citations>")) return;
+    const { citations } = parseMemoryCitations(answer);
+    if (!citations.length) return;
+    const storedIds = new Set((await this.localMemory.listMemoryEntries({ origins: ["all"] })).entries.map(({ id }) => id));
+    const valid = citations.filter(({ id }) => storedIds.has(id)).map(({ id }) => id);
+    if (!valid.length) return;
+    await this.localMemory.recordRecallUsage(valid);
+  }
+
   private async enqueueCompletedMemoryCandidate(
     task: string,
     answer: string,
@@ -1886,18 +1936,12 @@ export class AgentSession {
       }
     };
     if (personalization.contributeMemories) {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const overview = await this.localMemory.getOverview();
-        try {
-          await this.localMemory.enqueueCandidate(input, {
-            expectedRevision: overview.storeRevision,
-            excludeExternalContext: personalization.excludeExternalContext
-          });
-          break;
-        } catch (error) {
-          if (!(error instanceof MemoryRevisionConflictError) || attempt > 0) throw error;
-        }
-      }
+      await withFreshRevision(this.localMemory, undefined, async (expectedRevision) => (
+        await this.localMemory.enqueueCandidate(input, {
+          expectedRevision,
+          excludeExternalContext: personalization.excludeExternalContext
+        })
+      )).catch(() => undefined);
     }
     if (personalization.telos.autoObserve && (!externalContext || !personalization.excludeExternalContext)) {
       try {
@@ -2463,45 +2507,7 @@ export class AgentSession {
     this.activePersonalization = snapshot.state.resolved;
   }
 
-  private async reconcileMemoryEmbeddingChanges(before: readonly MemoryEntry[]): Promise<void> {
-    const after = (await this.localMemory.listMemoryEntries({ origins: ["all"] })).entries;
-    const previous = new Map(before.map((entry) => [entry.id, memoryEntryContentHash(entry)]));
-    const currentIds = new Set(after.map(({ id }) => id));
-    this.memoryEmbeddingService.removeEntries(before.filter(({ id }) => !currentIds.has(id)).map(({ id }) => id));
-    await this.refreshMemoryConfig().catch(() => undefined);
-    for (const entry of after) {
-      if (previous.get(entry.id) !== memoryEntryContentHash(entry)) {
-        await this.memoryEmbeddingService.indexEntry(entry);
-      }
-    }
-  }
 
-  private providerEmbeddingModels(): EmbeddingModelDescriptor[] {
-    return new ProviderRegistry(this.activeConfig).listEmbeddingModels();
-  }
-
-  private async activeMemoryEmbeddingRuntime(): Promise<EmbeddingModelRuntime | undefined> {
-    const ref = this.activeConfig.context.memory.embeddingModel;
-    if (!ref) return undefined;
-    if (ref.kind === "local") return await this.localEmbeddingManager.createRuntime(ref.model);
-    const providers = new ProviderRegistry(this.activeConfig);
-    const descriptor = providers.listEmbeddingModels().find((candidate) => (
-      candidate.ref.kind === "provider"
-      && candidate.ref.provider === ref.provider
-      && candidate.ref.model === ref.model
-    ));
-    if (!descriptor?.endpoint || descriptor.available === false) {
-      throw new Error(`Embedding model ${ref.provider}/${ref.model} is currently unavailable.`);
-    }
-    const endpointHash = descriptor.privacyEndpointHash;
-    if (!endpointHash) throw new Error(`Embedding endpoint identity is unavailable for ${ref.provider}.`);
-    const confirmed = Object.values(this.activeConfig.context.memory.cloudEmbeddingConsents)
-      .some((consent) => consent.endpointHash === endpointHash);
-    if (!confirmed) {
-      throw new Error(`Cloud embedding privacy confirmation is required for ${ref.provider}.`);
-    }
-    return providers.createEmbeddingRuntime(ref);
-  }
 
   /**
    * 只把权限模式写回配置文件。
@@ -2658,7 +2664,7 @@ function nativeTurnOutcome(
       steps,
       output,
       usage,
-      error: "The run reached its configured hard provider-step limit.",
+      error: "已达到本轮配置的最大模型步数。",
       resumable: true
     };
   }
@@ -2670,7 +2676,7 @@ function nativeTurnOutcome(
       steps,
       output,
       usage,
-      error: "The model reached its output limit before finishing the response.",
+      error: "模型输出达到长度上限，回复未能完整生成。",
       resumable: true
     };
   }
@@ -2682,7 +2688,7 @@ function nativeTurnOutcome(
       steps,
       output,
       usage,
-      error: "The model ended the response with an error."
+      error: "模型响应以错误结束。"
     };
   }
   if (finishReason === "aborted") {
@@ -2693,7 +2699,7 @@ function nativeTurnOutcome(
       steps,
       output,
       usage,
-      error: "The model response was aborted before the task was confirmed complete."
+      error: "模型响应在确认任务完成前被中止。"
     };
   }
   if (finishReason !== undefined && finishReason !== "stop") {
@@ -2704,7 +2710,7 @@ function nativeTurnOutcome(
       steps,
       output,
       usage,
-      error: `The model ended with a non-terminal reason: ${finishReason}.`,
+      error: `模型以非终结原因（${finishReason}）结束了响应。`,
       resumable: true
     };
   }

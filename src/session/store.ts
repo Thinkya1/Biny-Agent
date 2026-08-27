@@ -9,11 +9,13 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, constants, lstatSync, mkdirSync, promises as fs, readdirSync, realpathSync, type Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { globalAgentDir, projectSessionsDir } from "../config/paths.js";
+import { globalAgentDir, legacyProjectStateDirName, projectSessionsDir, projectStateDirName } from "../config/paths.js";
 import { readSessionTail } from "./limits.js";
 
 const sessionMetadataConcurrency = 8;
 const managedStateDirectories = ["attachments", "logs", "runs", "processes", "tool-results", "todos", "turns", "evals"] as const;
+/** 项目 session 目录里的元数据文件名，列出会话时要跳过。 */
+const sessionIndexFileName = "index.json";
 
 interface PathIdentity {
   path: string;
@@ -114,8 +116,8 @@ function findSessionPathsByNameSync(directory: string, fileName: string): string
 }
 
 function sessionFileCandidatePath(workspaceRoot: string, sessionId: string): string {
-  const sessionsPath = projectSessionsDir(workspaceRoot);
-  return path.join(sessionsPath, ...sessionDateSegments(sessionId), `${sessionId}.jsonl`);
+  // 新布局是平铺：session 文件直接落在项目 session 目录下，不再按 YYYY/MM/DD 分层。
+  return path.join(projectSessionsDir(workspaceRoot), `${sessionId}.jsonl`);
 }
 
 export function sessionIdFromFile(filePath: string): string {
@@ -276,14 +278,18 @@ async function latestSessionFile(location: SessionStorageLocation): Promise<stri
       const session = sessions[index];
       if (!session) continue;
       const filePath = session.filePath;
-      const handle = await openSessionHandle(location, filePath);
-      let stat: Stats;
       try {
-        stat = await assertSessionBinding(location, filePath, handle);
-      } finally {
-        await handle.close();
+        const handle = await openSessionHandle(location, filePath);
+        let stat: Stats;
+        try {
+          stat = await assertSessionBinding(location, filePath, handle);
+        } finally {
+          await handle.close();
+        }
+        stats[index] = stat.size > 0 ? { fileName: session.fileName, filePath, mtimeMs: stat.mtimeMs } : undefined;
+      } catch {
+        // 列出后被并发删除或替换的文件直接跳过，不能让一个文件拖垮整个 latest 解析。
       }
-      stats[index] = stat.size > 0 ? { fileName: session.fileName, filePath, mtimeMs: stat.mtimeMs } : undefined;
     }
   });
   await Promise.all(workers);
@@ -344,65 +350,225 @@ async function ensureProjectSessionStorage(canonicalWorkspace: string): Promise<
   const canonicalGlobal = await fs.realpath(configuredGlobal);
   const globalSessionsPath = path.join(canonicalGlobal, "sessions");
   await ensureRealDirectory(globalSessionsPath, "global sessions");
+  await migrateLegacyProjectSessionDir(canonicalGlobal, canonicalWorkspace);
   const sessionsPath = projectSessionsDir(canonicalWorkspace);
   await ensureRealDirectory(sessionsPath, "current project sessions");
   if (await fs.realpath(sessionsPath) !== sessionsPath) {
     throw new Error("Project session storage resolves outside the global sessions directory.");
   }
   await validateSessionDirectories(sessionsPath);
-  await migrateFlatSessionFiles(sessionsPath);
+  await flattenDatedSessionDirectories(sessionsPath);
 }
 
-/** 旧平铺 Session 一次性迁到日期目录；发现两个不同实体时停止，绝不猜测覆盖顺序。 */
-async function migrateFlatSessionFiles(sessionsPath: string): Promise<void> {
-  const entries = await fs.readdir(sessionsPath, { withFileTypes: true });
+/**
+ * 把旧版纯 24hex 项目 session 目录迁移到新的 `<basename>-<hash8>` 目录。
+ *
+ * 新目录不存在时整体 `rename`：目录里的旧文件保持原名，绝不重写已有 session 文件名。
+ * 两边同时存在（一般是迁移后又有旧版本进程写回过旧目录）就走并入逻辑，把旧目录内容合进
+ * 新目录。`.DS_Store`、tombstone 这类系统/临时文件放行不搬；真正不认识的条目才抛出，
+ * 留待人工处理，绝不猜测。
+ */
+async function migrateLegacyProjectSessionDir(canonicalGlobal: string, canonicalWorkspace: string): Promise<void> {
+  const legacyName = legacyProjectStateDirName(canonicalWorkspace);
+  const newName = projectStateDirName(canonicalWorkspace);
+  if (legacyName === newName) return;
+  const globalSessionsPath = path.join(canonicalGlobal, "sessions");
+  const legacyPath = path.join(globalSessionsPath, legacyName);
+  const newPath = path.join(globalSessionsPath, newName);
+
+  let legacyStat: Stats;
+  try {
+    legacyStat = await fs.lstat(legacyPath);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return;
+    throw error;
+  }
+  if (legacyStat.isSymbolicLink() || !legacyStat.isDirectory()) {
+    throw new Error("Legacy project session storage must be a real directory, not a symbolic link.");
+  }
+  if (await fs.realpath(legacyPath) !== legacyPath) {
+    throw new Error("Legacy project session storage resolves outside the global sessions directory.");
+  }
+  if (await pathExists(newPath)) {
+    await mergeLegacyProjectSessionDir(legacyPath, newPath);
+    return;
+  }
+
+  const entries = await fs.readdir(legacyPath, { withFileTypes: true });
   for (const entry of entries) {
-    if (!entry.isFile() || !isSessionFileName(entry.name)) continue;
-    const source = path.join(sessionsPath, entry.name);
-    const sourceStat = await fs.lstat(source);
-    if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
-      throw unsafeSessionError(entry.name);
+    if (entry.isDirectory()) continue;
+    if (entry.isFile() && (isSessionFileName(entry.name) || entry.name === sessionIndexFileName || isIgnorableSessionEntry(entry.name))) continue;
+    throw new Error(`Legacy project session storage contains an unexpected entry: ${entry.name}`);
+  }
+  try {
+    await fs.rename(legacyPath, newPath);
+  } catch (error) {
+    // 并发下另一个进程可能先迁好；目标已出现就当成功，否则向上抛。
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTEMPTY") || hasErrorCode(error, "EEXIST")) {
+      if (await pathExists(newPath)) return;
     }
-    const sessionId = sessionIdFromFile(entry.name);
-    let targetDirectory = sessionsPath;
-    for (const segment of sessionDateSegments(sessionId)) {
-      targetDirectory = path.join(targetDirectory, segment);
-      await ensureRealDirectory(targetDirectory, "session date directory");
-      if (await fs.realpath(targetDirectory) !== targetDirectory) {
-        throw new Error("Session date directory resolves outside the current project's global session directory.");
+    throw error;
+  }
+}
+
+/**
+ * 新旧项目目录同时存在时的并入逻辑：session 文件按原名移动（同名且不同 inode 视为冲突报错，
+ * 绝不覆盖），年份分层目录递归并入（随后由 flatten 统一摊平），`.catalog` 里按会话一份的
+ * 元数据 JSON 只补新目录缺失的记录。全部搬完后删除旧目录；缓存类条目（index.json、
+ * .DS_Store、tombstone）不搬。
+ */
+async function mergeLegacyProjectSessionDir(legacyPath: string, newPath: string): Promise<void> {
+  const entries = await fs.readdir(legacyPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const source = path.join(legacyPath, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === ".catalog") {
+        await mergeLegacyCatalogRecords(source, path.join(newPath, entry.name));
+        continue;
       }
-    }
-    const target = path.join(targetDirectory, entry.name);
-    let targetStat: Stats | undefined;
-    try {
-      targetStat = await fs.lstat(target);
-    } catch (error) {
-      if (!hasErrorCode(error, "ENOENT")) throw error;
-    }
-    if (targetStat) {
-      if (sourceStat.dev !== targetStat.dev || sourceStat.ino !== targetStat.ino) {
-        throw new Error(`Duplicate session id exists in flat and dated storage: ${sessionId}`);
+      if (/^\d{4}$/u.test(entry.name)) {
+        await mergeLegacyDirectory(source, path.join(newPath, entry.name));
+        continue;
       }
-      await fs.unlink(source).catch((error: unknown) => {
-        if (!hasErrorCode(error, "ENOENT")) throw error;
-      });
-      await fs.chmod(target, 0o600);
+      throw new Error(`Legacy project session storage contains an unexpected directory: ${entry.name}`);
+    }
+    if (!entry.isFile()) throw unsafeSessionError(entry.name);
+    if (entry.name === sessionIndexFileName || isIgnorableSessionEntry(entry.name)) continue;
+    if (!isSessionFileName(entry.name)) {
+      throw new Error(`Legacy project session storage contains an unexpected entry: ${entry.name}`);
+    }
+    await moveLegacySessionFile(source, path.join(newPath, entry.name));
+  }
+  await fs.rm(legacyPath, { recursive: true });
+}
+
+/** 递归并入旧目录：目标子目录不存在就整目录 rename，存在就逐文件并入。 */
+async function mergeLegacyDirectory(source: string, target: string): Promise<void> {
+  if (!await pathExists(target)) {
+    await fs.rename(source, target);
+    return;
+  }
+  const entries = await fs.readdir(source, { withFileTypes: true });
+  for (const entry of entries) {
+    const sourcePath = path.join(source, entry.name);
+    const targetPath = path.join(target, entry.name);
+    if (entry.isDirectory()) {
+      await mergeLegacyDirectory(sourcePath, targetPath);
       continue;
     }
-    if (sourceStat.nlink !== 1) throw unsafeSessionError(entry.name);
-    try {
-      await fs.link(source, target);
-    } catch (error) {
-      if (!hasErrorCode(error, "EEXIST")) throw error;
-      const [currentSource, currentTarget] = await Promise.all([fs.lstat(source), fs.lstat(target)]);
-      if (currentSource.dev !== currentTarget.dev || currentSource.ino !== currentTarget.ino) {
-        throw new Error(`Duplicate session id exists in flat and dated storage: ${sessionId}`);
-      }
+    if (!entry.isFile()) throw unsafeSessionError(entry.name);
+    if (!isSessionFileName(entry.name)) {
+      if (isIgnorableSessionEntry(entry.name)) continue;
+      throw new Error(`Legacy project session storage contains an unexpected entry: ${entry.name}`);
     }
-    await fs.unlink(source).catch((error: unknown) => {
-      if (!hasErrorCode(error, "ENOENT")) throw error;
-    });
-    await fs.chmod(target, 0o600);
+    await moveLegacySessionFile(sourcePath, targetPath);
+  }
+}
+
+/** 按 inode 去重的移动：目标不存在就 rename；目标与源是同一 inode 说明重复，删掉源即可。 */
+async function moveLegacySessionFile(source: string, target: string): Promise<void> {
+  const sourceStat = await fs.lstat(source);
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw unsafeSessionError(path.basename(source));
+  if (sourceStat.nlink !== 1) throw unsafeSessionError(path.basename(source));
+  if (await pathExists(target)) {
+    const targetStat = await fs.lstat(target);
+    if (sourceStat.dev !== targetStat.dev || sourceStat.ino !== targetStat.ino) {
+      throw new Error(`Duplicate session id exists while merging legacy storage: ${sessionIdFromFile(path.basename(source))}`);
+    }
+    await fs.unlink(source);
+    return;
+  }
+  await fs.rename(source, target);
+  await fs.chmod(target, 0o600);
+}
+
+/** `.catalog` 每会话一份 `<sessionId>.json`：只补新目录缺失的记录，锁与已有记录不动。 */
+async function mergeLegacyCatalogRecords(source: string, target: string): Promise<void> {
+  const entries = await fs.readdir(source, { withFileTypes: true });
+  await fs.mkdir(target, { recursive: true, mode: 0o700 });
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const targetPath = path.join(target, entry.name);
+    if (await pathExists(targetPath)) continue;
+    await fs.rename(path.join(source, entry.name), targetPath);
+  }
+}
+
+/**
+ * 项目 session 目录里允许存在、但迁移/合并时不携带的系统与临时文件：
+ * Finder 的 `.DS_Store`（真实数据里几乎每个目录都有）、删除/置顶流程留下的 tombstone。
+ */
+function isIgnorableSessionEntry(name: string): boolean {
+  return name === ".DS_Store"
+    || name.endsWith(".delete")
+    || name.endsWith(".pinned-backup")
+    || name.endsWith(".pinned-after-verification");
+}
+
+/**
+ * 旧版按 `YYYY/MM/DD/<id>.jsonl` 分层的 session 平铺回项目 session 目录根。
+ *
+ * 文件名保持不变，只改位置；同名冲突（根目录与日期目录里各有一份）时抛出，绝不猜测覆盖顺序。
+ * 迁移完会清掉空掉的日期目录和 `index.json` 一并保留在根。
+ */
+async function flattenDatedSessionDirectories(sessionsPath: string): Promise<void> {
+  const entries = await fs.readdir(sessionsPath, { withFileTypes: true });
+  for (const entry of entries) {
+
+    if (!entry.isDirectory()) continue;
+    if (!/^\d{4}$/u.test(entry.name)) continue; // 只有 4 位年份目录才可能是旧日期分层。
+    const yearDirectory = path.join(sessionsPath, entry.name);
+    if (await fs.realpath(yearDirectory) !== yearDirectory) {
+      throw new Error("Session date directory resolves outside the current project's global session directory.");
+    }
+    const datedFiles: string[] = [];
+    await collectDatedSessionFiles(yearDirectory, datedFiles);
+    for (const source of datedFiles) {
+      const fileName = path.basename(source);
+      const sourceStat = await fs.lstat(source);
+      if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw unsafeSessionError(fileName);
+      const target = path.join(sessionsPath, fileName);
+      if (await pathExists(target)) {
+        const targetStat = await fs.lstat(target);
+        if (sourceStat.dev !== targetStat.dev || sourceStat.ino !== targetStat.ino) {
+          throw new Error(`Duplicate session id exists in flat and dated storage: ${sessionIdFromFile(fileName)}`);
+        }
+        await fs.unlink(source).catch((error: unknown) => {
+          if (!hasErrorCode(error, "ENOENT")) throw error;
+        });
+        await fs.chmod(target, 0o600);
+        continue;
+      }
+      if (sourceStat.nlink !== 1) throw unsafeSessionError(fileName);
+      await fs.rename(source, target);
+      await fs.chmod(target, 0o600);
+    }
+    await fs.rm(yearDirectory, { recursive: true });
+  }
+}
+
+async function collectDatedSessionFiles(directory: string, out: string[]): Promise<void> {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (await fs.realpath(entryPath) !== entryPath) {
+        throw new Error("Session date directory resolves outside the current project's global session directory.");
+      }
+      await collectDatedSessionFiles(entryPath, out);
+      continue;
+    }
+    if (entry.isFile() && isSessionFileName(entry.name)) out.push(entryPath);
+  }
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.lstat(target);
+    return true;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return false;
+    throw error;
   }
 }
 
@@ -802,37 +968,4 @@ function isSessionFileName(fileName: string): boolean {
     && path.basename(fileName) === fileName
     && !fileName.includes("\0")
     && !fileName.includes("\\");
-}
-
-function sessionDateSegments(sessionId: string): [string, string, string] {
-  const date = sessionDate(sessionId);
-  return [
-    String(date.getFullYear()).padStart(4, "0"),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0")
-  ];
-}
-
-function sessionDate(sessionId: string): Date {
-  const uuidV7 = /^([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-/iu.exec(sessionId);
-  if (uuidV7) {
-    const timestampMs = Number.parseInt(`${uuidV7[1]}${uuidV7[2]}`, 16);
-    const date = new Date(timestampMs);
-    if (!Number.isNaN(date.getTime())) return date;
-  }
-
-  const compactDate = /^(\d{4})(\d{2})(\d{2})-/u.exec(sessionId);
-  if (compactDate) return localDate(Number(compactDate[1]), Number(compactDate[2]), Number(compactDate[3]));
-
-  const dashedDate = /^(\d{4})-(\d{2})-(\d{2})/u.exec(sessionId);
-  if (dashedDate) return localDate(Number(dashedDate[1]), Number(dashedDate[2]), Number(dashedDate[3]));
-
-  return new Date();
-}
-
-function localDate(year: number, month: number, day: number): Date {
-  const date = new Date(year, month - 1, day);
-  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
-    ? date
-    : new Date();
 }

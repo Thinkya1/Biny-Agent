@@ -242,11 +242,18 @@ export class AutomationStore {
       const scheduledAt = stringValue(candidate.next_fire_at);
       const fireId = randomUUID();
       const createdAt = new Date().toISOString();
-      this.withAutomationEvent(automation, "automation.fire.pending", { fireId, scheduledAt }, createdAt, () => {
-        this.database.prepare("INSERT OR IGNORE INTO automation_pending_fires (fire_id, automation_id, scheduled_at, status, created_at) VALUES (?, ?, ?, 'pending', ?)").run(fireId, automationId, scheduledAt, createdAt);
-        const next = advanceFireAt(automation, new Date(scheduledAt));
-        this.database.prepare("UPDATE automations SET next_fire_at = ?, revision = revision + 1, updated_at = ? WHERE automation_id = ?").run(next ?? null, createdAt, automationId);
-      });
+      try {
+        this.withAutomationEvent(automation, "automation.fire.pending", { fireId, scheduledAt }, createdAt, () => {
+          this.database.prepare("INSERT OR IGNORE INTO automation_pending_fires (fire_id, automation_id, scheduled_at, status, created_at) VALUES (?, ?, ?, 'pending', ?)").run(fireId, automationId, scheduledAt, createdAt);
+          const next = advanceFireAt(automation, new Date(scheduledAt));
+          this.database.prepare("UPDATE automations SET next_fire_at = ?, revision = revision + 1, updated_at = ? WHERE automation_id = ?").run(next ?? null, createdAt, automationId);
+        });
+      } catch (error) {
+        // 单个 automation 推进失败（如只在闰日命中的 cron 触发后 366 天内没有下一次）不能
+        // 中断整轮 claim，否则它按 next_fire_at 永远排在最前，让后面的 automation 全部停摆。
+        this.updateStatus(automationId, "paused", error instanceof Error ? error.message : String(error));
+        continue;
+      }
       const fire = this.database.prepare("SELECT fire_id, automation_id, scheduled_at, claim_token, claimed_at, status, run_id, error, created_at FROM automation_pending_fires WHERE automation_id = ? AND scheduled_at = ?").get(automationId, scheduledAt) as unknown as PendingRow | undefined;
       if (fire) fires.push(toFire(fire));
     }
@@ -368,11 +375,12 @@ export class AutomationStore {
     }, execute);
   }
 
-  private updateStatus(automationId: string, status: AutomationStatus): AutomationRecord {
+  private updateStatus(automationId: string, status: AutomationStatus, error?: string): AutomationRecord {
     const automation = this.require(automationId);
     if (automation.status === status) return automation;
     const now = new Date().toISOString();
-    return this.withAutomationEvent(automation, "automation.status", { status }, now, () => {
+    // error 只作为事件 payload 的诊断信息；undefined 时序列化结果与原先完全一致。
+    return this.withAutomationEvent(automation, "automation.status", { status, error }, now, () => {
       this.database.prepare("UPDATE automations SET status = ?, revision = revision + 1, updated_at = ? WHERE automation_id = ?").run(status, now, automationId);
       return this.require(automationId);
     });

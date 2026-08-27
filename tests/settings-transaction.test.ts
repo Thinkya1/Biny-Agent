@@ -20,6 +20,7 @@ import {
   type DesktopSettingsJournal,
   type DesktopSettingsTransactionAgents
 } from "../src/desktop/electron/main/DesktopSettingsTransaction.js";
+import { settingsSaveInputSchema } from "../src/desktop/electron/main/settingsSaveInputSchema.js";
 import { DesktopStateStore } from "../src/desktop/electron/main/DesktopStateStore.js";
 import { runtimeMutationStartsWork } from "../src/desktop/electron/main/settingsRuntimeGate.js";
 
@@ -70,6 +71,8 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
       personalization: structuredClone(this.config.personalization),
       activity: structuredClone(this.config.activity),
       memory: structuredClone(this.config.context.memory),
+      compaction: structuredClone(this.config.context.compaction),
+      chatParams: structuredClone(this.config.chat),
       webSearch: {
         enabled: this.config.web.search.enabled,
         provider: this.config.web.search.provider,
@@ -108,6 +111,8 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
     if (input.personalization !== undefined) after.personalization = structuredClone(input.personalization);
     if (input.activity !== undefined) after.activity = { ...after.activity, ...structuredClone(input.activity) };
     if (input.memory !== undefined) after.context.memory = structuredClone(input.memory);
+    if (input.compaction !== undefined) after.context.compaction = structuredClone(input.compaction);
+    if (input.chatParams !== undefined) after.chat = structuredClone(input.chatParams);
     if (input.webSearch !== undefined) {
       after.web.search = {
         enabled: input.webSearch.enabled,
@@ -121,6 +126,8 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
     const included = input.personalization !== undefined
       || input.activity !== undefined
       || input.memory !== undefined
+      || input.compaction !== undefined
+      || input.chatParams !== undefined
       || input.webSearch !== undefined
       || input.models !== undefined;
     const credentialHandles = [
@@ -316,6 +323,7 @@ class FailPreferenceRollbackEvidenceTransaction extends DesktopSettingsTransacti
 
 await testCommitAndJournalRedaction();
 await testActivitySettingsUseConfigCas();
+await testChatParamsOnlySaveCommits();
 await testPostCommitHookCannotRollbackSettings();
 await testPreflightConflictsAreZeroWrite();
 await testSegmentFailureCompensation();
@@ -328,6 +336,7 @@ await testCrashAfterConfigBeforeChatIsCompensatedOnRestart();
 await testCredentialOnlyCrashUsesInnerTargetMarker();
 await testCredentialOnlyPendingJournalIsAmbiguous();
 await testStartupRecoveryRunsBeforeTaskAdmission();
+testSettingsSaveInputAcceptsCompactionAndChatParams();
 testRuntimeMutationRecoveryClassification();
 console.log("settings transaction tests passed");
 
@@ -346,6 +355,55 @@ async function testActivitySettingsUseConfigCas(): Promise<void> {
     assert.equal(agents.config.activity.heartbeatMs, 90_000);
     assert.equal(agents.config.activity.externalPolicy, "local_only");
   });
+}
+
+async function testChatParamsOnlySaveCommits(): Promise<void> {
+  await withFixture(async ({ state, agents }) => {
+    const transaction = new DesktopSettingsTransaction(state, agents);
+    const initial = await transaction.snapshot("project");
+    // 只改聊天采样参数时也必须真正提交：appliedFields 漏掉 chatParams 会让保存
+    // 以「无字段变更」提前返回，配置永远落不了盘。
+    const result = await transaction.save("project", {
+      expectedPreferenceRevision: initial.preferenceRevision,
+      expectedConfigRevision: initial.configRevision,
+      chatParams: { temperature: 0.4, maxOutputTokens: 8_192 }
+    });
+    assert.equal(result.status, "committed", JSON.stringify(result));
+    assert.deepEqual(result.appliedFields, ["chatParams"]);
+    assert.deepEqual(agents.config.chat, { temperature: 0.4, maxOutputTokens: 8_192 });
+    assert.equal(result.snapshot.chatParams.temperature, 0.4);
+  });
+}
+
+function testSettingsSaveInputAcceptsCompactionAndChatParams(): void {
+  // 渲染层 saveInput 每次都会带上 compaction/chatParams 键（未修改时值为 undefined 但键名
+  // 保留）；strict schema 缺这两个字段时会把所有设置保存拒之门外。
+  const base = {
+    expectedPreferenceRevision: 0,
+    expectedConfigRevision: "config:0",
+    themePreference: undefined,
+    fontPreference: undefined,
+    personalization: undefined,
+    activity: undefined,
+    memory: undefined,
+    compaction: undefined,
+    chatParams: undefined,
+    webSearch: undefined,
+    skills: undefined,
+    models: undefined,
+    chat: undefined
+  };
+  assert.doesNotThrow(() => settingsSaveInputSchema.parse(base));
+  const parsed = settingsSaveInputSchema.parse({
+    ...base,
+    compaction: { enabled: false },
+    chatParams: { temperature: 0.4, maxOutputTokens: 8_192 }
+  });
+  assert.equal(parsed.compaction?.enabled, false);
+  assert.equal(parsed.chatParams?.temperature, 0.4);
+  assert.equal(parsed.chatParams?.maxOutputTokens, 8_192);
+  // strict 语义不变：未知键仍然拒绝。
+  assert.throws(() => settingsSaveInputSchema.parse({ ...base, unknownField: 1 }));
 }
 
 async function testCommitAndJournalRedaction(): Promise<void> {
@@ -393,15 +451,12 @@ async function testPostCommitHookCannotRollbackSettings(): Promise<void> {
       expectedConfigRevision: initial.configRevision,
       memory: {
         ...initial.memory,
-        embeddingModel: { kind: "local", model: "multilingual-e5-small" }
+        useMemories: !initial.memory.useMemories
       }
     });
-    assert.equal(result.status, "committed", "background index scheduling failure must not roll back verified settings");
+    assert.equal(result.status, "committed", "post-commit hook failure must not roll back verified settings");
     assert.equal(agents.settingsCommitNotifications, 1);
-    assert.deepEqual(agents.config.context.memory.embeddingModel, {
-      kind: "local",
-      model: "multilingual-e5-small"
-    });
+    assert.equal(agents.config.context.memory.useMemories, !initial.memory.useMemories);
   });
 }
 

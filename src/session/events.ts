@@ -254,14 +254,17 @@ export async function readStoredSessionEvents(
   const snapshot = await readSessionSnapshot(workspaceRoot, session);
   // 与 resume 共用同一份解析缓存：只有完整读到文件且没丢事件时才进缓存（超限截断的结果
   // 不能复用，否则会把"只看到尾部"的视角发给需要完整事件的读取方）。
+  // 缓存命中的一定是完整解析（截断结果从不进缓存），所以命中时 eventsTruncated 保持 false 是对的。
+  let eventsTruncated = false;
   const events = cachedSessionEvents(snapshot.filePath, sessionFileFingerprint(snapshot.stat), () => {
-    const parsed = parseSessionEvents(snapshot.bytes.toString("utf8"), { overflow: "truncate" });
-    return { events: parsed, complete: !snapshot.truncated && parsed.length < maxSessionEvents };
+    const parsed = parseSessionEventsDetailed(snapshot.bytes.toString("utf8"), { overflow: "truncate" });
+    eventsTruncated = parsed.truncated;
+    return { events: parsed.events, complete: !snapshot.truncated && !parsed.truncated };
   });
   return {
     filePath: snapshot.filePath,
     events,
-    truncated: snapshot.truncated ?? false,
+    truncated: snapshot.truncated || eventsTruncated,
     sizeBytes: snapshot.stat.size,
     summary: summarizeSessionEvents(snapshot.fileName, events, snapshot.stat)
   };
@@ -273,11 +276,12 @@ export async function readSessionSummary(
   session: string | undefined
 ): Promise<SessionSummary | undefined> {
   const snapshot = await readSessionSnapshot(workspaceRoot, session);
-  // 严格模式解析成功即代表完整读到了文件，可以进缓存；超限截断的视角不进缓存。
-  const events = cachedSessionEvents(snapshot.filePath, sessionFileFingerprint(snapshot.stat), () => ({
-    events: parseSessionEvents(snapshot.bytes.toString("utf8")),
-    complete: !snapshot.truncated
-  }));
+  // 与打开路径一致用 truncate 模式：事件数超限的会话按尾部降级，而不是在列表和改元数据
+  // 路径上凭空消失。没看全文件的解析不进缓存，避免把截断视角发给需要完整事件的读取方。
+  const events = cachedSessionEvents(snapshot.filePath, sessionFileFingerprint(snapshot.stat), () => {
+    const parsed = parseSessionEventsDetailed(snapshot.bytes.toString("utf8"), { overflow: "truncate" });
+    return { events: parsed.events, complete: !snapshot.truncated && !parsed.truncated };
+  });
   return summarizeSessionEvents(snapshot.fileName, events, snapshot.stat);
 }
 
@@ -312,13 +316,25 @@ export interface ParseSessionEventsOptions {
   overflow?: "reject" | "truncate";
 }
 
+export interface ParsedSessionEvents {
+  events: SessionEvent[];
+  /** 事件数超过上限、头部事件被丢弃时为 true；只在 overflow: "truncate" 下可能发生。 */
+  truncated: boolean;
+}
+
 export function parseSessionEvents(raw: string, options: ParseSessionEventsOptions = {}): SessionEvent[] {
+  return parseSessionEventsDetailed(raw, options).events;
+}
+
+/** 与 parseSessionEvents 相同，但额外暴露是否发生了事件数截断，供读取路径如实上报。 */
+export function parseSessionEventsDetailed(raw: string, options: ParseSessionEventsOptions = {}): ParsedSessionEvents {
   const overflow = options.overflow ?? "reject";
   const totalBytes = Buffer.byteLength(raw, "utf8");
   if (totalBytes > maxSessionFileBytes && overflow === "reject") {
     throw new Error(`Session exceeds the maximum size of ${String(maxSessionFileBytes)} bytes.`);
   }
   const events: SessionEvent[] = [];
+  let truncated = false;
   let lineNumber = 0;
   let lineStart = 0;
   while (lineStart <= raw.length) {
@@ -349,6 +365,7 @@ export function parseSessionEvents(raw: string, options: ParseSessionEventsOptio
       }
       // 保留最近的事件：恢复会话时有用的是尾部，不是开头。
       events.shift();
+      truncated = true;
     }
     const event = validateSessionEvent(parsed, lineNumber);
     if (!validateRuntimeEventRecord(event.runtime)) {
@@ -358,7 +375,7 @@ export function parseSessionEvents(raw: string, options: ParseSessionEventsOptio
     if (!terminated) break;
     lineStart = lineEnd + 1;
   }
-  return events;
+  return { events, truncated };
 }
 
 export function runtimeEventIdentity(event: SessionEvent): RuntimeEventIdentity | undefined {
@@ -407,10 +424,11 @@ export async function listSessionSummaries(workspaceRoot: string): Promise<Sessi
       try {
         const snapshot = await readSessionSnapshot(workspaceRoot, fileName);
         // 未变更的文件直接命中解析缓存，只对新增/变大的文件重新跑逐事件的 zod 校验。
-        const events = cachedSessionEvents(snapshot.filePath, sessionFileFingerprint(snapshot.stat), () => ({
-          events: parseSessionEvents(snapshot.bytes.toString("utf8")),
-          complete: !snapshot.truncated
-        }));
+        // 与打开路径一致用 truncate 模式：事件数超限的会话按尾部降级，仍应出现在列表里。
+        const events = cachedSessionEvents(snapshot.filePath, sessionFileFingerprint(snapshot.stat), () => {
+          const parsed = parseSessionEventsDetailed(snapshot.bytes.toString("utf8"), { overflow: "truncate" });
+          return { events: parsed.events, complete: !snapshot.truncated && !parsed.truncated };
+        });
         summaries[index] = summarizeSessionEvents(fileName, events, snapshot.stat);
       } catch {
         // Opening a corrupt session directly still reports the precise error;

@@ -5,6 +5,7 @@
  * model used by live rendering. Tool calls and results are paired by id (with
  * a same-tool fallback for older sessions) instead of becoming system text.
  */
+import { parseMemoryCitations } from "../agent/context/memoryCitations.js";
 import type { SessionEvent } from "../session/recorder.js";
 import { activitySummaryText } from "../runtime/activitySummary.js";
 import { publicUserMessage } from "../session/publicMessage.js";
@@ -23,7 +24,9 @@ export function sessionEventsToTranscript(events: SessionEvent[]): TranscriptIte
     }
 
     if (event.type === "assistant_message") {
-      if (event.content) items.push({ id: replayId("assistant", index), kind: "assistant", content: event.content });
+      // 展示层剥离记忆引用块；session JSONL 保留原文供审计。
+      const parsed = event.content ? parseMemoryCitations(event.content) : undefined;
+      if (parsed?.textWithoutBlock) items.push({ id: replayId("assistant", index), kind: "assistant", content: parsed.textWithoutBlock });
       continue;
     }
 

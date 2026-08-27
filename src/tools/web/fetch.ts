@@ -165,6 +165,8 @@ async function fetchDocument(url: URL, limits: FetchLimits, signal?: AbortSignal
         continue;
       }
       if (!response.ok) {
+        // 与上面的跳转分支一样先取消 body，否则未消费的响应体会一直挂到 GC。
+        await response.body?.cancel();
         throw new Error(`Fetching ${current.toString()} returned HTTP ${String(response.status)}.`);
       }
       const { text, truncated } = await readBounded(response, limits.maxBytes);
@@ -186,8 +188,8 @@ async function fetchDocument(url: URL, limits: FetchLimits, signal?: AbortSignal
   }
 }
 
-/** Content-Length 是可以撒谎的，所以按实际读到的字节数收口。 */
-async function readBounded(response: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+/** Content-Length 是可以撒谎的，所以按实际读到的字节数收口。web_search 也复用这个上限读取。 */
+export async function readBounded(response: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
   const body = response.body;
   if (!body) return { text: "", truncated: false };
   const reader = body.getReader();

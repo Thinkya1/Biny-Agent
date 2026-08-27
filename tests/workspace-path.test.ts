@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { resolveWorkspaceDirectory, resolveWorkspacePath, toWorkspaceRelative } from "../src/workspace/resolvePath.js";
+import { scanWorkspaceFiles } from "../src/workspace/scanner.js";
 
 async function main(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-workspace-path-"));
@@ -29,9 +30,28 @@ async function main(): Promise<void> {
     assert.throws(() => resolveWorkspacePath(workspaceRoot, "dangling", []), /dangling symbolic link/);
     assert.throws(() => resolveWorkspacePath(workspaceRoot, "ignored/file.ts", ["ignored"]), /ignored by workspace policy/);
     assert.throws(() => resolveWorkspacePath(workspaceRoot, "aliased-ignored/file.ts", ["ignored"]), /resolves to a location ignored/);
+
+    await testScannerSkipsUnreadableDirectories(workspaceRoot);
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(outsideRoot, { recursive: true, force: true });
+  }
+}
+
+/** 不可读的子目录必须整棵跳过，不能让一个 EACCES 拖垮整个工作区扫描。 */
+async function testScannerSkipsUnreadableDirectories(workspaceRoot: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const sealed = path.join(workspaceRoot, "sealed");
+  await mkdir(sealed);
+  await writeFile(path.join(sealed, "hidden.txt"), "hidden\n");
+  await chmod(sealed, 0o000);
+  try {
+    const files = await scanWorkspaceFiles(workspaceRoot, ["ignored"], 100);
+    assert.equal(files.includes(path.join("src", "entry.ts")), true);
+    assert.equal(files.some((entry) => entry.startsWith("sealed")), false);
+  } finally {
+    // 恢复权限，否则最后的 rm 清理不掉这个目录。
+    await chmod(sealed, 0o700);
   }
 }
 

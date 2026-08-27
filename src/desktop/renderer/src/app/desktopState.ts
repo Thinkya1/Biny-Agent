@@ -23,11 +23,19 @@ export function applyUpdatesToWorkspace(
 ): DesktopWorkspaceSnapshot {
   const projectUpdates = updates.filter((update) => update.projectId === workspace.project.id);
   const sessions = applyUpdatesToProjectSessions(workspace.project.id, workspace.sessions, projectUpdates);
-  const runtime = projectUpdates.at(-1)?.snapshot ?? workspace.runtime;
+  // 并行池化后一个项目有多个 runtime 在推送：workspace.runtime 只跟随主 runtime（primary !== false），
+  // 各会话的运行态按信封上的 sessionId 存进 sessionRuntimes。
+  const runtime = projectUpdates.filter((update) => update.primary !== false).at(-1)?.snapshot ?? workspace.runtime;
+  let sessionRuntimes = workspace.sessionRuntimes;
+  for (const update of projectUpdates) {
+    if (!update.sessionId || !update.snapshot) continue;
+    sessionRuntimes = { ...sessionRuntimes, [update.sessionId]: update.snapshot };
+  }
   return {
     ...workspace,
     sessions,
     runtime,
+    sessionRuntimes,
     // 权限模式来自共享持久化配置；Runtime 快照可能仍是旧 Host 的内存状态，不能反向覆盖它。
     permissionMode: workspace.permissionMode
   };
@@ -246,7 +254,12 @@ export function updateRuntimeInfo(
         reasoningLabel: info.reasoningLabel,
         thinking: info.thinking,
         contextWindow: info.contextWindow,
-        maxInputTokens: info.maxInputTokens
+        maxInputTokens: info.maxInputTokens,
+        // 切模型后保留有效窗口/预留元数据，否则用量展示退回原始窗口，把输出预留摊进额度。
+        effectiveContextWindow: info.effectiveContextWindow,
+        effectiveContextWindowPercent: info.effectiveContextWindowPercent,
+        contextReserveTokens: info.contextReserveTokens,
+        autoCompactTokenLimit: info.autoCompactTokenLimit
       }
     }
   };

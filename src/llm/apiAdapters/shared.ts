@@ -56,14 +56,18 @@ export function anthropicMessages(context: ModelStreamContext): unknown[] {
     if (message.role === "user") {
       messages.push({ role: "user", content: anthropicUserContent(message.content) });
     } else if (message.role === "assistant") {
-      messages.push({ role: "assistant", content: message.content.flatMap((part): unknown[] => {
+      const content = message.content.flatMap((part): unknown[] => {
         if (part.type === "text") return [{ type: "text", text: part.text }];
         if (part.type === "reasoning") {
           const signature = anthropicReasoningSignature(part.providerMetadata);
           return signature ? [{ type: "thinking", thinking: part.text, signature }] : [];
         }
         return [{ type: "tool_use", id: part.id, name: part.name, input: part.arguments }];
-      }) });
+      });
+      // 与 OpenAI 路径对齐：空 assistant（被中断的输出、回放丢弃了无签名 reasoning 的旧
+      // session）会产出 content: []，Anthropic 对空 content 直接 400，必须跳过。
+      if (!content.length) continue;
+      messages.push({ role: "assistant", content });
     } else {
       messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: message.toolCallId, content: resultText(message.content), is_error: message.isError === true }] });
     }

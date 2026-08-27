@@ -26,6 +26,8 @@ export interface PermissionRequestContext {
   actionType: ActionType;
   riskLevel: RiskLevel;
   targetPath?: string;
+  /** move_file 等双路径工具的第二个目标路径,与 targetPath 一样参与 denyPaths 判定。 */
+  secondaryTargetPath?: string;
   command?: string;
   reason?: string;
   diffPreview?: string;
@@ -88,7 +90,7 @@ export interface PermissionStatus {
 
 const defaultPolicy: ProjectPermissionPolicy = {
   mode: "ask",
-  allowTools: ["read_file", "list_files", "search_files", "grep_search", "git_status", "git_diff", "web_search", "save_memory"],
+  allowTools: ["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory"],
   allowPaths: [],
   denyPaths: [".env", ".ssh/", "node_modules/"],
   criticalAlwaysAsk: true
@@ -116,7 +118,9 @@ export class PermissionManager {
   }
 
   evaluate(request: PermissionRequestContext): PermissionEvaluation {
-    const deniedPath = request.targetPath ? matchingPathRule(request.targetPath, this.policy.denyPaths) : undefined;
+    const deniedPath =
+      (request.targetPath ? matchingPathRule(request.targetPath, this.policy.denyPaths) : undefined)
+      ?? (request.secondaryTargetPath ? matchingPathRule(request.secondaryTargetPath, this.policy.denyPaths) : undefined);
     if (deniedPath) {
       return { decision: "deny", reason: `Target path is denied by project policy: ${deniedPath}` };
     }
@@ -270,10 +274,16 @@ function matchingPathRule(targetPath: string, rules: string[]): string | undefin
 
 function pathRuleMatches(target: string, rule: string): boolean {
   if (!rule) return false;
-  if (rule.endsWith("/")) return target === rule.slice(0, -1) || target.startsWith(rule);
+  if (rule.endsWith("/")) {
+    const directory = rule.slice(0, -1);
+    if (target === directory || target.startsWith(rule)) return true;
+    // 无路径前缀的目录规则匹配任意层级的同名目录,如 "secrets/" 命中 "packages/api/secrets/x"。
+    return !directory.includes("/") && (target.endsWith(`/${directory}`) || target.includes(`/${directory}/`));
+  }
   if (target === rule) return true;
   if (rule === ".env" && target.startsWith(".env.")) return true;
-  return false;
+  // 无斜杠规则按 basename 匹配任意层级,如 ".env" 命中 "packages/api/.env"。
+  return !rule.includes("/") && target.endsWith(`/${rule}`);
 }
 
 function normalizeRulePath(value: string): string {

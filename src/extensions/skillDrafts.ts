@@ -188,14 +188,19 @@ async function writeAtomic(target: string, content: string): Promise<void> {
     if (!isNotFound(error)) throw error;
   }
   const temporary = `${target}.${randomUUID()}.tmp`;
-  const handle = await fs.open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
   try {
-    await handle.writeFile(content, "utf8");
-    await handle.sync();
+    const handle = await fs.open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(temporary, target);
   } finally {
-    await handle.close();
+    // 写入或 rename 失败时清理残留临时文件；成功后 rename 已消费掉它，force 删除是空操作。
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
   }
-  await fs.rename(temporary, target);
 }
 
 function isNotFound(error: unknown): boolean {

@@ -365,16 +365,8 @@ function testStatusReportUsesRuntimeAndContextFields(): void {
       source: "provider",
       measuredAt: "2026-08-02T00:00:00.000Z"
     },
-    memoryEnabled: false,
-    memoryTopics: [],
-    memoryRecall: {
-      origins: {
-        included: { user: 1, currentWorkspace: 2, otherWorkspaces: 0 },
-        trimmed: { user: 0, currentWorkspace: 1, otherWorkspaces: 0 }
-      },
-      omitted: [{ origin: { kind: "workspace", workspaceId: "a".repeat(24), workspaceName: "workspace" }, id: "entry-3", reason: "budget" }],
-      budgetOmission: { maxChars: 12_000, usedChars: 11_500, omitted: 1 }
-    }
+    memoryEnabled: true,
+    memoryOverviewChars: 1_536
   };
   const usage: UsageSummary = {
     calls: 2,
@@ -398,8 +390,6 @@ function testStatusReportUsesRuntimeAndContextFields(): void {
   assert.match(report, /Input budget: 12,345 \/ 981,056/u);
   assert.match(report, /Input measurement: estimated 12,600; provider 12,345; delta -255/u);
   assert.match(report, /Instructions: 1 loaded/u);
-  assert.match(report, /Memory recall: included user=1, current=2, other=0; trimmed user=0, current=1, other=0; omitted=1/u);
-  assert.match(report, /Memory budget: 11,500\/12,000 chars; 1 omitted/u);
   assert.doesNotMatch(report, /^Context$/mu);
 }
 

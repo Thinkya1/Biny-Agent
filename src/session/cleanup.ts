@@ -10,8 +10,20 @@ import { SessionRunLedger } from "./runLedger.js";
 import { deleteSessionFile } from "./store.js";
 
 export async function deleteSessionArtifacts(persistenceRoot: string, sessionId: string): Promise<void> {
-  await deleteSessionFile(persistenceRoot, sessionId);
-  await deleteSessionCatalogRecord(persistenceRoot, sessionId);
-  await deleteInterruptedTurn(persistenceRoot, sessionId);
-  await new SessionRunLedger(persistenceRoot).deleteSessionRuns(sessionId);
+  // 每步独立容错：一个产物删除失败（比如 JSONL 已被并发删掉）不能阻止其余产物的清理，
+  // 否则会话会留在半删除状态。全部尝试完后抛出首个错误，让调用方知道有残留。
+  let firstError: unknown;
+  for (const step of [
+    () => deleteSessionFile(persistenceRoot, sessionId),
+    () => deleteSessionCatalogRecord(persistenceRoot, sessionId),
+    () => deleteInterruptedTurn(persistenceRoot, sessionId),
+    async () => await new SessionRunLedger(persistenceRoot).deleteSessionRuns(sessionId)
+  ]) {
+    try {
+      await step();
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError !== undefined) throw firstError;
 }

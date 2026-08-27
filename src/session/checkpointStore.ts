@@ -13,6 +13,7 @@
  * 文件不在其中，恢复时也不会动它们。
  */
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -58,7 +59,8 @@ export class CheckpointStore {
   }
 
   async create(label: string): Promise<Checkpoint> {
-    const temporaryIndex = path.join(os.tmpdir(), `biny-checkpoint-index-${process.pid}-${Date.now().toString(36)}`);
+    // pid+毫秒在并发下同毫秒会撞名，加随机成分保证临时索引互不污染。
+    const temporaryIndex = path.join(os.tmpdir(), `biny-checkpoint-index-${process.pid}-${Date.now().toString(36)}-${randomUUID()}`);
     try {
       // 独立索引文件：用户暂存了什么、没暂存什么，全程不受影响。
       const env = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
@@ -117,7 +119,7 @@ export class CheckpointStore {
 
     // 用临时索引把快照内容写回工作区。`git checkout <commit> -- .` 会顺带改写用户的暂存区，
     // 而 `checkout-index` 只认给它的索引文件，用户暂存了什么完全不受影响。
-    const restoreIndex = path.join(os.tmpdir(), `biny-restore-index-${process.pid}-${Date.now().toString(36)}`);
+    const restoreIndex = path.join(os.tmpdir(), `biny-restore-index-${process.pid}-${Date.now().toString(36)}-${randomUUID()}`);
     try {
       const env = { ...process.env, GIT_INDEX_FILE: restoreIndex };
       await this.git(["read-tree", checkpoint.commit], env);

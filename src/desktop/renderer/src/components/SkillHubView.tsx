@@ -18,7 +18,7 @@ import { SkillImportDialog } from "./SkillImportDialog.js";
 
 type SkillHubTab = "plugins" | "skills";
 
-export function SkillHubView({ onError }: { onError(message: string): void }): React.JSX.Element {
+export function SkillHubView({ onError, onOpenRuntime }: { onError(message: string): void; onOpenRuntime(): void }): React.JSX.Element {
   const [tab, setTab] = useState<SkillHubTab>("skills");
   const [query, setQuery] = useState("");
   const [snapshot, setSnapshot] = useState<DesktopSkillCatalogSnapshot>({ skills: [], inventory: [], unmanagedSkills: [], plugins: [], managedSources: [], warnings: [], diagnostics: [] });
@@ -195,6 +195,7 @@ export function SkillHubView({ onError }: { onError(message: string): void }): R
         unmanagedCount={snapshot.unmanagedSkills.length}
         importing={importing}
         loading={loading}
+        onOpenRuntime={onOpenRuntime}
       />
       <div className="biny-extension-body">
         {diagnosticMessages.length ? <div className="biny-extension-warning" role="status"><Icon name="warning" size={15} /><div>{diagnosticMessages.map((warning) => <div key={warning}>{warning}</div>)}</div></div> : null}
@@ -241,7 +242,8 @@ const ExtensionHeader = memo(function ExtensionHeader({
   onImportExisting,
   onDiscover,
   unmanagedCount,
-  importing
+  importing,
+  onOpenRuntime
 }: {
   tab: SkillHubTab;
   query: string;
@@ -254,6 +256,7 @@ const ExtensionHeader = memo(function ExtensionHeader({
   onDiscover(): void;
   unmanagedCount: number;
   importing: boolean;
+  onOpenRuntime(): void;
 }): React.JSX.Element {
   return (
     <header className="biny-extension-header">
@@ -272,6 +275,8 @@ const ExtensionHeader = memo(function ExtensionHeader({
         <button className="biny-extension-discover" onClick={onDiscover} type="button"><Icon name="spark" size={15} />发现技能</button>
       </> : null}
       <button aria-label="刷新扩展列表" className="biny-extension-refresh" disabled={loading} onClick={onRefresh} title="刷新" type="button"><Icon name="refresh" size={15} /></button>
+      <span aria-hidden="true" className="biny-extension-header-divider" />
+      <button aria-label="自动化" className="biny-toolbar-button" onClick={onOpenRuntime} title="自动化" type="button"><Icon name="activity" size={15} /></button>
     </header>
   );
 });

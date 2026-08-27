@@ -10,12 +10,15 @@ export type IconName =
   | "activity"
   | "add"
   | "archive"
+  | "arrow-down"
   | "arrow-left"
   | "arrow-right"
   | "arrow-up"
   | "bell"
   | "branch"
   | "brain"
+  | "brain-off"
+  | "brain-spark"
   | "calendar"
   | "chart"
   | "check"
@@ -42,6 +45,7 @@ export type IconName =
   | "folder-panel"
   | "help"
   | "home"
+  | "info"
   | "list-tree"
   | "lock"
   | "menu"
@@ -112,12 +116,16 @@ function pathFor(name: IconName): React.JSX.Element {
     case "activity": return <path {...common} d="M22 12h-4l-3 9L9 3l-3 9H2" />;
     case "add": return <><path {...common} d="M5 12h14" /><path {...common} d="M12 5v14" /></>;
     case "archive": return <><rect {...common} height="14" rx="1.5" width="17" x="3.5" y="6.5" /><path {...common} d="M3.5 9h17M9 13h6" /></>;
+    case "arrow-down": return <path {...common} d="m6 13 6 6 6-6M12 19V5" />;
     case "arrow-left": return <path {...common} d="M19 12H5m7-7-7 7 7 7" />;
     case "arrow-right": return <path {...common} d="M5 12h14m-7-7 7 7-7 7" />;
     case "arrow-up": return <path {...common} d="m6 11 6-6 6 6M12 5v14" />;
     case "bell": return <><path {...common} d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z" /><path {...common} d="M10 21h4" /></>;
     case "branch": return <><circle {...common} cx="7" cy="5" r="2" /><circle {...common} cx="17" cy="19" r="2" /><path {...common} d="M7 7v5c0 3.9 3.1 7 7 7h1M17 5v4c0 2.2-1.8 4-4 4H7" /></>;
     case "brain": return <><path {...common} d="M9.5 5.2A3 3 0 0 0 6 7.8a3.2 3.2 0 0 0 .2 5.9A3 3 0 0 0 9 18.5c.8 1.2 2.2 2 3 2V5.1a3.5 3.5 0 0 0-2.5.1Z" /><path {...common} d="M14.5 5.2A3 3 0 0 1 18 7.8a3.2 3.2 0 0 1-.2 5.9 3 3 0 0 1-2.8 4.8c-.8 1.2-2.2 2-3 2V5.1a3.5 3.5 0 0 1 2.5.1ZM7 9.5h2M15 9.5h2M7.5 14h2M14.5 14h2" /></>;
+    // 记忆开关专用：斜杠脑=关闭（对应规范「斜杠表示关闭/隐私保护」），缩小的脑+右上星星=开启（星星代表已启用）。
+    case "brain-off": return <><path {...common} d="M9.5 5.2A3 3 0 0 0 6 7.8a3.2 3.2 0 0 0 .2 5.9A3 3 0 0 0 9 18.5c.8 1.2 2.2 2 3 2V5.1a3.5 3.5 0 0 0-2.5.1Z" /><path {...common} d="M14.5 5.2A3 3 0 0 1 18 7.8a3.2 3.2 0 0 1-.2 5.9 3 3 0 0 1-2.8 4.8c-.8 1.2-2.2 2-3 2V5.1a3.5 3.5 0 0 1 2.5.1ZM7 9.5h2M15 9.5h2M7.5 14h2M14.5 14h2" /><path {...common} d="m4.5 4.5 15 15" /></>;
+    case "brain-spark": return <><g {...common} strokeWidth={1.8} transform="translate(-1.6 2.2) scale(0.82)"><path d="M9.5 5.2A3 3 0 0 0 6 7.8a3.2 3.2 0 0 0 .2 5.9A3 3 0 0 0 9 18.5c.8 1.2 2.2 2 3 2V5.1a3.5 3.5 0 0 0-2.5.1Z" /><path d="M14.5 5.2A3 3 0 0 1 18 7.8a3.2 3.2 0 0 1-.2 5.9 3 3 0 0 1-2.8 4.8c-.8 1.2-2.2 2-3 2V5.1a3.5 3.5 0 0 1 2.5.1ZM7 9.5h2M15 9.5h2M7.5 14h2M14.5 14h2" /></g><path {...common} d="M18.4 2c.32 1.86 1.22 2.76 3.08 3.08-1.86.32-2.76 1.22-3.08 3.08-.32-1.86-1.22-2.76-3.08-3.08 1.86-.32 2.76-1.22 3.08-3.08Z" /><path {...common} d="M20.9 8.8v3.6M19.1 10.6h3.6" /></>;
     case "calendar": return <><rect {...common} height="16" rx="2" width="16" x="4" y="5" /><path {...common} d="M8 3v4M16 3v4M4 10h16M8 14h3" /></>;
     case "chart": return <><path {...common} d="M4 20V5M4 20h17" /><path {...common} d="M8 17v-5M12 17V7M16 17v-8" /></>;
     case "check": return <path {...common} d="m5 12 4.2 4.2L19 6.5" />;
@@ -144,6 +152,7 @@ function pathFor(name: IconName): React.JSX.Element {
     case "folder-panel": return <><path {...common} d="M7.5 5h4l2 2H19a1.5 1.5 0 0 1 1.5 1.5V16" /><path {...common} d="M3.5 9h6l2-2h7v11.5A1.5 1.5 0 0 1 17 20H5a1.5 1.5 0 0 1-1.5-1.5V9Z" /></>;
     case "help": return <><circle {...common} cx="12" cy="12" r="9" /><path {...common} d="M9.8 9a2.3 2.3 0 0 1 4.5.7c0 1.8-2.3 2-2.3 3.8M12 17.4h.01" /></>;
     case "home": return <path {...common} d="m4 10 8-6 8 6v9a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1v-9Z" />;
+    case "info": return <><circle {...common} cx="12" cy="12" r="9" /><path {...common} d="M12 11v5" /><path {...common} d="M12 8h.01" /></>;
     case "list-tree": return <><path {...common} d="M21 12h-8" /><path {...common} d="M21 6H8" /><path {...common} d="M21 18h-8" /><path {...common} d="M3 6v4c0 1.1.9 2 2 2h3" /><path {...common} d="M3 10v6c0 1.1.9 2 2 2h3" /></>;
     case "lock": return <><rect {...common} height="9" rx="1.5" width="14" x="5" y="10" /><path {...common} d="M8 10V7a4 4 0 0 1 8 0v3" /></>;
     case "menu": return <path {...common} d="M5 7h14M5 12h14M5 17h14" />;

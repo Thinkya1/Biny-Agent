@@ -541,25 +541,48 @@ async function writeCredentialJournal(journalPath: string, journal: CredentialTr
   await fs.rename(temporary, journalPath);
 }
 
+/** 钥匙串锁定或等待用户授权时 security 可能一直不退出,必须有超时,避免凭据水合永久挂起。 */
+const KEYCHAIN_COMMAND_TIMEOUT_MS = 30_000;
+
 function runKeychainCommand(command: string, args: string[], input?: string): Promise<KeychainCommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let stdinError: Error | undefined;
+    let settled = false;
+    const settle = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      action();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      settle(() => reject(new Error(`Keychain command timed out after ${String(KEYCHAIN_COMMAND_TIMEOUT_MS)}ms.`)));
+    }, KEYCHAIN_COMMAND_TIMEOUT_MS);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { stdout += chunk; });
     child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-    child.once("error", reject);
+    child.once("error", (error) => settle(() => reject(error)));
     child.once("close", (code, signal) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
+      if (code === 0 && stdinError) {
+        settle(() => reject(stdinError));
         return;
       }
+      if (code === 0) {
+        settle(() => resolve({ stdout, stderr }));
+        return;
+      }
+      // 非零退出时优先报退出码错误(带 code/stderr),调用方靠它识别「条目不存在」等场景。
       const error = new Error(`Keychain command exited with ${code === null ? signal ?? "unknown status" : `code ${String(code)}`}.`);
       Object.assign(error, { code: code ?? signal, stderr, stdout });
-      reject(error);
+      settle(() => reject(error));
     });
+    // security 提前退出时写 stdin 会触发 EPIPE,没有 error 监听会让整个进程 uncaughtException;
+    // 这里只记录,最终结论仍以 close 的退出码为准。
+    child.stdin.once("error", (error: Error) => { stdinError = error; });
     child.stdin.end(input);
   });
 }

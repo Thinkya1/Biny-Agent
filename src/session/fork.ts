@@ -36,7 +36,9 @@ export async function forkSession(
   options: ForkSessionOptions = {}
 ): Promise<ForkedSession> {
   const sourcePath = await resolveSessionFile(persistenceRoot, sourceSession);
-  const { events } = await readStoredSessionEvents(persistenceRoot, sourceSession);
+  const { events, truncated } = await readStoredSessionEvents(persistenceRoot, sourceSession);
+  // 超限会话只能读到尾部事件；把残缺视角固化进新文件会让分叉出来的会话永久丢掉开头。
+  if (truncated) throw new Error("Cannot fork a session that exceeds the session limits; only its most recent events are readable.");
   if (!events.length) throw new Error("Cannot fork an empty session.");
 
   const requested = options.upToEvent ?? events.length;

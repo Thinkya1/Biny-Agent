@@ -25,6 +25,7 @@ const catalogDirectoryName = ".catalog";
 const catalogLockDirectoryName = ".locks";
 const catalogLockTimeoutMs = 5_000;
 const catalogLockQueues = new Map<string, Promise<void>>();
+const sessionIndexFileName = "index.json";
 export const SESSION_CATALOG_MISSING_REVISION = "missing" as const;
 
 export type SessionBranchPoint =
@@ -218,6 +219,7 @@ export async function updateSessionCatalogMetadata(
     assertCatalogRecord(next);
     if (existing && catalogMetadataEquals(existing, next)) return existing;
     await writeAtomically(target, `${JSON.stringify(next)}\n`);
+    refreshSessionIndex(workspaceRoot);
     return next;
   });
 }
@@ -289,7 +291,10 @@ export async function querySessionCatalog(
   workspaceRoot: string,
   options: SessionCatalogQuery = {}
 ): Promise<SessionCatalogPage> {
-  return querySessionCatalogItems(await listSessionCatalog(workspaceRoot), options);
+  const all = await listSessionCatalog(workspaceRoot);
+  const page = querySessionCatalogItems(all, options);
+  writeSessionIndexFile(workspaceRoot, page.items);
+  return page;
 }
 
 /** 对已经加载的 catalog 做分页，供 workspace 首屏复用同一份 catalog 快照。 */
@@ -466,6 +471,44 @@ async function ensureCatalogDirectory(workspaceRoot: string): Promise<string> {
   return directory;
 }
 
+/**
+ * 在项目 session 目录根写一份 `index.json`，缓存最近一次 catalog 列表的轻量元数据。
+ *
+ * JSONL 和 `.catalog/` 仍是事实来源；`index.json` 只是给外部工具一个不用逐行解析 JSONL
+ * 的读取入口，随时可以从 catalog 重建。写失败（比如目录刚好被清理）只记录、不影响会话功能。
+ */
+async function writeSessionIndexFile(workspaceRoot: string, items: readonly SessionCatalogItem[]): Promise<void> {
+  try {
+    const directory = await ensureCatalogDirectory(workspaceRoot);
+    const sessionsDirectory = path.dirname(directory);
+    const payload = {
+      version: 1,
+      workspaceRoot: path.resolve(workspaceRoot),
+      generatedAt: new Date().toISOString(),
+      sessions: items.map((item) => ({
+        sessionId: item.id,
+        file: item.fileName,
+        title: item.title,
+        rootSessionId: item.rootSessionId,
+        parentSessionId: item.parentSessionId,
+        createdAt: item.summary.createdAt,
+        updatedAt: item.summary.updatedAt,
+        eventCount: item.summary.eventCount
+      }))
+    };
+    await writeAtomically(path.join(sessionsDirectory, sessionIndexFileName), `${JSON.stringify(payload, null, 2)}\n`);
+  } catch {
+    // 索引是易失的派生物；写不进去时静默跳过，catalog/JSONL 依旧可用。
+  }
+}
+
+/** fire-and-forget 的全量索引刷新：从 catalog 现算，不持有任何 catalog 记录锁。 */
+export function refreshSessionIndex(workspaceRoot: string): void {
+  void listSessionCatalog(workspaceRoot)
+    .then((items) => writeSessionIndexFile(workspaceRoot, items))
+    .catch(() => undefined);
+}
+
 function catalogFilePath(directory: string, sessionId: string): string {
   assertSessionId(sessionId);
   return path.join(directory, `${sessionId}.json`);
@@ -509,6 +552,9 @@ async function withCatalogRecordLock<T>(
 ): Promise<T> {
   // 同一进程先异步排队，避免后来的同步 BEGIN IMMEDIATE 阻塞事件循环，导致前一个异步
   // operation 无法完成。operation 内不得再次调用同 session 的 catalog mutator，否则会等待自身。
+  //
+  // 队列只进不出（用完不 delete）：链表靠闭包串起来，删除映射项在并发入队时会丢掉后来者。
+  // 键的数量受本进程内不同 session 数限制，没有泄漏风险。
   const lockDirectory = await ensureCatalogLockDirectory(directory);
   const databasePath = path.join(lockDirectory, `${sessionId}.sqlite`);
   const predecessor = catalogLockQueues.get(databasePath) ?? Promise.resolve();
@@ -516,14 +562,12 @@ async function withCatalogRecordLock<T>(
   const turn = new Promise<void>((resolve) => {
     releaseTurn = resolve;
   });
-  const tail = predecessor.then(() => turn);
-  catalogLockQueues.set(databasePath, tail);
+  catalogLockQueues.set(databasePath, predecessor.then(() => turn));
   await predecessor;
   try {
     return await withCatalogDatabaseLock(databasePath, operation);
   } finally {
     releaseTurn();
-    if (catalogLockQueues.get(databasePath) === tail) catalogLockQueues.delete(databasePath);
   }
 }
 

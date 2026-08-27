@@ -7,7 +7,7 @@
  * 不直接承载 agent、工具或 TUI 的业务流程。
  */
 import { createRequire } from "node:module";
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import { initCommand } from "./commands/init.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { runCommand, type RunCommandOptions } from "./commands/run.js";
@@ -15,6 +15,8 @@ import { chatCommand } from "./commands/chat.js";
 import { evalCompareCommand, evalRunCommand } from "./commands/evals.js";
 import { resumeCommand } from "./commands/resume.js";
 import { sessionsCommand, type SessionsCommandOptions } from "./commands/sessions.js";
+import { sessionExportCommand, sessionImportCommand } from "./commands/sessionTransfer.js";
+import type { SessionTransferFormat } from "../session/transfer.js";
 import { planCommand } from "./commands/plan.js";
 import { tuiCommand } from "./commands/tui.js";
 import { runtimeHostCommand } from "./commands/runtimeHost.js";
@@ -143,6 +145,28 @@ program
   .option("--parent <session-id>", "only list direct children of a session")
   .option("--json", "print the page as JSON")
   .action((options: SessionsCommandOptions) => wrap(() => sessionsCommand(workspaceRoot, options))());
+const session = program.command("session").description("Export and import sessions");
+session
+  .command("export")
+  .description("Export a session to a Biny bundle (.json) or Claude Code (.jsonl) file")
+  .argument("<session>", "session id or .jsonl path")
+  .option("--format <format>", "biny (default) or claude", "biny")
+  .option("--out <path>", "output file path; defaults to ./<sessionId>.<ext>")
+  .option("--json", "print the result as JSON")
+  .action((sessionRef: string, options: { format?: string; out?: string; json?: boolean }) => {
+    const format = options.format === "claude" ? "claude" : "biny";
+    return wrap(() => sessionExportCommand(workspaceRoot, sessionRef, { format, out: options.out, json: options.json }))();
+  });
+session
+  .command("import")
+  .description("Import a Biny, Claude Code, or Codex session file as a new session")
+  .argument("<file>", "path to the session file to import")
+  .option("--format <format>", "source format: biny, claude, or codex (auto-detected by default)")
+  .option("--json", "print the result as JSON")
+  .action((file: string, options: { format?: string; json?: boolean }) => {
+    const format: SessionTransferFormat | undefined = options.format === "biny" || options.format === "claude" || options.format === "codex" ? options.format : undefined;
+    return wrap(() => sessionImportCommand(workspaceRoot, file, { format, json: options.json }))();
+  });
 program
   .command("plan")
   .description("Create a plan without executing write, edit, or command tools")
@@ -205,14 +229,16 @@ function wrap(fn: () => Promise<void>): () => Promise<void> {
   };
 }
 
+// commander 只接管 InvalidArgumentError（打印单行错误后退出）；普通 Error 会穿透
+// parseAsync 变成未处理异常，把堆栈打到终端，绕过 wrap() 的干净错误展示。
 function parsePositiveInteger(value: string): number {
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`Expected a positive integer, got: ${value}`);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new InvalidArgumentError(`Expected a positive integer, got: ${value}`);
   return parsed;
 }
 
 function parseNonNegativeInteger(value: string): number {
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`Expected a non-negative integer, got: ${value}`);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new InvalidArgumentError(`Expected a non-negative integer, got: ${value}`);
   return parsed;
 }

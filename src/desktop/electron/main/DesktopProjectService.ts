@@ -40,6 +40,13 @@ import { deleteSessionArtifacts } from "../../../session/cleanup.js";
 import { createSessionId, type SessionTurnStatus } from "../../../session/recorder.js";
 import { SessionRunLedger, type SessionRunRecord } from "../../../session/runLedger.js";
 import { createSessionFile, duplicateSessionFile, ensureAgentDirs } from "../../../session/store.js";
+import {
+  exportSessionBundle,
+  exportSessionClaudeCode,
+  importSessionFile,
+  type ExportedSessionFile,
+  type ImportedSession
+} from "../../../session/transfer.js";
 import { gitInspectionEnvironment } from "../../../tools/git/environment.js";
 import { resolveWorkspaceDirectory, resolveWorkspacePath, toWorkspaceRelative } from "../../../workspace/resolvePath.js";
 import { attachmentFilePath, attachmentPathPrefix, saveAttachment as saveProjectAttachment } from "../../../attachments/store.js";
@@ -60,6 +67,14 @@ import { DesktopStateStore } from "./DesktopStateStore.js";
 import { DesktopUserDataStore } from "./DesktopUserDataStore.js";
 
 const execFileAsync = promisify(execFile);
+
+/** 会话状态派生的运行时输入：单快照（旧调用方）或并行多快照（桌面端会话池）。 */
+export type RuntimeSnapshotsInput = InteractiveRuntimeSnapshot | readonly InteractiveRuntimeSnapshot[] | undefined;
+
+function runtimeSnapshotList(input: RuntimeSnapshotsInput): readonly InteractiveRuntimeSnapshot[] {
+  if (input === undefined) return [];
+  return Array.isArray(input) ? input as readonly InteractiveRuntimeSnapshot[] : [input as InteractiveRuntimeSnapshot];
+}
 const filePreviewLimit = 512 * 1024;
 /** 内联图片要整张塞进 data URL，超过这个大小就不给了，免得 IPC 和 DOM 里挂着几十兆的 base64。 */
 const inlineImageLimit = 8 * 1024 * 1024;
@@ -218,7 +233,7 @@ export class DesktopProjectService {
 
   async listSessions(
     project: DesktopProject,
-    runtime: InteractiveRuntimeSnapshot | undefined,
+    runtime: RuntimeSnapshotsInput,
     liveEvents: ReadonlyMap<string, AgentHostEvent[]>
   ): Promise<DesktopSessionSummary[]> {
     if (project.missing) return [];
@@ -233,7 +248,7 @@ export class DesktopProjectService {
   /** workspace 首屏同时需要完整摘要和分页页，复用同一份 catalog/ledger 读取结果。 */
   async listWorkspaceSessions(
     project: DesktopProject,
-    runtime: InteractiveRuntimeSnapshot | undefined,
+    runtime: RuntimeSnapshotsInput,
     liveEvents: ReadonlyMap<string, AgentHostEvent[]>
   ): Promise<{ sessions: DesktopSessionSummary[]; sessionPage: DesktopSessionTreePage }> {
     if (project.missing) {
@@ -279,7 +294,7 @@ export class DesktopProjectService {
   /** 只读取某一层的一个页面；子节点由 Renderer 在展开父节点时再请求。 */
   async listSessionTreePage(
     project: DesktopProject,
-    runtime: InteractiveRuntimeSnapshot | undefined,
+    runtime: RuntimeSnapshotsInput,
     liveEvents: ReadonlyMap<string, AgentHostEvent[]>,
     options: DesktopSessionTreePageOptions = {}
   ): Promise<DesktopSessionTreePage> {
@@ -319,21 +334,24 @@ export class DesktopProjectService {
   private async buildSessionSummaries(
     project: DesktopProject,
     catalog: SessionCatalogItem[],
-    runtime: InteractiveRuntimeSnapshot | undefined,
+    runtime: RuntimeSnapshotsInput,
     liveEvents: ReadonlyMap<string, AgentHostEvent[]>,
     latestRunBySession: ReadonlyMap<string, SessionRunRecord>,
     runLedger: SessionRunLedger
   ): Promise<DesktopSessionSummary[]> {
+    const runtimes = runtimeSnapshotList(runtime);
     const sessions = catalog.map((item) => desktopSessionSummary(
       project.id,
       item,
-      runtime,
+      runtimes,
       liveEvents,
       latestRunBySession.get(item.id)
     ));
-    const runtimeInfo = runtime?.info;
-    const runtimeEvents = runtimeInfo ? liveEvents.get(runtimeInfo.sessionId) : undefined;
-    if (runtimeInfo && runtimeEvents?.some((event) => event.type === "message.user") && !sessions.some((session) => session.id === runtimeInfo.sessionId)) {
+    // 每个并行 runtime 绑定的草稿/新会话都可能还没进 catalog，逐个补合成条目。
+    for (const snapshot of runtimes) {
+      const runtimeInfo = snapshot.info;
+      const runtimeEvents = liveEvents.get(runtimeInfo.sessionId);
+      if (!runtimeEvents?.some((event) => event.type === "message.user") || sessions.some((session) => session.id === runtimeInfo.sessionId)) continue;
       const runtimeLatestRun = latestRunBySession.get(runtimeInfo.sessionId) ?? await runLedger.latestSessionRun(runtimeInfo.sessionId);
       const now = new Date().toISOString();
       sessions.push({
@@ -357,7 +375,7 @@ export class DesktopProjectService {
         parentSessionId: undefined,
         branchPoint: undefined,
         latestRun: runtimeLatestRun ? desktopRunSummary(runtimeLatestRun) : undefined,
-        status: sessionStatus(runtimeInfo.sessionId, "", undefined, runtime, liveEvents.get(runtimeInfo.sessionId), runtimeLatestRun?.status),
+        status: sessionStatus(runtimeInfo.sessionId, "", undefined, runtimes, liveEvents.get(runtimeInfo.sessionId), runtimeLatestRun?.status),
         resumable: undefined
       });
     }
@@ -370,7 +388,7 @@ export class DesktopProjectService {
   async openSession(
     project: DesktopProject,
     sessionId: string,
-    runtime: InteractiveRuntimeSnapshot | undefined,
+    runtime: RuntimeSnapshotsInput,
     liveEvents: ReadonlyMap<string, AgentHostEvent[]>
   ): Promise<DesktopSessionDocument> {
     if (project.missing) throw new Error(`Session not found: ${sessionId}`);
@@ -490,6 +508,26 @@ export class DesktopProjectService {
     if (this.state.selectedSessionId(project.id) === sessionId) {
       await this.state.setSelectedSession(project.id, undefined);
     }
+  }
+
+  /** 生成导出内容（不落盘）；文件位置由 IPC 层的保存对话框决定，再交给 writeSessionExport。 */
+  async buildSessionExport(project: DesktopProject, sessionId: string, format: "biny" | "claude"): Promise<ExportedSessionFile> {
+    const dataRoot = await this.storage.ensureProjectData(project);
+    return format === "claude"
+      ? await exportSessionClaudeCode(dataRoot, sessionId)
+      : await exportSessionBundle(dataRoot, sessionId);
+  }
+
+  /** 把导出内容写到用户在保存对话框里选定的路径，权限按 0600（含完整对话）。 */
+  async writeSessionExport(filePath: string, exported: ExportedSessionFile): Promise<void> {
+    await fs.writeFile(filePath, exported.content, { encoding: "utf8", mode: 0o600 });
+    await fs.chmod(filePath, 0o600);
+  }
+
+  /** 从外部文件导入一条新会话，返回新建会话 id；选中它由 DesktopAgentManager 负责。 */
+  async importSessionFromFile(project: DesktopProject, sourcePath: string): Promise<ImportedSession> {
+    const dataRoot = await this.storage.ensureProjectData(project);
+    return await importSessionFile(dataRoot, sourcePath);
   }
 
   private async copyCatalogMetadata(
@@ -647,7 +685,7 @@ async function directoryExists(directory: string): Promise<boolean> {
 function desktopSessionSummary(
   projectId: string,
   item: SessionCatalogItem,
-  runtime: InteractiveRuntimeSnapshot | undefined,
+  runtime: RuntimeSnapshotsInput,
   liveEvents: ReadonlyMap<string, AgentHostEvent[]>,
   latestRun: SessionRunRecord | undefined,
   hasChildren: boolean | undefined = item.hasChildren
@@ -763,12 +801,14 @@ function sessionStatus(
   sessionId: string,
   lastAssistantMessage: string,
   persistedStatus: SessionTurnStatus | undefined,
-  runtime: InteractiveRuntimeSnapshot | undefined,
+  runtime: RuntimeSnapshotsInput,
   events: AgentHostEvent[] | undefined,
   latestRunStatus: SessionRunRecord["status"] | undefined
 ): DesktopSessionStatus {
-  if (pendingPermission(runtime)?.sessionId === sessionId) return "waiting_permission";
-  if (activeRun(runtime)?.sessionId === sessionId) return "running";
+  // 并行池化后同一项目可能有多个 runtime 各自忙自己的 session。
+  const runtimes = runtimeSnapshotList(runtime);
+  if (runtimes.some((snapshot) => pendingPermission(snapshot)?.sessionId === sessionId)) return "waiting_permission";
+  if (runtimes.some((snapshot) => activeRun(snapshot)?.sessionId === sessionId)) return "running";
   const finalEvent = events ? [...events].reverse().find(isTerminalRunEvent) : undefined;
   if (finalEvent?.type === "run.failed") return "failed";
   if (finalEvent?.type === "run.blocked") return "blocked";

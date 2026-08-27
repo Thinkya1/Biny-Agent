@@ -8,6 +8,7 @@
  * `.biny/todos`，所以恢复会话后还在。Agent Loop 会把它作为模型上下文使用，
  * 陈旧 Todo 不会独自驱动自动验收或无限 continuation。
  */
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { agentDir, ensureAgentDirs } from "./store.js";
@@ -101,9 +102,14 @@ export class TodoStore {
   private async persist(): Promise<void> {
     await ensureAgentDirs(this.workspaceRoot);
     const target = this.filePath();
-    const temporary = `${target}.tmp`;
-    await fs.writeFile(temporary, `${JSON.stringify({ version: 1, items: this.items })}\n`, { encoding: "utf8", mode: 0o600 });
-    await fs.rename(temporary, target);
+    // 临时名带随机成分：并发 persist 共用固定名会互相截断对方的临时文件。
+    const temporary = `${target}.${randomUUID()}.tmp`;
+    try {
+      await fs.writeFile(temporary, `${JSON.stringify({ version: 1, items: this.items })}\n`, { encoding: "utf8", mode: 0o600 });
+      await fs.rename(temporary, target);
+    } finally {
+      await fs.rm(temporary, { force: true }).catch(() => undefined);
+    }
   }
 }
 

@@ -258,6 +258,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
     return await settings.model.stream(context, {
       signal: options.signal,
       maxOutputTokens: options.maxOutputTokens ?? settings.maxOutputTokens,
+      temperature: options.temperature,
       reasoning: settings.reasoning,
       providerOptions: options.providerOptions ?? settings.providerOptions,
       timeoutMs: options.timeoutMs ?? settings.timeoutMs,

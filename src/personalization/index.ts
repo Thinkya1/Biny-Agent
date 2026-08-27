@@ -65,6 +65,16 @@ export const defaultTelosPolicy: TelosPolicy = {
   proactivePrompts: false
 };
 
+/** 早期记忆配置里出现过、当前已废弃的键；strict 校验前剥离以兼容旧文件。 */
+const deprecatedMemoryPolicyKeys = [] as const;
+
+const stripDeprecatedMemoryPolicy = (value: unknown): unknown => {
+  if (typeof value !== "object" || value === null) return value;
+  const record = { ...(value as Record<string, unknown>) };
+  for (const key of deprecatedMemoryPolicyKeys) delete record[key];
+  return record;
+};
+
 export const memorySimilarityThresholdSchema = z.object({
   currentWorkspace: z.number().min(0).max(1),
   crossWorkspace: z.number().min(0).max(1)
@@ -77,16 +87,18 @@ export const memorySimilarityThresholdSchema = z.object({
   });
 });
 
-const rawMemoryPolicySchema = z.object({
+const rawMemoryPolicySchema = z.preprocess(stripDeprecatedMemoryPolicy, z.object({
   // enabled 是硬门禁；聊天级 use/contribute 覆盖不能绕过它。
   enabled: z.boolean().optional(),
   useMemories: z.boolean().default(true),
   generateMemories: z.boolean().default(true),
+  // 语义召回：概览注入之外的 embedding 检索；查询重写可用便宜模型改写检索词。
   queryRewrite: z.boolean().default(true),
   memoryModel: z.string().min(1).optional(),
   rewriteModel: z.string().min(1).optional(),
   extractModel: z.string().min(1).optional(),
   consolidationModel: z.string().min(1).optional(),
+  // 嵌入模型默认本地 multilingual-e5-small（可下载）；云端需 provider 已配置并经隐私确认。
   embeddingModel: embeddingModelRefSchema.optional(),
   similarityThresholds: z.record(memorySimilarityThresholdSchema).default({}),
   // key 是 provider alias + endpoint 的不可逆摘要；不保存 URL、凭据或记忆正文。
@@ -96,10 +108,11 @@ const rawMemoryPolicySchema = z.object({
   }).strict()).default({}),
   // 外部网页、MCP/Plugin 与子代理结果默认不进入自动记忆候选。
   excludeExternalContext: z.boolean().default(true),
+  // 自动注入条数上限（概览之外的条目召回）。
   maxRecalled: z.number().int().min(1).max(20).default(5),
   // 新增策略保持 optional，旧 config 不会因为升级而出现无意义的写回差异。
   telos: telosPolicySchema.optional()
-}).strict();
+}).strict());
 
 export const memoryPolicySchema = rawMemoryPolicySchema.transform((policy) => ({
   ...policy,
@@ -114,7 +127,7 @@ export const memoryPolicySchema = rawMemoryPolicySchema.transform((policy) => ({
   rewriteModel: undefined,
   extractModel: undefined,
   consolidationModel: undefined,
-  embeddingModel: undefined,
+  embeddingModel: { kind: "local", model: "multilingual-e5-small" },
   similarityThresholds: {},
   cloudEmbeddingConsents: {},
   excludeExternalContext: true,
@@ -237,8 +250,8 @@ export function resolveChatPersonalization(
     contributeMemories: parsedMemory.enabled && (parsedOverride.contributeMemories === "inherit"
       ? parsedMemory.generateMemories
       : parsedOverride.contributeMemories),
-    queryRewrite: parsedMemory.queryRewrite,
     memoryModel: parsedMemory.memoryModel,
+    queryRewrite: parsedMemory.queryRewrite,
     rewriteModel: parsedMemory.rewriteModel,
     extractModel: parsedMemory.extractModel,
     consolidationModel: parsedMemory.consolidationModel,

@@ -11,7 +11,7 @@ import { WorkspaceContext } from "../src/agent/context/WorkspaceContext.js";
 import { cloneAgentMessages, messageReasoning, messageText } from "../src/agent/modelMessages.js";
 import { selectPlanTools } from "../src/agent/planMode.js";
 import { buildSystemPrompt, refreshRuntimeSystemPrompt, stableSystemPromptForCache, withActiveRunCompactionSummary } from "../src/agent/prompts.js";
-import { BINY_AGENT_DIR_ENV, globalAgentDir, projectSessionsDir } from "../src/config/paths.js";
+import { BINY_AGENT_DIR_ENV, globalAgentDir, legacyProjectStateDirName, projectSessionsDir, projectStateDirName } from "../src/config/paths.js";
 import type { AgentConfig } from "../src/config/schema.js";
 import { defaultConfig } from "../src/config/schema.js";
 import { PermissionManager } from "../src/permission/PermissionManager.js";
@@ -1057,34 +1057,58 @@ async function testLegacyAgentStateIsIgnored(): Promise<void> {
 }
 
 async function testFlatSessionMigration(): Promise<void> {
+  // 旧日期分层（YYYY/MM/DD/<id>.jsonl）在首次访问时平铺回项目 session 目录根，文件名不变。
   await withTempWorkspace(async (workspaceRoot) => {
     await ensureAgentDirs(workspaceRoot);
     const sessionsRoot = projectSessionsDir(await fs.realpath(workspaceRoot));
-    const sessionId = "2026-08-23-flat";
-    const source = path.join(sessionsRoot, `${sessionId}.jsonl`);
-    const content = `${JSON.stringify({ type: "user_message", content: "flat session" })}\n`;
+    const sessionId = "2026-08-23-dated";
+    const datedDir = path.join(sessionsRoot, "2026", "08", "23");
+    const source = path.join(datedDir, `${sessionId}.jsonl`);
+    const content = `${JSON.stringify({ type: "user_message", content: "dated session" })}\n`;
+    await fs.mkdir(datedDir, { recursive: true });
     await fs.writeFile(source, content, "utf8");
 
     await ensureAgentDirs(workspaceRoot);
-    const target = path.join(sessionsRoot, "2026", "08", "23", `${sessionId}.jsonl`);
+    const target = path.join(sessionsRoot, `${sessionId}.jsonl`);
     await assert.rejects(fs.access(source));
     assert.equal(await fs.readFile(target, "utf8"), content);
+    await assert.rejects(fs.access(datedDir));
     assert.deepEqual(await listSessionFiles(workspaceRoot), [`${sessionId}.jsonl`]);
   });
 
+  // 根目录与日期目录里同名但内容不同的 session 无法猜测覆盖顺序，必须报错并两边都保留。
   await withTempWorkspace(async (workspaceRoot) => {
     await ensureAgentDirs(workspaceRoot);
     const sessionsRoot = projectSessionsDir(await fs.realpath(workspaceRoot));
     const sessionId = "2026-08-23-conflict";
-    const source = path.join(sessionsRoot, `${sessionId}.jsonl`);
-    const target = path.join(sessionsRoot, "2026", "08", "23", `${sessionId}.jsonl`);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(source, "flat\n", "utf8");
-    await fs.writeFile(target, "dated\n", "utf8");
+    const flat = path.join(sessionsRoot, `${sessionId}.jsonl`);
+    const dated = path.join(sessionsRoot, "2026", "08", "23", `${sessionId}.jsonl`);
+    await fs.mkdir(path.dirname(dated), { recursive: true });
+    await fs.writeFile(flat, "flat\n", "utf8");
+    await fs.writeFile(dated, "dated\n", "utf8");
 
     await assert.rejects(ensureAgentDirs(workspaceRoot), /Duplicate session id exists in flat and dated storage/u);
-    assert.equal(await fs.readFile(source, "utf8"), "flat\n");
-    assert.equal(await fs.readFile(target, "utf8"), "dated\n");
+    assert.equal(await fs.readFile(flat, "utf8"), "flat\n");
+    assert.equal(await fs.readFile(dated, "utf8"), "dated\n");
+  });
+
+  // 旧版纯 24hex 项目目录整体改名成 `<basename>-<hash8>`，目录里的文件保持原名。
+  await withTempWorkspace(async (workspaceRoot) => {
+    const canonicalWorkspace = await fs.realpath(workspaceRoot);
+    const globalSessionsRoot = path.join(globalAgentDir(), "sessions");
+    const legacyDir = path.join(globalSessionsRoot, legacyProjectStateDirName(canonicalWorkspace));
+    const sessionId = "legacy-24hex-session";
+    const content = `${JSON.stringify({ type: "user_message", content: "legacy 24hex session" })}\n`;
+    await fs.mkdir(legacyDir, { recursive: true });
+    await fs.writeFile(path.join(legacyDir, `${sessionId}.jsonl`), content, "utf8");
+
+    await ensureAgentDirs(workspaceRoot);
+    const sessionsRoot = projectSessionsDir(canonicalWorkspace);
+    assert.notEqual(path.basename(sessionsRoot), legacyProjectStateDirName(canonicalWorkspace));
+    assert.equal(path.basename(sessionsRoot), projectStateDirName(canonicalWorkspace));
+    await assert.rejects(fs.access(legacyDir));
+    assert.equal(await fs.readFile(path.join(sessionsRoot, `${sessionId}.jsonl`), "utf8"), content);
+    assert.deepEqual(await listSessionFiles(workspaceRoot), [`${sessionId}.jsonl`]);
   });
 }
 
@@ -1093,7 +1117,7 @@ async function testSessionPathBoundaries(): Promise<void> {
     await ensureAgentDirs(workspaceRoot);
     const safeFile = sessionFilePath(workspaceRoot, "2026-07-18-safe");
     const sessionsRoot = projectSessionsDir(await fs.realpath(workspaceRoot));
-    assert.equal(path.relative(sessionsRoot, path.dirname(safeFile)), path.join("2026", "07", "18"));
+    assert.equal(path.dirname(safeFile), sessionsRoot);
     await fs.writeFile(safeFile, `${JSON.stringify({ type: "user_message", content: "safe session" })}\n`, "utf8");
     const canonicalSafeFile = await fs.realpath(safeFile);
 
@@ -1540,9 +1564,8 @@ async function testMemoryCandidateLifecycleAndUsagePersistence(): Promise<void> 
     await agent.runTask(`Remember this successful context workflow: ${"grounded details ".repeat(20)}`);
     const overview = await agent.getLocalMemory().getOverview();
     await agent.close();
-    const replay = await replaySession(recorder.filePath);
+    // v3：回合内不再有记忆模型调用（无查询重写）；候选在维护窗口由提取模型处理。
     assert.equal(overview.candidateCount, 1);
-    assert.equal(replay.usage.some((usage) => usage.operation === "memory"), true, "query rewrite usage is attributed to memory");
 
     const shortAgent = new AgentSession({
       workspaceRoot,
@@ -1647,12 +1670,7 @@ async function testMemoryStorageBoundaries(): Promise<void> {
 
       await fs.rm(memoryDir, { force: true });
       await fs.mkdir(memoryDir);
-      await fs.symlink(victim, path.join(memoryDir, "MEMORY.md"));
-      await assert.rejects(store.search("outside-memory", []), /single regular file/);
-      await assert.rejects(store.writeEntry(entry, { expectedRevision: 0 }), /single regular file/);
-      assert.equal(await fs.readFile(victim, "utf8"), victimContent);
-
-      await fs.rm(path.join(memoryDir, "MEMORY.md"), { force: true });
+      // v3 不再维护 MEMORY.md 索引；符号链接防护聚焦条目文件与状态文件。
       const entriesDir = path.join(memoryDir, "entries");
       await fs.mkdir(entriesDir);
       await fs.link(victim, path.join(entriesDir, "debugging.md"));

@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { ManagedProcessService } from "../src/runtime/ManagedProcessService.js";
 import {
-  createListProcessesTool,
   createProcessStatusTool,
   createReadProcessOutputTool,
   createStartProcessTool,
@@ -32,6 +31,7 @@ async function main(): Promise<void> {
     await testManagedHttpProcessOutlivesFiniteCommandTimeout(workspaceRoot, serverScript);
     await testTcpAndLogReadiness(workspaceRoot, serverScript);
     await testRuntimeCloseCleansProcessGroup(workspaceRoot, serverScript);
+    await testAbortedStartHonorsRetainLifecycle(workspaceRoot, serverScript);
     await testManagedCwdRejectsSymlinkEscape(workspaceRoot);
     await testCanonicalAbsoluteCwdUnderSymlinkWorkspaceRoot();
     await testProcessStorageRejectsSymlink();
@@ -137,7 +137,8 @@ async function testManagedHttpProcessOutlivesFiniteCommandTimeout(workspaceRoot:
 
     const status = await runnable(createProcessStatusTool(service).resolveExecution({ processId: started.processId }))
       .execute({ toolCallId: "status-http" });
-    assert.equal(status.state, "running", "managed servers must not inherit run_command's deadline");
+    assert.equal(status.processes.length, 1, "带 processId 时恰好返回一个进程");
+    assert.equal(status.processes[0]!.state, "running", "managed servers must not inherit run_command's deadline");
     assert.equal((await fetch(url)).status, 200);
 
     const output = await runnable(createReadProcessOutputTool(service).resolveExecution({
@@ -148,7 +149,7 @@ async function testManagedHttpProcessOutlivesFiniteCommandTimeout(workspaceRoot:
     assert.match(output.content, /READY \d+/);
     assert.equal(output.nextOffset, output.totalBytes);
 
-    const listed = await runnable(createListProcessesTool(service).resolveExecution({ includeExited: false }))
+    const listed = await runnable(createProcessStatusTool(service).resolveExecution({ includeExited: false }))
       .execute({ toolCallId: "list-http" });
     assert.equal(listed.processes.some((process) => process.processId === started.processId), true);
 
@@ -236,6 +237,35 @@ async function testRuntimeCloseCleansProcessGroup(workspaceRoot: string, serverS
   assert.equal(await waitFor(() => !isManagedProcessAlive(started.pid), 1_000), true);
   assert.equal(await waitFor(() => !isPidAlive(serverPid), 1_000), true, "runtime close must clean descendants, not only the shell");
   assert.equal((await service.status(started.processId)).state, "stopped");
+}
+
+async function testAbortedStartHonorsRetainLifecycle(workspaceRoot: string, serverScript: string): Promise<void> {
+  const service = new ManagedProcessService({
+    workspaceRoot,
+    persistenceRoot: workspaceRoot,
+    terminationGraceMs: 200,
+    killSettleMs: 200
+  });
+  try {
+    const port = await unusedPort();
+    const controller = new AbortController();
+    const pending = service.start({
+      command: nodeCommand(serverScript, port),
+      lifecycle: "retain",
+      signal: controller.signal,
+      readiness: { type: "http", url: `http://127.0.0.1:${String(port)}/health`, timeoutMs: 5_000, intervalMs: 25 }
+    });
+    setImmediate(() => controller.abort());
+    await assert.rejects(pending);
+    // retain 语义：start 被 abort 后进程仍保留，由调用方显式处理。
+    const [record] = await service.list();
+    assert.ok(record);
+    assert.equal(record.lifecycle, "retain");
+    assert.equal(isManagedProcessAlive(record.pid), true, "retain process must survive an aborted start");
+    assert.equal((await service.stop(record.processId, "retain abort regression test")).state, "stopped");
+  } finally {
+    await service.close();
+  }
 }
 
 function runnable<TResult>(execution: ToolExecution<TResult>): RunnableToolExecution<TResult> {

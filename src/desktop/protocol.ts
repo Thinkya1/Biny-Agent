@@ -13,10 +13,8 @@ import type { ActivityRuntimeSnapshot } from "../activity/types.js";
 import type { ActivityReportResult } from "../activity/analyzer.js";
 import type { ActivitySearchResult } from "../activity/store.js";
 import type { ModelCatalogEntry } from "../ai/types.js";
-import type { ModelApiBackend, ModelCompatibility, ModelLimits, ModelProvider, ThinkingLevelMap, WebSearchConfig } from "../config/schema.js";
+import type { ChatParamsConfig, CompactionConfig, ModelApiBackend, ModelCompatibility, ModelLimits, ModelProvider, ThinkingLevelMap, WebSearchConfig } from "../config/schema.js";
 import type { EmbeddingModelDescriptor } from "../llm/embedding/types.js";
-import type { LocalEmbeddingModelId } from "../llm/embedding/types.js";
-import type { MemoryEmbeddingRuntimeStatus } from "../agent/context/MemoryEmbeddingService.js";
 import type { MemoryMaintenanceStatus } from "../agent/context/memoryTypes.js";
 import type { ModelChoice, ModelRuntimeInfo, ThinkingSelection } from "../llm/ModelManager.js";
 import type { MemoryPolicy } from "../personalization/index.js";
@@ -71,6 +69,8 @@ export const desktopIpc = {
   markSessionRead: "desktop:session:mark-read",
   duplicateSession: "desktop:session:duplicate",
   deleteSession: "desktop:session:delete",
+  exportSession: "desktop:session:export",
+  importSession: "desktop:session:import",
   sessionMenu: "desktop:session:menu",
   sendPrompt: "desktop:agent:send",
   resumeInterruptedTurn: "desktop:agent:resume-interrupted",
@@ -124,12 +124,6 @@ export const desktopIpc = {
   reviewBehaviorPattern: "desktop:telos:review-pattern",
   resolveTelosDrift: "desktop:telos:resolve-drift",
   snoozeTelosDrift: "desktop:telos:snooze-drift",
-  memoryEmbeddingStatus: "desktop:memory:embedding-status",
-  downloadMemoryEmbeddingModel: "desktop:memory:embedding-download",
-  cancelMemoryEmbeddingDownload: "desktop:memory:embedding-cancel-download",
-  deleteMemoryEmbeddingModel: "desktop:memory:embedding-delete",
-  rebuildMemoryEmbeddingIndex: "desktop:memory:embedding-rebuild",
-  cancelMemoryEmbeddingRebuild: "desktop:memory:embedding-cancel-rebuild",
   saveAttachment: "desktop:attachment:save",
   resolveDroppedFile: "desktop:attachment:resolve-path",
   listWorkspaceDirectory: "desktop:file:list-directory",
@@ -320,6 +314,8 @@ export interface DesktopWorkspaceSnapshot {
   sessionPage?: DesktopSessionTreePage;
   selectedSessionId?: string;
   runtime?: InteractiveRuntimeSnapshot;
+  /** 并行会话的运行时快照（sessionId → snapshot，含主 runtime 绑定的 session）；多 session 并行时渲染层按 session 取运行态。 */
+  sessionRuntimes?: Record<string, InteractiveRuntimeSnapshot>;
   runtimeError?: string;
   /** 跨 Desktop/TUI 共享的已保存权限模式；Runtime 启动时会先与这个持久化值对齐。 */
   permissionMode: PermissionMode;
@@ -358,6 +354,10 @@ export interface DesktopRunReceipt {
 /** 事件推送信封。带上 projectId 是因为所有项目共用同一条事件通道，渲染层要自己过滤。 */
 export interface DesktopAgentEventEnvelope extends AgentRuntimeUpdate {
   projectId: string;
+  /** 产生事件的 runtime 当前绑定的 session；一个项目可能有多个并行 runtime。 */
+  sessionId?: string;
+  /** 主 runtime 发出的事件为 true；会话池里的并行 runtime 为 false。 */
+  primary?: boolean;
 }
 
 export interface DesktopAttachment {
@@ -553,11 +553,15 @@ export interface DesktopPluginMarketEntry {
   category: string;
   description: string;
   details: string;
-  downloadUrl: string;
-  sizeBytes: number;
-  sha256: string;
-  archive: "tar.gz";
+  author?: { name: string; email?: string };
+  tags: string[];
+  repository: string;
+  path: string;
+  files?: string[];
+  branch?: string;
   entry?: string;
+  homepage?: string;
+  featured: boolean;
 }
 
 export interface DesktopPluginRegistrySnapshot {
@@ -751,6 +755,8 @@ export interface DesktopModelConnection {
   providerAlias: string;
   providerType: ModelProvider;
   protocol?: "anthropic" | "openai-compatible";
+  /** 连接级适配器（新建连接时与模型级一致写入）；渲染层用它回显「API 格式」。 */
+  apiBackend?: ModelApiBackend;
   baseUrl?: string;
   requiresApiKey: boolean;
   hasCredential: boolean;
@@ -924,6 +930,12 @@ export interface DesktopMemoryLineage {
 /** 记忆策略的渲染端视图；与 `context.memory` 的当前字段一一对应。 */
 export type DesktopMemorySettings = MemoryPolicy;
 
+/** 自动压缩策略的渲染端视图；与 `context.compaction` 的当前字段一一对应。 */
+export type DesktopCompactionSettings = CompactionConfig;
+
+/** 聊天采样参数的渲染端视图；与 `chat` 的当前字段一一对应。 */
+export type DesktopChatParamsSettings = ChatParamsConfig;
+
 export interface DesktopMemoryEntry {
   id: string;
   origin: DesktopMemoryOrigin;
@@ -958,7 +970,6 @@ export interface DesktopMemoryOverview {
     manualAdded: number;
   };
   candidateCount: number;
-  indexChars: number;
   origins: {
     user: number;
     currentWorkspace: number;
@@ -1014,20 +1025,6 @@ export interface DesktopEmbeddingModelDescriptor extends EmbeddingModelDescripto
   privacyEndpointHash?: string;
 }
 
-export type DesktopMemoryEmbeddingStatus = Omit<MemoryEmbeddingRuntimeStatus, "models"> & {
-  models: DesktopEmbeddingModelDescriptor[];
-};
-
-export interface DesktopMemoryEmbeddingCancellationResult {
-  cancelled: boolean;
-  status: DesktopMemoryEmbeddingStatus;
-}
-
-export interface DesktopMemoryEmbeddingDeleteResult {
-  filesDeleted: number;
-  bytesFreed: number;
-  status: DesktopMemoryEmbeddingStatus;
-}
 
 export interface DesktopMemorySettingsInput {
   expectedRevision: string;
@@ -1083,6 +1080,8 @@ export interface DesktopSettingsSnapshot {
   personalization: DesktopPersonalizationSettings;
   activity: ActivitySettings;
   memory: DesktopMemorySettings;
+  compaction: DesktopCompactionSettings;
+  chatParams: DesktopChatParamsSettings;
   webSearch: DesktopWebSearchSettings;
   models: DesktopSettingsModelsSnapshot;
   skills: DesktopSkillSettings;
@@ -1116,6 +1115,8 @@ export interface DesktopSettingsSaveInput {
   /** 外发策略不属于 renderer 可写入的输入；主进程会保留当前策略并仅更新采集参数。 */
   activity?: ActivitySettingsInput;
   memory?: DesktopMemorySettings;
+  compaction?: DesktopCompactionSettings;
+  chatParams?: DesktopChatParamsSettings;
   webSearch?: DesktopWebSearchSettingsInput;
   models?: DesktopSettingsModelsInput;
   skills?: DesktopSkillSettingsInput;
@@ -1240,7 +1241,7 @@ export type DesktopRuntimeMutation =
   | "capability.cancel";
 
 export type DesktopMenuAction = "new-task" | "open-project" | "search" | "settings" | "toggle-sidebar" | "focus-composer";
-export type DesktopSessionMenuAction = "rename" | "pin" | "unpin" | "archive" | "unarchive" | "duplicate" | "delete";
+export type DesktopSessionMenuAction = "rename" | "pin" | "unpin" | "archive" | "unarchive" | "duplicate" | "export-bundle" | "export-claude" | "delete";
 
 /** 内嵌终端创建结果。`replay` 是复用已有终端时回放的最近输出。 */
 export interface DesktopTerminalHandle {
@@ -1284,6 +1285,10 @@ export interface DesktopApi {
   markSessionRead(projectId: string, sessionId: string, expectedRevision?: string): Promise<DesktopWorkspaceSnapshot>;
   duplicateSession(projectId: string, sessionId: string): Promise<DesktopWorkspaceSnapshot>;
   deleteSession(projectId: string, sessionId: string): Promise<DesktopWorkspaceSnapshot>;
+  /** 导出为 Biny bundle（无损 JSON）或 Claude Code JSONL；用户在保存对话框里选位置。 */
+  exportSession(projectId: string, sessionId: string, format: "biny" | "claude"): Promise<DesktopWorkspaceSnapshot>;
+  /** 从 Biny bundle / Claude Code / Codex rollout 文件导入一条新会话并选中它。 */
+  importSession(projectId: string): Promise<DesktopWorkspaceSnapshot>;
   showSessionMenu(projectId: string, sessionId: string, pinned: boolean, archived?: boolean): Promise<DesktopSessionMenuAction | undefined>;
   sendPrompt(
     projectId: string,
@@ -1292,10 +1297,11 @@ export interface DesktopApi {
     mode: InteractiveAgentRunMode,
     attachments: DesktopAttachment[],
     delivery?: "steer" | "followUp",
-    personalization?: DesktopChatPersonalizationOverride
+    personalization?: DesktopChatPersonalizationOverride,
+    idempotencyKey?: string
   ): Promise<DesktopRunReceipt>;
   resumeInterruptedTurn(projectId: string, sessionId: string): Promise<DesktopRunReceipt | undefined>;
-  editPrompt(projectId: string, sessionId: string, userMessageIndex: number, input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[]): Promise<DesktopRunReceipt>;
+  editPrompt(projectId: string, sessionId: string, userMessageIndex: number, input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], idempotencyKey?: string): Promise<DesktopRunReceipt>;
   cancelRun(projectId: string, runId: string): Promise<void>;
   runSlashCommand(projectId: string, sessionId: string | undefined, command: string): Promise<DesktopSlashResult>;
   expandSkillCommand(projectId: string, input: string): Promise<string>;
@@ -1349,14 +1355,7 @@ export interface DesktopApi {
   saveTelos(projectId: string, input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
   reviewBehaviorPattern(projectId: string, patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
   resolveTelosDrift(projectId: string, driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number): Promise<DesktopTelosOverview>;
-  snoozeTelosDrift(projectId: string, driftId: string, until: string, expectedRevision: number): Promise<DesktopTelosOverview>;
-  memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus>;
-  downloadMemoryEmbeddingModel(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
-  cancelMemoryEmbeddingDownload(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingCancellationResult>;
-  deleteMemoryEmbeddingModel(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingDeleteResult>;
-  rebuildMemoryEmbeddingIndex(projectId: string): Promise<DesktopMemoryEmbeddingStatus>;
-  cancelMemoryEmbeddingRebuild(projectId: string): Promise<DesktopMemoryEmbeddingCancellationResult>;
-  saveAttachment(projectId: string, name: string, mimeType: string, bytes: Uint8Array): Promise<DesktopAttachment>;
+  snoozeTelosDrift(projectId: string, driftId: string, until: string, expectedRevision: number): Promise<DesktopTelosOverview>;  saveAttachment(projectId: string, name: string, mimeType: string, bytes: Uint8Array): Promise<DesktopAttachment>;
   resolveDroppedFile(file: File): string;
   listWorkspaceDirectory(projectId: string, relativePath: string): Promise<DesktopWorkspaceDirectory>;
   readWorkspaceFile(projectId: string, relativePath: string): Promise<DesktopWorkspaceFilePreview>;

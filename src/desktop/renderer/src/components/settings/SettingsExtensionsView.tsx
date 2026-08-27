@@ -13,10 +13,12 @@ import type {
   DesktopSkillCatalogEntry,
   DesktopSkillCatalogSnapshot,
   DesktopSkillDraft,
-  DesktopSkillFilePreview
+  DesktopSkillFilePreview,
+  DesktopSkillImportCandidate
 } from "../../../../protocol.js";
 import { errorMessage } from "../../app/desktopApi.js";
 import { Icon } from "../Icon.js";
+import { SkillImportDialog } from "../SkillImportDialog.js";
 import { useSettingsDraft } from "./SettingsDraftContext.js";
 
 type SettingsExtensionKind = "plugins" | "skills";
@@ -57,6 +59,8 @@ export function SettingsExtensionsView({ kind, onError, projectId }: {
   const [contentLoadingId, setContentLoadingId] = useState<string>();
   const [pluginTab, setPluginTab] = useState<PluginTab>("installed");
   const [busyPluginId, setBusyPluginId] = useState<string>();
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async (): Promise<void> => {
     if (!projectId) {
@@ -250,6 +254,20 @@ export function SettingsExtensionsView({ kind, onError, projectId }: {
     }
   }, [load, onError, projectId]);
 
+  const importExisting = useCallback(async (skillIds: string[]): Promise<void> => {
+    if (!projectId) return;
+    setImporting(true);
+    try {
+      await window.biny.importExistingSkills(skillIds);
+      await load();
+      setImportDialogOpen(false);
+    } catch (error) {
+      onError(errorMessage(error));
+    } finally {
+      setImporting(false);
+    }
+  }, [load, onError, projectId]);
+
   if (!projectId) return <div className="settings-extension-view is-empty"><ExtensionSettingsEmpty icon={kind === "skills" ? "wand" : "puzzle"} title="请先打开一个项目" detail="Skill 和 Plugin 设置需要绑定当前项目。" /></div>;
 
   return (
@@ -262,6 +280,7 @@ export function SettingsExtensionsView({ kind, onError, projectId }: {
         onApproveDraft={(draft) => void updateDraft(draft, "approve")}
         onEditDraft={(draft, content) => void updateDraft(draft, "edit", content)}
         onExtractionChange={setExtraction}
+        onImportExisting={() => setImportDialogOpen(true)}
         onInherit={inheritSkill}
         onSetGlobal={setGlobalSkill}
         onOpenDirectory={(skill) => { void window.biny.openSkillDirectory(skill.id).catch((error: unknown) => onError(errorMessage(error))); }}
@@ -277,6 +296,7 @@ export function SettingsExtensionsView({ kind, onError, projectId }: {
         skills={visibleSkills}
         globalDefaults={settingsDraft.draft?.skills.globalDefaults ?? {}}
         projectOverrides={settingsDraft.draft?.skills.projectOverrides ?? {}}
+        unmanagedSkills={snapshot.unmanagedSkills}
       /> : <PluginsSettingsContent
         category={category}
         loading={loading}
@@ -295,6 +315,7 @@ export function SettingsExtensionsView({ kind, onError, projectId }: {
         query={query}
         registry={registry}
       />}
+      {importDialogOpen && kind === "skills" ? <SkillImportDialog candidates={snapshot.unmanagedSkills} importing={importing} onClose={() => setImportDialogOpen(false)} onImport={(skillIds) => void importExisting(skillIds)} /> : null}
     </div>
   );
 }
@@ -309,6 +330,7 @@ const SkillsSettingsContent = memo(function SkillsSettingsContent({
   onApproveDraft,
   onEditDraft,
   onExtractionChange,
+  onImportExisting,
   onInherit,
   onSetGlobal,
   onOpenDirectory,
@@ -321,7 +343,8 @@ const SkillsSettingsContent = memo(function SkillsSettingsContent({
   projectOverrides,
   query,
   skillContent,
-  skills
+  skills,
+  unmanagedSkills
 }: {
   contentLoadingId?: string;
   drafts: DesktopSkillDraft[];
@@ -332,6 +355,7 @@ const SkillsSettingsContent = memo(function SkillsSettingsContent({
   onApproveDraft(draft: DesktopSkillDraft): void;
   onEditDraft(draft: DesktopSkillDraft, content: string): void;
   onExtractionChange(enabled: boolean, minToolCalls: number): void;
+  onImportExisting(): void;
   onInherit(skill: DesktopSkillCatalogEntry): void;
   onSetGlobal(skill: DesktopSkillCatalogEntry): void;
   onOpenDirectory(skill: DesktopSkillCatalogEntry): void;
@@ -345,6 +369,7 @@ const SkillsSettingsContent = memo(function SkillsSettingsContent({
   query: string;
   skillContent: Record<string, DesktopSkillFilePreview>;
   skills: DesktopSkillCatalogEntry[];
+  unmanagedSkills: DesktopSkillImportCandidate[];
 }): React.JSX.Element {
   return (
     <>
@@ -370,6 +395,7 @@ const SkillsSettingsContent = memo(function SkillsSettingsContent({
         <span>{skills.length} 个技能可用</span>
         <div>
           <button onClick={onRefresh} type="button"><Icon name="refresh" size={16} />刷新</button>
+          {unmanagedSkills.length > 0 ? <button onClick={onImportExisting} type="button"><Icon name="archive" size={16} />导入已有 ({unmanagedSkills.length})</button> : null}
           {skills[0] ? <button onClick={() => onOpenDirectory(skills[0]!)} type="button"><Icon name="folder-open" size={16} />打开文件夹</button> : null}
         </div>
       </div>
@@ -487,7 +513,7 @@ const PluginsSettingsContent = memo(function PluginsSettingsContent({ busyPlugin
 });
 
 const PluginMarketCard = memo(function PluginMarketCard({ busy, onInstall, plugin }: { busy: boolean; onInstall(plugin: DesktopPluginMarketEntry): void; plugin: DesktopPluginMarketEntry }): React.JSX.Element {
-  return <article className="settings-plugin-card"><span className="settings-plugin-card-icon"><Icon name="puzzle" size={23} /></span><div><h3>{plugin.name}</h3><p>{plugin.category} · v{plugin.version} · {formatBytes(plugin.sizeBytes)}</p><span className="settings-plugin-description">{plugin.description}</span></div><button className="settings-plugin-install-button" disabled={busy} onClick={() => onInstall(plugin)} type="button">{busy ? "安装中…" : "安装"}</button></article>;
+  return <article className="settings-plugin-card"><span className="settings-plugin-card-icon"><Icon name="puzzle" size={23} /></span><div><h3>{plugin.name}{plugin.featured ? <span className="settings-plugin-featured">精选</span> : null}</h3><p>{plugin.category} · v{plugin.version}{plugin.author ? ` · ${plugin.author.name}` : ""}</p><span className="settings-plugin-description">{plugin.description}</span>{plugin.tags.length ? <p className="settings-plugin-tags">{plugin.tags.map((tag) => `#${tag}`).join(" ")}</p> : null}</div><button className="settings-plugin-install-button" disabled={busy} onClick={() => onInstall(plugin)} type="button">{busy ? "安装中…" : "安装"}</button></article>;
 });
 
 const PluginSettingsCard = memo(function PluginSettingsCard({ busy, onSetEnabled, onUninstall, plugin }: { busy: boolean; onSetEnabled(plugin: DesktopPluginSummary): void; onUninstall(plugin: DesktopPluginSummary): void; plugin: DesktopPluginSummary }): React.JSX.Element {
@@ -505,12 +531,6 @@ function activationFor(skill: DesktopSkillCatalogEntry, globalDefaults: Record<s
     projectOverride: projectValue,
     source: projectValue !== undefined ? "project" : globalValue !== undefined ? "global" : "default"
   };
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function ExtensionSettingsLoading(): React.JSX.Element {

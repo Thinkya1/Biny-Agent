@@ -36,12 +36,13 @@ export function createDesktopWindow(
     minWidth: 800,
     minHeight: 600,
     show: false,
-    // macOS 用 vibrancy 材质做窗口底色（玻璃侧栏），透明背景才不会把它盖住；
+    // macOS 用透明底色让 CSS 液态玻璃效果透出桌面背景；
     // 其他平台保持跟随主题的不透明底色，避免加载期闪白。
     backgroundColor: process.platform === "darwin" ? "#00000000" : themeBackgroundColor(preference),
     title: "Biny",
     titleBarStyle: "hidden",
-    vibrancy: process.platform === "darwin" ? "sidebar" : undefined,
+    // macOS 不再使用系统 vibrancy（themeSource 切换时不更新），改为 CSS
+    // backdrop-filter 液态玻璃，light/dark 效果一致且随主题变量自动刷新。
     visualEffectState: process.platform === "darwin" ? "active" : undefined,
     titleBarOverlay: process.platform === "darwin" ? true : undefined,
     trafficLightPosition: process.platform === "darwin" ? { x: 14, y: 16 } : undefined,
@@ -55,8 +56,11 @@ export function createDesktopWindow(
   });
 
   const syncBackgroundColor = (): void => {
-    // macOS 的窗口底色是系统材质，会随主题自动变化，无需手动同步。
-    if (process.platform === "darwin") return;
+    if (process.platform === "darwin") {
+      // macOS 玻璃侧栏需要透明窗口底色，CSS backdrop-filter 负责毛玻璃效果。
+      if (!window.isDestroyed()) window.setBackgroundColor("#00000000");
+      return;
+    }
     if (!window.isDestroyed()) window.setBackgroundColor(themeBackgroundColor(state.themePreference()));
   };
   nativeTheme.on("updated", syncBackgroundColor);
@@ -95,6 +99,12 @@ export function createDesktopWindow(
         allowClose = true;
         window.close();
       }
+    }, () => {
+      // 决策异常不能卡住关闭流程：重置状态并放行关闭，否则窗口永远关不掉。
+      closePromptOpen = false;
+      if (window.isDestroyed()) return;
+      allowClose = true;
+      window.close();
     });
   });
 

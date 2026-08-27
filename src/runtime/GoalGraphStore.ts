@@ -449,7 +449,8 @@ export class GoalGraphStore {
     return projected;
   }
 
-  private recoverNode(graphId: string, nodeId: string, status: "ready" | "blocked", reason: string, taskRunId?: string): GraphRecord {
+  /** 把 running 节点退回 ready/blocked 并放弃当前 claim；Host 重启回收与 supervisor 的 busy 重试共用。 */
+  recoverNode(graphId: string, nodeId: string, status: "ready" | "blocked", reason: string, taskRunId?: string): GraphRecord {
     const graph = this.requireGraph(graphId);
     const node = graph.nodes.find((candidate) => candidate.nodeId === nodeId);
     if (!node || graph.status !== "running" || node.status !== "running") return graph;
@@ -570,14 +571,20 @@ export class GraphSupervisor {
     let attempt: TaskAttemptRecord | undefined;
     const store = this.store();
     const taskRuns = this.taskRuns();
+    const runtime = this.runtime();
     try {
+      // runtime 忙于交互会话或其他 run 不是节点执行失败：退回 ready，等后续 tick 重新 claim。
+      if (runtime.getSnapshot().state.kind !== "idle") {
+        store.recoverNode(graphId, node.nodeId, "ready", "Runtime is busy; node execution deferred.");
+        return;
+      }
       const parentRunId = "graph:" + graphId;
       const task = taskRuns?.create({ taskRunId: "graph:" + graphId + ":" + node.nodeId, task: node.intent, parentRunId });
       taskRunId = task?.taskRunId;
       const runId = randomUUID();
       const turnId = randomUUID();
       attempt = task ? taskRuns?.createAttempt(task.taskRunId, { runId, turnId, parentRunId, retrySafety: "unknown" }) : undefined;
-      const submitted = this.runtime().submitPrompt(String((node.intent as { prompt?: unknown })?.prompt ?? node.nodeKey), "chat", [], { runId, turnId, parentRunId, continuationSource: "graph:" + graphId + ":intent:" + claim.claimId });
+      const submitted = runtime.submitPrompt(String((node.intent as { prompt?: unknown })?.prompt ?? node.nodeKey), "chat", [], { runId, turnId, parentRunId, continuationSource: "graph:" + graphId + ":intent:" + claim.claimId });
       if (task && attempt) taskRuns?.transition(task.taskRunId, "running", { attemptId: attempt.attemptId });
       const outcome = await submitted.completion;
       if (outcome.status === "completed") {
@@ -588,6 +595,12 @@ export class GraphSupervisor {
         store.completeNode(graphId, node.nodeId, "failed", { error: outcome.error }, taskRunId);
       }
     } catch (error) {
+      // 空闲检查之后仍可能撞上 busy 竞态（本地 submit 同步抛错、Host 经 completion 异步拒绝）；
+      // busy 一律退回 ready 重试，只有真实执行失败才允许把节点和 graph 判成 failed。
+      if (isRuntimeBusyError(error)) {
+        store.recoverNode(graphId, node.nodeId, "ready", "Runtime is busy; node execution deferred.");
+        return;
+      }
       this.transitionTask(taskRuns, taskRunId, "failed", attempt?.attemptId, { error: error instanceof Error ? error.message : String(error) });
       store.completeNode(graphId, node.nodeId, "failed", { error: error instanceof Error ? error.message : String(error) }, taskRunId);
     }
@@ -696,6 +709,11 @@ function nodeStatus(value: unknown): GraphNodeStatus {
 
 function isGraphTerminal(status: GraphStatus): boolean {
   return status === "completed" || status === "failed" || status === "blocked" || status === "cancelled";
+}
+
+/** InteractiveAgentRuntime/Host 在 runtime 忙时抛出的 admission 错误；busy 是可重试信号，不是执行失败。 */
+function isRuntimeBusyError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("while the runtime is busy");
 }
 
 function isAllowedGoalTransition(from: GoalStatus, to: GoalStatus): boolean {

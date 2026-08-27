@@ -9,6 +9,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { globalConfigDir } from "../config/paths.js";
+import { getSharedProxyAwareFetch } from "../network/proxyFetch.js";
 import { parseSkillDocument } from "./skillCatalog.js";
 
 const githubApiBase = "https://api.github.com";
@@ -156,7 +157,7 @@ export async function discoverSkillRepositories(options: {
   fetcher?: typeof globalThis.fetch;
   installedNames?: ReadonlySet<string>;
 }): Promise<{ skills: DiscoverableSkill[]; warnings: string[] }> {
-  const fetcher = options.fetcher ?? globalThis.fetch;
+  const fetcher = options.fetcher ?? getSharedProxyAwareFetch();
   const repositories = options.repositories.filter((repo) => repo.enabled).slice(0, maxRepositories);
   const results = await mapWithConcurrency(repositories, 4, async (repository) => {
     try {
@@ -187,7 +188,7 @@ export async function searchSkillsSh(options: {
   url.searchParams.set("q", query);
   url.searchParams.set("limit", String(limit));
   url.searchParams.set("offset", String(offset));
-  const response = await fetchJson<SkillsShResponse>(options.fetcher ?? globalThis.fetch, url.toString(), maxResponseBytes);
+  const response = await fetchJson<SkillsShResponse>(options.fetcher ?? getSharedProxyAwareFetch(), url.toString(), maxResponseBytes);
   const installedNames = options.installedNames ?? new Set<string>();
   const skills = (response.skills ?? []).flatMap((item) => {
     if (typeof item.source !== "string" || typeof item.skillId !== "string" || typeof item.name !== "string") return [];
@@ -219,7 +220,7 @@ export async function installDiscoveredSkill(options: {
   const repository: SkillRepository = { owner: skill.repoOwner, name: skill.repoName, branch: skill.repoBranch, enabled: true };
   assertRepository(repository);
   if (!isSafeSkillPath(skill.directory)) throw new Error("Skill 目录路径无效。");
-  const fetcher = options.fetcher ?? globalThis.fetch;
+  const fetcher = options.fetcher ?? getSharedProxyAwareFetch();
   const { tree, branch } = await fetchRepositoryTreeWithFallback(repository, fetcher);
   const sourceDirectory = resolveSkillDirectory(tree, skill.directory);
   if (sourceDirectory === undefined) throw new Error(`仓库中找不到 Skill 目录：${skill.directory}`);

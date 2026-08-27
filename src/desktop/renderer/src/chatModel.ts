@@ -5,6 +5,7 @@
  * （日期感知时钟、用时、首 token 延迟、解码吞吐）。全部为纯函数，不依赖 React，便于单测。
  */
 import type { TimelineRunStatus, TimelineTool, TimelineTurn } from "./sessionTimeline.js";
+import type { SessionUsage } from "../../../session/metadata.js";
 import type { IconName } from "./components/Icon.js";
 
 /** 工具行视觉变体（标题字面量来自 DSH figma 设计）。 */
@@ -39,7 +40,7 @@ export const VARIANT_TITLES: Record<ToolRowVariant, string> = {
   others: "Tool call",
 };
 
-/** 已知工具名 → 变体；未知工具落到通用 `others`。 */
+/** 已知工具名 → 变体；未知工具（含 MCP 动态工具）落到通用 `others`，行标题回退显示原始工具名。 */
 const TOOL_VARIANTS: Record<string, ToolRowVariant> = {
   run_command: "bash",
   read_file: "read",
@@ -61,8 +62,20 @@ const TOOL_VARIANTS: Record<string, ToolRowVariant> = {
   process_status: "process",
   read_process_output: "process",
   list_processes: "process",
+  list_files: "read",
+  read_tool_result: "read",
+  update_todos: "edit",
   invoke_skill: "skill",
   skill_call: "skill",
+  read_skill_resource: "read",
+  activity_search: "search",
+  activity_search_semantic: "search",
+  activity_sessions: "read",
+  activity_session_show: "read",
+  activity_report: "read",
+  activity_digest: "read",
+  mcp_list_resources: "search",
+  mcp_read_resource: "read",
 };
 
 /** 把工具名分类成行变体。 */
@@ -95,6 +108,31 @@ export function runErrorPresentation(status: TimelineRunStatus): { title: string
     case "failed":
     default: return { title: "本轮运行失败", variant: "error" };
   }
+}
+
+/** 失败/阻塞/未完成/取消/中止：这些终态的错误输出统一走 RunErrorCard。 */
+export function isRunErrorStatus(status: TimelineRunStatus): boolean {
+  return status === "failed"
+    || status === "blocked"
+    || status === "incomplete"
+    || status === "cancelled"
+    || status === "aborted";
+}
+
+/**
+ * 错误卡片「已看过」标记的稳定身份：project + session + 轮次终态时间戳。
+ *
+ * 实时轮次的 id 是 runId，同一轮切走再切回、从 session 文件重建后变成位置序号
+ * history-N——用 id 当身份会让「已看过」在重载后对不上号、错误卡复活。终态事件的
+ * 时间戳在两条构建路径里同源（同一个事件只发生一次），跨投影稳定；缺时间戳的轮次
+ * 退回轮次 id 兜底。
+ */
+export function runErrorSeenKey(
+  projectId: string,
+  sessionId: string | undefined,
+  turn: Pick<TimelineTurn, "id" | "timestamp">
+): string {
+  return `${projectId}:${sessionId ?? "draft"}:${turn.timestamp ?? turn.id}`;
 }
 
 /**
@@ -184,17 +222,10 @@ export function formatMessageClock(time: number, now: number = Date.now()): stri
   return `${date} ${clock}`;
 }
 
-/** 一轮的展示指标：首 token 延迟与解码吞吐（只有数据齐全才给出）。 */
+/** 一轮的展示指标：首 token 延迟、解码吞吐、模型耗时（TTFT + 解码，两者齐全才给出）。 */
 export interface TurnMetrics {
   ttftMs?: number;
   tokensPerSecond?: number;
-}
-
-/** 一轮的展示指标：首 token 延迟、解码吞吐、模型耗时（TTFT + 解码）。 */
-export interface TurnMetrics {
-  ttftMs?: number;
-  tokensPerSecond?: number;
-  /** 模型输出耗时（TTFT + 解码墙钟）；只有两者都可用时才给出。 */
   llmMs?: number;
 }
 
@@ -209,4 +240,66 @@ export function turnMetrics(turn: TimelineTurn): TurnMetrics {
     metrics.llmMs = turn.ttftMs + turn.decodeMs;
   }
   return metrics;
+}
+
+/* ============ 用量悬浮卡（复刻 Alma 消息菜单的 Usage 详情） ============ */
+
+/** 悬浮用量卡的一行：标签 + 已格式化值。 */
+export interface UsageDetailRow {
+  key: string;
+  label: string;
+  value: string;
+}
+
+/** 精确 token 计数（千分位）；缺失/非法回退 N/A 由调用方过滤。 */
+function formatTokenCountExact(value: number | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "N/A";
+  return value.toLocaleString("en-US");
+}
+
+/** 缓存命中率 = 缓存读取 / 完整输入；输入为 0 或缺数据时 N/A。 */
+function formatCacheHitRate(cacheRead: number | undefined, input: number | undefined): string {
+  if (typeof cacheRead !== "number" || typeof input !== "number") return "N/A";
+  if (!Number.isFinite(cacheRead) || !Number.isFinite(input) || input <= 0 || cacheRead < 0) return "N/A";
+  return `${Math.min(100, (cacheRead / input) * 100).toFixed(1)}%`;
+}
+
+/** 悬浮卡里的吞吐精度：≥10 一位小数，以下两位（比时钟上的整数更细）。 */
+function formatTokensPerSecondPrecise(tps: number): string {
+  if (typeof tps !== "number" || !Number.isFinite(tps) || tps <= 0) return "N/A";
+  return tps >= 10 ? tps.toFixed(1) : tps.toFixed(2);
+}
+
+/**
+ * 组装悬浮用量卡的行：输入/输出/缓存读取/命中率/缓存写入/总量 + 首个 Token 时间与吞吐。
+ * 输入与缓存读取优先取回合内最后一次完整请求的口径（latest*），缺数据行整条不出现。
+ */
+export function buildUsageDetailRows(usage: SessionUsage | undefined, metrics: TurnMetrics): UsageDetailRow[] {
+  if (!usage) return [];
+  const input = usage.latestRequestInputTokens ?? usage.inputTokens;
+  const cacheRead = usage.latestRequestCacheReadTokens ?? usage.cacheReadTokens;
+  const rows: UsageDetailRow[] = [
+    { key: "input", label: "输入 Token", value: formatTokenCountExact(input) },
+    { key: "output", label: "输出 Token", value: formatTokenCountExact(usage.outputTokens) },
+    { key: "cacheRead", label: "缓存读取", value: formatTokenCountExact(cacheRead) },
+    { key: "cacheHit", label: "缓存命中率", value: formatCacheHitRate(cacheRead, input) },
+    { key: "cacheWrite", label: "缓存写入", value: formatTokenCountExact(usage.cacheWriteTokens) },
+    { key: "total", label: "总 Token", value: formatTokenCountExact(usage.totalTokens) },
+    { key: "ttft", label: "首个 Token 时间", value: metrics.ttftMs !== undefined ? formatDuration(metrics.ttftMs) : "N/A" },
+    { key: "tps", label: "Token/秒", value: metrics.tokensPerSecond !== undefined ? formatTokensPerSecondPrecise(metrics.tokensPerSecond) : "N/A" },
+  ];
+  return rows.filter((row) => row.value !== "N/A");
+}
+
+/** Turn 结束原因的语义色：绿=正常停止，琥珀=长度截断，蓝=工具调用，橙=内容过滤，红=错误/中止。 */
+export type FinishReasonTone = "ok" | "limit" | "tool" | "filter" | "error" | "unknown";
+
+/** 把各家 provider 的原始 finishReason（含 biny 归一化的 stopReason）映射成色点语义。 */
+export function finishReasonTone(reason: string): FinishReasonTone {
+  if (/^(stop|end_turn|stop_sequence)$/i.test(reason)) return "ok";
+  if (/^(length|max_tokens)$/i.test(reason)) return "limit";
+  if (/^(tool[-_]calls|tool_use|function_call)$/i.test(reason)) return "tool";
+  if (/^(content_filter|safety|recitation)$/i.test(reason)) return "filter";
+  if (/^(error|aborted|cancelled|failed)$/i.test(reason)) return "error";
+  return "unknown";
 }

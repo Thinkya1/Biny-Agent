@@ -28,6 +28,7 @@ import {
 } from "../../../sidebarSizing.js";
 
 const SIDEBAR_RAIL_STORAGE_KEY = "biny.desktop.sidebar-rail";
+const SIDEBAR_WIDTH_STORAGE_KEY = "biny.desktop.sidebar-width";
 const PEEK_TRIGGER_WIDTH = 12;
 
 export interface SidebarPeekHandlers {
@@ -79,9 +80,33 @@ function writeRailPreference(enabled: boolean): void {
   }
 }
 
+/**
+ * 展开宽度在主进程状态库里，bootstrap 异步返回前首帧只能用默认值。
+ * 镜像一份到 localStorage，让首帧直接以上次的宽度渲染，避免启动后可见的跳变；
+ * bootstrap hydration 仍会把主进程值写回来保持权威一致。
+ */
+function readWidthPreference(): number {
+  try {
+    if (typeof window === "undefined") return DEFAULT_SIDEBAR_LAYOUT.expandedWidth;
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+    if (raw === null) return DEFAULT_SIDEBAR_LAYOUT.expandedWidth;
+    return normalizeSidebarExpandedWidth(Number(raw));
+  } catch {
+    return DEFAULT_SIDEBAR_LAYOUT.expandedWidth;
+  }
+}
+
+function writeWidthPreference(width: number): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+  } catch {
+    // Renderer 本地存储不可用时仍保留本次会话的宽度状态。
+  }
+}
+
 export function useSidebarLayout({ persistWidth }: UseSidebarLayoutOptions): UseSidebarLayoutResult {
   const [baseMode, setBaseMode] = useState<SidebarBaseMode>(() => readRailPreference() ? "rail" : DEFAULT_SIDEBAR_LAYOUT.baseMode);
-  const [expandedWidth, setExpandedWidth] = useState(DEFAULT_SIDEBAR_LAYOUT.expandedWidth);
+  const [expandedWidth, setExpandedWidth] = useState(() => readWidthPreference());
   const [peekPhase, setPeekPhase] = useState<SidebarPeekPhase>("idle");
   const [activeResize, setActiveResize] = useState<ActiveResize | undefined>(undefined);
   const baseModeRef = useRef(baseMode);
@@ -106,6 +131,7 @@ export function useSidebarLayout({ persistWidth }: UseSidebarLayoutOptions): Use
     const normalized = normalizeSidebarExpandedWidth(next);
     expandedWidthRef.current = normalized;
     setExpandedWidth(normalized);
+    writeWidthPreference(normalized);
   }, []);
 
   const setPeekPhaseValue = useCallback((next: SidebarPeekPhase): void => {

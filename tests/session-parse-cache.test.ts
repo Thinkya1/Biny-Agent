@@ -3,7 +3,7 @@ import { appendFile, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { listSessionSummaries, readStoredSessionEvents } from "../src/session/events.js";
-import { cachedSessionEvents, clearSessionParseCache, sessionFileFingerprint } from "../src/session/parseCache.js";
+import { cachedSessionEvents, clearSessionParseCache } from "../src/session/parseCache.js";
 import { SessionRecorder, type SessionEvent } from "../src/session/recorder.js";
 import { ensureAgentDirs } from "../src/session/store.js";
 

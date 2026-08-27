@@ -80,9 +80,9 @@ async function startDesktopApplication(): Promise<void> {
     }
   });
   const settingsClose = new DesktopSettingsCloseCoordinator();
-  const agents = new DesktopAgentManager(state, projects, configStore, (projectId, update) => {
+  const agents = new DesktopAgentManager(state, projects, configStore, (projectId, update, meta) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(desktopIpc.event, { projectId, ...update });
+      mainWindow.webContents.send(desktopIpc.event, { projectId, ...update, ...meta });
     }
     const event = update.event;
     // 只有窗口不在前台时才发系统通知：界面上已经能看到权限询问就不用再打扰一次。
@@ -161,6 +161,9 @@ async function startDesktopApplication(): Promise<void> {
   };
 
   const decideWindowClose = async (): Promise<WindowCloseDecision> => {
+    // 先处理未保存的设置草稿：取消必须发生在中止任务之前，否则用户取消时任务已被停掉。
+    const settingsDecision = await settingsClose.request(mainWindow?.webContents, "window");
+    if (settingsDecision === "cancel") return "cancel";
     if (!agents.hasRunningTasks()) return "close";
     const response = await showMessage(mainWindow, {
       type: "question",
@@ -242,35 +245,40 @@ async function startDesktopApplication(): Promise<void> {
     if (preparingQuit) return;
     preparingQuit = true;
     void (async () => {
-      if (agents.hasRunningTasks()) {
-        const response = await showMessage(mainWindow, {
-          type: "warning",
-          title: "退出 Biny",
-          message: "退出会中止所有正在运行的任务。",
-          buttons: ["中止并退出", "取消"],
-          defaultId: 1,
-          cancelId: 1,
-          noLink: true
-        });
-        if (response.response !== 0) {
-          preparingQuit = false;
-          return;
-        }
-        await agents.stopAllForExit();
-      }
-      terminals.disposeAll();
-      await activity.stop();
-      await browser.dispose();
-      mainWindow?.destroy();
+      // 确认阶段（设置草稿、运行中任务）允许取消并还原 preparingQuit；一旦确认退出，
+      // 清理链的任何异常都不能让 app.exit 落空，否则应用会永远退不掉。
+      let confirmed = false;
       try {
+        const settingsDecision = await settingsClose.request(mainWindow?.webContents, "quit");
+        if (settingsDecision === "cancel") return;
+        const hadRunningTasks = agents.hasRunningTasks();
+        if (hadRunningTasks) {
+          const response = await showMessage(mainWindow, {
+            type: "warning",
+            title: "退出 Biny",
+            message: "退出会中止所有正在运行的任务。",
+            buttons: ["中止并退出", "取消"],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true
+          });
+          if (response.response !== 0) return;
+        }
+        confirmed = true;
+        if (hadRunningTasks) await agents.stopAllForExit();
+        terminals.disposeAll();
+        await activity.stop();
+        await browser.dispose();
+        mainWindow?.destroy();
         await Promise.race([
           agents.closeAll({ terminateOwnedHosts: true }),
           new Promise<void>((resolve) => setTimeout(resolve, 5_000))
         ]);
       } finally {
-        app.exit(0);
+        if (confirmed) app.exit(0);
+        else preparingQuit = false;
       }
-    })();
+    })().catch(() => undefined);
   });
 }
 

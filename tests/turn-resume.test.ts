@@ -186,7 +186,7 @@ async function testAgentSessionCrashRecovery(
       outcome.steps,
       crash === "during-tool-b" ? 1 : crash === "after-side-effect-b" ? 2 : 3
     );
-    if (crash === "during-tool-b") assert.match(outcome.error ?? "", /unresolved side effect/u);
+    if (crash === "during-tool-b") assert.match(outcome.error ?? "", /未确认的副作用/u);
     assert.equal(await new TurnStore(workspaceRoot, sessionId).load(), undefined);
 
     const sessionEvents = await readSessionEvents(sessionFile);

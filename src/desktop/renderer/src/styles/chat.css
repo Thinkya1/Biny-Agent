@@ -971,6 +971,208 @@
   color: var(--biny-text-tertiary);
 }
 
+/* ============ 同文件编辑合并行 ============ */
+
+.merged-edits-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 主行（可点区域）吃满剩余宽度；ops/统计是它的兄弟节点，不进 button。 */
+.merged-edits-main {
+  flex: 1;
+  min-width: 0;
+  gap: 8px;
+}
+
+.merged-edits-name {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: calc(12px * var(--font-scale, 1));
+  font-weight: 500;
+  color: var(--biny-text);
+}
+
+/* 目录让位压缩：文件名不缩，长目录先 ellipsis。 */
+.merged-edits-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: calc(11.5px * var(--font-scale, 1));
+  color: var(--biny-text-tertiary);
+}
+
+.merged-edits-chip {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--biny-focus) 12%, transparent);
+  color: var(--biny-focus);
+  font-size: calc(11px * var(--font-scale, 1));
+  font-weight: 500;
+}
+
+.merged-edits-ops {
+  display: inline-flex;
+  gap: 2px;
+  flex: none;
+  opacity: 0;
+  transition: opacity var(--biny-motion-quick, 120ms) ease;
+}
+
+.merged-edits-row:hover .merged-edits-ops,
+.merged-edits-ops:focus-within {
+  opacity: 1;
+}
+
+.merged-edits-op {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--biny-text-tertiary);
+  cursor: pointer;
+}
+
+.merged-edits-op:hover {
+  background: color-mix(in srgb, var(--biny-text) 8%, transparent);
+  color: var(--biny-text-secondary);
+}
+
+.merged-edits-op.is-copied {
+  color: var(--biny-success);
+}
+
+.merged-edits-stats {
+  flex: none;
+  padding-right: 4px;
+}
+
+.merged-edits-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0 8px 24px;
+}
+
+.merged-edit-segment {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.merged-edit-segment-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: calc(11px * var(--font-scale, 1));
+  color: var(--biny-text-tertiary);
+}
+
+.merged-edit-segment-lines {
+  font-family: var(--font-mono);
+}
+
+.merged-edit-segment-failed {
+  color: var(--biny-danger);
+}
+
+.merged-edit-diff {
+  margin: 0;
+  padding: 4px 0;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: calc(12px * var(--font-scale, 1));
+  line-height: 1.55;
+  scrollbar-width: thin;
+}
+
+.merged-diff-line {
+  display: flex;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.merged-diff-ln {
+  flex: none;
+  width: 36px;
+  padding-right: 8px;
+  text-align: right;
+  color: var(--biny-text-tertiary);
+  opacity: 0.7;
+  user-select: none;
+}
+
+.merged-diff-sign {
+  flex: none;
+  width: 12px;
+  user-select: none;
+}
+
+.merged-diff-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.merged-diff-line[data-line="add"] {
+  background: color-mix(in srgb, var(--biny-success) 9%, transparent);
+}
+
+.merged-diff-line[data-line="add"] .merged-diff-sign,
+.merged-diff-line[data-line="add"] .merged-diff-text {
+  color: var(--biny-success);
+}
+
+.merged-diff-line[data-line="del"] {
+  background: color-mix(in srgb, var(--biny-danger) 8%, transparent);
+}
+
+.merged-diff-line[data-line="del"] .merged-diff-sign,
+.merged-diff-line[data-line="del"] .merged-diff-text {
+  color: var(--biny-danger);
+}
+
+.merged-diff-gap .merged-diff-ln {
+  opacity: 0.9;
+}
+
+.merged-edit-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 12px;
+  border: none;
+  border-top: 1px dashed color-mix(in srgb, var(--biny-border) 80%, transparent);
+  background: none;
+  color: var(--biny-text-tertiary);
+  font-size: calc(11.5px * var(--font-scale, 1));
+  cursor: pointer;
+  text-align: left;
+}
+
+.merged-edit-more:hover {
+  color: var(--biny-text-secondary);
+}
+
+.merged-edit-error {
+  padding: 4px 12px;
+  font-size: calc(12px * var(--font-scale, 1));
+  color: var(--biny-danger);
+}
+
 /* ============ 工具展开体：网页搜索 ============ */
 
 .web-search-log {
@@ -1261,6 +1463,7 @@
 
 /* 轮次级失败/未完成卡片（blocked / incomplete / cancelled / aborted / failed 统一出口） */
 .biny-chat-scroll .run-error-card {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 10px;
@@ -1289,6 +1492,31 @@
 
 .run-error-card[data-variant="warning"] .run-error-card-icon {
   color: var(--biny-warning);
+}
+
+.biny-chat-scroll .run-error-card-dismiss {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--biny-radius-control, 6px);
+  background: transparent;
+  color: var(--biny-text-tertiary, var(--biny-text-secondary));
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity var(--biny-motion-quick, 120ms) ease, background var(--biny-motion-quick, 120ms) ease;
+}
+
+.biny-chat-scroll .run-error-card-dismiss:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--biny-text) 8%, transparent);
+  color: var(--biny-text);
 }
 
 .run-error-card-body {
@@ -1458,26 +1686,47 @@
   justify-content: flex-end;
 }
 
-.biny-chat-scroll .user-message-actions,
 .biny-chat-scroll .assistant-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
-  margin-top: 4px;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* 左侧常显：运行时长的波形图标 + 文本，始终可见。 */
+.biny-chat-scroll .assistant-actions-duration {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: calc(11px * var(--font-scale, 1));
+  color: var(--biny-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.biny-chat-scroll .assistant-actions-duration svg {
+  opacity: 0.6;
+}
+
+/* hover 揭示：用户消息整条操作行都藏；助手行只藏右侧图标按钮组。 */
+.biny-chat-scroll .user-message-actions,
+.biny-chat-scroll .assistant-actions-buttons {
   opacity: 0;
   transition: opacity 150ms ease;
 }
 
-.biny-chat-scroll .assistant-actions {
-  margin-top: 8px;
+.biny-chat-scroll .assistant-actions-buttons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .biny-chat-scroll .user-message:hover .user-message-actions,
-.biny-chat-scroll .desktop-assistant-message:hover .assistant-actions,
+.biny-chat-scroll .desktop-assistant-message:hover .assistant-actions-buttons,
 .biny-chat-scroll .user-message-actions.is-open,
-.biny-chat-scroll .assistant-actions.is-open,
+.biny-chat-scroll .assistant-actions.is-open .assistant-actions-buttons,
 .biny-chat-scroll .user-message-actions:focus-within,
-.biny-chat-scroll .assistant-actions:focus-within {
+.biny-chat-scroll .assistant-actions-buttons:focus-within {
   opacity: 1;
 }
 
@@ -1568,64 +1817,103 @@
   object-fit: cover;
 }
 
-/* 用户消息编辑器 */
+/* 用户消息编辑器：迷你 composer——整卡聚焦、无框输入区、底栏快捷键提示 + 圆形发送钮（复用 .biny-send-button）。 */
 .user-message-editor {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-width: min(480px, 60vw);
+  border: 1px solid var(--biny-border);
+  border-radius: var(--biny-composer-radius);
+  background: var(--biny-surface-elevated);
+  box-shadow: var(--biny-shadow);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.user-message-editor:focus-within {
+  border-color: color-mix(in srgb, var(--biny-focus) 65%, var(--biny-border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--biny-focus) 16%, transparent), var(--biny-shadow);
 }
 
 .biny-chat-scroll .user-message-editor textarea {
   width: 100%;
-  padding: 6px 8px;
-  border: 1px solid var(--biny-border);
-  border-radius: 8px;
-  background: var(--biny-surface);
+  min-height: 44px;
+  max-height: 40vh;
+  padding: 13px 14px 6px;
+  border: 0;
+  background: transparent;
   color: var(--biny-text);
   font: inherit;
-  font-size: calc(13.5px * var(--font-scale, 1));
-  line-height: 1.5;
+  font-size: calc(14px * var(--font-scale, 1));
+  line-height: 1.6;
   resize: none;
   outline: none;
+  overflow-y: auto;
   field-sizing: content;
 }
 
-.biny-chat-scroll .user-message-editor textarea:focus {
-  border-color: var(--biny-focus);
+.biny-chat-scroll .user-message-editor textarea:disabled {
+  opacity: 0.68;
 }
 
 .user-message-editor-error {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding: 2px 14px 0;
   font-size: calc(12px * var(--font-scale, 1));
   color: var(--biny-danger);
 }
 
 .user-message-editor-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: 8px;
+  padding: 4px 10px 10px 14px;
 }
 
-.biny-chat-scroll .user-message-editor-actions button {
-  padding: 5px 12px;
+.user-message-editor-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--biny-text-tertiary);
+  font-size: calc(11.5px * var(--font-scale, 1));
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.user-message-editor-hint kbd {
+  display: inline-block;
+  min-width: 16px;
+  padding: 1px 4px;
   border: 1px solid var(--biny-border);
-  border-radius: 8px;
-  background: var(--biny-surface);
-  color: var(--biny-text);
+  border-radius: 4px;
+  background: var(--biny-surface-soft);
+  font: inherit;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.user-message-editor-cancel {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  font: inherit;
   font-size: calc(12.5px * var(--font-scale, 1));
   cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
 }
 
-.biny-chat-scroll .user-message-editor-actions button.is-primary {
-  border-color: var(--biny-focus);
-  background: var(--biny-focus);
-  color: #fff;
+.biny-chat-scroll .user-message-editor-cancel:hover:not(:disabled) {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
 }
 
-.biny-chat-scroll .user-message-editor-actions button:disabled {
+.biny-chat-scroll .user-message-editor-cancel:disabled {
   opacity: 0.5;
   cursor: default;
 }
@@ -1971,7 +2259,7 @@
   margin-left: -7px;
 }
 
-.chat-activity-avatar:hover:not(:disabled) {
+.chat-activity-avatar:hover:not(:disabled):not(.is-selected) {
   z-index: 50;
   border-color: var(--biny-text-tertiary);
   color: var(--biny-text);
@@ -2191,6 +2479,162 @@
 @media (prefers-reduced-motion: reduce) {
   .chat-activity-avatar.is-alive::after,
   .chat-working-dots > span {
+    animation: none;
+  }
+}
+
+/* ============ 助手消息菜单与用量悬浮卡（portal 到 body，复刻 Alma 消息底栏） ============ */
+
+/* 注意：这两块通过 createPortal 挂到 document.body，不在 .biny-chat-scroll 作用域内，
+   样式必须自包含；主题 token 走 :root 上的 --biny-* / --font-scale。 */
+
+.assistant-menu {
+  position: fixed;
+  z-index: 2000;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--biny-border);
+  border-radius: 12px;
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 1px 2px var(--biny-shadow-soft), 0 6px 16px var(--biny-shadow-soft);
+  color: var(--biny-text-secondary);
+  font-size: calc(12.5px * var(--font-scale, 1));
+  user-select: none;
+  animation: assistant-menu-in 140ms ease;
+}
+
+.assistant-menu[data-direction="down"] {
+  transform-origin: top left;
+}
+
+.assistant-menu[data-direction="up"] {
+  transform-origin: bottom left;
+}
+
+@keyframes assistant-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.assistant-menu .message-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--biny-text-secondary);
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.assistant-menu .message-menu-item > svg {
+  flex: none;
+}
+
+.assistant-menu .message-menu-item:hover:not(.is-static) {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+/* 「Turn 结束原因」是纯展示行：不响应 hover、不变手型。 */
+.assistant-menu .message-menu-item.is-static {
+  cursor: default;
+}
+
+/* 复制成功瞬态：图标变勾、整行转绿，800ms 后菜单自动收起。 */
+.assistant-menu .message-menu-item.is-success,
+.assistant-menu .message-menu-item.is-success:hover {
+  background: transparent;
+  color: var(--biny-success);
+}
+
+.finish-reason-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-inline: 3px;
+  border-radius: 50%;
+}
+
+.finish-reason-dot.is-ok { background: var(--biny-success); }
+.finish-reason-dot.is-limit { background: var(--biny-warning); }
+.finish-reason-dot.is-tool { background: #0ea5e9; }
+.finish-reason-dot.is-filter { background: #f97316; }
+.finish-reason-dot.is-error { background: var(--biny-danger); }
+.finish-reason-dot.is-unknown { background: var(--biny-text-tertiary); opacity: 0.5; }
+
+.finish-reason-label {
+  color: var(--biny-text-tertiary);
+}
+
+.finish-reason-value {
+  margin-left: auto;
+  color: var(--biny-text);
+  font-family: var(--font-mono);
+  font-size: calc(11.5px * var(--font-scale, 1));
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-detail-popover {
+  position: fixed;
+  z-index: 2100;
+  width: 240px;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--biny-border);
+  border-radius: 12px;
+  background: var(--biny-surface-elevated);
+  box-shadow: 0 1px 2px var(--biny-shadow-soft), 0 6px 16px var(--biny-shadow-soft);
+  transform: translateY(-50%);
+  user-select: none;
+  animation: assistant-menu-in 140ms ease;
+}
+
+.usage-detail-title {
+  color: var(--biny-text-tertiary);
+  font-size: calc(11px * var(--font-scale, 1));
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.usage-detail-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: calc(12.5px * var(--font-scale, 1));
+}
+
+.usage-detail-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.usage-detail-label {
+  color: var(--biny-text-tertiary);
+}
+
+.usage-detail-value {
+  color: var(--biny-text);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-menu,
+  .usage-detail-popover {
     animation: none;
   }
 }

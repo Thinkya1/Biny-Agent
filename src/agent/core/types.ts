@@ -169,6 +169,8 @@ export interface ModelStreamContext {
 export interface ModelStreamOptions {
   signal?: AbortSignal;
   maxOutputTokens?: number;
+  /** 采样温度；undefined 时不写入请求体，跟随模型/provider 默认。 */
+  temperature?: number;
   reasoning?: "off" | ReasoningEffort;
   providerOptions?: Record<string, unknown>;
   timeoutMs?: number;

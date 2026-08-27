@@ -22,6 +22,7 @@
   - MCP：Desktop 在设置中的“MCP 服务器”分页提供应用市场与已安装列表、自定义 Stdio / Remote 配置、剪贴板导入、连接测试、重连、工具/提示/资源详情和启停管理；环境变量与请求头只保存 Keychain 引用。
   - Plugin、具名子代理和持久 Memory：Desktop 设置支持技能启停、全局默认/当前项目覆盖、自动提取草稿审核，以及 Plugin 官方市场的刷新、搜索、安装、升级、启停和卸载；Plugin 只从固定官方 HTTPS Registry 下载，安装包会校验 SHA-256 并拒绝路径穿越、链接和安装脚本，安装后默认关闭。Plugin JavaScript 会由主进程加载，不提供沙箱保证。
 - **交互模式** —— 支持 Chat / Plan、follow-up / steer，以及 Desktop 与 TUI 共用的 slash command。
+- **消息重试** —— Desktop 重复点击或 IPC 重入只执行一次发送；失败回合的“重试”和消息“重新生成”沿用原用户消息位置，按编辑分叉成新会话，不追加重复用户消息。
 
 ## 快速开始
 

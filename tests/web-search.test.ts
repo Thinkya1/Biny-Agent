@@ -13,6 +13,7 @@ async function main(): Promise<void> {
   testGoogleParser();
   testTavilyParser();
   await testDuckDuckGoSearch();
+  await testSearchResponseBodyIsBounded();
   await testGoogleSearchWithCookies();
   await testBraveSearch();
   await testTavilySearch();
@@ -99,6 +100,35 @@ async function testDuckDuckGoSearch(): Promise<void> {
     assert.equal(result.results[0]?.url, "https://weather.gov/chicago");
     assert.equal(requestedUrl?.searchParams.get("df"), "d");
     assert.match(requestedUrl?.searchParams.get("q") ?? "", /site:weather\.gov/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+/** 响应体必须按字节收口：超出上限之后的内容不应进入解析。 */
+async function testSearchResponseBodyIsBounded(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const padding = "x".repeat(3 * 1024 * 1024);
+  globalThis.fetch = (async (): Promise<Response> => new Response(`
+    <h2 class="result__title"><a class="result__a" href="https://example.com/early">Early result</a></h2>
+    ${padding}
+    <h2 class="result__title"><a class="result__a" href="https://example.com/beyond-limit">Late result</a></h2>
+  `, { status: 200, headers: { "content-type": "text/html" } })) as typeof fetch;
+
+  try {
+    const tool = createWebSearchTool({
+      enabled: true,
+      provider: "duckduckgo",
+      apiKey: undefined,
+      apiKeyEnv: undefined,
+      timeoutMs: 5_000,
+      maxResults: 5
+    });
+    const execution = await tool.resolveExecution({ query: "bounded" });
+    assert.equal("isError" in execution, false);
+    if ("isError" in execution) return;
+    const result = await execution.execute({ toolCallId: "search-bounded", signal: undefined });
+    assert.deepEqual(result.results.map((entry) => entry.url), ["https://example.com/early"]);
   } finally {
     globalThis.fetch = originalFetch;
   }

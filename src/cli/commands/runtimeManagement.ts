@@ -168,7 +168,8 @@ async function hostAction<T>(workspaceRoot: string, options: HostActionOptions, 
   try {
     const result = await action(client);
     const visible = unwrapHostOperationResult(result);
-    console.log(options.json === false ? formatPlain(visible) : JSON.stringify(visible));
+    // commander 布尔选项不传时是 undefined（不是 false）：默认人类可读输出，--json 输出紧凑 JSON。
+    console.log(options.json ? JSON.stringify(visible) : formatPlain(visible));
   } finally {
     await client.close();
   }

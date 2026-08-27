@@ -438,9 +438,14 @@ function abortReason(signal: AbortSignal | undefined): unknown {
   return new DOMException("The operation was aborted.", "AbortError");
 }
 
-function appendCapped(current: string, chunk: string): string {
+export function appendCapped(current: string, chunk: string): string {
   const next = `${current}${chunk}`;
-  if (Buffer.byteLength(next, "utf8") <= maxOutputBytes) return next;
-  const overflow = Buffer.byteLength(next, "utf8") - maxOutputBytes;
-  return next.slice(Math.min(overflow, next.length));
+  const byteLength = Buffer.byteLength(next, "utf8");
+  if (byteLength <= maxOutputBytes) return next;
+  // 上限按字节计，截断也必须按字节来：起点落在多字节字符中间时前进到下一个字符边界，
+  // 避免在输出开头留下半个 UTF-8 序列。
+  const buffer = Buffer.from(next, "utf8");
+  let start = byteLength - maxOutputBytes;
+  while (start < buffer.length && (buffer[start]! & 0xc0) === 0x80) start += 1;
+  return buffer.subarray(start).toString("utf8");
 }

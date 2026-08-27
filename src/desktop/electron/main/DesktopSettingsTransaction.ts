@@ -710,6 +710,8 @@ export class DesktopSettingsTransaction {
       personalization: config.personalization,
       activity: structuredClone(config.activity),
       memory: config.memory,
+      compaction: structuredClone(config.compaction),
+      chatParams: structuredClone(config.chatParams),
       webSearch: config.webSearch,
       models: config.models,
       skills: config.skills ?? {
@@ -871,6 +873,8 @@ function createJournal(
   const configIncluded = input.personalization !== undefined
     || input.activity !== undefined
     || input.memory !== undefined
+    || input.compaction !== undefined
+    || input.chatParams !== undefined
     || input.webSearch !== undefined
     || input.models !== undefined;
   return {
@@ -1178,6 +1182,8 @@ function listAppliedFields(input: DesktopSettingsSaveInput): string[] {
   if (input.personalization !== undefined) fields.push("personalization");
   if (input.activity !== undefined) fields.push("activity");
   if (input.memory !== undefined) fields.push("memory");
+  if (input.compaction !== undefined) fields.push("compaction");
+  if (input.chatParams !== undefined) fields.push("chatParams");
   if (input.webSearch !== undefined) fields.push("webSearch");
   if (input.models !== undefined) fields.push("models");
   if (input.skills !== undefined) fields.push("skills");

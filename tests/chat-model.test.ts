@@ -7,7 +7,9 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  buildUsageDetailRows,
   classifyTool,
+  finishReasonTone,
   firstLine,
   formatDuration,
   formatLatencySeconds,
@@ -16,7 +18,9 @@ import {
   formatTokens,
   formatTokensPerSecond,
   humanizeRunError,
+  isRunErrorStatus,
   runErrorPresentation,
+  runErrorSeenKey,
   toolRowState,
   turnMetrics,
   VARIANT_TITLES,
@@ -251,6 +255,34 @@ test("runErrorPresentation 按终态区分标题与语义色", () => {
   assert.deepEqual(runErrorPresentation("failed"), { title: "本轮运行失败", variant: "error" });
 });
 
+test("isRunErrorStatus 五种错误终态为真，运行/完成态为假", () => {
+  for (const status of ["failed", "blocked", "incomplete", "cancelled", "aborted"] as const) {
+    assert.equal(isRunErrorStatus(status), true, status);
+  }
+  for (const status of ["idle", "running", "waiting_permission", "completed"] as const) {
+    assert.equal(isRunErrorStatus(status), false, status);
+  }
+});
+
+test("runErrorSeenKey 同一轮在实时（runId）与历史（history-N）投影下身份一致", () => {
+  const live = runErrorSeenKey("p1", "s1", { id: "0198abcd-runid", timestamp: "2026-08-27T01:02:03.000Z" });
+  const rebuilt = runErrorSeenKey("p1", "s1", { id: "history-7", timestamp: "2026-08-27T01:02:03.000Z" });
+  assert.equal(live, rebuilt);
+  // 会话与项目维度都在身份里：跨会话、跨项目不串扰。
+  assert.notEqual(live, runErrorSeenKey("p1", "s2", { id: "0198abcd-runid", timestamp: "2026-08-27T01:02:03.000Z" }));
+  assert.notEqual(live, runErrorSeenKey("p2", "s1", { id: "0198abcd-runid", timestamp: "2026-08-27T01:02:03.000Z" }));
+});
+
+test("runErrorSeenKey 缺会话退 draft 兜底，缺时间戳退轮次 id", () => {
+  const timestamped = runErrorSeenKey("p1", undefined, { id: "0198-run", timestamp: "2026-08-27T09:00:00.000Z" });
+  assert.match(timestamped, /^p1:draft:/u);
+  assert.equal(
+    runErrorSeenKey("p1", "s1", { id: "0198-run" }),
+    runErrorSeenKey("p1", "s1", { id: "0198-run" })
+  );
+  assert.match(timestamped, /2026-08-27T09/u);
+});
+
 test("humanizeRunError 把网络/运行时错误码映射成人话", () => {
   // 连接 / 响应超时（undici 原始码）
   assert.equal(humanizeRunError("TypeError: fetch failed (UND_ERR_CONNECT_TIMEOUT)"), "网络连接超时，请检查代理或网络后重试。");
@@ -274,4 +306,87 @@ test("humanizeRunError 映射鉴权/限流/服务端/上下文/取消", () => {
 test("humanizeRunError 可读文案保留首行，空串原样返回", () => {
   assert.equal(humanizeRunError("Something unexpected happened.\nMore detail here."), "Something unexpected happened.");
   assert.equal(humanizeRunError("   "), "");
+});
+
+test("buildUsageDetailRows 汇总 token 与延迟指标，latest* 口径优先", () => {
+  const rows = buildUsageDetailRows({
+    operation: "turn",
+    modelAlias: "a",
+    provider: "p",
+    model: "m",
+    inputTokens: 1_000,
+    outputTokens: 469,
+    totalTokens: 189_101,
+    cacheReadTokens: 900,
+    cacheWriteTokens: 50,
+    latestRequestInputTokens: 188_632,
+    latestRequestCacheReadTokens: 187_904,
+    pricingKnown: false,
+  }, { ttftMs: 27_000, tokensPerSecond: 0.27 });
+  const byKey = new Map(rows.map((row) => [row.key, row.value]));
+  assert.equal(byKey.get("input"), "188,632");
+  assert.equal(byKey.get("output"), "469");
+  assert.equal(byKey.get("cacheRead"), "187,904");
+  assert.equal(byKey.get("cacheHit"), "99.6%");
+  assert.equal(byKey.get("cacheWrite"), "50");
+  assert.equal(byKey.get("total"), "189,101");
+  assert.equal(byKey.get("ttft"), "27s");
+  assert.equal(byKey.get("tps"), "0.27");
+});
+
+test("buildUsageDetailRows 缺数据的行整条不出现，无 usage 返回空", () => {
+  const rows = buildUsageDetailRows({
+    operation: "turn",
+    modelAlias: "a",
+    provider: "p",
+    model: "m",
+    inputTokens: 100,
+    outputTokens: 20,
+    pricingKnown: false,
+  }, {});
+  assert.deepEqual(rows.map((row) => row.key), ["input", "output"]);
+  assert.equal(buildUsageDetailRows(undefined, {}).length, 0);
+});
+
+test("finishReasonTone 把各家原始结束原因映射成语义色", () => {
+  assert.equal(finishReasonTone("stop"), "ok");
+  assert.equal(finishReasonTone("end_turn"), "ok");
+  assert.equal(finishReasonTone("STOP"), "ok");
+  assert.equal(finishReasonTone("length"), "limit");
+  assert.equal(finishReasonTone("max_tokens"), "limit");
+  assert.equal(finishReasonTone("MAX_TOKENS"), "limit");
+  assert.equal(finishReasonTone("tool-calls"), "tool");
+  assert.equal(finishReasonTone("tool_use"), "tool");
+  assert.equal(finishReasonTone("function_call"), "tool");
+  assert.equal(finishReasonTone("content_filter"), "filter");
+  assert.equal(finishReasonTone("SAFETY"), "filter");
+  assert.equal(finishReasonTone("error"), "error");
+  assert.equal(finishReasonTone("aborted"), "error");
+  assert.equal(finishReasonTone("something-else"), "unknown");
+});
+
+test("历史 turn_status 的 finishReason 进轮次（原始值优先，缺省回退 stopReason）", () => {
+  const withRaw = buildSessionTimeline([
+    { type: "user_message", content: "你好", time: "2026-05-15T10:00:00.000Z" },
+    { type: "assistant_message", content: "你好呀", time: "2026-05-15T10:00:02.000Z" },
+    { type: "turn_status", status: "completed", stopReason: "stop", finishReason: "end_turn", steps: 1, time: "2026-05-15T10:00:02.100Z" },
+  ], []);
+  assert.equal(withRaw[0]?.finishReason, "end_turn");
+  const fallback = buildSessionTimeline([
+    { type: "user_message", content: "你好", time: "2026-05-15T10:00:00.000Z" },
+    { type: "assistant_message", content: "截断了", time: "2026-05-15T10:00:02.000Z" },
+    { type: "turn_status", status: "blocked", stopReason: "length", steps: 1, time: "2026-05-15T10:00:02.100Z" },
+  ], []);
+  assert.equal(fallback[0]?.finishReason, "length");
+});
+
+test("实时 run.completed 的 finishReason 进轮次", () => {
+  const base = { sessionId: "s1", runId: "r1" };
+  const timeline = buildSessionTimeline([], [
+    { ...base, type: "message.user", timestamp: "2026-05-15T10:00:00.000Z", messageId: "m1", content: "你好" },
+    { ...base, type: "run.started", timestamp: "2026-05-15T10:00:00.000Z", messageId: "m1", input: "你好", mode: "normal", model: { alias: "a", provider: "p", label: "p/m", reasoning: "" }, skills: [] },
+    { ...base, type: "assistant.delta", timestamp: "2026-05-15T10:00:01.000Z", content: "好的" },
+    { ...base, type: "run.completed", timestamp: "2026-05-15T10:00:02.000Z", durationMs: 2_000, stopReason: "stop", finishReason: "stop" },
+  ]);
+  assert.equal(timeline[0]?.finishReason, "stop");
 });

@@ -63,6 +63,10 @@ export async function* streamOpenAiResponses(
   if (config.provider !== "openai-codex" && options.maxOutputTokens !== undefined) {
     body.max_output_tokens = options.maxOutputTokens;
   }
+  // Codex 的 ChatGPT 访问路径同样拒绝 temperature；官方 Responses 端点正常支持。
+  if (config.provider !== "openai-codex" && options.temperature !== undefined) {
+    body.temperature = options.temperature;
+  }
   applyResponsesReasoning(body, config, options);
 
   const endpoint = resolveEndpoint(config.baseUrl, "responses");

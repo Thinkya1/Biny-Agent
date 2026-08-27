@@ -31,6 +31,7 @@ async function main(): Promise<void> {
   try {
     testEmptySkillReport();
     await testSkillsAndPlugins(workspaceRoot);
+    await testGlobalSkillSymlinkRoots();
     await testExtensionPathBoundary(workspaceRoot);
     await testMcpStdioTool(workspaceRoot);
     testUsageCostAccounting();
@@ -565,6 +566,9 @@ async function testProgressiveSkills(workspaceRoot: string): Promise<void> {
       path.join("service", ".agents", "skills", "nested-skill", "SKILL.md"),
       path.join(".agents", "skills", "root-skill", "SKILL.md")
     ]);
+    // 仓库根 .agents/skills 扫到的技能在嵌套工作区下也归属 agents source，与 catalog 的开关联动约定一致。
+    assert.match(officialBundle.skills.find((skill) => skill.name === "root-skill")?.ref ?? "", /:agents:/);
+    assert.match(officialBundle.skills.find((skill) => skill.name === "nested-skill")?.ref ?? "", /:agents:/);
 
     // 初始清单使用整体字符预算：先缩短描述，再省略尾部 Skill 并给出警告。
     const budgetRoot = path.join(workspaceRoot, ".biny", "budget-skills");
@@ -595,6 +599,56 @@ async function testProgressiveSkills(workspaceRoot: string): Promise<void> {
     await rm(path.join(workspaceRoot, ".biny"), { recursive: true, force: true });
     await rm(path.join(workspaceRoot, "legacy-skill.md"), { force: true });
     await rm(path.join(workspaceRoot, "hr-skill.md"), { force: true });
+  }
+}
+
+async function testGlobalSkillSymlinkRoots(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-symlink-workspace-"));
+  // mkdtemp 落在 /var 软链下，先 realpath 让 $HOME 与扫描根的 canonical 形式一致，
+  // 这样展示路径才能正确缩写成 "~"。
+  const fakeHome = await fs.realpath(await mkdtemp(path.join(os.tmpdir(), "biny-symlink-home-")));
+  const originalHome = process.env.HOME;
+  try {
+    // 跨根软链：全局 .agents/skills 的第一层目录软链指向 .claude/skills 里的技能。
+    // 绑定校验按软链目标自己的根进行，技能正常加载，且扫描真正所属的根时不重复出现。
+    const claudeSkill = path.join(fakeHome, ".claude", "skills", "linked-skill");
+    await mkdir(claudeSkill, { recursive: true });
+    await writeFile(path.join(claudeSkill, "SKILL.md"), "---\nname: linked-skill\ndescription: Linked across global roots\n---\nLinked body.", "utf8");
+    const agentsSkillsRoot = path.join(fakeHome, ".agents", "skills");
+    await mkdir(agentsSkillsRoot, { recursive: true });
+    await symlink(claudeSkill, path.join(agentsSkillsRoot, "linked-skill"), "dir");
+    process.env.HOME = fakeHome;
+    const linked = await loadSkills({ workspaceRoot, projectPaths: [] });
+    assert.deepEqual(linked.warnings, []);
+    const linkedMatches = linked.skills.filter((skill) => skill.name === "linked-skill");
+    assert.equal(linkedMatches.length, 1);
+    assert.equal(linkedMatches[0]?.scope, "global");
+    assert.equal(linkedMatches[0]?.path, path.join("~", ".claude", "skills", "linked-skill", "SKILL.md"));
+    const invoke = await createSkillTool(linked).resolveExecution({ skill: "linked-skill" });
+    assert.equal("isError" in invoke, false);
+    if (!("isError" in invoke)) {
+      const result = await invoke.execute({ toolCallId: "test" }) as { instructions: string };
+      assert.match(result.instructions, /Linked body/);
+    }
+
+    // 全局根下的悬空软链只跳过自身，不能让同根的其他技能一起丢失。
+    const danglingRoot = await fs.realpath(await mkdtemp(path.join(os.tmpdir(), "biny-dangling-skills-")));
+    try {
+      const goodSkill = path.join(danglingRoot, "good-skill");
+      await mkdir(goodSkill);
+      await writeFile(path.join(goodSkill, "SKILL.md"), "---\nname: good-skill\ndescription: Survives a dangling sibling link\n---\nGood body.", "utf8");
+      await symlink(path.join(danglingRoot, "missing-target"), path.join(danglingRoot, "dangling-link"), "dir");
+      const withDangling = await loadSkills({ workspaceRoot, projectPaths: [], globalRoot: danglingRoot });
+      assert.equal(withDangling.skills.some((skill) => skill.name === "good-skill"), true);
+      assert.equal(withDangling.warnings.some((warning) => warning.includes("Skipped skill root")), false);
+    } finally {
+      await rm(danglingRoot, { recursive: true, force: true });
+    }
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(fakeHome, { recursive: true, force: true });
   }
 }
 
@@ -861,6 +915,11 @@ rl.on("line", (line) => {
     process.env[envName] = "now-present";
     const status = await envHost.reconnectServer("pending");
     assert.equal(status.connected, true);
+    // 重连失败必须落回未连接状态，不能让 connected 滞留 true、实际却没有 client。
+    delete process.env[envName];
+    const failed = await envHost.reconnectServer("pending");
+    assert.equal(failed.connected, false);
+    assert.match(failed.lastError ?? "", new RegExp(`Environment variable ${envName} is not set`));
   } finally {
     delete process.env[envName];
     await envHost.close();

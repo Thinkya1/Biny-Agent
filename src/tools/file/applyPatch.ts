@@ -101,14 +101,18 @@ export function applyUnifiedPatch(content: string, patch: string, filePath = "fi
   const lineEnding = content.includes("\r\n") ? "\r\n" : "\n";
   let lines = content.split(/\r\n|\n/u);
   let cursor = 0;
+  // hunk 头里的 oldStart 针对原始文件；每应用一个 hunk 都会平移后续位置，这里累计净行数变化，
+  // 否则纯新增 hunk（没有 oldLines 可匹配，直接按 hint 落位）会被贴到错误的位置。
+  let lineOffset = 0;
   let changedLines = 0;
 
   for (const [index, hunk] of parsed.entries()) {
-    const hint = Math.max(0, Math.min(lines.length, hunk.oldStart - 1));
+    const hint = Math.max(0, Math.min(lines.length, hunk.oldStart - 1 + lineOffset));
     const match = findHunkMatch(lines, hunk.oldLines, hint, cursor, filePath, index + 1);
     const replacement = hunk.newLines;
     lines = [...lines.slice(0, match), ...replacement, ...lines.slice(match + hunk.oldLines.length)];
     cursor = match + replacement.length;
+    lineOffset += replacement.length - hunk.oldLines.length;
     changedLines += hunk.oldLines.filter((line, lineIndex) => line !== replacement[lineIndex]).length
       + Math.max(0, replacement.length - hunk.oldLines.length);
   }

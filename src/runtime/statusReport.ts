@@ -41,11 +41,10 @@ export function formatStatusReport(
     : "none";
   const repoMapSummary = `${String(context.repoMapEntries)} entries${context.repoMapDirty ? " (dirty)" : ""}`;
   const memorySummary = context.memoryEnabled
-    ? context.memoryTopics.length
-      ? `use enabled (${context.memoryTopics.join(", ")})`
-      : "use enabled"
-    : "use disabled (stored data retained)";
-  const memoryRecall = context.memoryRecall;
+    ? context.memoryOverviewChars
+      ? `enabled; overview ${formatCount(context.memoryOverviewChars)} chars injected`
+      : "enabled"
+    : "disabled (stored data retained)";
   const usageSummary = usage.calls
     ? `${formatCount(usage.totalTokens)} total (${formatCount(usage.inputTokens)} input + ${formatCount(usage.outputTokens)} output; ${formatCount(usage.reasoningTokens)} reasoning)`
     : "no model calls recorded";
@@ -81,14 +80,6 @@ export function formatStatusReport(
     `Instructions: ${instructionSummary}; ${formatCount(context.instructionBytes)}/${formatCount(context.instructionCapBytes)} bytes`,
     `Repo map: ${repoMapSummary}`,
     `Memory: ${memorySummary}`,
-    ...(memoryRecall
-      ? [
-        `Memory recall: included user=${String(memoryRecall.origins.included.user)}, current=${String(memoryRecall.origins.included.currentWorkspace)}, other=${String(memoryRecall.origins.included.otherWorkspaces)}; trimmed user=${String(memoryRecall.origins.trimmed.user)}, current=${String(memoryRecall.origins.trimmed.currentWorkspace)}, other=${String(memoryRecall.origins.trimmed.otherWorkspaces)}; omitted=${String(memoryRecall.omitted.length)}`,
-        ...(memoryRecall.budgetOmission
-          ? [`Memory budget: ${formatCount(memoryRecall.budgetOmission.usedChars)}/${formatCount(memoryRecall.budgetOmission.maxChars)} chars; ${String(memoryRecall.budgetOmission.omitted)} omitted`]
-          : [])
-      ]
-      : []),
     ...(contextComposition.length
       ? [
         "Context composition:",

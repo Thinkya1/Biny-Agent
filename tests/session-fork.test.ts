@@ -25,7 +25,7 @@ async function main(): Promise<void> {
 function testSessionIdsAreTimeSortable(): void {
   const earlier = createSessionId(Date.UTC(2026, 0, 1, 0, 0, 0, 1));
   const later = createSessionId(Date.UTC(2026, 0, 1, 0, 0, 0, 2));
-  assert.match(earlier, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  assert.match(earlier, /^\d{8}-\d{6}-\d{3}-[0-9a-f]{8}$/u);
   assert.equal(earlier < later, true);
   assert.notEqual(createSessionId(Date.UTC(2026, 0, 1, 0, 0, 0, 1)), earlier);
 }

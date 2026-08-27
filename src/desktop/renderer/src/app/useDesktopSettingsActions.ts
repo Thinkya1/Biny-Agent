@@ -7,7 +7,6 @@
 import { useCallback, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
 import type { ContextBudgetStatus } from "../../../../agent/context/types.js";
 import type { ThinkingSelection } from "../../../../llm/ModelManager.js";
-import type { LocalEmbeddingModelId } from "../../../../llm/embedding/types.js";
 import type {
   DesktopMemoryEntryInput,
   DesktopMemoryEntryPatch,
@@ -159,60 +158,19 @@ export function useDesktopSettingsActions({
     return await snooze(requireProject(projectIdRef.current), driftId, until, expectedRevision);
   }, [projectIdRef]);
 
-  const loadMemoryEmbeddingStatus = useCallback(async () => {
-    const status = window.biny.memoryEmbeddingStatus;
-    if (typeof status !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await status(requireProject(projectIdRef.current));
-  }, [projectIdRef]);
-
-  const downloadMemoryEmbeddingModel = useCallback(async (model: LocalEmbeddingModelId) => {
-    const download = window.biny.downloadMemoryEmbeddingModel;
-    if (typeof download !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await download(requireProject(projectIdRef.current), model);
-  }, [projectIdRef]);
-
-  const cancelMemoryEmbeddingDownload = useCallback(async (model: LocalEmbeddingModelId) => {
-    const cancel = window.biny.cancelMemoryEmbeddingDownload;
-    if (typeof cancel !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await cancel(requireProject(projectIdRef.current), model);
-  }, [projectIdRef]);
-
-  const deleteMemoryEmbeddingModel = useCallback(async (model: LocalEmbeddingModelId) => {
-    const remove = window.biny.deleteMemoryEmbeddingModel;
-    if (typeof remove !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await remove(requireProject(projectIdRef.current), model);
-  }, [projectIdRef]);
-
-  const rebuildMemoryEmbeddingIndex = useCallback(async () => {
-    const rebuild = window.biny.rebuildMemoryEmbeddingIndex;
-    if (typeof rebuild !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await rebuild(requireProject(projectIdRef.current));
-  }, [projectIdRef]);
-
-  const cancelMemoryEmbeddingRebuild = useCallback(async () => {
-    const cancel = window.biny.cancelMemoryEmbeddingRebuild;
-    if (typeof cancel !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await cancel(requireProject(projectIdRef.current));
-  }, [projectIdRef]);
 
   return {
     addMemoryEntry,
-    cancelMemoryEmbeddingDownload,
-    cancelMemoryEmbeddingRebuild,
     cancelModelLogin,
     clearMemory,
     compactMemory,
     deleteMemoryEntry,
-    deleteMemoryEmbeddingModel,
-    downloadMemoryEmbeddingModel,
     fetchModelCatalog,
     fetchModelCatalogCandidate,
     loadCookieJarStatus,
-    loadMemoryEmbeddingStatus,
     loadMemoryOverview,
     loadTelosOverview,
     openBrowser,
-    rebuildMemoryEmbeddingIndex,
     resolveTelosDrift,
     reviewBehaviorPattern,
     saveTelos,

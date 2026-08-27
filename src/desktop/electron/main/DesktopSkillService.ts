@@ -44,7 +44,7 @@ import {
 } from "../../../extensions/skillDrafts.js";
 import {
   BINY_PLUGIN_REGISTRY_URL,
-  installPluginPackage,
+  installPluginFromRepository,
   parsePluginRegistry,
   projectPluginRoot,
   readPluginRegistryCache,
@@ -53,6 +53,7 @@ import {
   uninstallProjectPlugin,
   writePluginRegistryCache,
 } from "../../../extensions/pluginRegistry.js";
+import { getSharedProxyAwareFetch } from "../../../network/proxyFetch.js";
 import type {
   DesktopDiscoverableSkill,
   DesktopManagedSkillSource,
@@ -74,7 +75,7 @@ export class DesktopSkillService {
   constructor(
     private readonly state: DesktopStateStore,
     private readonly configStore: AgentConfigStore,
-    private readonly fetcher: typeof globalThis.fetch = globalThis.fetch
+    private readonly fetcher: typeof globalThis.fetch = getSharedProxyAwareFetch()
   ) {}
 
   async snapshot(projectId?: string): Promise<DesktopSkillCatalogSnapshot> {
@@ -260,7 +261,7 @@ export class DesktopSkillService {
     const registry = await this.pluginRegistry(projectId);
     const plugin = registry.plugins.find((candidate) => candidate.id === pluginId);
     if (!plugin) throw new Error(`应用市场中不存在 Plugin：${pluginId}`);
-    await installPluginPackage({ workspaceRoot: project.path, plugin, fetcher: this.fetcher });
+    await installPluginFromRepository({ workspaceRoot: project.path, plugin, fetcher: this.fetcher });
     return await this.requireManagedPluginSummary(projectId, pluginId);
   }
 

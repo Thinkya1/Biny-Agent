@@ -79,8 +79,7 @@ function testOverrideResolutionAndPromptPrivacy(): void {
     generateMemories: true,
     extractModel: undefined,
     consolidationModel: undefined,
-    excludeExternalContext: true,
-    maxRecalled: 4
+    excludeExternalContext: true
   }, override);
   assert.equal(resolved.personality, "pragmatic");
   assert.equal(resolved.customInstructions, "Use <short> evidence.");
@@ -123,7 +122,6 @@ function testOverrideResolutionAndPromptPrivacy(): void {
     useMemories: true,
     contributeMemories: false,
     excludeExternalContext: true,
-    maxRecalled: 4,
     telos: {
       enabled: false,
       autoObserve: false,
@@ -162,8 +160,7 @@ function testBuddyPersonalityPreset(): void {
     generateMemories: true,
     extractModel: undefined,
     consolidationModel: undefined,
-    excludeExternalContext: true,
-    maxRecalled: 3
+    excludeExternalContext: true
   }, override);
   assert.equal(resolved.personality, "buddy");
 
@@ -210,13 +207,9 @@ async function testGlobalAndProjectMigrations(): Promise<void> {
       enabled: true,
       useMemories: true,
       generateMemories: true,
-      queryRewrite: true,
       extractModel: "deepseek-v4-flash",
       consolidationModel: "deepseek-v4-flash",
-      similarityThresholds: {},
-      cloudEmbeddingConsents: {},
-      excludeExternalContext: true,
-      maxRecalled: 2
+      excludeExternalContext: true
     });
     const persisted = JSON.parse(await fs.readFile(path.join(globalRoot, "config.json"), "utf8")) as Record<string, unknown>;
     assert.equal(persisted.format, undefined, "plain config reads must not rewrite migrations");
@@ -265,7 +258,6 @@ async function testGlobalAndProjectMigrations(): Promise<void> {
     assert.equal(partialMemory.enabled, true);
     assert.equal(partialMemory.useMemories, true);
     assert.equal(partialMemory.generateMemories, true);
-    assert.equal(partialMemory.maxRecalled, 5);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

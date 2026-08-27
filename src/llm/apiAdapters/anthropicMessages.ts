@@ -50,6 +50,14 @@ export async function* streamAnthropic(
     stream: true
   };
   if (context.tools.length) body.tools = stableAgentTools(context.tools, config.promptProjectionCache).map(anthropicTool);
+  // Anthropic 开启扩展思考时不允许自定义 temperature（必须为 1）；判断来源与
+  // applyAnthropicThinking 一致（providerOptions.anthropic.thinking），思考开启时跳过下发。
+  const configuredOptions = isRecord(options.providerOptions) ? options.providerOptions : config.providerOptions;
+  const anthropicOptions = isRecord(configuredOptions?.anthropic) ? configuredOptions.anthropic : undefined;
+  const thinkingActive = isRecord(anthropicOptions?.thinking) && anthropicOptions.thinking.type === "enabled";
+  if (options.temperature !== undefined && !thinkingActive) {
+    body.temperature = options.temperature;
+  }
   applyAnthropicThinking(body, config, options);
 
   const endpoint = resolveEndpoint(config.baseUrl, "v1/messages");

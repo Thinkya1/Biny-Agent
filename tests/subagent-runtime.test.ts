@@ -169,7 +169,7 @@ async function testReadOnlyToolBoundary(): Promise<void> {
       "web_search",
       "run_command"
     ]);
-    assert.deepEqual(tools.map((tool) => tool.name), ["read_file", "list_files", "search_files", "grep_search", "git_status", "git_diff"]);
+    assert.deepEqual(tools.map((tool) => tool.name), ["read_file", "list_files", "search_files", "git_status", "git_diff"]);
     assert.equal(isSensitiveSubagentPath("config.json"), true);
     assert.equal(isSensitiveSubagentPath("nested/.env.production"), true);
     assert.equal(isSensitiveSubagentPath("src/index.ts"), false);
@@ -199,7 +199,6 @@ async function testWorkspaceSubagentToolBoundary(): Promise<void> {
       "read_file",
       "list_files",
       "search_files",
-      "grep_search",
       "git_status",
       "git_diff",
       "write_file",

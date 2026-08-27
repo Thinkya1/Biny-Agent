@@ -122,7 +122,7 @@ export class SessionRecorder {
     resolvedFilePath = sessionFilePath(workspaceRoot, sessionId),
     private readonly runtimeEventSink?: RuntimeEventSink
   ) {
-    // sessionId 默认使用 UUIDv7：高位携带毫秒时间戳，既能保持 UUID 格式，也便于按字典序排序。
+    // sessionId 默认来自 createSessionId()（时间戳+随机段），既保持字典序排序，也便于人类识别。
     this.sessionId = sessionId;
     this.filePath = canonicalSessionFilePath(workspaceRoot, sessionId, resolvedFilePath);
     this.existedAtCreation = existsSync(this.filePath);
@@ -632,21 +632,30 @@ function lastPersistedRuntimeEvent(raw: Buffer): RuntimeHighWater | undefined {
   return last;
 }
 
+/**
+ * 生成新 session 的逻辑 id，同时就是 session 文件的 basename（`<id>.jsonl`）。
+ *
+ * 格式 `<yyyymmdd-hhmmss>-<rand8>`，与 7 月旧布局同构：时间戳段用本地时间（跟墙上时钟一致，
+ * "按时间找会话"才符合直觉，也对齐 Codex rollout 的本地时间命名；单机使用时字典序仍按创建
+ * 先后排列），8 位 hex 随机段消掉同一秒内的碰撞。catalog/runLedger/claim/resume 只把 id 当
+ * 不透明字符串，所以改格式不需要动那 30 处耦合；store 的 `sessionFilePath` 靠"先查重、再落
+ * 候选路径"保证 id 与文件名始终一致。
+ */
 export function createSessionId(timestampMs = Date.now()): string {
-  if (!Number.isSafeInteger(timestampMs) || timestampMs < 0 || timestampMs > 0xffffffffffff) {
-    throw new RangeError("Session timestamp must be a non-negative safe integer within UUIDv7's 48-bit range.");
+  if (!Number.isSafeInteger(timestampMs) || timestampMs < 0 || timestampMs > 253402300799999) {
+    throw new RangeError("Session timestamp must be a non-negative safe integer within the local date range.");
   }
-
-  const bytes = randomBytes(16);
-  let remaining = timestampMs;
-  for (let index = 5; index >= 0; index -= 1) {
-    bytes[index] = remaining % 256;
-    remaining = Math.floor(remaining / 256);
-  }
-  // UUIDv7: version 7 occupies the high nibble of byte 6; RFC 9562 variant is 10xx.
-  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x70;
-  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
-
-  const hex = bytes.toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  const date = new Date(timestampMs);
+  const stamp = [
+    String(date.getFullYear()).padStart(4, "0"),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("") + "-" + [
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+    String(date.getSeconds()).padStart(2, "0")
+  ].join("");
+  // 毫秒段保证同秒内创建的会话也能按字典序排出时间序（fork/连续新建都落在同一秒）。
+  const milliseconds = String(date.getMilliseconds()).padStart(3, "0");
+  return `${stamp}-${milliseconds}-${randomBytes(4).toString("hex")}`;
 }

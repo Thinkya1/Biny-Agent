@@ -1,9 +1,9 @@
 /**
  * 桌面端 agent 运行时管理。
  *
- * 每个项目一个 runtime handle，按需懒创建并缓存在 `runtimes` 里；当前进程可能是
- * Runtime Host owner，也可能 attach 到其它 Desktop/TUI owner。一个项目同一时刻只能
- * 有一个活动会话在跑，切换会话前必须先停掉当前运行。
+ * 每个项目一个主 runtime handle，按需懒创建并缓存在 `runtimes` 里；当前进程可能是
+ * Runtime Host owner，也可能 attach 到其它 Desktop/TUI owner。主 runtime 忙时其他会话
+ * 通过 `sessionRuntimes` 池里的本地 runtime 并行运行（session 租约本来就是按会话互斥的）。
  *
  * 几处需要注意的状态：
  * - `runtimeInitializations` 缓存正在创建中的 promise，避免并发请求把同一个项目初始化两次；
@@ -38,8 +38,7 @@ import { createNativeModelSettings, validateModelConfiguration } from "../../../
 import { ModelRuntime } from "../../../llm/ModelRuntime.js";
 import { listLocalEmbeddingModels } from "../../../llm/embedding/LocalEmbeddingRuntime.js";
 import { listProviderEmbeddingModels } from "../../../llm/embedding/ProviderEmbeddingRuntime.js";
-import { embeddingModelRefKey, type EmbeddingModelDescriptor, type LocalEmbeddingModelId } from "../../../llm/embedding/types.js";
-import type { MemoryEmbeddingRuntimeStatus } from "../../../agent/context/MemoryEmbeddingService.js";
+import type { EmbeddingModelDescriptor } from "../../../llm/embedding/types.js";
 import { FileModelsStore, restoreProviderCatalogs, type ModelsStore } from "../../../llm/ModelsStore.js";
 import { hasUsableModelConfiguration, listConfiguredModelChoices, listPickerModelChoices, modelRuntimeInfo, type ModelRuntimeInfo, type ThinkingSelection } from "../../../llm/ModelManager.js";
 import type { PermissionMode, PermissionResult } from "../../../permission/PermissionManager.js";
@@ -74,7 +73,7 @@ import {
   type AgentPersonalizationState,
   type GlobalPersonalizationUpdate
 } from "../../../personalization/index.js";
-import { activeRun, isTerminalRunEvent, runtimeIsBusy, type AgentHostEvent, type AgentRuntimeUpdate } from "../../../runtime/agentEvents.js";
+import { activeRun, isTerminalRunEvent, pendingPermission, runtimeIsBusy, type AgentHostEvent, type AgentRuntimeUpdate, type InteractiveRuntimeSnapshot } from "../../../runtime/agentEvents.js";
 import { evaluateTaskRetry } from "../../../runtime/TaskRetryPolicy.js";
 import { isTaskRunTerminal } from "../../../runtime/TaskRunStore.js";
 import { withAttachmentReferences } from "../../attachmentReferences.js";
@@ -86,9 +85,6 @@ import type {
   DesktopMemoryCompactionResult,
   DesktopMemoryEntryInput,
   DesktopMemoryEntryPatch,
-  DesktopMemoryEmbeddingCancellationResult,
-  DesktopMemoryEmbeddingDeleteResult,
-  DesktopMemoryEmbeddingStatus,
   DesktopMemoryOverview,
   DesktopMemoryOriginFilter,
   DesktopMemorySearchMatch,
@@ -162,6 +158,8 @@ export interface DesktopSettingsConfigSnapshot {
   personalization: AgentConfig["personalization"];
   activity: AgentConfig["activity"];
   memory: AgentConfig["context"]["memory"];
+  compaction: AgentConfig["context"]["compaction"];
+  chatParams: AgentConfig["chat"];
   webSearch: DesktopWebSearchSettings;
   models: DesktopSettingsModelsSnapshot;
   skills?: DesktopSkillSettings;
@@ -188,10 +186,18 @@ export interface PreparedDesktopSettingsChat {
 }
 
 export class DesktopAgentManager {
+  /** 会话并行池每项目上限于 3 个本地 runtime（主 runtime 不算）；控制 MCP/索引等基础设施的重复开销。 */
+  private static readonly maxSessionRuntimesPerProject = 3;
   private readonly runtimes = new Map<string, ManagedRuntime>();
+  /** 同项目并行会话池：sessionId → 本地 runtime。主 runtime 忙时，其他会话的运行请求 mint 到这里。 */
+  private readonly sessionRuntimes = new Map<string, Map<string, ManagedRuntime>>();
+  /** writer claim 挂在哪个 runtime 上（池化后同进程多个 runtime 抢同一份 lease 文件会互斥，转移前必须先释放）。 */
+  private readonly sessionClaimOwners = new Map<string, Map<string, ManagedRuntime>>();
   private readonly runtimeInitializations = new Map<string, Promise<ManagedRuntime>>();
   private readonly liveEvents = new Map<string, Map<string, AgentHostEvent[]>>();
   private readonly runtimeErrors = new Map<string, string>();
+  /** 同一发送/编辑操作键复用 Promise，避免 IPC 重入再次产生用户消息或分叉会话。 */
+  private readonly idempotentPromptRequests = new Map<string, Promise<DesktopRunReceipt>>();
   private idleRuntimeRebuildTail: Promise<void> = Promise.resolve();
   private readonly pendingSessionReads = new Map<string, {
     initialRevision: string | undefined;
@@ -206,7 +212,7 @@ export class DesktopAgentManager {
     private readonly state: DesktopStateStore,
     private readonly projects: DesktopProjectService,
     private readonly configStore: AgentConfigStore,
-    private readonly emit: (projectId: string, update: AgentRuntimeUpdate) => void,
+    private readonly emit: (projectId: string, update: AgentRuntimeUpdate, meta?: { sessionId?: string; primary?: boolean }) => void,
     openExternal?: (url: string) => Promise<void>,
     private readonly modelsStore: ModelsStore = new FileModelsStore(),
     private readonly fetcher: typeof globalThis.fetch = globalThis.fetch
@@ -222,9 +228,10 @@ export class DesktopAgentManager {
     // Keep lastOpenedAt stable on select/refresh so the sidebar order does not jump.
     await this.state.upsertProject(project);
     const runtime = this.runtimes.get(projectId)?.runtime;
+    const runtimeSnapshots = this.runtimeSnapshots(projectId);
     const [config, sessionData] = await Promise.all([
       this.configStore.load(project.path).catch(() => undefined),
-      this.projects.listWorkspaceSessions(project, runtime?.getSnapshot(), this.projectEvents(projectId))
+      this.projects.listWorkspaceSessions(project, runtimeSnapshots, this.projectEvents(projectId))
     ]);
     const catalogs = config ? await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore) : [];
     const models = config ? listConfiguredModelChoices(config) : [];
@@ -241,6 +248,7 @@ export class DesktopAgentManager {
       sessionPage: sessionData.sessionPage,
       selectedSessionId: this.state.selectedSessionId(projectId),
       runtime: runtime?.getSnapshot(),
+      sessionRuntimes: Object.fromEntries(runtimeSnapshots.map((snapshot) => [snapshot.info.sessionId, snapshot])),
       runtimeError: this.runtimeErrors.get(projectId),
       permissionMode,
       // 默认模型失效不等于整个应用没有模型。只要选择器里还有一个可用模型，
@@ -285,16 +293,14 @@ export class DesktopAgentManager {
     const sessionGroups = await Promise.all(this.state.projects().map(async (storedProject) => {
       if (workspace?.project.id === storedProject.id) return workspace.sessionPage?.sessions ?? workspace.sessions;
       const project = await this.projects.inspectProject(storedProject);
-      const runtime = this.runtimes.get(project.id)?.runtime;
-      return (await this.projects.listSessionTreePage(project, runtime?.getSnapshot(), this.projectEvents(project.id))).sessions;
+      return (await this.projects.listSessionTreePage(project, this.runtimeSnapshots(project.id), this.projectEvents(project.id))).sessions;
     }));
     return sessionGroups.flat();
   }
 
   async listSessionTreePage(projectId: string, options: DesktopSessionTreePageOptions = {}): Promise<DesktopSessionTreePage> {
     const project = await this.projects.inspectProject(this.projects.requireProject(projectId));
-    const runtime = this.runtimes.get(projectId)?.runtime;
-    return await this.projects.listSessionTreePage(project, runtime?.getSnapshot(), this.projectEvents(projectId), options);
+    return await this.projects.listSessionTreePage(project, this.runtimeSnapshots(projectId), this.projectEvents(projectId), options);
   }
 
   async startDraft(projectId: string): Promise<DesktopWorkspaceSnapshot> {
@@ -316,6 +322,120 @@ export class DesktopAgentManager {
       throw new Error("当前项目仍有任务运行。请先停止它，或稍后再开始新任务。");
     }
     await managed.runtime.startDraft();
+    // startDraft 内部会释放 writer claim，manager 侧的认领记录同步失效。
+    this.dropClaimOwnersOf(managed);
+  }
+
+  // —— 会话并行池：主 runtime 忙时，其他会话的运行请求落到这里 mint 的本地 runtime ——
+
+  private poolFor(projectId: string): Map<string, ManagedRuntime> {
+    let pool = this.sessionRuntimes.get(projectId);
+    if (!pool) {
+      pool = new Map();
+      this.sessionRuntimes.set(projectId, pool);
+    }
+    return pool;
+  }
+
+  /** 项目的全部 runtime（主 + 会话池），状态聚合、重建、关闭都要看到全部实例。 */
+  private runtimeEntries(projectId: string): ManagedRuntime[] {
+    const entries: ManagedRuntime[] = [];
+    const primary = this.runtimes.get(projectId);
+    if (primary) entries.push(primary);
+    for (const managed of this.sessionRuntimes.get(projectId)?.values() ?? []) entries.push(managed);
+    return entries;
+  }
+
+  private runtimeSnapshots(projectId: string): InteractiveRuntimeSnapshot[] {
+    return this.runtimeEntries(projectId).map((entry) => entry.runtime.getSnapshot());
+  }
+
+  /** 已绑定该 session 的 runtime（池里的优先，其次看主 runtime 当前绑定）。未加载时返回 undefined。 */
+  private findRuntimeForSession(projectId: string, sessionId: string): ManagedRuntime | undefined {
+    const pooled = this.sessionRuntimes.get(projectId)?.get(sessionId);
+    if (pooled) return pooled;
+    const primary = this.runtimes.get(projectId);
+    if (primary && primary.runtime.getSnapshot().info.sessionId === sessionId) return primary;
+    return undefined;
+  }
+
+  /** 一个 runtime 同时只持有一个 writer claim（InteractiveAgentRuntime 语义），换绑前先抹掉旧记录。 */
+  private trackClaimOwner(projectId: string, sessionId: string, owner: ManagedRuntime): void {
+    let claims = this.sessionClaimOwners.get(projectId);
+    if (!claims) {
+      claims = new Map();
+      this.sessionClaimOwners.set(projectId, claims);
+    }
+    for (const [claimedId, claimedBy] of claims) {
+      if (claimedBy === owner) claims.delete(claimedId);
+    }
+    claims.set(sessionId, owner);
+  }
+
+  private dropClaimOwnersOf(managed: ManagedRuntime): void {
+    for (const claims of this.sessionClaimOwners.values()) {
+      for (const [claimedId, claimedBy] of claims) {
+        if (claimedBy === managed) claims.delete(claimedId);
+      }
+    }
+  }
+
+  /**
+   * 给并行会话 mint 一个本地 runtime（不经 Runtime Host——host 是单 runtime 的，池化放在这层）。
+   * session 租约按会话互斥：被 TUI/CLI 占用时 resumeSession 会抛 SessionLeaseError，原样上抛。
+   */
+  private async mintSessionRuntime(projectId: string, sessionId?: string): Promise<ManagedRuntime> {
+    const project = this.projects.requireProject(projectId);
+    const persistenceRoot = await this.projects.dataRoot(project);
+    const local = await createInteractiveAgentHost(project.path, {
+      persistenceRoot,
+      configStore: this.configStore,
+      attachmentRoot: this.projects.attachmentsRoot(project)
+    });
+    const managed: ManagedRuntime = { runtime: local.runtime, commands: local.commands, host: undefined, spawnedHost: undefined, unsubscribe: () => undefined };
+    try {
+      if (sessionId !== undefined) await local.runtime.resumeSession(sessionId);
+    } catch (error) {
+      await local.runtime.close().catch(() => undefined);
+      throw error;
+    }
+    managed.unsubscribe = this.wireRuntimeEvents(projectId, managed.runtime, false);
+    const boundSessionId = managed.runtime.getSnapshot().info.sessionId;
+    this.poolFor(projectId).set(boundSessionId, managed);
+    if (sessionId !== undefined) this.trackClaimOwner(projectId, boundSessionId, managed);
+    this.evictIdleSessionRuntimes(projectId);
+    return managed;
+  }
+
+  /** 池上限内的 idle 实例留着复用；超出后从最老的开始关（忙的永远不动）。 */
+  private evictIdleSessionRuntimes(projectId: string): void {
+    const pool = this.sessionRuntimes.get(projectId);
+    if (!pool || pool.size <= DesktopAgentManager.maxSessionRuntimesPerProject) return;
+    for (const [sessionId, managed] of pool) {
+      if (pool.size <= DesktopAgentManager.maxSessionRuntimesPerProject) break;
+      if (runtimeIsBusy(managed.runtime.getSnapshot())) continue;
+      pool.delete(sessionId);
+      void this.closeManagedRuntime(managed).catch(() => undefined);
+    }
+  }
+
+  /** 事件订阅统一出口：所有 runtime 的事件按 sessionId 分桶后广播，meta 标记来源实例。 */
+  private wireRuntimeEvents(projectId: string, runtime: InteractiveRuntimeHandle, primary: boolean): () => void {
+    return runtime.subscribe((update) => {
+      const event = update.event;
+      if (event) {
+        const projectEvents = this.projectEvents(projectId);
+        const sessionEvents = projectEvents.get(event.sessionId) ?? [];
+        sessionEvents.push(event);
+        // 实时事件只为「重新打开会话时补上本轮内容」，按会话保留最近 4000 条，防止长跑占满内存。
+        if (sessionEvents.length > 4_000) sessionEvents.splice(0, sessionEvents.length - 4_000);
+        projectEvents.set(event.sessionId, sessionEvents);
+        if (isTerminalRunEvent(event) && this.state.selectedSessionId(projectId) !== event.sessionId) {
+          void this.projects.updateSessionMetadata(this.projects.requireProject(projectId), event.sessionId, { unread: true }).catch(() => undefined);
+        }
+      }
+      this.emit(projectId, update, { sessionId: runtime.getSnapshot().info.sessionId, primary });
+    });
   }
 
   async listProjectBranches(projectId: string): Promise<DesktopGitBranch[]> {
@@ -346,23 +466,31 @@ export class DesktopAgentManager {
 
   async openSession(projectId: string, sessionId: string): Promise<DesktopSessionDocument> {
     const project = this.projects.requireProject(projectId);
-    const managed = await this.ensureRuntime(projectId);
-    const runtime = managed.runtime;
-    const document = await this.projects.openSession(project, sessionId, runtime?.getSnapshot(), this.projectEvents(projectId));
+    await this.ensureRuntime(projectId);
+    const document = await this.projects.openSession(project, sessionId, this.runtimeSnapshots(projectId), this.projectEvents(projectId));
     // 已读标记只影响侧栏状态，不应阻塞会话正文首屏。后续元数据写入会先等待这次
     // 后台更新，并把同一份 revision 传给 catalog CAS，避免用户紧接着置顶/改名时误冲突。
     this.scheduleSessionRead(project, sessionId, document.session.metadataRevision);
     let writerConflict: DesktopSessionWriterConflict | undefined;
-    try {
-      await runtime.claimSession(sessionId);
-    } catch (error) {
-      if (!isSessionWriterConflictError(error)) throw error;
-      writerConflict = {
-        sessionId,
-        ownerSurface: error.ownerSurface === "desktop" || error.ownerSurface === "tui" || error.ownerSurface === "cli"
-          ? error.ownerSurface
-          : undefined
-      };
+    // 认领挂在已绑定该会话的池化 runtime 上，否则用空闲主 runtime；主 runtime 忙时跳过
+    // （claimSession 忙时会抛 busy）——打开阅读不需要认领，真正发送时再由路由认领。
+    const claims = this.sessionClaimOwners.get(projectId);
+    if (!claims?.has(sessionId)) {
+      const claimTarget = this.findRuntimeForSession(projectId, sessionId) ?? this.runtimes.get(projectId);
+      if (claimTarget && !runtimeIsBusy(claimTarget.runtime.getSnapshot())) {
+        try {
+          await claimTarget.runtime.claimSession(sessionId);
+          this.trackClaimOwner(projectId, sessionId, claimTarget);
+        } catch (error) {
+          if (!isSessionWriterConflictError(error)) throw error;
+          writerConflict = {
+            sessionId,
+            ownerSurface: error.ownerSurface === "desktop" || error.ownerSurface === "tui" || error.ownerSurface === "cli"
+              ? error.ownerSurface
+              : undefined
+          };
+        }
+      }
     }
     return {
       ...document,
@@ -405,25 +533,37 @@ export class DesktopAgentManager {
     mode: InteractiveAgentRunMode,
     attachments: DesktopAttachment[],
     delivery?: "steer" | "followUp",
+    personalization?: DesktopChatPersonalizationOverride,
+    idempotencyKey?: string
+  ): Promise<DesktopRunReceipt> {
+    return await this.runIdempotently(projectId, "send", idempotencyKey, async () => await this.sendPromptOnce(
+      projectId,
+      sessionId,
+      input,
+      mode,
+      attachments,
+      delivery,
+      personalization
+    ));
+  }
+
+  private async sendPromptOnce(
+    projectId: string,
+    sessionId: string | undefined,
+    input: string,
+    mode: InteractiveAgentRunMode,
+    attachments: DesktopAttachment[],
+    delivery?: "steer" | "followUp",
     personalization?: DesktopChatPersonalizationOverride
   ): Promise<DesktopRunReceipt> {
-    const managed = await this.ensureRuntime(projectId);
+    const managed = await this.runtimeForPrompt(projectId, sessionId, personalization);
     const runtime = managed.runtime;
-    let snapshot = runtime.getSnapshot();
-    // 没有显式选中历史 session 时，第一条消息必须落到新聊天，而不是附加到
-    // Desktop 启动前 Host 恰好持有的旧空闲 session。运行中的 Host 仍保持可观察和可 follow-up。
-    // 轻量切草稿：runtime 实例不变，无需重新 ensure，也不算一份没人看的 workspaceSnapshot。
-    if (!sessionId && !runtimeIsBusy(snapshot)) {
-      await this.ensureDraftRuntime(projectId);
-      snapshot = runtime.getSnapshot();
-    }
+    const snapshot = runtime.getSnapshot();
+    const project = this.projects.requireProject(projectId);
+    const prompt = withAttachmentReferences(input, attachments);
+    const nativeAttachments = await loadNativeAttachments(this.projects.attachmentsRoot(project), attachments);
     if (runtimeIsBusy(snapshot)) {
-      if (!sessionId || snapshot.info.sessionId !== sessionId) {
-        throw new Error("当前项目已有任务正在运行。请先在 Desktop 中明确打开该会话，或在 TUI 使用 /app 交接后再继续。");
-      }
-      const project = this.projects.requireProject(projectId);
-      const prompt = withAttachmentReferences(input, attachments);
-      const nativeAttachments = await loadNativeAttachments(this.projects.attachmentsRoot(project), attachments);
+      // 池化后路由到的 runtime 一定绑定目标 session，忙 = 同会话运行中，消息排队进去。
       const queued = delivery === "steer"
         ? runtime.steer(prompt, nativeAttachments)
         : runtime.followUp(prompt, nativeAttachments);
@@ -434,23 +574,7 @@ export class DesktopAgentManager {
         messageId: queued.messageId
       };
     }
-    // 目标会话不是运行时当前会话时需要切过去，但只能在完全空闲时切。
-    if (sessionId && runtime.getSnapshot().info.sessionId !== sessionId) {
-      snapshot = runtime.getSnapshot();
-      if (runtimeIsBusy(snapshot)) {
-        throw new Error("The selected session is still running. Return to it or stop the task before resuming another session.");
-      }
-      await runtime.resumeSession(sessionId);
-    }
-    // 新建任务在第一条消息发送前没有 sessionId。先把聊天级策略写入 runtime
-    // 当前的未记录草稿，再提交回合，保证首条消息也使用用户刚选择的记忆策略。
-    if (sessionId === undefined && personalization !== undefined) {
-      await this.updateManagedChatPersonalization(managed, personalization);
-    }
-    const info = runtime.getSnapshot().info;
-    const prompt = withAttachmentReferences(input, attachments);
-    const project = this.projects.requireProject(projectId);
-    const nativeAttachments = await loadNativeAttachments(this.projects.attachmentsRoot(project), attachments);
+    const info = snapshot.info;
     const submitted = runtime.submitPrompt(prompt, mode, nativeAttachments);
     await this.state.setSelectedSession(projectId, info.sessionId);
     this.observeRunCompletion(projectId, submitted.completion);
@@ -461,13 +585,44 @@ export class DesktopAgentManager {
     };
   }
 
-  async resumeInterruptedTurn(projectId: string, sessionId: string): Promise<DesktopRunReceipt | undefined> {
-    const { runtime } = await this.ensureRuntime(projectId);
-    const snapshot = runtime.getSnapshot();
-    if (snapshot.info.sessionId !== sessionId) {
-      if (runtimeIsBusy(snapshot)) throw new Error("当前项目仍有另一条会话正在运行，请先停止任务。");
-      await runtime.resumeSession(sessionId);
+  /**
+   * 给待发消息挑选 runtime：已绑定目标 session 的实例优先（池里或主 runtime 当前绑定）；
+   * 主 runtime 空闲就轻量 resume 过去（基础设施全保留），忙则给会话 mint 本地 runtime 并行跑。
+   * 没有 sessionId（新聊天）时同理：主 runtime 忙就 mint 一个带新草稿会话的实例。
+   */
+  private async runtimeForPrompt(
+    projectId: string,
+    sessionId: string | undefined,
+    personalization?: DesktopChatPersonalizationOverride
+  ): Promise<ManagedRuntime> {
+    if (sessionId !== undefined) return await this.resolveSessionRuntime(projectId, sessionId);
+    const primary = await this.ensureRuntime(projectId);
+    if (!runtimeIsBusy(primary.runtime.getSnapshot())) {
+      // 轻量切草稿：runtime 实例不变，无需重新 ensure，也不算一份没人看的 workspaceSnapshot。
+      await this.ensureDraftRuntime(projectId);
+      if (personalization !== undefined) await this.updateManagedChatPersonalization(primary, personalization);
+      return primary;
     }
+    const minted = await this.mintSessionRuntime(projectId, undefined);
+    if (personalization !== undefined) await this.updateManagedChatPersonalization(minted, personalization);
+    return minted;
+  }
+
+  /** 找到或准备一个绑定目标 session 的 runtime：已绑定的实例 > 空闲主 runtime 轻量 resume > mint 并行实例。 */
+  private async resolveSessionRuntime(projectId: string, sessionId: string): Promise<ManagedRuntime> {
+    const existing = this.findRuntimeForSession(projectId, sessionId);
+    if (existing) return existing;
+    const primary = await this.ensureRuntime(projectId);
+    if (!runtimeIsBusy(primary.runtime.getSnapshot())) {
+      await primary.runtime.resumeSession(sessionId);
+      this.trackClaimOwner(projectId, sessionId, primary);
+      return primary;
+    }
+    return await this.mintSessionRuntime(projectId, sessionId);
+  }
+
+  async resumeInterruptedTurn(projectId: string, sessionId: string): Promise<DesktopRunReceipt | undefined> {
+    const { runtime } = await this.resolveSessionRuntime(projectId, sessionId);
     const submitted = await runtime.startInterruptedTurn();
     if (!submitted) return undefined;
     await this.state.setSelectedSession(projectId, sessionId);
@@ -491,17 +646,29 @@ export class DesktopAgentManager {
     userMessageIndex: number,
     input: string,
     mode: InteractiveAgentRunMode,
+    attachments: DesktopAttachment[],
+    idempotencyKey?: string
+  ): Promise<DesktopRunReceipt> {
+    return await this.runIdempotently(projectId, "edit", idempotencyKey, async () => await this.editPromptOnce(
+      projectId,
+      sessionId,
+      userMessageIndex,
+      input,
+      mode,
+      attachments
+    ));
+  }
+
+  private async editPromptOnce(
+    projectId: string,
+    sessionId: string,
+    userMessageIndex: number,
+    input: string,
+    mode: InteractiveAgentRunMode,
     attachments: DesktopAttachment[]
   ): Promise<DesktopRunReceipt> {
-    const managed = await this.ensureRuntime(projectId);
+    const managed = await this.resolveSessionRuntime(projectId, sessionId);
     const { runtime } = managed;
-    if (runtime.getSnapshot().info.sessionId !== sessionId) {
-      const snapshot = runtime.getSnapshot();
-      if (runtimeIsBusy(snapshot)) {
-        throw new Error("当前项目仍有其他会话正在运行，请先停止后再编辑消息。");
-      }
-      await runtime.resumeSession(sessionId);
-    }
     const snapshot = runtime.getSnapshot();
     if (runtimeIsBusy(snapshot)) {
       runtime.cancelCurrentRun();
@@ -516,6 +683,11 @@ export class DesktopAgentManager {
     if (runtime instanceof RuntimeHostClient) {
       await runtime.restartRuntime(targetSessionId);
       nextRuntime = runtime;
+    } else if (this.sessionRuntimes.get(projectId)?.get(sessionId) === managed) {
+      // 池化实例：只关自己、按分叉后的新 session 重 mint，不影响主 runtime 和其他并行会话。
+      this.sessionRuntimes.get(projectId)?.delete(sessionId);
+      await this.closeManagedRuntime(managed);
+      nextRuntime = (await this.mintSessionRuntime(projectId, targetSessionId)).runtime;
     } else {
       await this.disposeRuntime(projectId);
       nextRuntime = (await this.ensureRuntime(projectId)).runtime;
@@ -532,9 +704,33 @@ export class DesktopAgentManager {
     };
   }
 
+  /**
+   * 在执行副作用前登记操作 Promise。失败 Promise 也保留在缓存里：IPC 若因超时重入，
+   * 必须复用原结果，不能把一次已经写入 session 的请求再执行一遍；用户主动重试会生成新键。
+   */
+  private runIdempotently(
+    projectId: string,
+    operation: "send" | "edit",
+    idempotencyKey: string | undefined,
+    execute: () => Promise<DesktopRunReceipt>
+  ): Promise<DesktopRunReceipt> {
+    const normalizedKey = idempotencyKey?.trim();
+    if (!normalizedKey) return execute();
+    const cacheKey = JSON.stringify([operation, projectId, normalizedKey]);
+    const existing = this.idempotentPromptRequests.get(cacheKey);
+    if (existing) return existing;
+    // 先把 Promise 放进缓存，再在 microtask 中启动 runtime/session 副作用。
+    const pending = Promise.resolve().then(execute);
+    this.idempotentPromptRequests.set(cacheKey, pending);
+    return pending;
+  }
+
   async cancelRun(projectId: string, runId: string): Promise<void> {
-    const runtime = this.runtimes.get(projectId)?.runtime;
-    if (!runtime) throw new Error("Project runtime is not active.");
+    // 并行池化后先按 activeRun 找 run 所在的 runtime，找不到再退回主 runtime。
+    const entries = this.runtimeEntries(projectId);
+    const owner = entries.find((entry) => activeRun(entry.runtime.getSnapshot())?.runId === runId) ?? entries[0];
+    if (!owner) throw new Error("Project runtime is not active.");
+    const runtime = owner.runtime;
     if (runtime instanceof RuntimeHostClient) {
       const result = await runtime.cancelRunRequest(runId);
       if (!result.accepted) throw new Error(result.reason ?? "Runtime Host did not accept cancellation.");
@@ -544,9 +740,10 @@ export class DesktopAgentManager {
   }
 
   async resolvePermission(projectId: string, requestId: string, result: PermissionResult): Promise<void> {
-    const runtime = this.runtimes.get(projectId)?.runtime;
-    if (!runtime) throw new Error("Project runtime is not active.");
-    runtime.answerPermission(requestId, result);
+    const entries = this.runtimeEntries(projectId);
+    const owner = entries.find((entry) => pendingPermission(entry.runtime.getSnapshot())?.requestId === requestId) ?? entries[0];
+    if (!owner) throw new Error("Project runtime is not active.");
+    owner.runtime.answerPermission(requestId, result);
   }
 
   async setPermissionMode(projectId: string, mode: PermissionMode): Promise<DesktopWorkspaceSnapshot> {
@@ -568,6 +765,8 @@ export class DesktopAgentManager {
     if (!this.runtimes.has(projectId) && !hasUsableModelConfiguration(config)) {
       // Runtime 会用默认模型初始化。默认模型凭据失效时先验证并持久化用户选中的
       // 可用模型，否则 ModelManager 在构造阶段就会被旧默认模型挡住。
+      // 这条分支直接改写全局配置，与设置事务一样要避开运行中的任务。
+      this.assertNoRunningTasks("任务运行期间不能切换默认模型。");
       const catalogs = await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore);
       const effective = await updateConfig(this.configStore, project.path, (persisted) => {
         const targetRuntime = new ModelRuntime(persisted, catalogs);
@@ -637,6 +836,21 @@ export class DesktopAgentManager {
           ...next.context,
           memory: input.memory ?? next.context.memory
         }
+      });
+    }
+    if (input.compaction !== undefined) {
+      next = configSchema.parse({
+        ...next,
+        context: {
+          ...next.context,
+          compaction: input.compaction
+        }
+      });
+    }
+    if (input.chatParams !== undefined) {
+      next = configSchema.parse({
+        ...next,
+        chat: input.chatParams
       });
     }
     if (input.skills !== undefined) {
@@ -995,7 +1209,6 @@ export class DesktopAgentManager {
       totalEntries: store.overview.entryCount,
       memoryStats: memoryStats(store.allEntries),
       candidateCount: store.overview.candidateCount,
-      indexChars: store.overview.indexChars,
       origins: { ...store.overview.origins },
       maintenance: { ...store.maintenance },
       topics: [...topicCounts.entries()].map(([topic, count]) => ({ topic, entries: count })),
@@ -1072,7 +1285,6 @@ export class DesktopAgentManager {
         "memory",
         async () => {
           const written = await requireLocalMemory(commands).writeEntry(entry, { expectedRevision });
-          if (written.written && written.entry) await commands.agent.indexMemoryEntry(written.entry);
           return written;
         }
       )
@@ -1099,7 +1311,6 @@ export class DesktopAgentManager {
         "memory",
         async () => {
           const written = await requireLocalMemory(commands).updateEntry(entryId, patch, { expectedRevision });
-          if (written.written && written.entry) await commands.agent.indexMemoryEntry(written.entry);
           return written;
         }
       )
@@ -1127,7 +1338,6 @@ export class DesktopAgentManager {
         "memory",
         async () => {
           const deleted = await requireLocalMemory(commands).deleteEntryById(entryId, { expectedRevision });
-          if (deleted.deleted) commands.agent.removeMemoryEmbeddingEntries([entryId]);
           return deleted;
         }
       )
@@ -1143,16 +1353,7 @@ export class DesktopAgentManager {
       "任务运行期间不能清空记忆。"
     );
     if (commands) {
-      await runtime.runExclusiveOperation(
-        "memory",
-        async () => {
-          const memory = requireLocalMemory(commands);
-          const entries = await memory.listMemoryEntries({ origins: [filter] });
-          const cleared = await memory.clearEntries(filter, { expectedRevision });
-          if (cleared.deletedEntries) commands.agent.removeMemoryEmbeddingEntries(entries.entries.map(({ id }) => id));
-          return cleared;
-        }
-      );
+      await runtime.runExclusiveOperation("memory", () => requireLocalMemory(commands).clearEntries(filter, { expectedRevision }));
     } else {
       await requireRemoteRuntime(runtime).memory("clear-v3", { selector: filter, expectedRevision });
     }
@@ -1180,8 +1381,6 @@ export class DesktopAgentManager {
         expectedRevision,
         topic
       });
-    // 远端 Host 会在自身 maintenance boundary 后调度；同进程 fallback 由 Manager 补上。
-    if (commands && result.revision !== expectedRevision) this.scheduleMemoryEmbeddingRebuild(projectId);
     return {
       filter,
       before: result.before,
@@ -1314,129 +1513,9 @@ export class DesktopAgentManager {
     return await requireProjectTelos(this.projects.requireProject(projectId)).snoozeDrift(driftId, until, expectedRevision);
   }
 
-  async memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
-    const status = commands
-      ? await commands.agent.memoryEmbeddingStatus()
-      : await requireRemoteRuntime(runtime).memoryEmbeddingStatus();
-    return describeMemoryEmbeddingStatus(status);
-  }
-
-  async downloadMemoryEmbeddingModel(
-    projectId: string,
-    model: LocalEmbeddingModelId
-  ): Promise<DesktopMemoryEmbeddingStatus> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.runtimeForGlobalWrite(
-      projectId,
-      "任务运行期间不能下载 Embedding 模型。"
-    );
-    if (!commands) return describeMemoryEmbeddingStatus(await requireRemoteRuntime(runtime).downloadMemoryEmbeddingModel(model));
-    const status = await runtime.runExclusiveOperation("memory", async (signal) => {
-      await commands.agent.downloadMemoryEmbeddingModel(model, signal);
-      return await commands.agent.memoryEmbeddingStatus();
-    });
-    return describeMemoryEmbeddingStatus(status);
-  }
-
-  async cancelMemoryEmbeddingDownload(
-    projectId: string,
-    model: LocalEmbeddingModelId
-  ): Promise<DesktopMemoryEmbeddingCancellationResult> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
-    if (!commands) {
-      const result = await requireRemoteRuntime(runtime).cancelMemoryEmbeddingDownload(model);
-      return { cancelled: result.cancelled, status: describeMemoryEmbeddingStatus(result.status) };
-    }
-    const cancelled = commands.agent.cancelMemoryEmbeddingDownload(model);
-    return { cancelled, status: describeMemoryEmbeddingStatus(await commands.agent.memoryEmbeddingStatus()) };
-  }
-
-  async deleteMemoryEmbeddingModel(
-    projectId: string,
-    model: LocalEmbeddingModelId
-  ): Promise<DesktopMemoryEmbeddingDeleteResult> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.runtimeForGlobalWrite(
-      projectId,
-      "任务运行期间不能删除 Embedding 模型。"
-    );
-    if (!commands) {
-      const result = await requireRemoteRuntime(runtime).deleteMemoryEmbeddingModel(model);
-      return { ...result, status: describeMemoryEmbeddingStatus(result.status) };
-    }
-    const result = await runtime.runExclusiveOperation("memory", async () => ({
-      ...(await commands.agent.removeMemoryEmbeddingModel(model)),
-      status: await commands.agent.memoryEmbeddingStatus()
-    }));
-    return { ...result, status: describeMemoryEmbeddingStatus(result.status) };
-  }
-
-  async rebuildMemoryEmbeddingIndex(projectId: string): Promise<DesktopMemoryEmbeddingStatus> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.runtimeForGlobalWrite(
-      projectId,
-      "任务运行期间不能重建记忆索引。"
-    );
-    if (!commands) return describeMemoryEmbeddingStatus(await requireRemoteRuntime(runtime).rebuildMemoryEmbeddingIndex());
-    const status = await runtime.runExclusiveOperation("memory", async (signal) => {
-      await commands.agent.rebuildMemoryEmbeddingIndex(signal);
-      return await commands.agent.memoryEmbeddingStatus();
-    });
-    return describeMemoryEmbeddingStatus(status);
-  }
-
-  async cancelMemoryEmbeddingRebuild(projectId: string): Promise<DesktopMemoryEmbeddingCancellationResult> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
-    if (!commands) {
-      const result = await requireRemoteRuntime(runtime).cancelMemoryEmbeddingRebuild();
-      return { cancelled: result.cancelled, status: describeMemoryEmbeddingStatus(result.status) };
-    }
-    const cancelled = commands.agent.cancelMemoryEmbeddingRebuild();
-    return { cancelled, status: describeMemoryEmbeddingStatus(await commands.agent.memoryEmbeddingStatus()) };
-  }
-
-  /** 设置事务已经复读确认后才调用；重建失败只留在派生状态，不改变 committed 结果。 */
+  /** 设置事务不再触发索引动作；记忆没有派生向量索引，只需在配置变更时重建运行时。 */
   settingsCommitted(prepared: PreparedDesktopSettingsConfig): void {
     if (prepared.beforeRevision !== prepared.targetRevision) this.scheduleIdleManagedRuntimeRebuild();
-    const before = prepared.before.context.memory.embeddingModel;
-    const after = prepared.after.context.memory.embeddingModel;
-    if (after === undefined) return;
-    const beforeDescriptor = before === undefined
-      ? undefined
-      : describeEmbeddingModels(prepared.before).find(({ ref }) => embeddingModelRefKey(ref) === embeddingModelRefKey(before));
-    const afterDescriptor = describeEmbeddingModels(prepared.after)
-      .find(({ ref }) => embeddingModelRefKey(ref) === embeddingModelRefKey(after));
-    const beforeEndpointHash = beforeDescriptor?.ref.kind === "provider"
-      ? beforeDescriptor.privacyEndpointHash
-      : undefined;
-    const afterEndpointHash = afterDescriptor?.ref.kind === "provider"
-      ? afterDescriptor.privacyEndpointHash
-      : undefined;
-    const beforeConsent = beforeEndpointHash !== undefined
-      ? Object.values(prepared.before.context.memory.cloudEmbeddingConsents).some(({ endpointHash }) => (
-          endpointHash === beforeEndpointHash
-        ))
-      : undefined;
-    const afterConsent = afterEndpointHash !== undefined
-      ? Object.values(prepared.after.context.memory.cloudEmbeddingConsents).some(({ endpointHash }) => (
-          endpointHash === afterEndpointHash
-        ))
-      : undefined;
-    if (before !== undefined
-      && embeddingModelRefKey(before) === embeddingModelRefKey(after)
-      && beforeDescriptor?.fingerprint === afterDescriptor?.fingerprint
-      && (after.kind === "local" || beforeConsent === afterConsent)) return;
-    this.scheduleMemoryEmbeddingRebuild(prepared.projectId);
-  }
-
-  private scheduleMemoryEmbeddingRebuild(projectId: string): void {
-    setTimeout(() => {
-      void this.rebuildMemoryEmbeddingIndex(projectId).catch(() => undefined);
-    }, 0).unref?.();
   }
 
   /**
@@ -1604,7 +1683,9 @@ export class DesktopAgentManager {
       retry: sameProvider ? existingProvider.retry : undefined,
       modelsEndpoint: sameProvider ? existingProvider.modelsEndpoint : undefined,
       headers: sameProvider ? existingProvider.headers : undefined,
-      apiBackend: sameProvider ? existingProvider.apiBackend : undefined,
+      // 「API 格式」同时写连接级与模型级：连接级让目录拉取/回显不用翻模型列表，
+      // 模型级保留逐模型覆盖的逃生门。显式选择优先；未带格式时保留既有连接级设置。
+      apiBackend: input.apiBackend ?? (sameProvider ? existingProvider.apiBackend : undefined),
       compatibility: sameProvider ? existingProvider.compatibility : undefined,
       embeddingModels: sameProvider ? existingProvider.embeddingModels : undefined
     };
@@ -1675,12 +1756,17 @@ export class DesktopAgentManager {
    */
   async runSlashCommand(projectId: string, sessionId: string | undefined, input: string): Promise<DesktopSlashResult> {
     await this.requireConfiguredModel(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
-    // /status、/usage 依赖当前会话：用户查看的会话与 runtime 不一致且空闲时先切换。
-    if (sessionId && runtime.getSnapshot().info.sessionId !== sessionId) {
-      const snapshot = runtime.getSnapshot();
-      if (!runtimeIsBusy(snapshot)) await runtime.resumeSession(sessionId);
+    // /status、/usage 依赖当前会话：先路由到绑定该会话的实例（池化后可能在并行 runtime 上）；
+    // 主 runtime 忙且会话未加载时退回旧行为（在 runtime 当前会话上下文里执行）。
+    let managed = sessionId !== undefined ? this.findRuntimeForSession(projectId, sessionId) : undefined;
+    if (!managed) {
+      managed = await this.ensureRuntime(projectId);
+      if (sessionId && managed.runtime.getSnapshot().info.sessionId !== sessionId && !runtimeIsBusy(managed.runtime.getSnapshot())) {
+        await managed.runtime.resumeSession(sessionId);
+        this.trackClaimOwner(projectId, sessionId, managed);
+      }
     }
+    const { runtime, commands } = managed;
     const result = commands
       ? await executeRuntimeCommand(runtime, commands, input, "desktop")
       : await requireRemoteRuntime(runtime).executeCommand(input, "desktop");
@@ -1829,7 +1915,42 @@ export class DesktopAgentManager {
     return await this.workspaceSnapshot(projectId);
   }
 
+  /**
+   * 导出会话到用户选定的文件。`targetPath` 由 IPC 层的保存对话框给出；用户取消时它是
+   * undefined，这里就只回一份快照、不写任何文件。
+   */
+  async exportSession(projectId: string, sessionId: string, format: "biny" | "claude", targetPath?: string): Promise<DesktopWorkspaceSnapshot> {
+    const project = this.projects.requireProject(projectId);
+    if (targetPath) {
+      this.assertNoRunningTasks("任务运行期间不能导出会话。");
+      const exported = await this.projects.buildSessionExport(project, sessionId, format);
+      await this.projects.writeSessionExport(targetPath, exported);
+    }
+    return await this.workspaceSnapshot(projectId);
+  }
+
+  /**
+   * 从外部文件导入一条新会话并选中它。`sourcePath` 由 IPC 层的打开对话框给出；用户取消时
+   * 它是 undefined，这里只回一份快照。
+   */
+  async importSession(projectId: string, sourcePath?: string): Promise<DesktopWorkspaceSnapshot> {
+    const project = this.projects.requireProject(projectId);
+    if (sourcePath) {
+      this.assertNoRunningTasks("任务运行期间不能导入会话。");
+      const imported = await this.projects.importSessionFromFile(project, sourcePath);
+      await this.state.setSelectedSession(projectId, imported.sessionId);
+    }
+    return await this.workspaceSnapshot(projectId);
+  }
+
   async deleteSession(projectId: string, sessionId: string): Promise<DesktopWorkspaceSnapshot> {
+    // 会话可能绑在并行池的本地实例上：先把它关掉（运行中则拒绝删除）。
+    const pooled = this.sessionRuntimes.get(projectId)?.get(sessionId);
+    if (pooled) {
+      if (runtimeIsBusy(pooled.runtime.getSnapshot())) throw new Error("Stop the running task before deleting this session.");
+      this.sessionRuntimes.get(projectId)?.delete(sessionId);
+      await this.closeManagedRuntime(pooled);
+    }
     const managed = this.runtimes.get(projectId);
     if (managed?.runtime.getSnapshot().info.sessionId === sessionId) {
       const snapshot = managed.runtime.getSnapshot();
@@ -1843,6 +1964,7 @@ export class DesktopAgentManager {
       }
     }
     await this.projects.deleteSession(this.projects.requireProject(projectId), sessionId);
+    this.liveEvents.get(projectId)?.delete(sessionId);
     if (this.state.selectedSessionId(projectId) === sessionId) {
       await this.state.setSelectedSession(projectId, undefined);
     }
@@ -1850,17 +1972,20 @@ export class DesktopAgentManager {
   }
 
   async disposeProject(projectId: string): Promise<void> {
+    // 实时事件缓存不随 runtime 生命周期清理，移除项目时要一并删除；本进程 spawn 的
+    // Host 是 detached 子进程，必须显式终止，否则会永久残留。
+    this.liveEvents.delete(projectId);
+    await this.disposeSessionRuntimes(projectId);
     const managed = this.runtimes.get(projectId);
     if (!managed) return;
-    await this.closeManagedRuntime(managed);
+    await this.closeManagedRuntime(managed, { terminateOwnedHosts: true });
     this.runtimes.delete(projectId);
   }
 
   /** 关窗前用它决定要不要提示用户：等待权限也算「在跑」，直接关掉会丢掉这次询问。 */
   hasRunningTasks(): boolean {
-    return [...this.runtimes.values()].some(({ runtime }) => {
-      return runtimeIsBusy(runtime.getSnapshot());
-    });
+    return [...new Set([...this.runtimes.keys(), ...this.sessionRuntimes.keys()])]
+      .some((projectId) => this.isProjectRunning(projectId));
   }
 
   /**
@@ -1872,9 +1997,7 @@ export class DesktopAgentManager {
   }
 
   isProjectRunning(projectId: string): boolean {
-    const runtime = this.runtimes.get(projectId)?.runtime;
-    if (!runtime) return false;
-    return runtimeIsBusy(runtime.getSnapshot());
+    return this.runtimeEntries(projectId).some(({ runtime }) => runtimeIsBusy(runtime.getSnapshot()));
   }
 
   private assertProjectGitMutationIdle(projectId: string): void {
@@ -1885,7 +2008,9 @@ export class DesktopAgentManager {
   }
 
   cancelAll(): void {
-    for (const { runtime } of this.runtimes.values()) runtime.cancelCurrentRun();
+    for (const projectId of new Set([...this.runtimes.keys(), ...this.sessionRuntimes.keys()])) {
+      for (const { runtime } of this.runtimeEntries(projectId)) runtime.cancelCurrentRun();
+    }
   }
 
   /**
@@ -1893,7 +2018,8 @@ export class DesktopAgentManager {
    * 超时只是不再阻塞窗口关闭；本次 Desktop 自己启动的 owner 会在 closeAll 中被回收。
    */
   async stopAllForExit(timeoutMs = 2_500): Promise<void> {
-    await Promise.all([...this.runtimes.values()].map(async ({ runtime }) => {
+    const projectIds = new Set([...this.runtimes.keys(), ...this.sessionRuntimes.keys()]);
+    await Promise.all([...projectIds].flatMap((projectId) => this.runtimeEntries(projectId).map(async ({ runtime }) => {
       const deadline = Date.now() + timeoutMs;
       const run = activeRun(runtime.getSnapshot());
       if (run && runtime instanceof RuntimeHostClient) {
@@ -1904,7 +2030,7 @@ export class DesktopAgentManager {
         runtime.cancelCurrentRun();
       }
       await waitForRuntimeIdle(runtime, remainingTimeout(deadline));
-    }));
+    })));
   }
 
   /**
@@ -1921,15 +2047,28 @@ export class DesktopAgentManager {
     await Promise.allSettled(this.runtimeInitializations.values());
     await this.idleRuntimeRebuildTail.catch(() => undefined);
     const managedRuntimes = [...this.runtimes.values()];
+    for (const pool of this.sessionRuntimes.values()) managedRuntimes.push(...pool.values());
     this.runtimes.clear();
+    this.sessionRuntimes.clear();
+    this.sessionClaimOwners.clear();
     await Promise.all(managedRuntimes.map(async (managed) => await this.closeManagedRuntime(managed, options)));
   }
 
   private async disposeRuntime(projectId: string): Promise<void> {
+    await this.disposeSessionRuntimes(projectId);
     const managed = this.runtimes.get(projectId);
     if (!managed) return;
     await this.closeManagedRuntime(managed);
     this.runtimes.delete(projectId);
+  }
+
+  /** 关掉项目的整个会话并行池（claim 记录随 close 统一清）。 */
+  private async disposeSessionRuntimes(projectId: string): Promise<void> {
+    const pool = this.sessionRuntimes.get(projectId);
+    this.sessionRuntimes.delete(projectId);
+    this.sessionClaimOwners.delete(projectId);
+    if (!pool) return;
+    await Promise.all([...pool.values()].map(async (entry) => await this.closeManagedRuntime(entry).catch(() => undefined)));
   }
 
   /** 配置变更需要 owner 重建 CommandRuntime；远端 client 通过 Host RPC 完成同一件事。 */
@@ -1951,6 +2090,18 @@ export class DesktopAgentManager {
       await this.rebuildManagedRuntime(projectId, managed);
       this.runtimeErrors.delete(projectId);
     }
+    await this.closeIdleSessionRuntimes();
+  }
+
+  /** 会话池里的 idle 本地实例：配置变更后直接关掉，下次使用时按新配置重新 mint。 */
+  private async closeIdleSessionRuntimes(): Promise<void> {
+    for (const pool of this.sessionRuntimes.values()) {
+      for (const [sessionId, managed] of pool) {
+        if (pool.get(sessionId) !== managed || runtimeIsBusy(managed.runtime.getSnapshot())) continue;
+        pool.delete(sessionId);
+        await this.closeManagedRuntime(managed).catch(() => undefined);
+      }
+    }
   }
 
   /** 后台派生刷新逐个容错，单个项目的 Host 异常不能阻止其它项目收敛到新配置。 */
@@ -1966,6 +2117,7 @@ export class DesktopAgentManager {
         this.runtimeErrors.set(projectId, error instanceof Error ? error.message : String(error));
       }
     }
+    await this.closeIdleSessionRuntimes();
   }
 
   /**
@@ -1986,6 +2138,8 @@ export class DesktopAgentManager {
     managed: ManagedRuntime,
     options: { terminateOwnedHosts?: boolean } = {}
   ): Promise<void> {
+    // runtime.close() 会释放它持有的 session lease，manager 侧的认领记录同步失效。
+    this.dropClaimOwnersOf(managed);
     managed.unsubscribe();
     await managed.host?.close();
     await managed.runtime.close();
@@ -2024,6 +2178,8 @@ export class DesktopAgentManager {
         if (outcome.status === "completed") this.runtimeErrors.delete(projectId);
       },
       (error: unknown) => {
+        // busy admission 拒绝只是竞态信号，run 从未开始；锁死项目视图会把正在正常跑的任务也挡在门外。
+        if (isBusyAdmissionError(error)) return;
         this.runtimeErrors.set(projectId, error instanceof Error ? error.message : String(error));
       }
     );
@@ -2456,6 +2612,8 @@ function describeSettingsConfigSnapshot(config: AgentConfig, revision: string, p
     personalization: { ...config.personalization },
     activity: structuredClone(config.activity),
     memory: structuredClone(config.context.memory),
+    compaction: structuredClone(config.context.compaction),
+    chatParams: structuredClone(config.chat),
     webSearch: describeWebSearchSettings(config.web.search),
     models: {
       configured: listConfiguredModelChoices(config),
@@ -2484,12 +2642,6 @@ function describeEmbeddingModels(config: AgentConfig): DesktopEmbeddingModelDesc
   ].map(describeDesktopEmbeddingModel);
 }
 
-function describeMemoryEmbeddingStatus(status: MemoryEmbeddingRuntimeStatus): DesktopMemoryEmbeddingStatus {
-  return {
-    ...status,
-    models: status.models.map(describeDesktopEmbeddingModel)
-  };
-}
 
 function describeDesktopEmbeddingModel(descriptor: EmbeddingModelDescriptor): DesktopEmbeddingModelDescriptor {
   return {
@@ -2535,6 +2687,8 @@ function describeModelConnections(config: AgentConfig): DesktopModelConnection[]
       providerAlias,
       providerType: provider.type,
       protocol: provider.protocol,
+      // 连接级 apiBackend 优先；老配置只有模型级时从任一模型折回，保证「API 格式」能回显。
+      apiBackend: provider.apiBackend ?? Object.values(config.models).find((model) => model.provider === providerAlias)?.apiBackend,
       baseUrl: provider.baseUrl ?? profile.baseUrl,
       requiresApiKey: provider.requiresApiKey ?? profile.requiresApiKey,
       hasCredential: credentialSource !== undefined,
@@ -2701,6 +2855,11 @@ function formatModelConnectionError(error: unknown): string {
     parts.push(cause.message);
   }
   return parts.filter(Boolean).join(" · ") || "连接失败";
+}
+
+/** runtime 忙时的 admission 拒绝（本地快照滞后于 Host 的瞬时竞态），run 根本没开始，不算运行失败。 */
+function isBusyAdmissionError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("while the runtime is busy");
 }
 
 function formatRuntimeInitializationError(error: unknown): string {

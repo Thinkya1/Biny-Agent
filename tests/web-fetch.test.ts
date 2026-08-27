@@ -27,6 +27,7 @@ async function main(): Promise<void> {
   await testFetchesTextAndPages();
   await testRedirectToInternalTargetIsRefused();
   await testByteLimitTruncatesInsteadOfHanging();
+  await testErrorResponseBodyIsCancelled();
   await testFetchUsesOnlyMatchingCookiesPerRedirect();
   console.log("web fetch tests passed");
 }
@@ -116,6 +117,19 @@ async function testByteLimitTruncatesInsteadOfHanging(): Promise<void> {
     assert.equal(result.truncatedAtByteLimit, true);
     assert.equal(result.totalCharacters <= 4_096, true, `expected <= 4096 characters, got ${String(result.totalCharacters)}`);
   });
+}
+
+/** HTTP 错误分支也必须取消响应体，否则未消费的流会挂到 GC。 */
+async function testErrorResponseBodyIsCancelled(): Promise<void> {
+  let captured: Response | undefined;
+  await withFetch(async () => {
+    captured = new Response("server error body", { status: 500, headers: { "content-type": "text/plain" } });
+    return captured;
+  }, async () => {
+    const tool = createWebFetchTool(undefined, undefined, testWebFetchDependencies);
+    await assert.rejects(run(tool, { url: "https://example.com/failing" }), /HTTP 500/);
+  });
+  assert.equal(captured?.bodyUsed, true);
 }
 
 /** Cookie 必须按每一跳的域名重新匹配，不能把 example.com 的登录态带到 example.org。 */

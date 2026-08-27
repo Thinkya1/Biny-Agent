@@ -118,7 +118,9 @@ export const toolDisplayRules: Record<string, ToolDisplayRule> = {
       const oldText = getStringField(args, "oldText");
       const newText = getStringField(args, "newText");
       const oldContent = await readExistingFileForDiff(filePath, context);
-      const nextContent = oldContent.includes(oldText) ? oldContent.replace(oldText, newText) : oldContent;
+      // 函数形式的替换值才会被原样插入；字符串形式会把 newText 里的 $$、$& 等序列当成模式解释，
+      // 导致预览 diff 与实际落盘内容不一致。
+      const nextContent = oldContent.includes(oldText) ? oldContent.replace(oldText, () => newText) : oldContent;
       const diff = createUnifiedDiff(filePath, oldContent, nextContent);
       const preview = formatUnifiedDiffPreview(filePath, diff, 16);
       return {

@@ -40,8 +40,6 @@ import {
   type GlobalPersonalizationUpdate
 } from "../personalization/index.js";
 import type { ModelChoice, ModelRuntimeInfo, ThinkingSelection } from "../llm/ModelManager.js";
-import type { LocalEmbeddingModelId } from "../llm/embedding/types.js";
-import type { MemoryEmbeddingRuntimeStatus } from "../agent/context/MemoryEmbeddingService.js";
 import type { PermissionMode, PermissionResult } from "../permission/PermissionManager.js";
 import type { SessionSummary } from "../session/events.js";
 import type { UsageSummary } from "../session/metadata.js";
@@ -69,7 +67,7 @@ import type {
   CapabilityRegistrationInput,
   CapabilityStore
 } from "./CapabilityStore.js";
-import { executeRuntimeCommand } from "./commands.js";
+import { cancelRuntimeGraph, executeRuntimeCommand } from "./commands.js";
 import { listSessionSummaries } from "../session/events.js";
 import { ensureAgentDirs, sessionIdFromFile } from "../session/store.js";
 import { TurnStore } from "../session/turnStore.js";
@@ -517,7 +515,6 @@ export class RuntimeHostServer {
   private memoryMaintenanceTimer: ReturnType<typeof setInterval> | undefined;
   private memoryMaintenanceAbort: AbortController | undefined;
   private memoryMaintenancePromise: Promise<void> | undefined;
-  private memoryEmbeddingRebuildTimer: ReturnType<typeof setTimeout> | undefined;
   private listening = false;
   private initialized = false;
 
@@ -670,8 +667,6 @@ export class RuntimeHostServer {
       if (this.memoryMaintenanceTimer) clearInterval(this.memoryMaintenanceTimer);
       this.memoryMaintenanceTimer = undefined;
       this.memoryMaintenanceAbort?.abort();
-      if (this.memoryEmbeddingRebuildTimer) clearTimeout(this.memoryEmbeddingRebuildTimer);
-      this.memoryEmbeddingRebuildTimer = undefined;
       for (const connection of this.connections) connection.socket.destroy();
       await Promise.all([...this.sessionWriterOwners.keys()].map(async (sessionId) => await this.runtime.releaseSessionClaim(sessionId)));
       this.sessionWriterOwners.clear();
@@ -727,20 +722,9 @@ export class RuntimeHostServer {
       // 候选入队时已经应用当回合的有效策略。这里按真实队列处理，避免聊天覆盖允许贡献后，
       // 又被当前全局开关拦住，导致已经承诺生成的候选永久滞留。
       if (this.runtime.getSnapshot().state.kind !== "idle") return;
-      let rebuildRequested = false;
-      try {
-        await commands.agent.getLocalMemory().processEligibleCandidates(
-          { signal: controller.signal },
-          {
-            indexEntry: async (entry) => await commands.agent.indexMemoryEntry(entry),
-            requestRebuild: () => { rebuildRequested = true; }
-          }
-        );
-      } finally {
-        // LocalMemory 只发失效信号；等整个批次退出后再启动 generation 重建，避免与下一条
-        // 候选的 Markdown mutation 竞态。即使维护被前台任务中断，已提交的整理也会到达这里。
-        if (rebuildRequested) this.scheduleMemoryEmbeddingRebuild();
-      }
+      // 候选入队时已经应用当回合的有效策略。这里按真实队列处理，避免聊天覆盖允许贡献后，
+      // 又被当前全局开关拦住，导致已经承诺生成的候选永久滞留。
+      await commands.agent.getLocalMemory().processEligibleCandidates({ signal: controller.signal });
     })().catch((error: unknown) => {
       if (!controller.signal.aborted) {
         // LocalMemory 将抽取/整理失败写入 maintenanceStatus；Host 不改变任何任务终态。
@@ -754,18 +738,6 @@ export class RuntimeHostServer {
     await promise;
   }
 
-  /** 整理已经提交 Markdown 后异步重建派生索引；失败只保留词法降级，不能改变整理结果。 */
-  private scheduleMemoryEmbeddingRebuild(): void {
-    if (this.closePromise || this.memoryEmbeddingRebuildTimer) return;
-    this.memoryEmbeddingRebuildTimer = setTimeout(() => {
-      this.memoryEmbeddingRebuildTimer = undefined;
-      void this.runtime.runExclusiveOperation(
-        "memory",
-        async (signal) => await this.commands.agent.rebuildMemoryEmbeddingIndex(signal)
-      ).catch(() => undefined);
-    }, 0);
-    this.memoryEmbeddingRebuildTimer.unref?.();
-  }
 
   private read(connection: HostConnection, chunk: string): void {
     connection.buffer += chunk;
@@ -1283,42 +1255,6 @@ export class RuntimeHostServer {
           "telos",
           async () => await this.executeTelos(payload)
         );
-      case "memory.embedding.status-v3":
-        return await this.commands.agent.memoryEmbeddingStatus();
-      case "memory.embedding.download-v3":
-        return await this.runtime.runExclusiveOperation(
-          "memory",
-          async (signal) => {
-            await this.commands.agent.downloadMemoryEmbeddingModel(readLocalEmbeddingModel(payload.model), signal);
-            return await this.commands.agent.memoryEmbeddingStatus();
-          }
-        );
-      case "memory.embedding.cancel-download-v3":
-        return {
-          cancelled: this.commands.agent.cancelMemoryEmbeddingDownload(readLocalEmbeddingModel(payload.model)),
-          status: await this.commands.agent.memoryEmbeddingStatus()
-        };
-      case "memory.embedding.delete-v3":
-        return await this.runtime.runExclusiveOperation(
-          "memory",
-          async () => ({
-            ...(await this.commands.agent.removeMemoryEmbeddingModel(readLocalEmbeddingModel(payload.model))),
-            status: await this.commands.agent.memoryEmbeddingStatus()
-          })
-        );
-      case "memory.embedding.rebuild-v3":
-        return await this.runtime.runExclusiveOperation(
-          "memory",
-          async (signal) => {
-            await this.commands.agent.rebuildMemoryEmbeddingIndex(signal);
-            return await this.commands.agent.memoryEmbeddingStatus();
-          }
-        );
-      case "memory.embedding.cancel-rebuild-v3":
-        return {
-          cancelled: this.commands.agent.cancelMemoryEmbeddingRebuild(),
-          status: await this.commands.agent.memoryEmbeddingStatus()
-        };
       case "runtime.restart":
         this.assertRevision(payload);
         {
@@ -1383,28 +1319,7 @@ export class RuntimeHostServer {
   }
 
   private async cancelGraph(graphId: string): Promise<unknown> {
-    const graph = this.commands.graphs.inspectGraph(graphId);
-    const activeRuns = graph.nodes
-      .filter((node) => node.status === "running" && node.taskRunId !== undefined)
-      .map((node) => {
-        const task = this.commands.taskRuns.get(node.taskRunId!);
-        return {
-          taskRunId: node.taskRunId!,
-          runId: task?.attempts.at(-1)?.runId
-        };
-      });
-    const result = this.commands.graphs.cancelGraph(graphId);
-    for (const active of activeRuns) {
-      this.commands.subagents?.cancelTask(active.taskRunId, "Graph cancelled.");
-      if (active.runId !== undefined) this.runtime.cancelRun(active.runId);
-      try {
-        const task = this.commands.taskRuns.get(active.taskRunId);
-        if (task && !isTaskRunTerminal(task.status)) this.commands.taskRuns.transition(active.taskRunId, "cancelled");
-      } catch {
-        // Graph cancellation is already durable; a late task snapshot must not undo it.
-      }
-    }
-    return result;
+    return await cancelRuntimeGraph(this.runtime, this.commands, graphId);
   }
 
   private async continueRun(payload: Record<string, unknown>): Promise<{ runId: string; messageId: string }> {
@@ -1602,7 +1517,6 @@ export class RuntimeHostServer {
       const result = await memory.writeEntry(readMemoryEntryInput(payload.entry), {
         expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
       });
-      if (result.written && result.entry) await this.commands.agent.indexMemoryEntry(result.entry);
       return result;
     }
     if (action === "update-v3") {
@@ -1611,7 +1525,6 @@ export class RuntimeHostServer {
         readMemoryEntryPatch(payload.patch),
         { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") }
       );
-      if (result.written && result.entry) await this.commands.agent.indexMemoryEntry(result.entry);
       return result;
     }
     if (action === "delete-v3") {
@@ -1620,16 +1533,13 @@ export class RuntimeHostServer {
         id,
         { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") }
       );
-      if (result.deleted) this.commands.agent.removeMemoryEmbeddingEntries([id]);
       return result;
     }
     if (action === "clear-v3") {
       const selector = readMemoryOriginSelector(payload.selector, true);
-      const entries = await memory.listMemoryEntries({ origins: [selector] });
       const result = await memory.clearEntries(selector, {
         expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
       });
-      if (result.deletedEntries) this.commands.agent.removeMemoryEmbeddingEntries(entries.entries.map(({ id }) => id));
       return result;
     }
     if (action === "consolidate-v3") {
@@ -1639,7 +1549,6 @@ export class RuntimeHostServer {
         expectedRevision,
         topic: optionalString(payload.topic)
       });
-      if (result.revision !== expectedRevision) this.scheduleMemoryEmbeddingRebuild();
       return result;
     }
     throw new Error(`Unknown memory operation: ${action}`);
@@ -1744,6 +1653,7 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   private readonly pending = new Map<string, PendingRequest<unknown>>();
   private readonly completions = new Map<string, PendingCompletion>();
   private readonly listeners = new Set<(update: AgentRuntimeUpdate) => void>();
+  private readonly idleWaiters = new Set<() => void>();
   private readonly capabilityOfferListeners = new Set<(offer: { invocation: CapabilityInvocation; registration: CapabilityRegistration }) => void>();
   private readonly pendingUpdates: AgentRuntimeUpdate[] = [];
   private snapshot: InteractiveRuntimeSnapshot | undefined;
@@ -2101,8 +2011,13 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
         expectedRevision: this.currentRevision()
       });
     } catch (error) {
-      if (!isTransientHostError(error)) this.rejectCompletion(ids.runId, error);
-      else this.scheduleReconnect();
+      if (!isTransientHostError(error)) {
+        // 失败随 throw 返回，调用方拿不到 completion 句柄；不挂观察会让进程出现 unhandled rejection。
+        void completion.catch(() => undefined);
+        this.rejectCompletion(ids.runId, error);
+      } else {
+        this.scheduleReconnect();
+      }
       throw error;
     }
     if (!result) {
@@ -2113,14 +2028,23 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   }
 
   async waitForIdle(): Promise<void> {
+    if (this.closed) return;
     if (!this.snapshot || this.snapshot.state.kind === "idle") return;
     await new Promise<void>((resolve) => {
-      const unsubscribe = this.subscribe((update) => {
-        if (update.snapshot.state.kind === "idle") {
-          unsubscribe();
-          resolve();
-        }
+      // subscribe 会同步回放 pendingUpdates，settle 可能在 unsubscribe 返回前就触发。
+      const waiter: { settled: boolean; unsubscribe?: () => void } = { settled: false };
+      const settle = (): void => {
+        if (waiter.settled) return;
+        waiter.settled = true;
+        this.idleWaiters.delete(settle);
+        waiter.unsubscribe?.();
+        resolve();
+      };
+      waiter.unsubscribe = this.subscribe((update) => {
+        if (update.snapshot.state.kind === "idle") settle();
       });
+      // close() 或永久断线后不会再有 idle 事件，挂起的等待由 close() 统一了结。
+      if (!waiter.settled) this.idleWaiters.add(settle);
     });
   }
 
@@ -2190,6 +2114,7 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     for (const pending of this.pending.values()) pending.reject(new Error("Runtime Host client closed."));
     this.pending.clear();
     this.rejectCompletions(new Error("Runtime Host client closed."));
+    for (const settle of [...this.idleWaiters]) settle();
     this.socket?.destroy();
     this.socket = undefined;
     return Promise.resolve();
@@ -2282,33 +2207,6 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     return await this.request<T>("telos", { action, ...payload });
   }
 
-  async memoryEmbeddingStatus(): Promise<MemoryEmbeddingRuntimeStatus> {
-    return await this.request("memory.embedding.status-v3", {});
-  }
-
-  async downloadMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<MemoryEmbeddingRuntimeStatus> {
-    return await this.request("memory.embedding.download-v3", { model });
-  }
-
-  async cancelMemoryEmbeddingDownload(model: LocalEmbeddingModelId): Promise<{ cancelled: boolean; status: MemoryEmbeddingRuntimeStatus }> {
-    return await this.request("memory.embedding.cancel-download-v3", { model });
-  }
-
-  async deleteMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<{
-    filesDeleted: number;
-    bytesFreed: number;
-    status: MemoryEmbeddingRuntimeStatus;
-  }> {
-    return await this.request("memory.embedding.delete-v3", { model });
-  }
-
-  async rebuildMemoryEmbeddingIndex(): Promise<MemoryEmbeddingRuntimeStatus> {
-    return await this.request("memory.embedding.rebuild-v3", {});
-  }
-
-  async cancelMemoryEmbeddingRebuild(): Promise<{ cancelled: boolean; status: MemoryEmbeddingRuntimeStatus }> {
-    return await this.request("memory.embedding.cancel-rebuild-v3", {});
-  }
 
   /** 让 owner 按指定会话或新会话重建 AgentSession。 */
   async restartRuntime(sessionId?: string): Promise<InteractiveRuntimeSnapshot> {
@@ -2340,14 +2238,11 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
   private async open(): Promise<void> {
     await this.openSocket();
     const result = await this.request<{ hostEpoch: string; persistenceRoot: string; snapshot: InteractiveRuntimeSnapshot; sequence: number; capabilities: string[] }>("subscribe", { afterSequence: undefined });
-    this.hostEpoch = result.hostEpoch;
-    this.sequence = result.sequence;
     this.capabilities = result.capabilities;
-    this.snapshot = result.snapshot;
+    this.applySnapshot(result.snapshot, result.sequence, result.hostEpoch);
     if (!this.snapshot) {
       const snapshot = await this.request<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }>("snapshot", {});
-      this.snapshot = snapshot.snapshot;
-      this.sequence = snapshot.sequence;
+      this.applySnapshot(snapshot.snapshot, snapshot.sequence);
     }
   }
 
@@ -2452,10 +2347,8 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
       afterSequence: this.sequence,
       afterHostEpoch: previousHostEpoch
     });
-    this.hostEpoch = result.hostEpoch;
-    this.snapshot = result.snapshot;
-    this.sequence = result.sequence;
     this.capabilities = result.capabilities;
+    this.applySnapshot(result.snapshot, result.sequence, result.hostEpoch);
     await this.recoverCompletions();
   }
 
@@ -2642,8 +2535,23 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
 
   private async refreshRuntimeSnapshot(): Promise<void> {
     const current = await this.request<{ snapshot: InteractiveRuntimeSnapshot; sequence: number }>("snapshot", {});
-    this.snapshot = current.snapshot;
-    this.sequence = current.sequence;
+    this.applySnapshot(current.snapshot, current.sequence);
+  }
+
+  /**
+   * subscribe/snapshot 响应在 Host execute 时取样，但客户端在 await 后的微任务里落地；
+   * 窗口内到达的事件帧已把 sequence 推得更新。同 epoch 下禁止回退，epoch 切换则整体替换。
+   */
+  private applySnapshot(snapshot: InteractiveRuntimeSnapshot, sequence: number, hostEpoch?: string): void {
+    if (hostEpoch !== undefined && hostEpoch !== this.hostEpoch) {
+      this.hostEpoch = hostEpoch;
+      this.snapshot = snapshot;
+      this.sequence = sequence;
+      return;
+    }
+    if (sequence < this.sequence) return;
+    this.snapshot = snapshot;
+    this.sequence = sequence;
   }
 
   private createCompletion(runId: string): Promise<AgentRunOutcome> {
@@ -3025,10 +2933,6 @@ function readMemoryKind(value: unknown): MemoryKind {
   throw new Error("Runtime Host memory entry kind is invalid.");
 }
 
-function readLocalEmbeddingModel(value: unknown): LocalEmbeddingModelId {
-  if (value === "multilingual-e5-small" || value === "paraphrase-multilingual-MiniLM-L12-v2") return value;
-  throw new Error("Runtime Host local embedding model is invalid.");
-}
 
 function readMemoryLineage(value: unknown): MemoryLineage {
   const record = asRecord(value);
@@ -3325,12 +3229,16 @@ async function acquireHostLock(paths: RuntimeHostPaths, persistenceRoot: string)
     try {
       const handle = await fs.open(paths.lockPath, hostWriteNewFlags(), 0o600);
       await handle.chmod(0o600);
+      // registration 要等 server initialize/listen 之后才落盘；先把 pid 写进 lock，
+      // 让竞争进程在这个窗口内也能判活，而不是把存活 owner 的 lock/socket 当 stale 清掉。
+      await handle.writeFile(`${String(process.pid)}\n`, "utf8");
       await handle.sync();
       return handle;
     } catch (error) {
       if (!isAlreadyExists(error)) throw error;
       const registration = await readRegistration(paths);
-      if (registration && isProcessAlive(registration.pid)) {
+      const ownerPid = registration?.pid ?? await readLockPid(paths.lockPath);
+      if (ownerPid !== undefined && isProcessAlive(ownerPid)) {
         throw new Error(`Runtime Host is already running for ${path.resolve(persistenceRoot)}.`);
       }
       await removeStaleRegistration(registration ?? {
@@ -3352,6 +3260,14 @@ async function acquireHostLock(paths: RuntimeHostPaths, persistenceRoot: string)
   throw new Error("Unable to acquire Runtime Host lock.");
 }
 
+/** lock 文件内容是 owner pid；读不出有效 pid 时按无法证明存活处理。 */
+async function readLockPid(lockPath: string): Promise<number | undefined> {
+  const raw = await readPrivateHostFile(lockPath);
+  if (raw === undefined) return undefined;
+  const pid = Number(raw.trim());
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+}
+
 async function removeStaleRegistration(registration: HostRegistration): Promise<void> {
   await fs.rm(registration.registrationPath, { force: true });
   await removeSocketIfStale(registration.endpoint);
@@ -3365,9 +3281,14 @@ async function removeRegistration(registration: HostRegistration): Promise<void>
     lockPath: registration.lockPath,
     rootHash: registration.rootHash
   });
-  if (current?.hostEpoch === registration.hostEpoch) await fs.rm(registration.registrationPath, { force: true });
-  await removeSocketIfStale(registration.endpoint);
-  await fs.rm(registration.lockPath, { force: true });
+  // registration/lock/socket 都可能已被新 owner 接管；只删除仍能证明归属自己的文件，
+  // 否则旧 owner 退出时会删掉新 owner 的 endpoint，造成双 owner 之外的另一种断连。
+  const ownsRegistration = current?.hostEpoch === registration.hostEpoch;
+  const lockPid = await readLockPid(registration.lockPath);
+  const ownsLock = lockPid === undefined || lockPid === registration.pid;
+  if (ownsRegistration) await fs.rm(registration.registrationPath, { force: true });
+  if (ownsRegistration || (current === undefined && ownsLock)) await removeSocketIfStale(registration.endpoint);
+  if (ownsLock) await fs.rm(registration.lockPath, { force: true });
 }
 
 async function removeSocketIfStale(endpoint: string): Promise<void> {

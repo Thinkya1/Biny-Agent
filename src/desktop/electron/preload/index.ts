@@ -38,8 +38,10 @@ const api: DesktopApi = {
   markSessionRead: async (projectId, sessionId, expectedRevision) => await ipcRenderer.invoke(desktopIpc.markSessionRead, projectId, sessionId, expectedRevision),
   duplicateSession: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.duplicateSession, projectId, sessionId),
   deleteSession: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.deleteSession, projectId, sessionId),
+  exportSession: async (projectId, sessionId, format) => await ipcRenderer.invoke(desktopIpc.exportSession, projectId, sessionId, format),
+  importSession: async (projectId) => await ipcRenderer.invoke(desktopIpc.importSession, projectId),
   showSessionMenu: async (projectId, sessionId, pinned, archived) => await ipcRenderer.invoke(desktopIpc.sessionMenu, projectId, sessionId, pinned, archived),
-  sendPrompt: async (projectId, sessionId, input, mode, attachments, delivery, personalization) => await ipcRenderer.invoke(
+  sendPrompt: async (projectId, sessionId, input, mode, attachments, delivery, personalization, idempotencyKey) => await ipcRenderer.invoke(
     desktopIpc.sendPrompt,
     projectId,
     sessionId,
@@ -47,10 +49,11 @@ const api: DesktopApi = {
     mode,
     attachments,
     delivery,
-    personalization
+    personalization,
+    idempotencyKey
   ),
   resumeInterruptedTurn: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.resumeInterruptedTurn, projectId, sessionId),
-  editPrompt: async (projectId, sessionId, userMessageIndex, input, mode, attachments) => await ipcRenderer.invoke(desktopIpc.editPrompt, projectId, sessionId, userMessageIndex, input, mode, attachments),
+  editPrompt: async (projectId, sessionId, userMessageIndex, input, mode, attachments, idempotencyKey) => await ipcRenderer.invoke(desktopIpc.editPrompt, projectId, sessionId, userMessageIndex, input, mode, attachments, idempotencyKey),
   cancelRun: async (projectId, runId) => await ipcRenderer.invoke(desktopIpc.cancelRun, projectId, runId),
   runSlashCommand: async (projectId, sessionId, command) => await ipcRenderer.invoke(desktopIpc.runSlashCommand, projectId, sessionId, command),
   expandSkillCommand: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.skillExpand, projectId, input),
@@ -109,12 +112,6 @@ const api: DesktopApi = {
   reviewBehaviorPattern: async (projectId, patternId, action, expectedRevision) => await ipcRenderer.invoke(desktopIpc.reviewBehaviorPattern, projectId, patternId, action, expectedRevision),
   resolveTelosDrift: async (projectId, driftId, action, expectedRevision) => await ipcRenderer.invoke(desktopIpc.resolveTelosDrift, projectId, driftId, action, expectedRevision),
   snoozeTelosDrift: async (projectId, driftId, until, expectedRevision) => await ipcRenderer.invoke(desktopIpc.snoozeTelosDrift, projectId, driftId, until, expectedRevision),
-  memoryEmbeddingStatus: async (projectId) => await ipcRenderer.invoke(desktopIpc.memoryEmbeddingStatus, projectId),
-  downloadMemoryEmbeddingModel: async (projectId, model) => await ipcRenderer.invoke(desktopIpc.downloadMemoryEmbeddingModel, projectId, model),
-  cancelMemoryEmbeddingDownload: async (projectId, model) => await ipcRenderer.invoke(desktopIpc.cancelMemoryEmbeddingDownload, projectId, model),
-  deleteMemoryEmbeddingModel: async (projectId, model) => await ipcRenderer.invoke(desktopIpc.deleteMemoryEmbeddingModel, projectId, model),
-  rebuildMemoryEmbeddingIndex: async (projectId) => await ipcRenderer.invoke(desktopIpc.rebuildMemoryEmbeddingIndex, projectId),
-  cancelMemoryEmbeddingRebuild: async (projectId) => await ipcRenderer.invoke(desktopIpc.cancelMemoryEmbeddingRebuild, projectId),
   saveAttachment: async (projectId, name, mimeType, bytes) => await ipcRenderer.invoke(desktopIpc.saveAttachment, projectId, name, mimeType, bytes),
   // 渲染进程拿不到拖入文件的真实路径，只有 preload 里的 webUtils 能解析。
   resolveDroppedFile: (file) => webUtils.getPathForFile(file),

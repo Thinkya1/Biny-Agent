@@ -378,6 +378,22 @@ assert.deepEqual(retryMetrics, [
   { attempt: 2, status: 200, willRetry: false }
 ]);
 
+// 429 退避必须尊重响应头：retry-after-ms 缺失时 Number(null) === 0 曾把退避算成 0，
+// 并让标准 Retry-After 分支变成死代码。用预中止信号在真正等待前中断，只观测计算出的退避。
+const observedRetryDelay = async (headers: Record<string, string>): Promise<number | undefined> => {
+  const delays: Array<number | undefined> = [];
+  const throttledFetch = createRetryFetch({ maxAttempts: 3, initialDelayMs: 40, maxDelayMs: 10_000 }, async () => {
+    return new Response("limited", { status: 429, headers });
+  }, (event) => delays.push(event.retryDelayMs));
+  const controller = new AbortController();
+  controller.abort();
+  await throttledFetch("https://example.test", { signal: controller.signal }).catch(() => undefined);
+  return delays[0];
+};
+assert.equal(await observedRetryDelay({}), 40);
+assert.equal(await observedRetryDelay({ "retry-after-ms": "7" }), 7);
+assert.equal(await observedRetryDelay({ "retry-after": "2" }), 2_000);
+
 // Relays and self-hosted gateways almost never declare reasoning_efforts, so
 // well-known reasoning models must still surface thinking controls via the
 // ID-based fallback — otherwise they silently show only a "default" level.

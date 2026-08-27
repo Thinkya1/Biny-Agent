@@ -7,24 +7,30 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Dialog } from "@astryxdesign/core/Dialog";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
-import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
-import type { DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
+  apiFormatForConnection,
+  apiFormatOption,
+  apiFormatOptions,
   catalogForConnection,
   customCatalogEntry,
   modelAliasFor,
   providerAliasFor,
   providerCatalog,
   providerCatalogOrder,
+  type ApiFormatId,
   type CatalogModel,
   type ProviderCatalogItem,
   type ProviderCategory
 } from "../../providerCatalog.js";
 import { Icon, type IconName } from "../Icon.js";
 import { McpServersView } from "../McpServersView.js";
+import { TopToast } from "../overlays/TopToast.js";
 import { ProviderBrandGlyph } from "../ProviderBrandGlyph.js";
 import { SettingsAbout } from "./SettingsAbout.js";
 import { SettingsAppearance } from "./SettingsAppearance.js";
+import { SettingsChatParams } from "./SettingsChatParams.js";
+import { SettingsCompaction } from "./SettingsCompaction.js";
 import { SettingsActivity } from "./SettingsActivity.js";
 import { SettingsCheckbox } from "./SettingsCheckbox.js";
 import { SettingsCloseGuard } from "./SettingsCloseGuard.js";
@@ -70,12 +76,6 @@ interface SettingsOverlayProps {
   onResolveTelosDrift(driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number): Promise<DesktopTelosOverview>;
   onSnoozeTelosDrift(driftId: string, until: string, expectedRevision: number): Promise<DesktopTelosOverview>;
   onOpenChatDraft(input: string): void;
-  onLoadMemoryEmbeddingStatus(): Promise<DesktopMemoryEmbeddingStatus>;
-  onDownloadMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
-  onCancelMemoryEmbeddingDownload(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingCancellationResult>;
-  onDeleteMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingDeleteResult>;
-  onRebuildMemoryEmbeddingIndex(): Promise<DesktopMemoryEmbeddingStatus>;
-  onCancelMemoryEmbeddingRebuild(): Promise<DesktopMemoryEmbeddingCancellationResult>;
   onOpenExternal(url: string): Promise<void>;
   onLoadCookieJarStatus(): Promise<DesktopCookieJarStatus>;
   onOpenBrowser(url?: string): Promise<void>;
@@ -86,11 +86,12 @@ interface SettingsOverlayProps {
   onCancelModelLogin(provider: DesktopModelLoginProvider, authRequestId: string): Promise<void>;
 }
 
-export type SettingsTab = "外观" | "个性化" | "模型" | "MCP 服务器" | "技能" | "插件" | "活动记录" | "记忆" | "联网搜索" | "关于";
+export type SettingsTab = "外观" | "个性化" | "聊天" | "模型" | "MCP 服务器" | "技能" | "插件" | "活动记录" | "记忆" | "联网搜索" | "关于";
 
 const settingsNav: Array<{ badge?: string; icon: IconName; tab: SettingsTab; label: string }> = [
   { icon: "sun", tab: "外观", label: "外观" },
   { icon: "spark", tab: "个性化", label: "个性化" },
+  { icon: "message", tab: "聊天", label: "聊天" },
   { icon: "network", tab: "模型", label: "模型供应商" },
   { icon: "plug", tab: "MCP 服务器", label: "MCP 服务器" },
   { icon: "wand", tab: "技能", label: "技能" },
@@ -104,6 +105,7 @@ const settingsNav: Array<{ badge?: string; icon: IconName; tab: SettingsTab; lab
 const settingsTitles: Record<SettingsTab, string> = {
   外观: "外观",
   个性化: "个性化",
+  聊天: "聊天",
   模型: "模型供应商",
   "MCP 服务器": "MCP 服务器",
   技能: "技能",
@@ -124,6 +126,7 @@ const settingsSubtitles: Record<SettingsTab, string> = {
   活动记录: "记录事件与 AX 语义，必要时使用本地视觉 fallback，并控制隐私边界。",
   记忆: "记忆检索、自动生成、长期策略与条目管理。",
   联网搜索: "配置联网搜索与数据来源。",
+  聊天: "温度、输出额度与自动压缩策略。",
   关于: "版本与产品信息。"
 };
 
@@ -184,12 +187,6 @@ function SettingsOverlayContent({
   onResolveTelosDrift,
   onSnoozeTelosDrift,
   onOpenChatDraft,
-  onLoadMemoryEmbeddingStatus,
-  onDownloadMemoryEmbeddingModel,
-  onCancelMemoryEmbeddingDownload,
-  onDeleteMemoryEmbeddingModel,
-  onRebuildMemoryEmbeddingIndex,
-  onCancelMemoryEmbeddingRebuild,
   onOpenExternal,
   onLoadCookieJarStatus,
   onOpenBrowser,
@@ -207,6 +204,7 @@ function SettingsOverlayContent({
   const [memoryVisited, setMemoryVisited] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [message, setMessage] = useState<string>();
+  const [dismissedLoadError, setDismissedLoadError] = useState<string>();
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
   const activeTabRef = useRef<SettingsTab>(tab);
   const notifyForTab = (sourceTab: SettingsTab, nextMessage: string | undefined): void => {
@@ -264,12 +262,15 @@ function SettingsOverlayContent({
     if (closeRequest) await onResolveCloseRequest(closeRequest.requestId, "cancelled");
   };
   const extensionSettings = tab === "MCP 服务器" || tab === "技能" || tab === "插件";
+  // 设置页提示统一走顶部药丸 toast：loadError 带警告图标优先展示，其余为纯文字提示。
+  const visibleLoadError = settingsDraft.loadError && settingsDraft.loadError !== dismissedLoadError ? settingsDraft.loadError : undefined;
+  const settingsToast = visibleLoadError ?? message;
   return (
     <Dialog
       aria-label="Biny 设置"
       className="desktop-settings-dialog"
       isOpen={open}
-      onOpenChange={(isOpen) => { if (!isOpen) void discardAndClose(); }}
+      onOpenChange={(isOpen) => { if (!isOpen) requestCancel(); }}
       padding={0}
       purpose="info"
       variant="fullscreen"
@@ -277,7 +278,7 @@ function SettingsOverlayContent({
       <section className={`settings-modal is-full-page${extensionSettings ? " is-extension-settings" : ""}`}>
         <div className="settings-modal-body">
           <aside className="settings-tabs">
-          <button aria-label="返回应用" className="settings-back-button" onClick={() => { void discardAndClose(); }} type="button">
+          <button aria-label="返回应用" className="settings-back-button" onClick={requestCancel} type="button">
             <Icon name="arrow-left" size={16} />
             <strong>设置</strong>
           </button>
@@ -415,9 +416,9 @@ function SettingsOverlayContent({
             onFontChange={settingsDraft.setFontPreference}
           /> : null}
           {tab === "活动记录" ? <SettingsActivity /> : null}
+          {tab === "聊天" ? (<><SettingsChatParams /><SettingsCompaction /></>) : null}
           {tab === "个性化" ? <SettingsPersonalizationDraft sessionRunning={runtimeBusy} /> : null}
           {memoryVisited ? <SettingsMemory
-            embeddingModels={settingsDraft.snapshot?.models.embeddingModels ?? []}
             models={settingsModels}
             projectId={workspace?.project.id}
             hidden={tab !== "记忆"}
@@ -435,12 +436,6 @@ function SettingsOverlayContent({
             onResolveTelosDrift={onResolveTelosDrift}
             onSnoozeTelosDrift={onSnoozeTelosDrift}
             onOpenChatDraft={onOpenChatDraft}
-            onLoadEmbeddingStatus={onLoadMemoryEmbeddingStatus}
-            onDownloadEmbeddingModel={onDownloadMemoryEmbeddingModel}
-            onCancelEmbeddingDownload={onCancelMemoryEmbeddingDownload}
-            onDeleteEmbeddingModel={onDeleteMemoryEmbeddingModel}
-            onRebuildEmbeddingIndex={onRebuildMemoryEmbeddingIndex}
-            onCancelEmbeddingRebuild={onCancelMemoryEmbeddingRebuild}
             onTestModelConfiguration={onTestModelConfiguration}
             onNotify={(nextMessage) => notifyForTab("记忆", nextMessage)}
             sessionRunning={runtimeBusy}
@@ -459,8 +454,14 @@ function SettingsOverlayContent({
             onClearCookies={onClearCookies}
             sessionRunning={runtimeBusy}
           /> : null}
-          {settingsDraft.loadError ? <div aria-live="polite" className="settings-message" role="status">{settingsDraft.loadError}</div> : null}
-          {message ? <div aria-live="polite" className="settings-message" role="status">{message}</div> : null}
+          {settingsToast ? (
+            <TopToast
+              icon={visibleLoadError ? "warning" : undefined}
+              key={settingsToast}
+              message={settingsToast}
+              onDismiss={() => (visibleLoadError ? setDismissedLoadError(visibleLoadError) : setMessage(undefined))}
+            />
+          ) : null}
           </main>
         </div>
         <SettingsPageFooter
@@ -710,6 +711,8 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
   const [query, setQuery] = useState("");
   const [connectApiKey, setConnectApiKey] = useState("");
   const [connectBaseUrl, setConnectBaseUrl] = useState("");
+  // 自定义端点的「API 格式」；内置 provider 的格式由目录预设决定，不占用这个状态。
+  const [connectApiFormat, setConnectApiFormat] = useState<ApiFormatId>("chat_completions");
   const [showKey, setShowKey] = useState(false);
   const [detailApiKey, setDetailApiKey] = useState("");
   const [detailBaseUrl, setDetailBaseUrl] = useState("");
@@ -783,6 +786,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
   const openConnect = (provider: ProviderCatalogItem): void => {
     setConnectApiKey("");
     setConnectBaseUrl(provider.baseUrl);
+    setConnectApiFormat(apiFormatForConnection(provider.protocol));
     setShowKey(false);
     setTestResult(undefined);
     setLoginStage("idle");
@@ -847,6 +851,8 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     // 自定义端点（无固定 baseUrl）由用户填服务地址、从实时目录勾选模型；
     // 其余内置服务商都有固定 baseUrl，模型列表从服务商目录勾选。
     const isCustom = isManualEndpoint(provider);
+    // 自定义端点的传输格式由用户在表单里选择；内置服务商沿用目录预设的协议。
+    const format = isCustom ? apiFormatOption(connectApiFormat) : undefined;
     const modelId = (options.modelId ?? provider.models[0]?.id ?? "").trim();
     if (!modelId) return undefined;
     const apiKey = (options.apiKey ?? connectApiKey).trim();
@@ -862,7 +868,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
       displayName: catalogModel?.displayName ?? modelId,
       providerAlias,
       providerType: provider.value,
-      protocol: provider.protocol,
+      protocol: format?.protocol ?? provider.protocol,
       model: modelId,
       baseUrl,
       apiKey: apiKey || undefined,
@@ -882,7 +888,9 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
       maxOutputTokens: catalogModel?.maxOutputTokens,
       limits: catalogModel?.limits,
       thinkingLevelMap: catalogModel?.thinkingLevelMap,
-      apiBackend: catalogModel?.apiBackend,
+      // 目录条目自带的 adapter 覆盖优先（同连接内个别模型可以走不同协议）；
+      // 否则用连接表单选择的格式。
+      apiBackend: catalogModel?.apiBackend ?? format?.apiBackend,
       makeDefault: options.makeDefault ?? false
     };
   };
@@ -903,19 +911,20 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
       }
       const providerAlias = providerAliasFor(provider, baseUrl);
       const seed = provider.models[0];
+      const format = isCustom ? apiFormatOption(connectApiFormat) : undefined;
       const result = await onFetchCatalogCandidate({
         alias: modelAliasFor(providerAlias, seed?.id ?? "probe"),
         displayName: seed?.displayName ?? seed?.id ?? "probe",
         providerAlias,
         providerType: provider.value,
-        protocol: provider.protocol,
+        protocol: format?.protocol ?? provider.protocol,
         model: seed?.id ?? "probe",
         baseUrl: baseUrl || undefined,
         apiKey: apiKey || undefined,
         requiresApiKey: provider.requiresApiKey,
         supportsTools: true,
         supportsThinking: seed?.supportsThinking,
-        apiBackend: seed?.apiBackend
+        apiBackend: format?.apiBackend ?? seed?.apiBackend
       });
       if (generation !== connectGenerationRef.current) return;
       setConnectFetchSource(result.source);
@@ -936,7 +945,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     } finally {
       if (generation === connectGenerationRef.current) setConnectFetching(false);
     }
-  }, [onFetchCatalogCandidate, onNotify]);
+  }, [connectApiFormat, onFetchCatalogCandidate, onNotify]);
 
   // 填完密钥（或服务商无需密钥）后自动加载模型列表；密钥变化时防抖重拉。
   useEffect(() => {
@@ -955,6 +964,16 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     }, 600);
     return () => clearTimeout(timer);
   }, [view, connectApiKey, loadConnectModels]);
+
+  /** 换格式后旧目录不可信（不同协议的 /models 形状不同），清空候选让用户重新加载。 */
+  const changeConnectApiFormat = (id: ApiFormatId): void => {
+    setConnectApiFormat(id);
+    setConnectModels([]);
+    setConnectSelected([]);
+    setConnectFetchSource(undefined);
+    setTestResult(undefined);
+    connectGenerationRef.current += 1;
+  };
 
   const toggleConnectModel = (modelId: string): void => {
     setConnectSelected((current) => (
@@ -1215,6 +1234,44 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     });
   };
 
+  /** 切换连接的 API 格式：协议与适配器写在每个模型上，所以要把整组模型一起改写。 */
+  const saveApiFormat = async (id: ApiFormatId): Promise<void> => {
+    if (!detailGroup || !detailCatalog) return;
+    const format = apiFormatOption(id);
+    setSaving(true);
+    try {
+      for (const model of detailGroup.models) {
+        await saveConfiguration({
+          alias: model.alias,
+          displayName: model.displayName,
+          providerAlias: detailGroup.provider,
+          providerType: detailCatalog.value,
+          protocol: format.protocol,
+          model: model.model,
+          baseUrl: detailBaseUrl.trim() || detailCatalog.baseUrl || undefined,
+          apiKey: undefined,
+          apiKeyEnv: undefined,
+          supportsTools: model.supportsTools !== false,
+          supportsThinking: model.efforts.length > 0,
+          parallelToolCalls: model.capabilities?.parallelToolCalls,
+          reasoningStream: model.capabilities?.reasoningStream,
+          reasoningSummary: model.capabilities?.reasoningSummary,
+          supportsVision: model.capabilities?.vision,
+          supportsAudio: model.capabilities?.audio,
+          contextWindow: model.contextWindow,
+          maxInputTokens: model.maxInputTokens,
+          maxOutputTokens: model.maxOutputTokens,
+          limits: model.limits,
+          thinkingLevelMap: model.thinkingLevelMap,
+          apiBackend: format.apiBackend
+        });
+      }
+      onNotify(`API 格式已切换为 ${format.label}，保存后生效`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const enableModel = async (catalogModel: CatalogModel): Promise<void> => {
     if (!detailGroup || !detailCatalog) return;
     await saveConfiguration({
@@ -1253,6 +1310,11 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
   };
 
   const detailActive = detailGroup?.models.find((model) => model.alias === detailDefaultAlias) ?? detailGroup?.defaultModel ?? detailGroup?.models[0];
+  // 连接级字段优先（新连接两处都写），老配置从当前模型的 apiBackend 折回。
+  const detailApiFormat = apiFormatForConnection(
+    detailConnection?.protocol ?? detailCatalog?.protocol,
+    detailConnection?.apiBackend ?? detailActive?.apiBackend
+  );
   const detailConfiguration: DesktopModelConfigurationInput | undefined = detailActive && detailGroup && detailCatalog ? {
     alias: detailActive.alias,
     displayName: detailActive.displayName,
@@ -1389,6 +1451,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
               provider={view.provider}
               apiKey={connectApiKey}
               baseUrl={connectBaseUrl}
+              apiFormat={connectApiFormat}
               showKey={showKey}
               saving={saving}
               testing={testing}
@@ -1400,6 +1463,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
               isCustom={isManualEndpoint(view.provider)}
               onApiKey={(value) => { setConnectApiKey(value); setTestResult(undefined); }}
               onBaseUrl={(value) => { setConnectBaseUrl(value); setTestResult(undefined); }}
+              onApiFormat={changeConnectApiFormat}
               onToggleKey={() => setShowKey((value) => !value)}
               onLoadModels={() => void loadConnectModels(view.provider, connectApiKey, true)}
               onSelectAll={toggleAllConnectModels}
@@ -1455,6 +1519,8 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
             onTest={() => void testProvider(detailConfiguration)}
             onSaveKey={() => void saveKey()}
             onSaveBaseUrl={() => void saveBaseUrl()}
+            apiFormat={detailApiFormat}
+            onSaveApiFormat={(id) => void saveApiFormat(id)}
             onEnableModel={(model) => void enableModel(model)}
             onDisableModel={(alias) => void disableModel(alias)}
             onDeleteConnection={() => void deleteConnection()}
@@ -1595,6 +1661,8 @@ function ConnectionDetailDialog({
   onTest,
   onSaveKey,
   onSaveBaseUrl,
+  apiFormat,
+  onSaveApiFormat,
   onEnableModel,
   onDisableModel,
   onDeleteConnection,
@@ -1627,6 +1695,8 @@ function ConnectionDetailDialog({
   onTest(): void;
   onSaveKey(): void;
   onSaveBaseUrl(): void;
+  apiFormat: ApiFormatId;
+  onSaveApiFormat(id: ApiFormatId): void;
   onEnableModel(model: CatalogModel): void;
   onDisableModel(alias: string): void;
   onDeleteConnection(): void;
@@ -1637,6 +1707,9 @@ function ConnectionDetailDialog({
   onChange(alias: string, thinking: ThinkingSelection): void;
 }): React.JSX.Element {
   const [modelQuery, setModelQuery] = useState("");
+  // 格式选择是草稿制：select 立刻暂存整组模型的协议改写，但真正生效要等设置保存提交，
+  // 所以本地留一份显示值，避免选择后被已保存的旧值弹回。
+  const [formatDraft, setFormatDraft] = useState<ApiFormatId>(apiFormat);
   const filteredModels = availableModels.filter((model) => !modelQuery.trim() || `${model.displayName} ${model.id}`.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()));
   const isDefaultConnection = group.models.some((model) => model.alias === defaultAlias);
   // The list is one Tab stop, carried by the first row that can actually take
@@ -1655,7 +1728,7 @@ function ConnectionDetailDialog({
           <span className={`provider-mark is-${catalog.iconTone}`}><ProviderBrandGlyph type={catalog.iconTone} /></span>
           <div>
             <strong>{catalog.label}</strong>
-            <small>{isDefaultConnection ? "默认连接" : "已连接"}</small>
+            <small>{isDefaultConnection ? "默认连接" : "已连接"} · {apiFormatOption(formatDraft).label}</small>
           </div>
         </div>
         <button aria-label="关闭连接设置" className="icon-button" onClick={onClose} type="button"><Icon name="close" /></button>
@@ -1781,6 +1854,27 @@ function ConnectionDetailDialog({
               <button className="ghost-button" disabled={busy || !baseUrl.trim()} onClick={onSaveBaseUrl} type="button">保存服务地址</button>
             </div>
           </div>
+
+          {!usesOAuth ? (
+            <div className="connection-field">
+              <div className="connection-field-label">
+                <span>API 格式</span>
+                <small>{apiFormatOption(formatDraft).description} · 切换后对该连接全部模型生效，保存后应用</small>
+              </div>
+              <select
+                className="connection-select"
+                disabled={busy}
+                onChange={(event) => {
+                  const id = event.target.value as ApiFormatId;
+                  setFormatDraft(id);
+                  onSaveApiFormat(id);
+                }}
+                value={formatDraft}
+              >
+                {apiFormatOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </div>
+          ) : null}
           {testResult ? <ConnectionTestResult result={testResult} /> : null}
           <div className="connection-detail-footer">
             <div>
@@ -1805,6 +1899,7 @@ function ConnectProviderDialog({
   provider,
   apiKey,
   baseUrl,
+  apiFormat,
   showKey,
   saving,
   testing,
@@ -1816,6 +1911,7 @@ function ConnectProviderDialog({
   isCustom,
   onApiKey,
   onBaseUrl,
+  onApiFormat,
   onToggleKey,
   onLoadModels,
   onSelectAll,
@@ -1828,6 +1924,7 @@ function ConnectProviderDialog({
   provider: ProviderCatalogItem;
   apiKey: string;
   baseUrl: string;
+  apiFormat: ApiFormatId;
   showKey: boolean;
   saving: boolean;
   testing: boolean;
@@ -1839,6 +1936,7 @@ function ConnectProviderDialog({
   isCustom: boolean;
   onApiKey(value: string): void;
   onBaseUrl(value: string): void;
+  onApiFormat(id: ApiFormatId): void;
   onToggleKey(): void;
   onLoadModels(): void;
   onSelectAll(): void;
@@ -1897,7 +1995,22 @@ function ConnectProviderDialog({
         {isCustom ? (
           <div className="connection-field">
             <div className="connection-field-label"><span>服务地址</span></div>
-            <input onChange={(event) => onBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" value={baseUrl} />
+            <input onChange={(event) => onBaseUrl(event.target.value)} placeholder={apiFormatOption(apiFormat).baseUrlPlaceholder} value={baseUrl} />
+          </div>
+        ) : null}
+        {isCustom ? (
+          <div className="connection-field">
+            <div className="connection-field-label">
+              <span>API 格式</span>
+              <small>{apiFormatOption(apiFormat).description}</small>
+            </div>
+            <select
+              className="connection-select"
+              onChange={(event) => onApiFormat(event.target.value as ApiFormatId)}
+              value={apiFormat}
+            >
+              {apiFormatOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+            </select>
           </div>
         ) : null}
         <div className="connection-field">

@@ -25,6 +25,8 @@ export interface DesktopTerminalCreation {
 export class DesktopTerminalManager {
   private readonly sessions = new Map<string, TerminalSession>();
   private readonly byProject = new Map<string, string>();
+  /** node-pty 是异步 import，创建期间先在项目维度占位，并发 create 复用同一次创建。 */
+  private readonly pendingByProject = new Map<string, Promise<DesktopTerminalCreation>>();
 
   constructor(private readonly emit: (event: { terminalId: string; type: "data"; data: string } | { terminalId: string; type: "exit"; exitCode: number }) => void) {}
 
@@ -35,6 +37,18 @@ export class DesktopTerminalManager {
       existing.pty.resize(sanitizeSize(cols, 80), sanitizeSize(rows, 24));
       return { terminalId: existing.id, replay: existing.replay };
     }
+    const pending = this.pendingByProject.get(projectId);
+    if (pending) return await pending;
+    const creation = this.spawnSession(projectId, cwd, cols, rows);
+    this.pendingByProject.set(projectId, creation);
+    try {
+      return await creation;
+    } finally {
+      if (this.pendingByProject.get(projectId) === creation) this.pendingByProject.delete(projectId);
+    }
+  }
+
+  private async spawnSession(projectId: string, cwd: string, cols: number, rows: number): Promise<DesktopTerminalCreation> {
     const { spawn } = await import("node-pty");
     const shell = process.env.SHELL && process.env.SHELL.trim() ? process.env.SHELL : "/bin/zsh";
     const pty = spawn(shell, ["-l"], {

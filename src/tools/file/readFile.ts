@@ -24,7 +24,7 @@ export function createReadFileTool(context: ToolContext): Tool<ReadFileArgs, Rea
   // read_file 是最小只读工具：解析路径、读 utf8、按原路径返回内容。
   return {
     name: "read_file",
-    description: `Read a UTF-8 file inside the workspace or a supplied attachment, up to ${String(maxReadFileBytes)} bytes. Larger files are rejected; use search_files or grep_search to inspect their bounded prefix.`,
+    description: `Read a UTF-8 file inside the workspace or a supplied attachment, up to ${String(maxReadFileBytes)} bytes. Larger files are rejected; use search_files to inspect their bounded prefix.`,
     promptSnippet: "Read UTF-8 file contents from the workspace or supplied attachments",
     promptGuidelines: ["Use read_file instead of shell commands to read a file when its path is known"],
     parameters: {

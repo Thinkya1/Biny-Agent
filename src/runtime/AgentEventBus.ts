@@ -12,8 +12,8 @@ export class AgentEventBus<TEvent> {
       try {
         listener(event);
       } catch {
-        // A renderer or host listener must not interrupt the agent lifecycle.
-        this.listeners.delete(listener);
+        // 单个监听者的坏帧既不能中断其他监听者，也不能永久摘除它——Host 经 subscribe
+        // 挂接的事件出口一旦被删就会无声失声。监听者只由 subscribe 返回的函数摘除。
       }
     }
   }

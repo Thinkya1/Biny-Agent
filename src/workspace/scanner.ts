@@ -17,7 +17,13 @@ export async function scanWorkspaceFiles(workspaceRoot: string, ignore: string[]
   async function walk(currentDir: string, relativeDir: string): Promise<void> {
     signal?.throwIfAborted();
     if (files.length >= limit) return;
-    const entries = await fs.readdir(currentDir, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await fs.readdir(currentDir, { withFileTypes: true });
+    } catch {
+      // 不可读（EACCES）或扫描过程中被删除的目录整棵跳过，与文件级读取失败的跳过策略一致。
+      return;
+    }
     for (const entry of entries) {
       signal?.throwIfAborted();
       if (files.length >= limit) return;

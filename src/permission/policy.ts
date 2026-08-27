@@ -20,7 +20,6 @@ export type ToolName =
   | "move_file"
   | "list_files"
   | "search_files"
-  | "grep_search"
   | "git_status"
   | "git_diff"
   | "git_commit"
@@ -29,7 +28,6 @@ export type ToolName =
   | "process_status"
   | "read_process_output"
   | "stop_process"
-  | "list_processes"
   | "web_search"
   | "web_fetch"
   | "update_todos"
@@ -56,7 +54,7 @@ export function analyzePermissionRequest(input: AnalyzePermissionInput): Permiss
     };
   }
 
-  if (input.toolName === "list_files" || input.toolName === "search_files" || input.toolName === "grep_search") {
+  if (input.toolName === "list_files" || input.toolName === "search_files") {
     return {
       ...base(input),
       actionType: "read",
@@ -84,14 +82,29 @@ export function analyzePermissionRequest(input: AnalyzePermissionInput): Permiss
     };
   }
 
-  if (input.toolName === "write_file" || input.toolName === "edit_file" || input.toolName === "multi_edit" || input.toolName === "apply_patch" || input.toolName === "move_file") {
-    const moveTarget = input.toolName === "move_file" ? normalizePermissionPath(getStringField(input.args, "from")) : targetPath;
+  if (input.toolName === "write_file" || input.toolName === "edit_file" || input.toolName === "multi_edit" || input.toolName === "apply_patch") {
     return {
       ...base(input),
       actionType: "write",
-      riskLevel: fileWriteRisk(moveTarget),
-      targetPath: moveTarget,
-      reason: fileWriteReason(moveTarget)
+      riskLevel: fileWriteRisk(targetPath),
+      targetPath,
+      reason: fileWriteReason(targetPath)
+    };
+  }
+
+  if (input.toolName === "move_file") {
+    // from/to 都会改变工作区,两个路径都参与判定:风险取两者较高者,
+    // denyPaths 由 PermissionManager 对 targetPath/secondaryTargetPath 分别检查。
+    const fromPath = normalizePermissionPath(getStringField(input.args, "from"));
+    const toPath = normalizePermissionPath(getStringField(input.args, "to"));
+    const riskTarget = riskRank(fileWriteRisk(toPath)) > riskRank(fileWriteRisk(fromPath)) ? toPath : fromPath;
+    return {
+      ...base(input),
+      actionType: "write",
+      riskLevel: fileWriteRisk(riskTarget),
+      targetPath: fromPath,
+      secondaryTargetPath: toPath || undefined,
+      reason: fileWriteReason(riskTarget)
     };
   }
 
@@ -109,7 +122,7 @@ export function analyzePermissionRequest(input: AnalyzePermissionInput): Permiss
     return analyzeCommand(input, getStringField(input.args, "command"));
   }
 
-  if (input.toolName === "process_status" || input.toolName === "read_process_output" || input.toolName === "list_processes") {
+  if (input.toolName === "process_status" || input.toolName === "read_process_output") {
     return {
       ...base(input),
       actionType: "read",
@@ -311,6 +324,11 @@ function fileWriteRisk(filePath: string): RiskLevel {
   if (isShellProfile(filePath)) return "critical";
   if (isLockfile(filePath)) return "high";
   return "medium";
+}
+
+function riskRank(riskLevel: RiskLevel): number {
+  const ranks: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+  return ranks[riskLevel];
 }
 
 function fileWriteReason(filePath: string): string {

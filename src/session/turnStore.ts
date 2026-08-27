@@ -11,6 +11,7 @@
  * 工具步之间保存实际已用步数；blocked 或可恢复的 incomplete 终态用 0 保存，表示只有用户
  * 显式恢复请求后才开启一个新预算窗口。正常 completed、cancelled、failed 或新根回合会清掉。
  */
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { AgentMessage } from "../agent/core/types.js";
@@ -93,15 +94,20 @@ export class TurnStore {
       updatedAt: new Date().toISOString()
     };
     const target = this.filePath();
-    const temporary = `${target}.tmp`;
-    await fs.writeFile(temporary, `${JSON.stringify({ version: turnStateVersion, turn: payload })}\n`, { encoding: "utf8", mode: 0o600 });
-    const handle = await fs.open(temporary, "r");
+    // 临时名带随机成分：并发 save 共用固定名会互相截断对方的临时文件。
+    const temporary = `${target}.${randomUUID()}.tmp`;
     try {
-      await handle.sync();
+      await fs.writeFile(temporary, `${JSON.stringify({ version: turnStateVersion, turn: payload })}\n`, { encoding: "utf8", mode: 0o600 });
+      const handle = await fs.open(temporary, "r");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await fs.rename(temporary, target);
     } finally {
-      await handle.close();
+      await fs.rm(temporary, { force: true }).catch(() => undefined);
     }
-    await fs.rename(temporary, target);
   }
 
   async load(): Promise<InterruptedTurn | undefined> {

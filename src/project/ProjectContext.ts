@@ -5,7 +5,7 @@
  * `src` 目录轮廓以及 git 状态。它刻意不读取完整源码，目的是给模型足够方向而不撑大上下文。
  */
 import { execFile } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { isIgnoredPath } from "../workspace/ignore.js";
@@ -98,7 +98,14 @@ async function readPackageJsonSummary(workspaceRoot: string, ignore: string[], s
   signal?.throwIfAborted();
   const filePath = resolveProjectFile(workspaceRoot, "package.json", ignore);
   if (!filePath || !(await pathExists(filePath))) return undefined;
-  const value = JSON.parse(await fs.readFile(filePath, { encoding: "utf8", signal })) as Record<string, unknown>;
+  let value: Record<string, unknown>;
+  try {
+    value = JSON.parse(await fs.readFile(filePath, { encoding: "utf8", signal })) as Record<string, unknown>;
+  } catch {
+    // 摘要收集不能因单个文件损坏或不可读而失败;按缺失降级(同 readGitStatus 的容错风格)。
+    signal?.throwIfAborted();
+    return undefined;
+  }
   signal?.throwIfAborted();
   return {
     name: stringValue(value.name),
@@ -115,7 +122,15 @@ async function readTsconfigSummary(workspaceRoot: string, ignore: string[], sign
   signal?.throwIfAborted();
   const filePath = resolveProjectFile(workspaceRoot, "tsconfig.json", ignore);
   if (!filePath || !(await pathExists(filePath))) return undefined;
-  const value = JSON.parse(await fs.readFile(filePath, { encoding: "utf8", signal })) as Record<string, unknown>;
+  let value: Record<string, unknown>;
+  try {
+    // tsconfig.json 官方是 JSONC(`tsc --init` 生成的文件满是注释),先做最小清洗再解析。
+    value = parseJsonc(await fs.readFile(filePath, { encoding: "utf8", signal })) as Record<string, unknown>;
+  } catch {
+    // 清洗后仍不是合法 JSON 时按缺失降级,不能让摘要收集拖垮整个 turn。
+    signal?.throwIfAborted();
+    return undefined;
+  }
   signal?.throwIfAborted();
   const compilerOptions = isRecord(value.compilerOptions) ? value.compilerOptions : {};
   return {
@@ -148,7 +163,14 @@ async function readSrcTree(workspaceRoot: string, ignore: string[], limit: numbe
     // 目录树只保留有限深度和数量，避免大型仓库启动时扫描过多文件。
     signal?.throwIfAborted();
     if (entries.length >= limit || depth > 6) return;
-    const dirEntries = await fs.readdir(currentDir, { withFileTypes: true });
+    let dirEntries: Dirent[];
+    try {
+      dirEntries = await fs.readdir(currentDir, { withFileTypes: true });
+    } catch {
+      // 单个目录不可读(如 EACCES)时跳过该子树,其余目录继续收集。
+      signal?.throwIfAborted();
+      return;
+    }
     dirEntries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of dirEntries) {
       signal?.throwIfAborted();
@@ -210,6 +232,58 @@ function resolveProjectDirectory(workspaceRoot: string, requestedPath: string, i
 function stringValue(value: unknown): string | undefined {
   // JSON 字段类型不可信，所有摘要字段都先做类型收窄。
   return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * 最小 JSONC 解析:单遍扫描剔除字符串外的 `//`、`/* *\/` 注释,并在 `}`/`]` 前回收尾逗号。
+ * 只覆盖 tsconfig 的官方语法子集,不追求完整 JSONC 规范。
+ */
+function parseJsonc(text: string): unknown {
+  let output = "";
+  let inString = false;
+  // output 中最近一次字符串外逗号的下标;遇到闭合括号且其间只有空白时回收该逗号。
+  let pendingComma = -1;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (inString) {
+      output += char;
+      if (char === "\\" && index + 1 < text.length) {
+        // 转义序列整体保留,避免 \" 被误判为字符串结束。
+        index += 1;
+        output += text[index]!;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      pendingComma = -1;
+      output += char;
+      continue;
+    }
+    if (char === "/" && text[index + 1] === "/") {
+      while (index < text.length && text[index] !== "\n") index += 1;
+      continue;
+    }
+    if (char === "/" && text[index + 1] === "*") {
+      index += 2;
+      while (index < text.length && !(text[index] === "*" && text[index + 1] === "/")) index += 1;
+      index += 1;
+      continue;
+    }
+    if (char === ",") {
+      pendingComma = output.length;
+      output += char;
+      continue;
+    }
+    if ((char === "}" || char === "]") && pendingComma >= 0 && !/\S/.test(output.slice(pendingComma + 1))) {
+      output = output.slice(0, pendingComma);
+    }
+    if (!/\s/.test(char)) pendingComma = -1;
+    output += char;
+  }
+  return JSON.parse(output);
 }
 
 function objectKeys(value: unknown): string[] {

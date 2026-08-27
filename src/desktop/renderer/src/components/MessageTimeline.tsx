@@ -4,15 +4,17 @@
  * 数据由 `buildSessionTimeline` 算好，这里只做渲染和局部交互（展开思考、复制、编辑重发、
  * 回滚文件等）。整体用 memo 包住，因为流式输出期间父组件会高频重渲染。
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { ChatMessage, ChatMessageBubble } from "@astryxdesign/core/Chat";
 import type { PermissionResult } from "../../../../permission/PermissionManager.js";
+import type { SessionUsage } from "../../../../session/metadata.js";
 import { splitAttachmentReferences, type AttachmentReference } from "../../../attachmentReferences.js";
 import { copyToClipboard } from "../copyToClipboard.js";
 import { useInlineImage } from "../inlineImage.js";
-import { listChangedFiles, type TimelineReasoningStep, type TimelineRunStatus, type TimelineStep, type TimelineTurn } from "../sessionTimeline.js";
+import { listChangedFiles, type TimelineReasoningStep, type TimelineStep, type TimelineTurn } from "../sessionTimeline.js";
 import { reasoningDetailText } from "../reasoningPresentation.js";
-import { turnMetrics } from "../chatModel.js";
+import { buildUsageDetailRows, finishReasonTone, formatDuration, formatMessageClock, formatRunDuration, isRunErrorStatus, runErrorSeenKey, turnMetrics, type TurnMetrics } from "../chatModel.js";
 import { speak, speechSupported } from "../speech.js";
 import { CopyButton } from "./CopyButton.js";
 import { Icon } from "./Icon.js";
@@ -33,8 +35,8 @@ interface MessageTimelineProps {
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
   onResume(): Promise<void>;
-  onRetry(input: string): void;
-  onEditUserMessage(input: string, userMessageIndex: number): Promise<void>;
+  onRetry(input: string, userMessageIndex: number, idempotencyKey: string): Promise<void>;
+  onEditUserMessage(input: string, userMessageIndex: number, idempotencyKey: string): Promise<void>;
   onCreateBranch(): void;
   onRollbackFiles(turn: TimelineTurn): void;
   onDeleteUserMessage(turnId: string): void;
@@ -67,9 +69,50 @@ export const MessageTimeline = memo(function MessageTimeline({ projectId, sessio
   const submitEditing = useCallback(async (): Promise<void> => {
     const current = editingRef.current;
     if (!current || !sessionId) return;
-    await onEditUserMessage(current.value, current.userMessageIndex);
+    await onEditUserMessage(current.value, current.userMessageIndex, globalThis.crypto.randomUUID());
     setEditing(undefined);
   }, [onEditUserMessage, sessionId]);
+
+  // 错误卡按「一个错误只打扰一次」展示：每个会话各记一份当前未读错误清单，切走（或组件
+  // 卸载）的一瞬整份标成已看过——用户点进失败的会话第一眼能看到，错过或划走就不再提。
+  const unreadRunErrorsRef = useRef(new Map<string, readonly string[]>());
+  useEffect(() => {
+    const keys = turns
+      .filter((turn) => Boolean(turn.error) && isRunErrorStatus(turn.status))
+      .map((turn) => runErrorSeenKey(projectId, sessionId, turn));
+    // 无依赖 effect 是拿「最新一帧」未读清单的手段：切换发生在提交之后、清理之前，
+    // 清理闭包读到的必须是上一帧数据，所以 ref 要跟每次提交同步。列表很小，成本可忽略。
+    unreadRunErrorsRef.current.set(sessionId ?? "", keys);
+  });
+
+  // 消费「被离开的会话」的全部未读错误：清理闭包里的 sessionKey 固定为创建该 effect
+  // 时的会话，切走时正是上一个会话；应用关闭等卸场也顺路消费，重启后不再复活。
+  useEffect(() => {
+    const sessionKey = sessionId ?? "";
+    return () => {
+      const leaving = unreadRunErrorsRef.current.get(sessionKey);
+      unreadRunErrorsRef.current.delete(sessionKey);
+      if (leaving?.length) markRunErrorsSeen(leaving);
+    };
+    // 只跟随会话身份；依赖清单一变化就会让「上次未读」变成空集，语义就错了。
+  }, [sessionId]);
+
+  // 新一轮开跑（本会话出现新的进行中轮次）时回收一次失效标记：编辑/重试会让轮次身份
+  // 变化或消失，死标记不该一直占着 localStorage，也不该顶着别的轮次的坑位。
+  const roundFingerprintsRef = useRef<{ sessionKey: string; fingerprints: Set<string> }>({ sessionKey: "", fingerprints: new Set() });
+  useEffect(() => {
+    const sessionKey = sessionId ?? "";
+    const fingerprints = new Set(turns.map((turn) => turn.timestamp ?? turn.id));
+    const previous = roundFingerprintsRef.current;
+    // 首帧（fingerprints 为空）与刚切进来的会话不触发：只有同一会话里长出新轮次才算「新一轮」。
+    const becameActive = turns.some((turn) =>
+      (turn.status === "running" || turn.status === "waiting_permission")
+      && !previous.fingerprints.has(turn.timestamp ?? turn.id));
+    if (previous.sessionKey === sessionKey && previous.fingerprints.size > 0 && becameActive) {
+      pruneRunErrorsSeen(projectId, sessionId, fingerprints);
+    }
+    roundFingerprintsRef.current = { sessionKey, fingerprints };
+  }, [projectId, sessionId, turns]);
 
   return (
     <div className="message-timeline">
@@ -90,6 +133,7 @@ export const MessageTimeline = memo(function MessageTimeline({ projectId, sessio
           onRollbackFiles={onRollbackFiles}
           onRetry={onRetry}
           projectId={projectId}
+          sessionId={sessionId}
           turn={turn}
         />
       ))}
@@ -97,8 +141,89 @@ export const MessageTimeline = memo(function MessageTimeline({ projectId, sessio
   );
 });
 
+/**
+ * 「已看过」的轮次错误登记处，身份由 runErrorSeenKey 给出（project + session + 轮次终态时间戳）。
+ *
+ * 展示语义按「一个错误只打扰一次」设计：手动点 ×、或者切走/离开这个会话，都算已读过，
+ * 之后无论切回来还是重启应用都不再复活。所以内存集合负责跨会话即时生效，localStorage
+ * 负责重启应用也生效。终态持久化在 session 文件里，「读过一次就不再提」正是要压住它。
+ *
+ * 身份必须与投影方式无关（见 chatModel.runErrorSeenKey），否则实时轮次（runId）重建为
+ * 历史轮次（history-N）后标记对不上号。本地存储只是缓存：读失败退回内存集合，写失败只影响
+ * 本次运行期；数量有上限，超出淘汰最旧的，不会无限膨胀。
+ */
+const dismissedRunErrorTurns = new Set<string>();
+const DISMISSED_RUN_ERROR_STORAGE_KEY = "biny.desktop.dismissed-run-errors";
+/** 持久化上限：超出就淘汰最旧的，避免本地缓存无限增长。 */
+const DISMISSED_RUN_ERROR_LIMIT = 500;
+/** 是否已从 localStorage 注水；注水只做一次，之后以内存集合为准。 */
+let dismissedRunErrorHydrated = false;
+
+function hydrateDismissedRunErrors(): void {
+  if (dismissedRunErrorHydrated) return;
+  dismissedRunErrorHydrated = true;
+  try {
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem(DISMISSED_RUN_ERROR_STORAGE_KEY);
+    if (!raw) return;
+    const stored: unknown = JSON.parse(raw);
+    if (!Array.isArray(stored)) return;
+    for (const key of stored) {
+      if (typeof key === "string" && key) dismissedRunErrorTurns.add(key);
+    }
+  } catch {
+    // 本地存储读失败：退回内存集合，本次运行期内仍然有效。
+  }
+}
+
+function persistDismissedRunErrors(): void {
+  try {
+    if (typeof window === "undefined") return;
+    // Set 是插入序：markRunErrorsSeen 先用 delete+add 把命中项挪到末尾，这里直接截尾淘汰最旧的。
+    window.localStorage.setItem(
+      DISMISSED_RUN_ERROR_STORAGE_KEY,
+      JSON.stringify([...dismissedRunErrorTurns].slice(-DISMISSED_RUN_ERROR_LIMIT))
+    );
+  } catch {
+    // 本地存储写失败：内存集合已记，本次运行期内仍不会再展示。
+  }
+}
+
+function isRunErrorSeen(key: string): boolean {
+  hydrateDismissedRunErrors();
+  return dismissedRunErrorTurns.has(key);
+}
+
+/** 批量登记「已看过」；每项先删再插挪到最新端（近似 LRU 触碰序），合并成一次持久化。 */
+function markRunErrorsSeen(keys: readonly string[]): void {
+  hydrateDismissedRunErrors();
+  for (const key of keys) {
+    dismissedRunErrorTurns.delete(key);
+    dismissedRunErrorTurns.add(key);
+  }
+  persistDismissedRunErrors();
+}
+
+/**
+ * 新一轮开始时回收本会话失效的「已看过」标记：编辑/重试会让位置序号漂移或让轮次消失，
+ * 只保留还挂在现存轮次上的标记，其余清掉并立即持久化——新失败的轮次有新身份，不受影响。
+ */
+function pruneRunErrorsSeen(projectId: string, sessionId: string | undefined, validIdentifiers: ReadonlySet<string>): void {
+  hydrateDismissedRunErrors();
+  const prefix = `${projectId}:${sessionId ?? "draft"}:`;
+  let mutated = false;
+  for (const key of dismissedRunErrorTurns) {
+    if (!key.startsWith(prefix)) continue;
+    if (validIdentifiers.has(key.slice(prefix.length))) continue;
+    dismissedRunErrorTurns.delete(key);
+    mutated = true;
+  }
+  if (mutated) persistDismissedRunErrors();
+}
+
 const Turn = memo(function Turn({
   projectId,
+  sessionId,
   turn,
   editing,
   onPreviewFile,
@@ -115,13 +240,14 @@ const Turn = memo(function Turn({
   onDeleteUserMessage
 }: {
   projectId: string;
+  sessionId?: string;
   turn: TimelineTurn;
   editing?: { value: string };
   onPreviewFile(path: string): void;
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
   onResume(): Promise<void>;
-  onRetry(input: string): void;
+  onRetry(input: string, userMessageIndex: number, idempotencyKey: string): Promise<void>;
   onCancelEdit(): void;
   onChangeEdit(value: string): void;
   onStartEdit(turn: TimelineTurn): void;
@@ -131,6 +257,31 @@ const Turn = memo(function Turn({
   onDeleteUserMessage(turnId: string): void;
 }): React.JSX.Element {
   const running = turn.status === "running" || turn.status === "waiting_permission";
+  // 「已看过」身份用跨投影稳定的 key（终态时间戳），实时/历史两种重建下都指同一轮。
+  const dismissedKey = useMemo(() => runErrorSeenKey(projectId, sessionId, turn), [projectId, sessionId, turn]);
+  const [errorDismissed, setErrorDismissed] = useState(() => isRunErrorSeen(dismissedKey));
+  const retryPromiseRef = useRef<Promise<void> | undefined>(undefined);
+  const dismissError = useCallback((): void => {
+    markRunErrorsSeen([dismissedKey]);
+    setErrorDismissed(true);
+  }, [dismissedKey]);
+  const retry = useCallback((): Promise<void> => {
+    const userMessageIndex = turn.userMessageIndex;
+    if (!turn.user || userMessageIndex === undefined) return Promise.resolve();
+    const existing = retryPromiseRef.current;
+    if (existing) return existing;
+    const pending = Promise.resolve().then(() => onRetry(turn.user, userMessageIndex, globalThis.crypto.randomUUID()));
+    retryPromiseRef.current = pending;
+    void pending.then(
+      () => {
+        if (retryPromiseRef.current === pending) retryPromiseRef.current = undefined;
+      },
+      () => {
+        if (retryPromiseRef.current === pending) retryPromiseRef.current = undefined;
+      }
+    );
+    return pending;
+  }, [onRetry, turn.user, turn.userMessageIndex]);
   const executionSteps = turn.steps.length ? turn.steps : fallbackExecutionSteps(turn);
   return (
     <section className={`timeline-turn is-${turn.status}`}>
@@ -146,7 +297,7 @@ const Turn = memo(function Turn({
           onEdit={() => onStartEdit(turn)}
           onOpenExternal={onOpenExternal}
           onPreviewFile={onPreviewFile}
-          onRegenerate={() => onRetry(turn.user)}
+          onRegenerate={turn.userMessageIndex === undefined ? undefined : retry}
           onRollbackFiles={() => onRollbackFiles(turn)}
           onSubmitEdit={onSubmitEdit}
           projectId={projectId}
@@ -168,24 +319,34 @@ const Turn = memo(function Turn({
         ) : null}
         {!executionSteps.some((step) => step.kind === "assistant") && turn.assistant ? <TypewriterMarkdown active={running} content={turn.assistant} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} /> : null}
 
+        {turn.memoryCitations?.length ? (
+          <div className="memory-citation-badge" title={turn.memoryCitations.map(({ id, note }) => note ? `${id} — ${note}` : id).join("\n")}>
+            <Icon name="brain" size={12} />
+            <span>引用 {String(turn.memoryCitations.length)} 条记忆</span>
+          </div>
+        ) : null}
+
         {turn.assistant ? (
           <AssistantActions
             content={turn.assistant}
+            finishReason={turn.finishReason}
             metrics={turnMetrics(turn)}
             onCreateBranch={onCreateBranch}
-            onRegenerate={turn.user ? () => onRetry(turn.user) : undefined}
+            onRegenerate={turn.userMessageIndex === undefined ? undefined : retry}
             runMs={turn.durationMs}
             timestamp={turn.timestamp}
+            usage={turn.usage}
           />
         ) : null}
 
         {/* 底部不再展示统计与模型行；运行信息只保留在 hover 揭示的时钟里。 */}
         {/* 失败/阻塞/未完成/取消/中止统一收敛成一张错误卡片：图标 + 标题 + 人话错误 + 继续/重试。 */}
-        {turn.error && isRunErrorStatus(turn.status) ? (
+        {turn.error && isRunErrorStatus(turn.status) && !errorDismissed ? (
           <RunErrorCard
             message={turn.error}
+            onDismiss={dismissError}
             onResume={() => void onResume()}
-            onRetry={turn.user ? () => onRetry(turn.user) : undefined}
+            onRetry={turn.userMessageIndex === undefined ? undefined : retry}
             resumable={turn.resumable}
             status={turn.status}
           />
@@ -336,15 +497,6 @@ function isGroupableStep(step: TimelineStep): step is ExecutionGroupStep {
   return step.kind === "reasoning" && step.notice !== "compaction";
 }
 
-/** 失败/阻塞/未完成/取消/中止：这些终态的错误输出统一走 RunErrorCard。 */
-function isRunErrorStatus(status: TimelineRunStatus): boolean {
-  return status === "failed"
-    || status === "blocked"
-    || status === "incomplete"
-    || status === "cancelled"
-    || status === "aborted";
-}
-
 function ActivitySummaryStep({ content, onOpenExternal, onPreviewFile, projectId }: {
   content: string;
   onOpenExternal(url: string): void;
@@ -404,7 +556,7 @@ function UserMessage({
   onChangeEdit(value: string): void;
   onOpenExternal(url: string): void;
   onPreviewFile(path: string): void;
-  onRegenerate(): void;
+  onRegenerate?(): Promise<void>;
   onRollbackFiles(): void;
   onSubmitEdit(): Promise<void>;
   projectId: string;
@@ -416,16 +568,15 @@ function UserMessage({
   const message = useMemo(() => splitAttachmentReferences(content), [content]);
 
   if (editing) {
+    // 编辑态不套 ChatMessageBubble：气泡自带主题底色/内边距，会把编辑器包成「盒中盒」。
     return (
       <ChatMessage className="user-message is-editing" sender="user">
-        <ChatMessageBubble>
-          <InlineUserMessageEditor
-            value={editing.value}
-            onCancel={onCancelEdit}
-            onChange={onChangeEdit}
-            onSubmit={onSubmitEdit}
-          />
-        </ChatMessageBubble>
+        <InlineUserMessageEditor
+          value={editing.value}
+          onCancel={onCancelEdit}
+          onChange={onChangeEdit}
+          onSubmit={onSubmitEdit}
+        />
       </ChatMessage>
     );
   }
@@ -441,7 +592,7 @@ function UserMessage({
       <div className={`user-message-actions${menuOpen ? " is-open" : ""}`} data-time-hover-root ref={actionsRef}>
         {clock}
         <button aria-label="复制消息" className="user-message-action" onClick={() => copyText(message.text)} title="复制消息" type="button"><Icon name="copy" size={16} /></button>
-        <button aria-label="重新生成" className="user-message-action" onClick={onRegenerate} title="重新生成" type="button"><Icon name="refresh" size={16} /></button>
+        {onRegenerate ? <button aria-label="重新生成" className="user-message-action" onClick={() => { void onRegenerate(); }} title="重新生成" type="button"><Icon name="refresh" size={16} /></button> : null}
         <button aria-label="编辑消息" className="user-message-action" onClick={onEdit} title="编辑消息" type="button"><Icon name="edit" size={16} /></button>
         <button aria-expanded={menuOpen} aria-haspopup="menu" aria-label="更多消息操作" className="user-message-action" onClick={() => setMenuOpen(!menuOpen)} title="更多" type="button"><Icon name="more" size={16} /></button>
         {menuOpen ? (
@@ -467,6 +618,7 @@ function InlineUserMessageEditor({ value, onCancel, onChange, onSubmit }: {
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const submitFlightRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const initialValueRef = useRef(value);
@@ -477,7 +629,8 @@ function InlineUserMessageEditor({ value, onCancel, onChange, onSubmit }: {
   }, []);
 
   const submit = async (): Promise<void> => {
-    if (busy || !value.trim()) return;
+    if (busy || submitFlightRef.current || !value.trim()) return;
+    submitFlightRef.current = true;
     setBusy(true);
     setError(undefined);
     try {
@@ -486,11 +639,12 @@ function InlineUserMessageEditor({ value, onCancel, onChange, onSubmit }: {
       setError(submitError instanceof Error ? submitError.message : String(submitError));
     } finally {
       setBusy(false);
+      submitFlightRef.current = false;
     }
   };
 
   return (
-    <div className="user-message-editor">
+    <div className={`user-message-editor${busy ? " is-busy" : ""}`}>
       <textarea
         aria-label="编辑用户消息"
         disabled={busy}
@@ -498,7 +652,13 @@ function InlineUserMessageEditor({ value, onCancel, onChange, onSubmit }: {
         onCompositionEnd={() => { composingRef.current = false; }}
         onCompositionStart={() => { composingRef.current = true; }}
         onKeyDown={(event) => {
-          if (event.key !== "Enter" || event.shiftKey || composingRef.current || event.nativeEvent.isComposing) return;
+          if (event.nativeEvent.isComposing || composingRef.current) return;
+          if (event.key === "Escape" && !busy) {
+            event.preventDefault();
+            onCancel();
+            return;
+          }
+          if (event.key !== "Enter" || event.shiftKey) return;
           event.preventDefault();
           void submit();
         }}
@@ -508,8 +668,20 @@ function InlineUserMessageEditor({ value, onCancel, onChange, onSubmit }: {
       />
       {error ? <div className="user-message-editor-error"><Icon name="warning" size={12} /><span>{error}</span></div> : null}
       <div className="user-message-editor-actions">
-        <button disabled={busy} onClick={onCancel} type="button">取消</button>
-        <button className="is-primary" disabled={busy || !value.trim()} onClick={() => void submit()} type="button">{busy ? "发送中…" : "发送"}</button>
+        <span className="user-message-editor-hint">
+          {busy ? "发送中…" : <><kbd>Esc</kbd> 取消 · <kbd>⏎</kbd> 发送</>}
+        </span>
+        <button className="user-message-editor-cancel" disabled={busy} onClick={onCancel} type="button">取消</button>
+        <button
+          aria-label="发送编辑后的消息"
+          className="biny-send-button"
+          disabled={busy || !value.trim()}
+          onClick={() => void submit()}
+          title="发送（Enter）"
+          type="button"
+        >
+          <Icon name="arrow-up" size={15} />
+        </button>
       </div>
     </div>
   );
@@ -529,22 +701,40 @@ function plainTextFromMarkdown(content: string): string {
     .trim();
 }
 
-/** 助手回复下方的操作条：复制、朗读、重新生成，以及放次要操作的更多菜单；
- *  操作条尾部是日期感知时钟 + 运行指标（用时 / 首 token / 解码吞吐），hover 揭示。 */
-function AssistantActions({ content, timestamp, metrics, runMs, onCreateBranch, onRegenerate }: {
+/** 助手回复下方的操作条（复刻 Alma 的消息底栏人体工学）：
+ *  复制/朗读/重新生成/更多 四个图标按钮 hover 揭示；日期感知时钟 + 运行指标
+ *  （LLM 用时 / 首 token / 解码吞吐）常显。更多菜单与用量悬浮卡都走 portal
+ *  fixed 定位：用量项悬停出详情卡（80ms 悬停意图防抖），结束原因带语义色点，
+ *  复制成功后图标变勾并延迟收菜单。 */
+function AssistantActions({ content, timestamp, metrics, runMs, usage, finishReason, onCreateBranch, onRegenerate }: {
   content: string;
   timestamp?: string;
-  metrics?: { ttftMs?: number; tokensPerSecond?: number; llmMs?: number };
+  metrics?: TurnMetrics;
   runMs?: number;
+  usage?: SessionUsage;
+  finishReason?: string;
   onCreateBranch(): void;
-  onRegenerate?(): void;
+  onRegenerate?(): Promise<void>;
 }): React.JSX.Element {
-  const { open: menuOpen, setOpen: setMenuOpen, containerRef: actionsRef } = useDismissableMenu();
   const [speaking, setSpeaking] = useState(false);
   const stopSpeechRef = useRef<() => void>(undefined);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<{ direction: "up" | "down"; style: CSSProperties }>();
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const usageItemRef = useRef<HTMLButtonElement>(null);
+  const [usagePopover, setUsagePopover] = useState<{ top: number; left: number }>();
+  const usageHideTimerRef = useRef<number | undefined>(undefined);
+  const [copiedKind, setCopiedKind] = useState<"markdown" | "plain">();
 
-  // 组件卸载（切会话、消息被折叠）时朗读要跟着停，否则声音会一直放到读完。
-  useEffect(() => () => stopSpeechRef.current?.(), []);
+  const usageRows = buildUsageDetailRows(usage, metrics ?? {});
+  const tone = finishReason ? finishReasonTone(finishReason) : undefined;
+
+  // 组件卸载（切会话、消息被折叠）时朗读与悬浮卡定时器都要跟着停。
+  useEffect(() => () => {
+    stopSpeechRef.current?.();
+    if (usageHideTimerRef.current !== undefined) window.clearTimeout(usageHideTimerRef.current);
+  }, []);
 
   const toggleSpeech = (): void => {
     if (speaking) {
@@ -555,34 +745,196 @@ function AssistantActions({ content, timestamp, metrics, runMs, onCreateBranch, 
     stopSpeechRef.current = speak(plainTextFromMarkdown(content), () => setSpeaking(false));
   };
 
-  const closeMenu = (): void => setMenuOpen(false);
-  const clock = timestamp ? (
-    <MessageClock
-      llmMs={metrics?.llmMs}
-      runMs={runMs}
-      time={Date.parse(timestamp)}
-      tokensPerSecond={metrics?.tokensPerSecond}
-      ttftMs={metrics?.ttftMs}
-    />
-  ) : null;
+  const closeMenu = useCallback((): void => setMenuOpen(false), []);
+
+  // 打开菜单时按更多按钮的视口位置算 fixed 坐标：下方放不下就向上弹。
+  const toggleMenu = (): void => {
+    if (menuOpen) {
+      setMenuOpen(false);
+      return;
+    }
+    const anchor = moreButtonRef.current?.getBoundingClientRect();
+    if (!anchor) {
+      setMenuOpen(true);
+      return;
+    }
+    const gap = 6;
+    const menuWidth = 208;
+    const itemCount = 3 + (usageRows.length ? 1 : 0) + (finishReason ? 1 : 0) + ((usageRows.length || finishReason) ? 1 : 0);
+    const estimatedHeight = itemCount * 32 + 12;
+    const spaceBelow = window.innerHeight - anchor.bottom - gap;
+    const direction = spaceBelow >= estimatedHeight || spaceBelow >= anchor.top - gap ? "down" : "up";
+    const left = Math.max(8, Math.min(anchor.left, window.innerWidth - menuWidth - 8));
+    setMenuPosition(direction === "down"
+      ? { direction, style: { left, top: anchor.bottom + gap } }
+      : { direction, style: { left, bottom: window.innerHeight - anchor.top + gap } });
+    setMenuOpen(true);
+  };
+
+  // 点击菜单/按钮外部、Esc、滚动或缩放窗口时收起（portal 不在 DOM 树内，外部判断要显式做）。
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target as Node;
+      if (moreButtonRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    const dismiss = (): void => setMenuOpen(false);
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("resize", dismiss);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("resize", dismiss);
+    };
+  }, [menuOpen]);
+
+  const cancelUsageHide = useCallback((): void => {
+    if (usageHideTimerRef.current === undefined) return;
+    window.clearTimeout(usageHideTimerRef.current);
+    usageHideTimerRef.current = undefined;
+  }, []);
+
+  const scheduleUsageHide = useCallback((): void => {
+    cancelUsageHide();
+    usageHideTimerRef.current = window.setTimeout(() => {
+      usageHideTimerRef.current = undefined;
+      setUsagePopover(undefined);
+    }, 80);
+  }, [cancelUsageHide]);
+
+  // 用量悬浮卡贴用量菜单项右侧（放不下换左侧），垂直方向与条目居中对齐。
+  const showUsagePopover = useCallback((): void => {
+    if (!usageRows.length) return;
+    cancelUsageHide();
+    const anchor = usageItemRef.current?.getBoundingClientRect();
+    if (!anchor) return;
+    const gap = 10;
+    const width = 240;
+    let left = anchor.right + gap + width <= window.innerWidth ? anchor.right + gap : anchor.left - gap - width;
+    left = Math.min(Math.max(gap, left), Math.max(gap, window.innerWidth - width - gap));
+    const top = Math.min(Math.max(anchor.top + anchor.height / 2, gap), window.innerHeight - gap);
+    setUsagePopover({ top, left });
+  }, [usageRows.length, cancelUsageHide]);
+
+  // 菜单收起时悬浮卡与复制成功态一并复位。
+  useEffect(() => {
+    if (menuOpen) return;
+    cancelUsageHide();
+    setUsagePopover(undefined);
+    setCopiedKind(undefined);
+  }, [menuOpen, cancelUsageHide]);
+
+  const copyAs = (kind: "markdown" | "plain"): void => {
+    copyText(kind === "markdown" ? content : plainTextFromMarkdown(content));
+    setCopiedKind(kind);
+    window.setTimeout(() => {
+      setCopiedKind(undefined);
+      setMenuOpen(false);
+    }, 800);
+  };
+
+  const durationText = useMemo(() => {
+    const parts: string[] = [];
+    if (timestamp) {
+      parts.push(formatMessageClock(Date.parse(timestamp)));
+    }
+    if (runMs !== undefined) {
+      parts.push(`Worked for ${formatRunDuration(runMs)}`);
+    } else if (metrics?.llmMs !== undefined) {
+      parts.push(`LLM ${formatDuration(metrics.llmMs)}`);
+    }
+    return parts.join(" · ");
+  }, [runMs, metrics, timestamp]);
+  const hasInfoSection = usageRows.length > 0 || Boolean(finishReason);
   return (
-    <div className={`assistant-actions${menuOpen ? " is-open" : ""}`} data-time-hover-root ref={actionsRef}>
-      <CopyButton className="assistant-action" label="复制回复" size={16} value={content} />
-      {speechSupported() ? (
-        <button aria-label={speaking ? "停止朗读" : "朗读回复"} className={`assistant-action${speaking ? " is-active" : ""}`} onClick={toggleSpeech} title={speaking ? "停止朗读" : "朗读回复"} type="button"><Icon name={speaking ? "volume-off" : "volume"} size={16} /></button>
-      ) : null}
-      {onRegenerate ? (
-        <button aria-label="重新生成" className="assistant-action" onClick={onRegenerate} title="重新生成" type="button"><Icon name="refresh" size={16} /></button>
-      ) : null}
-      <button aria-expanded={menuOpen} aria-haspopup="menu" aria-label="更多回复操作" className="assistant-action" onClick={() => setMenuOpen(!menuOpen)} title="更多" type="button"><Icon name="more" size={16} /></button>
-      {menuOpen ? (
-        <div className="assistant-message-menu" role="menu">
-          <button className="message-menu-item" onClick={() => { copyText(content); closeMenu(); }} role="menuitem" type="button"><Icon name="copy" size={14} /><span>复制为 Markdown</span></button>
-          <button className="message-menu-item" onClick={() => { copyText(plainTextFromMarkdown(content)); closeMenu(); }} role="menuitem" type="button"><Icon name="copy" size={14} /><span>复制为纯文本</span></button>
+    <div className={`assistant-actions${menuOpen ? " is-open" : ""}`}>
+      <div className="assistant-actions-duration">
+        <Icon name="activity" size={14} />
+        <span>{durationText}</span>
+      </div>
+      <div className="assistant-actions-buttons">
+        <CopyButton className="assistant-action" label="复制回复" size={16} value={content} />
+        {speechSupported() ? (
+          <button aria-label={speaking ? "停止朗读" : "朗读回复"} className={`assistant-action${speaking ? " is-active" : ""}`} onClick={toggleSpeech} title={speaking ? "停止朗读" : "朗读回复"} type="button"><Icon name={speaking ? "volume-off" : "volume"} size={16} /></button>
+        ) : null}
+        {onRegenerate ? (
+          <button aria-label="重新生成" className="assistant-action" onClick={() => { void onRegenerate(); }} title="重新生成" type="button"><Icon name="refresh" size={16} /></button>
+        ) : null}
+        <button aria-expanded={menuOpen} aria-haspopup="menu" aria-label="更多回复操作" className="assistant-action" onClick={toggleMenu} ref={moreButtonRef} title="更多" type="button"><Icon name="more" size={16} /></button>
+      </div>
+      {menuOpen && menuPosition ? createPortal(
+        <div
+          className="assistant-menu"
+          data-direction={menuPosition.direction}
+          onClick={(event) => event.stopPropagation()}
+          ref={menuRef}
+          role="menu"
+          style={menuPosition.style}
+        >
+          {hasInfoSection ? (
+            <>
+              {usageRows.length ? (
+                <button
+                  className="message-menu-item"
+                  onBlur={scheduleUsageHide}
+                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                  onFocus={showUsagePopover}
+                  onMouseEnter={showUsagePopover}
+                  onMouseLeave={scheduleUsageHide}
+                  ref={usageItemRef}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="info" size={14} /><span>用量</span>
+                </button>
+              ) : null}
+              {finishReason && tone ? (
+                <div className="message-menu-item is-static" role="menuitem">
+                  <span aria-hidden="true" className={`finish-reason-dot is-${tone}`} />
+                  <span className="finish-reason-label">Turn 结束原因</span>
+                  <span className="finish-reason-value">{finishReason}</span>
+                </div>
+              ) : null}
+              <div className="message-menu-separator" />
+            </>
+          ) : null}
+          <button className={`message-menu-item${copiedKind === "markdown" ? " is-success" : ""}`} onClick={() => copyAs("markdown")} role="menuitem" type="button">
+            <Icon name={copiedKind === "markdown" ? "check" : "copy"} size={14} /><span>复制为 Markdown</span>
+          </button>
+          <button className={`message-menu-item${copiedKind === "plain" ? " is-success" : ""}`} onClick={() => copyAs("plain")} role="menuitem" type="button">
+            <Icon name={copiedKind === "plain" ? "check" : "copy"} size={14} /><span>复制为纯文本</span>
+          </button>
           <button className="message-menu-item" onClick={() => { onCreateBranch(); closeMenu(); }} role="menuitem" type="button"><Icon name="branch" size={14} /><span>创建分支</span></button>
-        </div>
+        </div>,
+        document.body
       ) : null}
-      {clock}
+      {usagePopover && usageRows.length ? createPortal(
+        <div
+          className="usage-detail-popover"
+          onMouseEnter={cancelUsageHide}
+          onMouseLeave={scheduleUsageHide}
+          role="status"
+          style={{ top: usagePopover.top, left: usagePopover.left }}
+        >
+          <div className="usage-detail-title">用量</div>
+          <div className="usage-detail-rows">
+            {usageRows.map((row) => (
+              <div className="usage-detail-row" key={row.key}>
+                <span className="usage-detail-label">{row.label}</span>
+                <span className="usage-detail-value">{row.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>,
+        document.body
+      ) : null}
     </div>
   );
 }

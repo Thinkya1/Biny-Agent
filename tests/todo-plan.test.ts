@@ -15,6 +15,7 @@ async function main(): Promise<void> {
     await testSurvivesReload(workspaceRoot);
     await testSwitchesSessionTruthSource(workspaceRoot);
     await testToolRoundTrip(workspaceRoot);
+    await testConcurrentPersistWritesCompleteFile(workspaceRoot);
     console.log("todo plan tests passed");
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
@@ -114,6 +115,29 @@ async function testToolRoundTrip(workspaceRoot: string): Promise<void> {
   assert.equal(result.remaining, 1);
   assert.equal(result.todos.length, 2);
   assert.equal(store.promptSection()?.includes("step two"), true);
+}
+
+/** 并发 persist 共用固定临时名会互相截断；随机临时名下落盘的必须是一份完整清单。 */
+async function testConcurrentPersistWritesCompleteFile(workspaceRoot: string): Promise<void> {
+  const store = new TodoStore(workspaceRoot, "plan-concurrent");
+  await store.initialize();
+  await Promise.all([
+    store.replace([{ content: "first version", status: "pending" }]),
+    store.replace([{ content: "second version", status: "completed" }])
+  ]);
+
+  const reloaded = new TodoStore(workspaceRoot, "plan-concurrent");
+  await reloaded.initialize();
+  const items = reloaded.list();
+  assert.equal(items.length, 1);
+  const item = items[0];
+  assert.ok(item);
+  assert.equal(
+    item.content === "first version" && item.status === "pending"
+      || item.content === "second version" && item.status === "completed",
+    true,
+    "the persisted plan must be one complete version, not an interleaved mix"
+  );
 }
 
 await main();

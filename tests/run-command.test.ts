@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { defaultConfig } from "../src/config/schema.js";
 import type { AgentConfigStore } from "../src/config/store.js";
 import { applyRunConfig, createRunConfigStore, validateRunOptions } from "../src/cli/commands/run.js";
+import { appendCapped } from "../src/tools/shell/runCommand.js";
 
 const config = structuredClone(defaultConfig);
 const overridden = applyRunConfig(config, {
@@ -31,8 +32,24 @@ assert.throws(
 );
 
 await testRunConfigStoreKeepsOverridesEphemeral();
+testShellOutputCapTrimsByBytes();
 
 console.log("run command tests passed");
+
+function testShellOutputCapTrimsByBytes(): void {
+  const maxOutputBytes = 1024 * 1024;
+  // 输出上限按字节计：多字节字符超限截断时不能按字符数删（会成倍多删），也不能切断半个 UTF-8 序列。
+  const chunk = "字".repeat(400_000); // 1_200_000 字节，超出 1 MiB 上限
+  const capped = appendCapped("", chunk);
+  const keptCharacters = Math.floor(maxOutputBytes / 3);
+  assert.equal(Buffer.byteLength(capped, "utf8"), keptCharacters * 3);
+  assert.equal(capped, chunk.slice(chunk.length - keptCharacters));
+  assert.equal(capped.includes("\uFFFD"), false);
+
+  const ascii = appendCapped("a".repeat(maxOutputBytes), "b".repeat(100));
+  assert.equal(Buffer.byteLength(ascii, "utf8"), maxOutputBytes);
+  assert.equal(ascii, `${"a".repeat(maxOutputBytes - 100)}${"b".repeat(100)}`);
+}
 
 async function testRunConfigStoreKeepsOverridesEphemeral(): Promise<void> {
   let persisted = structuredClone(defaultConfig);

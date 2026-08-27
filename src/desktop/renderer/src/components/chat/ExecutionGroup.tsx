@@ -12,10 +12,11 @@ import { memo, useMemo, useState } from "react";
 import type { PermissionResult } from "../../../../../permission/PermissionManager.js";
 import { classifyTool, VARIANT_ICON_NAMES } from "../../chatModel.js";
 import { reasoningDetailText } from "../../reasoningPresentation.js";
-import type { TimelineReasoningStep, TimelineToolStep } from "../../sessionTimeline.js";
+import type { TimelineReasoningStep, TimelineTool, TimelineToolStep } from "../../sessionTimeline.js";
 import { Icon } from "../Icon.js";
 import { ToolActivity } from "../ToolActivity.js";
 import { Collapse } from "./Collapse.js";
+import { editToolPath, isMergeableEdit, MergedFileEdits } from "./MergedFileEdits.js";
 
 /** 可进聚合组的步骤：工具调用，或思考相位。 */
 export type ExecutionGroupStep = TimelineToolStep | TimelineReasoningStep;
@@ -78,6 +79,8 @@ export const ExecutionGroup = memo(function ExecutionGroup({
   const allThinking = tools.length === 0;
   const overflowCount = Math.max(0, phases.length - MAX_AVATARS);
   const visiblePhases = overflowCount > 0 ? phases.slice(overflowCount) : phases;
+  // 时间线展开体：相邻同路径的 edit 合并成一行（相位头像仍一一对应，不参与合并）。
+  const railUnits = useMemo(() => buildRailUnits(phases), [phases]);
 
   return (
     <section className={`chat-activity${railOpen ? " is-open" : ""}`} data-running={isLive || undefined}>
@@ -146,13 +149,31 @@ export const ExecutionGroup = memo(function ExecutionGroup({
       </div>
       <Collapse open={railOpen}>
         <div className="chat-activity-rail">
-          {(openPhase ? [openPhase] : phases).map((phase) => (
+          {openPhase ? (
             <PhaseBody
-              key={phase.id}
+              key={openPhase.id}
               onOpenExternal={onOpenExternal}
               onPreviewFile={onPreviewFile}
               onResolvePermission={onResolvePermission}
-              phase={phase}
+              phase={openPhase}
+              projectId={projectId}
+              running={running}
+              showTitle={!isLive}
+            />
+          ) : railUnits.map((unit) => unit.kind === "merged" ? (
+            <MergedFileEdits
+              key={unit.key}
+              onPreviewFile={onPreviewFile}
+              projectId={projectId}
+              tools={unit.tools}
+            />
+          ) : (
+            <PhaseBody
+              key={unit.phase.id}
+              onOpenExternal={onOpenExternal}
+              onPreviewFile={onPreviewFile}
+              onResolvePermission={onResolvePermission}
+              phase={unit.phase}
               projectId={projectId}
               running={running}
               showTitle={!isLive}
@@ -163,6 +184,40 @@ export const ExecutionGroup = memo(function ExecutionGroup({
     </section>
   );
 });
+
+/** 时间线展开单元：单相位，或同文件连续编辑的合并行。 */
+type RailUnit =
+  | { kind: "single"; phase: ExecutionGroupStep }
+  | { kind: "merged"; key: string; tools: TimelineTool[] };
+
+/**
+ * 相邻 + 同路径 + 可合并（edit 带 diff、无权限卡）的工具相位收成合并行；
+ * 其余相位原样保留顺序。单个编辑不合并（仍是普通工具行）。
+ */
+function buildRailUnits(phases: ExecutionGroupStep[]): RailUnit[] {
+  const units: RailUnit[] = [];
+  let bucket: { phase: TimelineToolStep; path: string }[] = [];
+  const flush = (): void => {
+    if (bucket.length >= 2) {
+      units.push({ kind: "merged", key: bucket[0]!.phase.id, tools: bucket.map((entry) => entry.phase.tool) });
+    } else {
+      for (const entry of bucket) units.push({ kind: "single", phase: entry.phase });
+    }
+    bucket = [];
+  };
+  for (const phase of phases) {
+    const path = phase.kind === "tool" && isMergeableEdit(phase.tool) ? editToolPath(phase.tool) : undefined;
+    if (phase.kind === "tool" && path !== undefined) {
+      if (bucket.length > 0 && bucket[0]!.path !== path) flush();
+      bucket.push({ phase, path });
+    } else {
+      flush();
+      units.push({ kind: "single", phase });
+    }
+  }
+  flush();
+  return units;
+}
 
 /** 相位头像：24px 圆形按钮，叠放分隔；选中/活体有对应态。 */
 function PhaseAvatar({ phase, selected, active, onClick }: {

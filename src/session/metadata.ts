@@ -69,7 +69,6 @@ export interface SessionContextState {
   summary?: string;
   compactedMessages: number;
   lastCompactedAt?: string;
-  memoryTopics: string[];
   budget: SessionContextUsage;
   checkpoint?: SessionContextCheckpoint;
   /** 自定义指令正文不进入 JSONL；只保存不可逆 hash 与枚举/版本元数据。 */

@@ -11,6 +11,18 @@ import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from "undici";
 
 const nativeFetch = globalThis.fetch;
 
+let sharedProxyAwareFetch: typeof globalThis.fetch | undefined;
+
+/**
+ * 进程级共享的代理感知 fetch。首次调用时创建并解析一次环境/系统代理，
+ * 之后复用同一份 ProxyAgent 缓存——MCP 市场、技能仓库、插件注册表等
+ * 桌面服务都以它为默认 fetcher，避免 Node 原生 fetch 绕过系统代理。
+ */
+export function getSharedProxyAwareFetch(): typeof globalThis.fetch {
+  sharedProxyAwareFetch ??= createProxyAwareFetch();
+  return sharedProxyAwareFetch;
+}
+
 export interface ProxyFetchOptions {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;

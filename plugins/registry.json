@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "plugins": [
+    {
+      "id": "timestamp-converter",
+      "name": "Timestamp Converter",
+      "version": "1.0.0",
+      "category": "tools",
+      "description": "Unix 时间戳（秒/毫秒自动识别）与人类可读日期时间互转，附带星期与时区偏移。纯计算、零依赖。",
+      "details": "注册 plugin_timestamp_convert 工具：传入 Unix 时间戳或日期时间字符串，输出 ISO 8601、本地时间、星期、秒/毫秒时间戳与时区偏移。\n\n这是 Biny 官方示例插件，演示插件的目录式安装与工具注册链路。",
+      "author": { "name": "Biny" },
+      "tags": ["time", "utility"],
+      "repository": "https://github.com/Thinkya1/Biny",
+      "path": "plugins/timestamp-converter",
+      "files": ["index.mjs"],
+      "entry": "index.mjs",
+      "featured": true
+    }
+  ]
+}

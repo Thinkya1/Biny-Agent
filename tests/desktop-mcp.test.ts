@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { defaultConfig } from "../src/config/schema.js";
 import type { AgentConfigStore } from "../src/config/store.js";
 import { DesktopMcpService } from "../src/desktop/electron/main/DesktopMcpService.js";
+import { parseArguments, parseClipboardConfig, toFieldMutations } from "../src/desktop/renderer/src/mcpFormDraft.js";
 
 const configStore = {
   loadVersioned: async () => ({ config: structuredClone(defaultConfig), revision: "sha256:test" })
@@ -70,5 +71,38 @@ assert.equal(state.entries[0]?.installations[0]?.transport, "stdio");
 assert.equal(state.entries[0]?.installations[0]?.parameters[0]?.key, "ROOT");
 assert.equal(state.entries[1]?.installations[0]?.transport, "remote");
 assert.equal(state.entries[1]?.installations[0]?.remoteProtocol, "sse");
+
+// 编辑对话框的参数按行各为一个参数：含空格的路径打开-保存一轮后必须原样保留。
+assert.deepEqual(parseArguments("-y\n/Users/me/My Documents"), ["-y", "/Users/me/My Documents"]);
+assert.deepEqual(parseArguments("\n -y \n\nfilesystem-mcp \n"), ["-y", "filesystem-mcp"]);
+// 单行输入保留空格分隔的兼容行为。
+assert.deepEqual(parseArguments("-y filesystem-mcp"), ["-y", "filesystem-mcp"]);
+assert.deepEqual(parseArguments(""), []);
+assert.deepEqual(parseArguments("   \n\n"), []);
+
+// 被删除或改名的持久化 env/headers key 必须显式 clear，否则主进程会保留旧值。
+assert.deepEqual(toFieldMutations([], ["OLD_KEY"]), [{ key: "OLD_KEY", action: "clear" }]);
+assert.deepEqual(
+  toFieldMutations([{ key: "KEEP", value: "", action: "keep" }], ["KEEP", "GONE"]),
+  [{ key: "KEEP", action: "keep" }, { key: "GONE", action: "clear" }]
+);
+assert.deepEqual(
+  toFieldMutations([{ key: "RENAMED", value: "v", action: "set" }], ["OLD"]),
+  [{ key: "RENAMED", action: "set", value: "v" }, { key: "OLD", action: "clear" }]
+);
+// 同名 key 重新填值时只发 set，不能同时出现 clear。
+assert.deepEqual(
+  toFieldMutations([{ key: "KEY", value: "v2", action: "set" }], ["KEY"]),
+  [{ key: "KEY", action: "set", value: "v2" }]
+);
+
+// 剪贴板导入兼容 Claude Desktop / Cursor 的 "type": "sse" 写法。
+const sseByType = parseClipboardConfig({ mcpServers: { remote: { type: "sse", url: "https://example.com/mcp" } } });
+assert.equal(sseByType?.transport, "remote");
+assert.equal(sseByType?.remoteProtocol, "sse");
+const sseByTransportProtocol = parseClipboardConfig({ mcpServers: { remote: { transportProtocol: "sse", url: "https://example.com/mcp" } } });
+assert.equal(sseByTransportProtocol?.remoteProtocol, "sse");
+const plainRemote = parseClipboardConfig({ mcpServers: { remote: { url: "https://example.com/mcp" } } });
+assert.equal(plainRemote?.remoteProtocol, "streamable-http");
 
 console.log("desktop MCP service tests passed");

@@ -20,9 +20,18 @@ import {
   type SaveDialogOptions
 } from "electron";
 import { z } from "zod";
-import { activitySettingsInputSchema } from "../../../activity/settings.js";
-import { modelApiBackendSchema, modelCompatibilitySchema, modelLimitsSchema, modelProviderSchema, providerProtocolSchema, reasoningEffortSchema } from "../../../config/schema.js";
-import { memoryPolicySchema } from "../../../personalization/index.js";
+import {
+  chatPersonalizationSchema,
+  configRevisionSchema,
+  fontPreferenceSchema,
+  idSchema,
+  memorySettingsSchema,
+  modelConfigurationSchema,
+  personalizationSettingsSchema,
+  settingsSaveInputSchema,
+  themePreferenceSchema,
+  thinkingSchema
+} from "./settingsSaveInputSchema.js";
 import { clampFontSize } from "../../fontPreference.js";
 import type { DesktopActiveView, DesktopBootstrap, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopSystemSettingsPane, DesktopThemePreference } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
@@ -36,6 +45,7 @@ import { DesktopStateStore } from "./DesktopStateStore.js";
 import { DesktopSettingsTransaction } from "./DesktopSettingsTransaction.js";
 import { DesktopTerminalManager } from "./DesktopTerminalManager.js";
 import { runtimeMutationStartsWork } from "./settingsRuntimeGate.js";
+import { exportSessionBundle, exportSessionClaudeCode } from "../../../session/transfer.js";
 
 interface IpcContext {
   state: DesktopStateStore;
@@ -55,13 +65,12 @@ interface IpcContext {
 
 // 以下 schema 是渲染层参数的唯一入口校验，上限值都刻意给得比正常用法宽松，
 // 只用于挡住异常大的输入，不承担业务规则校验。
-const idSchema = z.string().min(1).max(240);
 const promptSchema = z.string().min(1).max(1_000_000);
 const userMessageIndexSchema = z.number().int().nonnegative();
 const titleSchema = z.string().trim().min(1).max(120);
 const branchNameSchema = z.string().trim().min(1).max(255);
 const revisionSchema = z.string().max(200).optional();
-const configRevisionSchema = z.string().min(1).max(200);
+const idempotencyKeySchema = z.string().trim().min(1).max(240).optional();
 const sessionTreePageOptionsSchema = z.object({
   parentSessionId: idSchema.optional(),
   cursor: z.string().max(4_000).optional(),
@@ -76,41 +85,12 @@ const terminalDataSchema = z.string().max(1_000_000);
 const activityQuerySchema = z.string().trim().max(500);
 const activityLimitSchema = z.number().int().min(1).max(100).optional();
 const activityReportDateSchema = z.string().trim().min(1).max(40).optional();
-const thinkingSchema = z.union([z.literal("off"), reasoningEffortSchema]);
 const modelLoginProviderSchema = z.enum(["claude-code", "openai-codex"]);
 const settingsCredentialScopeSchema = z.object({
   projectId: idSchema,
   purpose: z.enum(["model", "web-search"]),
   providerAlias: idSchema
 }).strict();
-const modelConfigurationSchema = z.object({
-  alias: idSchema,
-  displayName: z.string().trim().min(1).max(120),
-  providerAlias: idSchema,
-  providerType: modelProviderSchema,
-  protocol: providerProtocolSchema.optional(),
-  model: z.string().trim().min(1).max(240),
-  baseUrl: z.string().url().optional(),
-  apiKey: z.string().min(1).max(4_000).optional(),
-  apiKeyHandle: z.string().uuid().optional(),
-  apiKeyEnv: z.string().trim().min(1).max(120).optional(),
-  requiresApiKey: z.boolean().optional(),
-  supportsTools: z.boolean(),
-  supportsThinking: z.boolean().optional(),
-  parallelToolCalls: z.boolean().optional(),
-  reasoningStream: z.boolean().optional(),
-  reasoningSummary: z.boolean().optional(),
-  supportsVision: z.boolean().optional(),
-  supportsAudio: z.boolean().optional(),
-  contextWindow: z.number().int().min(4_096).max(2_000_000).optional(),
-  maxInputTokens: z.number().int().min(2_048).max(2_000_000).optional(),
-  maxOutputTokens: z.number().int().min(1).max(384_000).optional(),
-  limits: modelLimitsSchema.optional(),
-  apiBackend: modelApiBackendSchema.optional(),
-  thinkingLevelMap: z.record(z.string().min(1), z.string().min(1).nullable()).optional(),
-  compatibility: modelCompatibilitySchema.optional(),
-  makeDefault: z.boolean().optional()
-});
 const runModeSchema = z.enum(["chat", "plan"]);
 const permissionResultSchema = z.object({
   approved: z.boolean(),
@@ -130,41 +110,8 @@ const externalUrlSchema = z.string().url().refine((value) => {
   const protocol = new URL(value).protocol;
   return protocol === "https:" || protocol === "http:";
 }, "Only HTTP(S) links can be opened externally.");
-const webSearchSettingsSchema = z.object({
-  enabled: z.boolean(),
-  provider: z.enum(["duckduckgo", "google", "tavily", "brave", "anysearch"]),
-  apiKey: z.string().max(4_000).optional(),
-  apiKeyHandle: z.string().uuid().optional(),
-  apiKeyEnv: z.string().trim().min(1).max(120).optional(),
-  timeoutMs: z.number().int().min(1_000).max(60_000),
-  maxResults: z.number().int().min(1).max(10)
-});
-const personalitySchema = z.enum(["none", "friendly", "pragmatic", "buddy"]);
-const customInstructionsSchema = z.string().refine(
-  (value) => Buffer.byteLength(value, "utf8") <= 4_096,
-  "Custom instructions must not exceed 4 KiB."
-);
-const chatPersonalizationSchema = z.object({
-  personality: z.union([z.literal("inherit"), personalitySchema]),
-  customInstructions: z.object({
-    mode: z.enum(["inherit", "replace", "disabled"]),
-    value: customInstructionsSchema.optional()
-  }).strict(),
-  useMemories: z.union([z.literal("inherit"), z.boolean()]),
-  contributeMemories: z.union([z.literal("inherit"), z.boolean()])
-}).strict();
 const memoryOriginFilterSchema = z.enum(["all", "current_workspace", "user", "other_workspaces"]);
 const memoryAudienceSchema = z.enum(["workspace", "universal"]);
-const memorySettingsSchema = memoryPolicySchema;
-const personalizationSettingsSchema = z.object({
-  expectedRevision: configRevisionSchema,
-  settings: z.object({
-    enabled: z.boolean(),
-    personality: personalitySchema,
-    customInstructions: customInstructionsSchema
-  }).strict(),
-  memory: memorySettingsSchema
-}).strict();
 const memoryTopicSchema = z.string().trim().min(1).max(64);
 const memoryTitleSchema = z.string().trim().min(1).max(120);
 const memorySummarySchema = z.string().trim().min(1).max(4_000);
@@ -194,44 +141,9 @@ const telosDocumentInputSchema = z.object({
 const telosPatternActionSchema = z.enum(["confirm", "reject", "expire"]);
 const telosDriftActionSchema = z.enum(["adjust_telos", "adjust_behavior", "dismiss", "resolve"]);
 const telosDateSchema = z.string().datetime();
-const localEmbeddingModelSchema = z.enum(["multilingual-e5-small", "paraphrase-multilingual-MiniLM-L12-v2"]);
 const memorySettingsInputSchema = z.object({
   expectedRevision: configRevisionSchema,
   settings: memorySettingsSchema
-}).strict();
-const themePreferenceSchema = z.enum(["system", "light", "dark"]);
-const fontPreferenceSchema = z.object({
-  family: z.string().min(1).max(100),
-  size: z.number().finite()
-}).strict();
-const settingsSaveInputSchema = z.object({
-  expectedPreferenceRevision: z.number().int().nonnegative(),
-  expectedConfigRevision: configRevisionSchema,
-  themePreference: themePreferenceSchema.optional(),
-  fontPreference: fontPreferenceSchema.optional(),
-  personalization: personalizationSettingsSchema.shape.settings.optional(),
-  activity: activitySettingsInputSchema.optional(),
-  memory: memorySettingsSchema.optional(),
-  webSearch: webSearchSettingsSchema.optional(),
-  models: z.object({
-    upserts: z.array(modelConfigurationSchema).max(200),
-    removeAliases: z.array(idSchema).max(200),
-    defaultModel: z.object({ alias: idSchema, thinking: thinkingSchema }).strict().optional(),
-    oauthCredentialHandles: z.array(z.string().uuid()).max(20).optional()
-  }).strict().optional(),
-  skills: z.object({
-    globalDefaults: z.record(z.boolean()).refine((value) => Object.keys(value).length <= 512, "技能全局开关不能超过 512 项。"),
-    projectOverrides: z.record(z.boolean()).refine((value) => Object.keys(value).length <= 512, "技能项目开关不能超过 512 项。"),
-    extraction: z.object({
-      enabled: z.boolean(),
-      minToolCalls: z.number().int().min(1).max(64)
-    }).strict()
-  }).strict().optional(),
-  chat: z.object({
-    sessionId: idSchema,
-    expectedMetadataRevision: configRevisionSchema,
-    personalization: chatPersonalizationSchema
-  }).strict().optional()
 }).strict();
 const memoryEntryInputSchema = z.object({
   audience: memoryAudienceSchema,
@@ -434,6 +346,8 @@ export function registerDesktopIpc(context: IpcContext): void {
   handle(desktopIpc.openProjectTerminal, async (_event, projectId: unknown) => {
     const project = context.projects.requireProject(idSchema.parse(projectId));
     const child = spawn("/usr/bin/open", ["-a", "Terminal", project.path], { detached: true, stdio: "ignore" });
+    // spawn 失败（如系统命令缺失）会以 error 事件异步抛出，不兜底会变成主进程 uncaughtException。
+    child.on("error", () => undefined);
     child.unref();
   });
 
@@ -524,7 +438,48 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await showSessionMenu(context.getWindow(), z.boolean().parse(pinned), z.boolean().optional().default(false).parse(archived));
   });
 
-  handleRecoveryGated(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown, personalization: unknown) => {
+  handle(desktopIpc.exportSession, async (_event, projectId: unknown, sessionId: unknown, format: unknown) => {
+    const parsedProjectId = idSchema.parse(projectId);
+    const parsedSessionId = idSchema.parse(sessionId);
+    const exportFormat = z.enum(["biny", "claude"]).parse(format);
+    const project = context.projects.requireProject(parsedProjectId);
+    const dataRoot = await context.projects.dataRoot(project);
+    // 先在主进程拿到导出内容，用内容里的会话 id 给保存对话框一个可读、不重复的默认文件名。
+    const exported = exportFormat === "claude"
+      ? await exportSessionClaudeCode(dataRoot, parsedSessionId)
+      : await exportSessionBundle(dataRoot, parsedSessionId);
+    const defaultFileName = exportFormat === "claude" ? `${exported.baseName}.claude.jsonl` : `${exported.baseName}.biny.json`;
+    const options: SaveDialogOptions = {
+      title: exportFormat === "claude" ? "导出为 Claude Code 会话" : "导出会话包",
+      defaultPath: defaultFileName,
+      filters: exportFormat === "claude"
+        ? [{ name: "Claude Code 会话", extensions: ["jsonl"] }]
+        : [{ name: "Biny 会话包", extensions: ["json"] }]
+    };
+    const window = context.getWindow();
+    const result = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return await context.agents.workspaceSnapshot(parsedProjectId);
+    return await context.agents.exportSession(parsedProjectId, parsedSessionId, exportFormat, result.filePath);
+  });
+
+  handle(desktopIpc.importSession, async (_event, projectId: unknown) => {
+    const parsedProjectId = idSchema.parse(projectId);
+    const options: OpenDialogOptions = {
+      title: "导入会话",
+      filters: [
+        { name: "会话文件 (Biny / Claude Code / Codex)", extensions: ["json", "jsonl"] },
+        { name: "全部文件", extensions: ["*"] }
+      ],
+      properties: ["openFile"]
+    };
+    const window = context.getWindow();
+    const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+    const sourcePath = result.filePaths[0];
+    if (result.canceled || !sourcePath) return await context.agents.workspaceSnapshot(parsedProjectId);
+    return await context.agents.importSession(parsedProjectId, sourcePath);
+  });
+
+  handleRecoveryGated(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown, personalization: unknown, idempotencyKey: unknown) => {
     return await context.agents.sendPrompt(
       idSchema.parse(projectId),
       sessionId === undefined ? undefined : idSchema.parse(sessionId),
@@ -532,7 +487,8 @@ export function registerDesktopIpc(context: IpcContext): void {
       runModeSchema.parse(mode),
       z.array(attachmentSchema).max(20).parse(attachments),
       z.enum(["steer", "followUp"]).optional().parse(delivery),
-      chatPersonalizationSchema.optional().parse(personalization)
+      chatPersonalizationSchema.optional().parse(personalization),
+      idempotencyKeySchema.parse(idempotencyKey)
     );
   });
 
@@ -540,14 +496,15 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.resumeInterruptedTurn(idSchema.parse(projectId), idSchema.parse(sessionId));
   });
 
-  handleRecoveryGated(desktopIpc.editPrompt, async (_event, projectId: unknown, sessionId: unknown, userMessageIndex: unknown, input: unknown, mode: unknown, attachments: unknown) => {
+  handleRecoveryGated(desktopIpc.editPrompt, async (_event, projectId: unknown, sessionId: unknown, userMessageIndex: unknown, input: unknown, mode: unknown, attachments: unknown, idempotencyKey: unknown) => {
     return await context.agents.editPrompt(
       idSchema.parse(projectId),
       idSchema.parse(sessionId),
       userMessageIndexSchema.parse(userMessageIndex),
       promptSchema.parse(input),
       runModeSchema.parse(mode),
-      z.array(attachmentSchema).max(20).parse(attachments)
+      z.array(attachmentSchema).max(20).parse(attachments),
+      idempotencyKeySchema.parse(idempotencyKey)
     );
   });
 
@@ -731,9 +688,10 @@ export function registerDesktopIpc(context: IpcContext): void {
     const preference = result.snapshot?.themePreference;
     if (preference !== undefined) {
       applyNativeThemePreference(preference);
-      // macOS 窗口底色是 vibrancy 材质，不透明背景会把它盖掉；材质本身会随主题自动变化。
       const window = context.getWindow();
-      if (window && !window.isDestroyed() && process.platform !== "darwin") window.setBackgroundColor(themeBackgroundColor(preference));
+      if (window && !window.isDestroyed()) {
+        window.setBackgroundColor(process.platform === "darwin" ? "#00000000" : themeBackgroundColor(preference));
+      }
     }
     return result;
   });
@@ -864,38 +822,6 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handleRecoveryGated(desktopIpc.memoryEmbeddingStatus, async (_event, projectId: unknown) => {
-    return await context.agents.memoryEmbeddingStatus(idSchema.parse(projectId));
-  });
-
-  handleRecoveryGated(desktopIpc.downloadMemoryEmbeddingModel, async (_event, projectId: unknown, model: unknown) => {
-    return await context.agents.downloadMemoryEmbeddingModel(
-      idSchema.parse(projectId),
-      localEmbeddingModelSchema.parse(model)
-    );
-  });
-
-  handleRecoveryGated(desktopIpc.cancelMemoryEmbeddingDownload, async (_event, projectId: unknown, model: unknown) => {
-    return await context.agents.cancelMemoryEmbeddingDownload(
-      idSchema.parse(projectId),
-      localEmbeddingModelSchema.parse(model)
-    );
-  });
-
-  handleRecoveryGated(desktopIpc.deleteMemoryEmbeddingModel, async (_event, projectId: unknown, model: unknown) => {
-    return await context.agents.deleteMemoryEmbeddingModel(
-      idSchema.parse(projectId),
-      localEmbeddingModelSchema.parse(model)
-    );
-  });
-
-  handleRecoveryGated(desktopIpc.rebuildMemoryEmbeddingIndex, async (_event, projectId: unknown) => {
-    return await context.agents.rebuildMemoryEmbeddingIndex(idSchema.parse(projectId));
-  });
-
-  handleRecoveryGated(desktopIpc.cancelMemoryEmbeddingRebuild, async (_event, projectId: unknown) => {
-    return await context.agents.cancelMemoryEmbeddingRebuild(idSchema.parse(projectId));
-  });
 
   handle(desktopIpc.saveAttachment, async (_event, projectId: unknown, name: unknown, mimeType: unknown, bytes: unknown) => {
     if (!ArrayBuffer.isView(bytes) || bytes.byteLength > 50 * 1024 * 1024) throw new Error("Attachment is invalid or larger than 50 MB.");
@@ -1094,10 +1020,9 @@ export function registerDesktopIpc(context: IpcContext): void {
     const preference = themePreferenceSchema.parse(theme);
     await context.state.setThemePreference(preference);
     applyNativeThemePreference(preference);
-    // macOS 窗口底色是 vibrancy 材质，不透明背景会把它盖掉；材质本身会随主题自动变化。
     const window = context.getWindow();
-    if (window && !window.isDestroyed() && process.platform !== "darwin") {
-      window.setBackgroundColor(themeBackgroundColor(preference));
+    if (window && !window.isDestroyed()) {
+      window.setBackgroundColor(process.platform === "darwin" ? "#00000000" : themeBackgroundColor(preference));
     }
     return preference;
   });
@@ -1143,6 +1068,9 @@ async function showSessionMenu(window: BrowserWindow | undefined, pinned: boolea
       { label: pinned ? "取消置顶" : "置顶", click: () => choose(pinned ? "unpin" : "pin") },
       { label: archived ? "取消归档" : "归档", click: () => choose(archived ? "unarchive" : "archive") },
       { label: "复制会话", click: () => choose("duplicate") },
+      { type: "separator" },
+      { label: "导出会话包 (.json)…", click: () => choose("export-bundle") },
+      { label: "导出为 Claude Code (.jsonl)…", click: () => choose("export-claude") },
       { type: "separator" },
       { label: "删除", click: () => choose("delete") }
     ];

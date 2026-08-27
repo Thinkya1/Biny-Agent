@@ -230,6 +230,80 @@ export const providerCatalogOrder: Record<ProviderCategory, string[]> = {
 
 type ProviderOption = ProviderCatalogItem;
 
+/**
+ * 「API 格式」：用户面对的概念，一条格式 = 传输协议 + 具体适配器。
+ *
+ * 配置层把格式拆成两个字段持久化：provider 级 `protocol`（anthropic / openai-compatible，
+ * 决定鉴权头与 /models 目录端点）和模型级 `apiBackend`（四种 adapter 之一，决定实际请求
+ * 形状）。两者都从显式选择写出，不依赖运行时的隐式推断，这样改格式后重放行为是确定的。
+ */
+export type ApiFormatId = "chat_completions" | "responses" | "anthropic_messages" | "google_generative_ai";
+
+export interface ApiFormatOption {
+  id: ApiFormatId;
+  label: string;
+  description: string;
+  protocol: NonNullable<DesktopModelConfigurationInput["protocol"]>;
+  apiBackend: NonNullable<DesktopModelConfigurationInput["apiBackend"]>;
+  /** 自定义端点表单里的服务地址占位符。 */
+  baseUrlPlaceholder: string;
+  /** 该格式有公认的官方端点时给出默认值（Gemini）；中转场景仍以用户填写为准。 */
+  defaultBaseUrl?: string;
+}
+
+const chatCompletionsFormat: ApiFormatOption = {
+  id: "chat_completions",
+  label: "OpenAI Chat Completions",
+  description: "最常见的兼容格式，中转站与聚合服务默认支持",
+  protocol: "openai-compatible",
+  apiBackend: "chat_completions",
+  baseUrlPlaceholder: "https://api.example.com/v1"
+};
+
+export const apiFormatOptions: ApiFormatOption[] = [
+  chatCompletionsFormat,
+  {
+    id: "responses",
+    label: "OpenAI Responses",
+    description: "OpenAI 新一代接口，部分网关仅提供该格式",
+    protocol: "openai-compatible",
+    apiBackend: "responses",
+    baseUrlPlaceholder: "https://api.example.com/v1"
+  },
+  {
+    id: "anthropic_messages",
+    label: "Anthropic Messages",
+    description: "Claude 原生协议，Claude 中转站常用",
+    protocol: "anthropic",
+    apiBackend: "anthropic_messages",
+    baseUrlPlaceholder: "https://api.example.com"
+  },
+  {
+    id: "google_generative_ai",
+    label: "Google Gemini",
+    description: "Gemini 原生 generateContent 协议",
+    protocol: "openai-compatible",
+    apiBackend: "google_generative_ai",
+    baseUrlPlaceholder: "https://generativelanguage.googleapis.com/v1beta",
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta"
+  }
+];
+
+export function apiFormatOption(id: ApiFormatId): ApiFormatOption {
+  return apiFormatOptions.find((option) => option.id === id) ?? chatCompletionsFormat;
+}
+
+/**
+ * 把已保存连接的 (protocol, apiBackend) 折回格式 id 用于回显。apiBackend 优先——它是
+ * 实际决定请求形状的字段；老配置只有 protocol（anthropic）时也能正确折回。
+ */
+export function apiFormatForConnection(protocol?: string, apiBackend?: string): ApiFormatId {
+  if (apiBackend === "responses") return "responses";
+  if (apiBackend === "google_generative_ai") return "google_generative_ai";
+  if (apiBackend === "anthropic_messages" || protocol === "anthropic") return "anthropic_messages";
+  return "chat_completions";
+}
+
 export function providerAliasFor(option: ProviderOption, baseUrl: string): string {
   if (option.value !== "openai-compatible") return option.value;
   try {

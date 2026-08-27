@@ -9,6 +9,7 @@
  *
  * 这里只做数据整形，不含任何渲染逻辑，方便单独测试。
  */
+import { parseMemoryCitations, type MemoryCitation } from "../../../agent/context/memoryCitations.js";
 import type { ToolInputDisplay, ToolUpdate } from "../../../tools/types.js";
 import type { AgentPermissionEventRequest, AgentRunModel, AgentHostEvent } from "../../../runtime/agentEvents.js";
 import { activitySummaryText } from "../../../runtime/activitySummary.js";
@@ -138,6 +139,8 @@ function executionToolLabel(tool: string): string {
 export interface TimelineTurn {
   id: string;
   user: string;
+  /** 回答末尾引用的记忆条目（已从展示正文剥离）；来自 <memory-citations> 协议块。 */
+  memoryCitations?: MemoryCitation[];
   userMessageIndex?: number;
   assistant: string;
   reasoning: string;
@@ -164,6 +167,8 @@ export interface TimelineTurn {
   decodeMs?: number;
   /** 解码 token 数（usage.outputTokens），实时轮次在终态时计算。 */
   decodeTokens?: number;
+  /** Turn 结束原因（provider 原始 finishReason 优先，缺省用归一化 stopReason）；驱动消息菜单里的色点展示。 */
+  finishReason?: string;
 }
 
 export interface TimelineChangedFile {
@@ -274,9 +279,11 @@ function buildHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
     }
     if (event.type === "assistant_message") {
       const turn = ensureTurn(event.time);
-      turn.assistant = event.content || turn.assistant;
+      const parsed = event.content ? parseMemoryCitations(event.content) : undefined;
+      turn.memoryCitations = parsed?.citations.length ? parsed.citations : turn.memoryCitations;
+      turn.assistant = (parsed?.textWithoutBlock || event.content) || turn.assistant;
       appendHistoricalReasoning(turn, event.reasoningContent);
-      appendHistoricalAssistant(turn, event.content);
+      appendHistoricalAssistant(turn, parsed?.textWithoutBlock || event.content);
       turn.durationMs = elapsedMs(turn.timestamp, event.time) ?? turn.durationMs;
       turn.timestamp = event.time ?? turn.timestamp;
       turn.status = "completed";
@@ -296,6 +303,7 @@ function buildHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
       turn.status = event.status;
       turn.timestamp = event.time ?? turn.timestamp;
       turn.resumable = event.resumable;
+      turn.finishReason = event.finishReason ?? event.stopReason;
       turn.error = event.status === "completed"
         ? undefined
         : historicalTurnStatusSummary(event);
@@ -544,12 +552,16 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
       appendAssistant(turn, event.content);
     } else if (event.type === "assistant.completed") {
       finishReasoning(event.runId, event.timestamp);
+      // 实时路径也在展示层剥离引用块；usage 回写在 owner 侧回合结束时统一完成。
+      const parsed = event.content ? parseMemoryCitations(event.content) : undefined;
+      const strippedContent = parsed?.textWithoutBlock || event.content;
+      if (parsed?.citations.length) turn.memoryCitations = parsed.citations;
       const active = activeAssistant.get(event.runId);
       if (active) {
-        if (event.content) active.content = event.content;
+        if (strippedContent) active.content = strippedContent;
         activeAssistant.delete(event.runId);
-      } else if (event.content && latestAssistantContent(turn) !== event.content) {
-        appendAssistant(turn, event.content);
+      } else if (strippedContent && latestAssistantContent(turn) !== strippedContent) {
+        appendAssistant(turn, strippedContent);
         activeAssistant.delete(event.runId);
       }
       turn.timestamp = event.timestamp;
@@ -630,6 +642,7 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
       turn.usage = event.usage;
+      turn.finishReason = event.finishReason ?? event.stopReason;
       settleMetrics(turn);
     } else if (event.type === "run.blocked") {
       turn.status = "blocked";
@@ -641,6 +654,7 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
       turn.usage = event.usage;
+      turn.finishReason = event.finishReason ?? event.stopReason;
       for (const tool of turn.tools) {
         if (tool.status !== "running" && tool.status !== "waiting") continue;
         tool.status = "unknown";

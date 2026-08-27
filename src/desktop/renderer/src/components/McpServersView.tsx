@@ -9,19 +9,16 @@ import type {
   DesktopMcpCatalogEntry,
   DesktopMcpCatalogInstallation,
   DesktopMcpCatalogState,
-  DesktopMcpFieldAction,
-  DesktopMcpFieldMutation,
-  DesktopMcpRemoteProtocol,
   DesktopMcpResourceSummary,
   DesktopMcpServerDetails,
-  DesktopMcpServerDraft,
   DesktopMcpServerSummary,
   DesktopMcpSnapshot,
-  DesktopMcpTestResult,
-  DesktopMcpTransport
+  DesktopMcpTestResult
 } from "../../../protocol.js";
 import { errorMessage } from "../app/desktopApi.js";
+import { EMPTY_DRAFT, parameterValues, parseClipboardConfig, toProtocolDraft, type FieldRow, type McpDraftForm } from "../mcpFormDraft.js";
 import { Icon } from "./Icon.js";
+import { TopToast } from "./overlays/TopToast.js";
 
 type McpTab = "market" | "installed";
 
@@ -31,48 +28,10 @@ interface McpServersViewProps {
   onSuccess(message: string): void;
 }
 
-interface FieldRow {
-  key: string;
-  value: string;
-  action: DesktopMcpFieldAction;
-  placeholder?: string;
-  required?: boolean;
-}
-
-interface McpDraftForm {
-  name: string;
-  description: string;
-  transport: DesktopMcpTransport;
-  command: string;
-  argsText: string;
-  cwd: string;
-  stderr: "ignore" | "inherit" | "pipe";
-  url: string;
-  remoteProtocol: DesktopMcpRemoteProtocol;
-  timeoutMs: string;
-  env: FieldRow[];
-  headers: FieldRow[];
-}
-
 interface McpMarketInstallSelection {
   entry: DesktopMcpCatalogEntry;
   installation: DesktopMcpCatalogInstallation;
 }
-
-const EMPTY_DRAFT: McpDraftForm = {
-  name: "",
-  description: "",
-  transport: "stdio",
-  command: "",
-  argsText: "",
-  cwd: "",
-  stderr: "ignore",
-  url: "",
-  remoteProtocol: "streamable-http",
-  timeoutMs: "",
-  env: [],
-  headers: []
-};
 
 export function McpServersView({ projectId, onError, onSuccess }: McpServersViewProps): React.JSX.Element {
   const [tab, setTab] = useState<McpTab>("market");
@@ -95,6 +54,7 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string>();
   const [marketInstall, setMarketInstall] = useState<McpMarketInstallSelection>();
+  const [dismissedCatalogNotice, setDismissedCatalogNotice] = useState<string>();
   const requestRef = useRef(0);
 
   const applySnapshot = useCallback((next: DesktopMcpSnapshot): void => {
@@ -124,6 +84,15 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
   useEffect(() => {
     void load(true);
   }, [load]);
+
+  // 市场加载失败以顶部浮层 toast 提示，可手动叉掉，也会自动消失。
+  // 错误被清除（如下次刷新成功）后重置 dismiss，保证同样的错误再次出现时仍会提示。
+  const catalogNotice = catalog.error
+    ? `${catalog.error}${catalog.status === "stale" ? " 当前显示上次成功加载的市场内容。" : ""}`
+    : undefined;
+  useEffect(() => {
+    if (!catalog.error) setDismissedCatalogNotice(undefined);
+  }, [catalog.error]);
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visibleEntries = useMemo(() => catalog.entries.filter((entry) => {
@@ -160,7 +129,9 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
       remoteProtocol: server.remoteProtocol ?? "streamable-http",
       timeoutMs: server.timeoutMs === undefined ? "" : String(server.timeoutMs),
       env: server.environmentKeys.map((key) => ({ key, value: "", action: "keep" })),
-      headers: server.headerNames.map((key) => ({ key, value: "", action: "keep" }))
+      headers: server.headerNames.map((key) => ({ key, value: "", action: "keep" })),
+      savedEnvKeys: [...server.environmentKeys],
+      savedHeaderKeys: [...server.headerNames]
     });
     setTestResult(undefined);
     setFormOpen(true);
@@ -349,7 +320,9 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
         <button aria-label="刷新 MCP 列表" className="biny-mcp-icon-button" disabled={loading} onClick={() => void load(true)} title="刷新" type="button"><Icon name="refresh" size={16} /></button>
       </div>
 
-      {catalog.error ? <div className="biny-mcp-notice"><Icon name="warning" size={15} /><span>{catalog.error}{catalog.status === "stale" ? " 当前显示上次成功加载的市场内容。" : ""}</span></div> : null}
+      {catalogNotice && catalogNotice !== dismissedCatalogNotice ? (
+        <TopToast icon="warning" key={catalogNotice} message={catalogNotice} onDismiss={() => setDismissedCatalogNotice(catalogNotice)} />
+      ) : null}
       <main className="biny-mcp-body">
         {tab === "market" ? <McpMarketContent entries={visibleEntries} loading={loading} onInstall={openMarketInstall} onOpenExternal={(url) => void window.biny.openExternal(url).catch((error) => onError(errorMessage(error)))} /> : <McpInstalledContent
           details={details}
@@ -561,82 +534,4 @@ function McpEmpty({ icon, title, detail }: { icon: "refresh" | "search" | "serve
 function filterInstalled(servers: DesktopMcpServerSummary[], query: string): DesktopMcpServerSummary[] {
   if (!query) return servers;
   return servers.filter((server) => `${server.name} ${server.description ?? ""} ${server.commandOrUrl}`.toLocaleLowerCase().includes(query));
-}
-
-function toProtocolDraft(draft: McpDraftForm): DesktopMcpServerDraft {
-  const name = draft.name.trim();
-  if (!name) throw new Error("请输入服务器名称。");
-  const timeoutMs = draft.timeoutMs.trim() ? Number(draft.timeoutMs.trim()) : undefined;
-  if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 300_000)) throw new Error("连接超时需要是 100 到 300000 之间的整数。");
-  return {
-    name,
-    description: draft.description.trim() || undefined,
-    transport: draft.transport,
-    command: draft.transport === "stdio" ? draft.command.trim() || undefined : undefined,
-    args: parseArguments(draft.argsText),
-    cwd: draft.cwd.trim() || undefined,
-    stderr: draft.stderr,
-    url: draft.transport === "remote" ? draft.url.trim() || undefined : undefined,
-    remoteProtocol: draft.transport === "remote" ? draft.remoteProtocol : undefined,
-    timeoutMs,
-    env: toFieldMutations(draft.env),
-    headers: toFieldMutations(draft.headers)
-  };
-}
-
-function toFieldMutations(rows: FieldRow[]): DesktopMcpFieldMutation[] {
-  const mutations: DesktopMcpFieldMutation[] = [];
-  for (const row of rows) {
-    const key = row.key.trim();
-    if (!key) continue;
-    if (row.action === "keep" && !row.value) {
-      mutations.push({ key, action: "keep" });
-      continue;
-    }
-    if (row.action === "set" && !row.value && row.required) throw new Error(`请填写 ${key} 的值。`);
-    if (row.action === "set" && !row.value) continue;
-    mutations.push({ key, action: row.action, value: row.action === "set" ? row.value : undefined });
-  }
-  return mutations;
-}
-
-function parseArguments(value: string): string[] {
-  return value.split(/\r?\n/).flatMap((line) => line.trim() ? [line.trim()] : []).flatMap((line) => line.includes(" ") ? line.split(/\s+/) : [line]);
-}
-
-function parameterValues(installation: DesktopMcpCatalogInstallation): Record<string, string> {
-  return Object.fromEntries(installation.parameters.map((parameter) => [parameter.key, ""]));
-}
-
-function parseClipboardConfig(value: unknown): McpDraftForm | undefined {
-  if (!isRecord(value)) return undefined;
-  const servers = isRecord(value.mcpServers) ? value.mcpServers : value;
-  const first = Object.entries(servers).find(([, candidate]) => isRecord(candidate));
-  if (!first || !isRecord(first[1])) return undefined;
-  const config = first[1];
-  const transport: DesktopMcpTransport = typeof config.url === "string" ? "remote" : "stdio";
-  return {
-    ...EMPTY_DRAFT,
-    name: first[0],
-    description: typeof config.description === "string" ? config.description : "",
-    transport,
-    command: typeof config.command === "string" ? config.command : "",
-    argsText: Array.isArray(config.args) ? config.args.filter((item): item is string => typeof item === "string").join("\n") : "",
-    cwd: typeof config.cwd === "string" ? config.cwd : "",
-    stderr: config.stderr === "inherit" || config.stderr === "pipe" ? config.stderr : "ignore",
-    url: typeof config.url === "string" ? config.url : "",
-    remoteProtocol: config.transportProtocol === "sse" ? "sse" : "streamable-http",
-    timeoutMs: typeof config.timeoutMs === "number" ? String(config.timeoutMs) : "",
-    env: recordRows(config.env),
-    headers: recordRows(config.headers)
-  };
-}
-
-function recordRows(value: unknown): FieldRow[] {
-  if (!isRecord(value)) return [];
-  return Object.entries(value).filter(([, candidate]) => typeof candidate === "string").map(([key, candidate]) => ({ key, value: String(candidate), action: "set" }));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

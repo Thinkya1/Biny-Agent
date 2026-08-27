@@ -124,7 +124,8 @@ export function applyMultiEdits(content: string, edits: readonly MultiEditOperat
       next = next.split(edit.oldText).join(edit.newText);
       replacements += matches;
     } else {
-      next = next.replace(edit.oldText, edit.newText);
+      // 函数形式的替换值才会被原样插入；字符串形式会把 newText 里的 $$、$& 等序列当成模式解释。
+      next = next.replace(edit.oldText, () => edit.newText);
       replacements += 1;
     }
   }

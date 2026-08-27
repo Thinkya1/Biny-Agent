@@ -37,15 +37,19 @@ async function* streamGoogle(
 ): AsyncGenerator<ModelStreamEvent, void, void> {
   const body: Record<string, unknown> = {
     systemInstruction: context.systemPrompt ? { parts: [{ text: context.systemPrompt }] } : undefined,
-    contents: context.messages.map(googleMessage),
+    contents: context.messages.map(googleMessage).filter((message) => message !== undefined),
     tools: context.tools.length ? [{ functionDeclarations: stableAgentTools(context.tools, request.promptProjectionCache).map(googleTool) }] : undefined,
     generationConfig: {
       maxOutputTokens: options.maxOutputTokens,
+      temperature: options.temperature,
       thinkingConfig: googleThinking(options.reasoning, request.providerOptions)
     }
   };
   const baseUrl = request.baseUrl.replace(/\/+$/u, "");
-  const endpoint = `${baseUrl}/models/${encodeURIComponent(request.modelId)}:streamGenerateContent?alt=sse`;
+  // Google 的 /models 目录返回带 "models/" 前缀的资源名；请求路径本身已经含 /models/ 段，
+  // 直接拼会 404，这里先剥掉。
+  const modelId = request.modelId.replace(/^models\//u, "");
+  const endpoint = `${baseUrl}/models/${encodeURIComponent(modelId)}:streamGenerateContent?alt=sse`;
   let response: Response;
   try {
     response = await request.fetch(endpoint, {
@@ -145,14 +149,14 @@ function googleCachedTokens(usage: Record<string, unknown>): number | undefined 
 function googleMessage(message: AgentMessage): unknown {
   if (message.role === "user") return { role: "user", parts: googleUserParts(message.content) };
   if (message.role === "assistant") {
-    return {
-      role: "model",
-      parts: message.content.flatMap((part): unknown[] => {
-        if (part.type === "text") return [{ text: part.text }];
-        if (part.type === "reasoning") return [{ text: part.text, thought: true }];
-        return [{ functionCall: { id: part.id, name: part.name, args: part.arguments } }];
-      })
-    };
+    const parts = message.content.flatMap((part): unknown[] => {
+      if (part.type === "text") return [{ text: part.text }];
+      if (part.type === "reasoning") return [{ text: part.text, thought: true }];
+      return [{ functionCall: { id: part.id, name: part.name, args: part.arguments } }];
+    });
+    // 与 OpenAI 路径对齐：空 assistant（被中断的输出）会产出 parts: []，Gemini 直接 400，跳过。
+    if (!parts.length) return undefined;
+    return { role: "model", parts };
   }
   return {
     role: "user",

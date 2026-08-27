@@ -7,8 +7,9 @@ import { agentDir, ensureAgentDirs, sessionFilePath } from "../src/session/store
 import { RuntimeEventAuthority } from "../src/runtime/RuntimeAuthority.js";
 import { DurableTaskRunStore } from "../src/runtime/TaskRunStore.js";
 import { AutomationStore, type AutomationExecutionTemplate } from "../src/runtime/AutomationScheduler.js";
-import { GoalGraphStore } from "../src/runtime/GoalGraphStore.js";
+import { GoalGraphStore, GraphSupervisor } from "../src/runtime/GoalGraphStore.js";
 import { CapabilityStore } from "../src/runtime/CapabilityStore.js";
+import type { InteractiveRuntimeHandle } from "../src/runtime/InteractiveAgentRuntime.js";
 import { evaluateTaskRetry } from "../src/runtime/TaskRetryPolicy.js";
 
 const root = await mkdtemp(path.join(os.tmpdir(), "biny-authority-test-"));
@@ -151,6 +152,35 @@ try {
     /unsupported field/
   );
 
+  // 闰日 cron 触发后 366 天内找不到下一次：推进失败只能暂停自己，不能阻塞同一轮其他 automation。
+  const leapCron = automations.create({
+    automationId: "automation-leap-day",
+    name: "leap-day",
+    triggerType: "cron",
+    schedule: { cron: "0 0 * * *" },
+    executionTemplate: { prompt: "leap day" }
+  });
+  authority.databaseHandle()
+    .prepare("UPDATE automations SET schedule_json = ?, next_fire_at = ? WHERE automation_id = ?")
+    .run(JSON.stringify({ cron: "0 0 29 2 *" }), "2024-02-29T00:00:00.000Z", leapCron.automationId);
+  const healthyAutomation = automations.create({
+    automationId: "automation-healthy",
+    name: "healthy",
+    triggerType: "interval",
+    schedule: { intervalMs: 100 },
+    executionTemplate: { prompt: "healthy" }
+  });
+  authority.databaseHandle()
+    .prepare("UPDATE automations SET next_fire_at = ? WHERE automation_id = ?")
+    .run("2024-03-01T00:00:00.000Z", healthyAutomation.automationId);
+  const dueFires = automations.claimDue(new Date("2024-03-01T00:00:01.000Z"));
+  assert.equal(
+    dueFires.some((fire) => fire.automationId === healthyAutomation.automationId),
+    true,
+    "unschedulable cron must not block the automations queued behind it"
+  );
+  assert.equal(automations.get(leapCron.automationId)?.status, "paused");
+
   const goal = graphs.createGoal("goal");
   const graph = graphs.createGraph(goal.goalId, [
     { nodeKey: "first", prompt: "first" },
@@ -228,9 +258,26 @@ try {
   assert.deepEqual(hostResult, { value: "host" });
   assert.equal(capabilities.list().find((candidate) => candidate.capabilityName === "host:test.echo")?.status, "admitted");
 
+  // result() 自身失败（超大 payload）时 invocation 已进入 unknown 终态；原始错误必须原样抛出，
+  // 不能被外层 catch 的 fail() 抛出的 "already terminal" 掩盖。
+  await assert.rejects(
+    capabilities.executeHostCapability(
+      {
+        capabilityName: "host:test.oversized",
+        schema: { type: "object" },
+        sessionId: "session-1",
+        request: { value: "x" },
+        timeoutMs: 1_000
+      },
+      async () => ({ value: "x".repeat(2 * 1024 * 1024) })
+    ),
+    /exceeds the result size limit/u
+  );
+
   const page = authority.readEvents({ limit: 10 });
   assert.ok(page.events.every((event, index) => index === 0 || event.sequence > page.events[index - 1]!.sequence));
   await testSessionBackfillWatermark();
+  await testGraphSupervisorDefersOnBusyRuntime();
   console.log("runtime authority tests passed");
 } finally {
   capabilities.close();
@@ -270,6 +317,63 @@ async function testSessionBackfillWatermark(): Promise<void> {
     assert.ok(Number(changed.file_size) > previousSize);
     database.close();
   } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+}
+
+async function testGraphSupervisorDefersOnBusyRuntime(): Promise<void> {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "biny-graph-supervisor-test-"));
+  const isolatedAuthority = await RuntimeEventAuthority.open(workspace);
+  const isolatedGraphs = await GoalGraphStore.open(workspace, isolatedAuthority);
+  try {
+    const busySnapshot = { revision: 0, state: { kind: "runs" } } as unknown as ReturnType<InteractiveRuntimeHandle["getSnapshot"]>;
+    const idleSnapshot = { revision: 0, state: { kind: "idle" } } as unknown as ReturnType<InteractiveRuntimeHandle["getSnapshot"]>;
+    let behavior: "busy_snapshot" | "busy_throw" | "explode" = "busy_snapshot";
+    const runtime = {
+      getSnapshot: () => behavior === "busy_snapshot" ? busySnapshot : idleSnapshot,
+      submitPrompt: () => {
+        if (behavior === "explode") throw new Error("provider exploded");
+        throw new Error("Cannot submit a prompt while the runtime is busy.");
+      }
+    } as unknown as InteractiveRuntimeHandle;
+    const supervisor = new GraphSupervisor({ store: isolatedGraphs, runtime, tickMs: 100 });
+    const tickAndSettle = async (): Promise<void> => {
+      await supervisor.tick();
+      // executeNode 归还串行槽位的 finally 在微任务里跑；等一个 macrotask 让下一次 tick 不被占住。
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    };
+    try {
+      // 快照已 busy：节点退回 ready 等下一轮 tick，不得把 graph 判成 failed。
+      const prechecked = isolatedGraphs.createGraph(undefined, [{ nodeKey: "prechecked", prompt: "prechecked" }]);
+      isolatedGraphs.startGraph(prechecked.graphId);
+      await tickAndSettle();
+      assert.equal(isolatedGraphs.inspectGraph(prechecked.graphId).nodes[0]!.status, "ready", "runtime busy 时节点应退回 ready 等待重试");
+      assert.equal(isolatedGraphs.inspectGraph(prechecked.graphId).status, "running", "runtime busy 不得终结整个 graph");
+
+      // 空闲检查后的 busy 竞态（submit 同步抛错/Host 异步拒绝）同样退回 ready。
+      // supervisor 串行调度且按创建顺序扫描，先取消旧 graph 保证本轮 claim 落到新节点。
+      behavior = "busy_throw";
+      isolatedGraphs.cancelGraph(prechecked.graphId);
+      const raced = isolatedGraphs.createGraph(undefined, [{ nodeKey: "raced", prompt: "raced" }]);
+      isolatedGraphs.startGraph(raced.graphId);
+      await tickAndSettle();
+      assert.equal(isolatedGraphs.inspectGraph(raced.graphId).nodes[0]!.status, "ready");
+      assert.equal(isolatedGraphs.inspectGraph(raced.graphId).status, "running");
+
+      // 真实执行失败仍然判 failed。
+      behavior = "explode";
+      isolatedGraphs.cancelGraph(raced.graphId);
+      const failing = isolatedGraphs.createGraph(undefined, [{ nodeKey: "failing", prompt: "failing" }]);
+      isolatedGraphs.startGraph(failing.graphId);
+      await tickAndSettle();
+      assert.equal(isolatedGraphs.inspectGraph(failing.graphId).nodes[0]!.status, "failed");
+      assert.equal(isolatedGraphs.inspectGraph(failing.graphId).status, "failed");
+    } finally {
+      supervisor.stop();
+    }
+  } finally {
+    isolatedGraphs.close();
+    isolatedAuthority.close();
     await rm(workspace, { recursive: true, force: true });
   }
 }

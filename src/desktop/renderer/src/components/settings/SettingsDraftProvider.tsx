@@ -8,7 +8,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type {
   DesktopActivitySettingsInput,
+  DesktopChatParamsSettings,
   DesktopChatPersonalizationOverride,
+  DesktopCompactionSettings,
   DesktopFontPreference,
   DesktopMemorySettings,
   DesktopModelConfigurationInput,
@@ -95,6 +97,14 @@ export function SettingsDraftProvider({
 
   const setMemory = useCallback((value: DesktopMemorySettings): void => {
     setDraft((current) => current ? { ...current, memory: value } : current);
+  }, []);
+
+  const setCompaction = useCallback((value: DesktopCompactionSettings): void => {
+    setDraft((current) => current ? { ...current, compaction: value } : current);
+  }, []);
+
+  const setChatParams = useCallback((value: DesktopChatParamsSettings): void => {
+    setDraft((current) => current ? { ...current, chatParams: value } : current);
   }, []);
 
   const setWebSearch = useCallback((value: DesktopWebSearchSettingsInput): void => {
@@ -270,6 +280,8 @@ export function SettingsDraftProvider({
     setPersonalization,
     setActivity,
     setMemory,
+    setCompaction,
+    setChatParams,
     setWebSearch,
     setChat,
     setSkills,
@@ -293,6 +305,8 @@ export function SettingsDraftProvider({
     saveAll,
     saveState,
     setChat,
+    setChatParams,
+    setCompaction,
     setDefaultModel,
     setFontPreference,
     setMemory,
@@ -316,6 +330,8 @@ function draftFromSnapshot(snapshot: DesktopSettingsSnapshot): DesktopSettingsDr
     personalization: { ...snapshot.personalization },
     activity: activityInputFromSnapshot(snapshot.activity),
     memory: structuredClone(snapshot.memory),
+    compaction: structuredClone(snapshot.compaction),
+    chatParams: structuredClone(snapshot.chatParams),
     webSearch: webSearchInput(snapshot.webSearch),
     chat: snapshot.chat ? structuredClone(snapshot.chat.personalization) : undefined,
     models: { upserts: [], removeAliases: [], defaultModel: undefined, oauthCredentialHandles: [] },
@@ -342,6 +358,8 @@ function countDirtyFields(snapshot: DesktopSettingsSnapshot, draft: DesktopSetti
   if (!sameJson(draft.personalization, snapshot.personalization)) count += 1;
   if (!sameJson(draft.activity, activityInputFromSnapshot(snapshot.activity))) count += 1;
   if (!sameJson(draft.memory, snapshot.memory)) count += 1;
+  if (!sameJson(draft.compaction, snapshot.compaction)) count += 1;
+  if (!sameJson(draft.chatParams, snapshot.chatParams)) count += 1;
   if (!sameWebSearch(draft.webSearch, snapshot.webSearch)) count += 1;
   if (draft.models.upserts.length || draft.models.removeAliases.length || draft.models.defaultModel || draft.models.oauthCredentialHandles.length) count += 1;
   if (snapshot.chat && draft.chat && !sameJson(draft.chat, snapshot.chat.personalization)) count += 1;
@@ -351,21 +369,23 @@ function countDirtyFields(snapshot: DesktopSettingsSnapshot, draft: DesktopSetti
 
 function validDraft(draft: DesktopSettingsDraft): boolean {
   if (new TextEncoder().encode(draft.personalization.customInstructions).byteLength > 4_096) return false;
+  const compaction = draft.compaction;
+  if (compaction.triggerPercent !== undefined && (compaction.triggerPercent < 0.5 || compaction.triggerPercent > 0.95)) return false;
+  if (compaction.keepRecentMessages !== undefined && (!Number.isInteger(compaction.keepRecentMessages) || compaction.keepRecentMessages < 1 || compaction.keepRecentMessages > 500)) return false;
+  if (compaction.reserveTokens !== undefined && (!Number.isInteger(compaction.reserveTokens) || compaction.reserveTokens < 256 || compaction.reserveTokens > 262_144)) return false;
+  if (compaction.keepRecentTokens !== undefined && (!Number.isInteger(compaction.keepRecentTokens) || compaction.keepRecentTokens < 256 || compaction.keepRecentTokens > 1_000_000)) return false;
+  if (compaction.maxSummaryTokens !== undefined && (!Number.isInteger(compaction.maxSummaryTokens) || compaction.maxSummaryTokens < 256 || compaction.maxSummaryTokens > 32_768)) return false;
+  const chatParams = draft.chatParams;
+  if (chatParams.temperature !== undefined && (chatParams.temperature < 0 || chatParams.temperature > 2)) return false;
+  if (chatParams.maxOutputTokens !== undefined && (!Number.isInteger(chatParams.maxOutputTokens) || chatParams.maxOutputTokens < 256 || chatParams.maxOutputTokens > 131_072)) return false;
   const activity = draft.activity;
   if (activity.captureDebounceMs < 250 || activity.heartbeatMs < 1_000 || activity.idleTimeoutMs < 1_000
     || activity.inputPauseMs < 0 || activity.visualPollMs < 0 || activity.jpegQuality < 1 || activity.jpegQuality > 100
     || activity.ocrEveryNFrames < 1 || activity.ocrLanguages.length === 0 || activity.maxStorageMb < 256
     || activity.outputDirectory.trim() === ""
     || (activity.analysisModel !== undefined && activity.analysisModel.trim().length > 200)) return false;
-  const thresholds = (draft.memory as DesktopMemorySettings & {
-    similarityThresholds?: Record<string, { currentWorkspace: number; crossWorkspace: number }>;
-  }).similarityThresholds;
-  return !thresholds || Object.values(thresholds).every((value) => (
-    value.currentWorkspace >= 0
-    && value.currentWorkspace <= 1
-    && value.crossWorkspace >= value.currentWorkspace
-    && value.crossWorkspace <= 1
-  )) && draft.skills.extraction.minToolCalls >= 1 && draft.skills.extraction.minToolCalls <= 64;
+  // v3 移除了记忆向量阈值；这里只保留技能抽取参数的范围校验。
+  return draft.skills.extraction.minToolCalls >= 1 && draft.skills.extraction.minToolCalls <= 64;
 }
 
 function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraft): DesktopSettingsSaveInput {
@@ -381,6 +401,8 @@ function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraf
     personalization: sameJson(draft.personalization, snapshot.personalization) ? undefined : draft.personalization,
     activity: sameJson(draft.activity, activityInputFromSnapshot(snapshot.activity)) ? undefined : draft.activity,
     memory: sameJson(draft.memory, snapshot.memory) ? undefined : draft.memory,
+    compaction: sameJson(draft.compaction, snapshot.compaction) ? undefined : draft.compaction,
+    chatParams: sameJson(draft.chatParams, snapshot.chatParams) ? undefined : draft.chatParams,
     webSearch: sameWebSearch(draft.webSearch, snapshot.webSearch) ? undefined : draft.webSearch,
     skills: sameJson(draft.skills, skillInputFromSnapshot(snapshot.skills)) ? undefined : draft.skills,
     models: modelsDirty ? {

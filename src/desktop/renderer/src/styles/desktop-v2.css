@@ -2135,7 +2135,7 @@ select {
   text-align: left;
 }
 
-.memory-embedding-option:hover:not(:disabled) {
+.memory-embedding-option:hover:not(:disabled):not(.is-selected) {
   background: var(--surface-hover);
 }
 

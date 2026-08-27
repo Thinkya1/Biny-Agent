@@ -17,7 +17,6 @@ import { createMoveFileTool } from "./file/moveFile.js";
 import { createReadToolResultTool } from "./file/readToolResult.js";
 import { createListFilesTool } from "./file/listFiles.js";
 import { createSearchFilesTool } from "./search/searchFiles.js";
-import { createGrepSearchTool } from "./search/grepSearch.js";
 import { createRunCommandTool } from "./shell/runCommand.js";
 import { createAttemptCompletionTool } from "./completion.js";
 import { createManagedProcessTools } from "./process/managedProcesses.js";
@@ -108,7 +107,6 @@ export function createToolRegistry(
   registry.register(createReadToolResultTool(context));
   registry.register(createListFilesTool(context));
   registry.register(createSearchFilesTool(context));
-  registry.register(createGrepSearchTool(context));
   registry.register(createGitStatusTool(context));
   registry.register(createGitDiffTool(context));
   registry.register(createGitCommitTool(context));

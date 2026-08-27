@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { InteractiveAgentRunMode } from "../../../agent/AgentSession.js";
 import type { ContextBudgetStatus } from "../../../agent/context/types.js";
+import { defaultEffectiveContextWindowPercent } from "../../../ai/capabilities.js";
 import type { PermissionMode, PermissionResult } from "../../../permission/PermissionManager.js";
 import { activeRun, pendingPermission } from "../../../runtime/agentEvents.js";
 import type {
@@ -36,10 +37,7 @@ import type {
 import { DEFAULT_FILE_PANEL_WIDTH } from "../../filePanelSizing.js";
 import { DEFAULT_FONT_PREFERENCE, SYSTEM_FONT_FAMILY } from "../../fontPreference.js";
 import {
-  canNavigateBack,
-  canNavigateForward,
   createNavigationState,
-  moveNavigation,
   pushNavigation,
   replaceNavigation,
   type DesktopNavigationState,
@@ -101,6 +99,11 @@ export function App(): React.JSX.Element {
   const [fontPreference, setFontPreference] = useState<DesktopFontPreference>(DEFAULT_FONT_PREFERENCE);
   const [focusToken, setFocusToken] = useState(0);
   const [composerDraft, setComposerDraft] = useState<string>();
+  /** 建议 pill 直达提交（nonce 变化触发 Composer 统一提交路径）。 */
+  const [composerSubmitDraft, setComposerSubmitDraft] = useState<{ text: string; nonce: number }>();
+  /** 首页 → 聊天过场信号；发送失败清空触发 Workspace 回滚，落地后由 Workspace 回调清空。 */
+  const [homeFlight, setHomeFlight] = useState<{ text: string; nonce: number } | null>(null);
+  const homeFlightNonceRef = useRef(0);
   const [projectBranches, setProjectBranches] = useState<DesktopGitBranch[]>([]);
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [deletedUserMessages, setDeletedUserMessages] = useState<Set<string>>(() => new Set());
@@ -124,7 +127,7 @@ export function App(): React.JSX.Element {
   const permissionModeRequestRef = useRef(0);
   const memoryToggleRequestRef = useRef(0);
   const navigationRef = useRef<DesktopNavigationState>(createNavigationState());
-  const [navigationState, setNavigationState] = useState<DesktopNavigationState>(() => createNavigationState());
+  const [_navigationState, setNavigationState] = useState<DesktopNavigationState>(() => createNavigationState());
   const loadRequestRef = useRef(0);
   const branchRequestRef = useRef(0);
   const menuActionRef = useRef<(action: DesktopMenuAction) => void>(() => undefined);
@@ -320,22 +323,16 @@ export function App(): React.JSX.Element {
 
   const {
     addMemoryEntry,
-    cancelMemoryEmbeddingDownload,
-    cancelMemoryEmbeddingRebuild,
     cancelModelLogin,
     clearMemory,
     compactMemory,
     deleteMemoryEntry,
-    deleteMemoryEmbeddingModel,
-    downloadMemoryEmbeddingModel,
     fetchModelCatalog,
     fetchModelCatalogCandidate,
     loadCookieJarStatus,
-    loadMemoryEmbeddingStatus,
     loadMemoryOverview,
     loadTelosOverview,
     openBrowser,
-    rebuildMemoryEmbeddingIndex,
     resolveTelosDrift,
     reviewBehaviorPattern,
     saveTelos,
@@ -659,17 +656,6 @@ export function App(): React.JSX.Element {
     }
   }, [commitNavigation, openNavigationTarget]);
 
-  const navigateHistory = useCallback(async (direction: -1 | 1): Promise<void> => {
-    const previousNavigation = navigationRef.current;
-    const nextNavigation = moveNavigation(previousNavigation, direction);
-    if (!nextNavigation.target) return;
-    try {
-      if (await openNavigationTarget(nextNavigation.target)) commitNavigation(nextNavigation.state);
-    } catch (error) {
-      setWarning(errorMessage(error));
-    }
-  }, [commitNavigation, openNavigationTarget]);
-
   const toggleSessionPinned = useCallback(async (session: DesktopSessionSummary, pinned = !session.pinned): Promise<void> => {
     try {
       mergeProjectSnapshot(await window.biny.pinSession(session.projectId, session.id, pinned, session.metadataRevision));
@@ -692,6 +678,10 @@ export function App(): React.JSX.Element {
       }
       if (action === "archive" || action === "unarchive") {
         mergeProjectSnapshot(await window.biny.archiveSession(session.projectId, session.id, action === "archive", session.metadataRevision));
+        return;
+      }
+      if (action === "export-bundle" || action === "export-claude") {
+        mergeProjectSnapshot(await window.biny.exportSession(session.projectId, session.id, action === "export-claude" ? "claude" : "biny"));
         return;
       }
       if (action === "duplicate") {
@@ -728,6 +718,22 @@ export function App(): React.JSX.Element {
     }
   }, [adoptWorkspace, commitNavigation, mergeProjectSnapshot, toggleSessionPinned]);
 
+  const importSessionIntoProject = useCallback(async (projectId: string): Promise<void> => {
+    try {
+      const snapshot = await window.biny.importSession(projectId);
+      if (projectRef.current === projectId) {
+        await adoptWorkspace(snapshot, snapshot.selectedSessionId);
+        if (snapshot.selectedSessionId) {
+          commitNavigation(pushNavigation(navigationRef.current, { projectId, sessionId: snapshot.selectedSessionId }));
+        }
+      } else {
+        mergeProjectSnapshot(snapshot);
+      }
+    } catch (error) {
+      setWarning(errorMessage(error));
+    }
+  }, [adoptWorkspace, commitNavigation, mergeProjectSnapshot]);
+
   useEffect(() => {
     menuActionRef.current = (action) => {
       if (action === "new-task") void newTask();
@@ -739,7 +745,7 @@ export function App(): React.JSX.Element {
     };
   }, [newTask, openProject, openSearch, openSettings, toggleSidebar]);
 
-  const sendPrompt = useCallback(async (input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp"): Promise<void> => {
+  const sendPrompt = useCallback(async (input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string): Promise<void> => {
     const projectId = projectRef.current;
     if (!projectId) throw new Error("请先打开一个项目。");
     const previousSessionId = selectedRef.current;
@@ -758,7 +764,8 @@ export function App(): React.JSX.Element {
       mode,
       attachments,
       delivery,
-      previousSessionId === undefined && draftMemoryOverride !== undefined ? draftPersonalization : undefined
+      previousSessionId === undefined && draftMemoryOverride !== undefined ? draftPersonalization : undefined,
+      idempotencyKey
     );
     setSelectedSessionId(receipt.sessionId);
     setDraftMemoryOverride(undefined);
@@ -785,6 +792,25 @@ export function App(): React.JSX.Element {
       setWarning(errorMessage(error));
     }
   }, [openSession]);
+
+  // 首页（无会话）首条消息：先播过场动画再让聊天布局接管。失败回滚交给 Workspace。
+  const sendPromptWithFlight = useCallback(async (input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string): Promise<void> => {
+    const isHomeSubmit = Boolean(projectRef.current) && selectedRef.current === undefined;
+    if (isHomeSubmit) {
+      homeFlightNonceRef.current += 1;
+      setHomeFlight({ text: input, nonce: homeFlightNonceRef.current });
+    }
+    try {
+      await sendPrompt(input, mode, attachments, delivery, idempotencyKey);
+    } catch (error) {
+      if (isHomeSubmit) setHomeFlight(null);
+      throw error;
+    }
+  }, [sendPrompt]);
+
+  const submitComposerPrompt = useCallback((prompt: string): void => {
+    setComposerSubmitDraft({ text: prompt, nonce: Date.now() });
+  }, []);
 
   const resumeInterruptedTurn = useCallback(async (): Promise<void> => {
     const projectId = projectRef.current;
@@ -821,7 +847,8 @@ export function App(): React.JSX.Element {
     mode: InteractiveAgentRunMode,
     attachments: DesktopAttachment[],
     sessionId: string,
-    userMessageIndex: number
+    userMessageIndex: number,
+    idempotencyKey?: string
   ): Promise<void> => {
     const projectId = projectRef.current;
     if (!projectId) throw new Error("请先打开一个项目。");
@@ -830,7 +857,7 @@ export function App(): React.JSX.Element {
     const previousDocument = document;
     const edit = window.biny.editPrompt;
     if (typeof edit !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    const receipt = await edit(projectId, sessionId, userMessageIndex, input, mode, attachments);
+    const receipt = await edit(projectId, sessionId, userMessageIndex, input, mode, attachments, idempotencyKey);
     setSelectedSessionId(receipt.sessionId);
     if (receipt.sessionId !== sessionId) {
       const target: DesktopNavigationTarget = { projectId, sessionId: receipt.sessionId };
@@ -849,12 +876,12 @@ export function App(): React.JSX.Element {
     setDocument({ session: summary, events: prefixEvents, liveEvents: [] });
   }, [commitNavigation, document, workspace?.sessions]);
 
-  const editUserMessage = useCallback(async (input: string, userMessageIndex: number): Promise<void> => {
+  const editUserMessage = useCallback(async (input: string, userMessageIndex: number, idempotencyKey?: string): Promise<void> => {
     const sessionId = selectedRef.current;
     if (!sessionId) {
       throw new Error("当前消息还没有可编辑的会话。");
     }
-    await editPrompt(input, "chat", [], sessionId, userMessageIndex);
+    await editPrompt(input, "chat", [], sessionId, userMessageIndex, idempotencyKey);
   }, [editPrompt]);
 
   const deleteUserMessage = useCallback((turnId: string): void => {
@@ -1040,9 +1067,18 @@ export function App(): React.JSX.Element {
   const turns = useSessionTimeline(document);
   // 以下三个回调会一路传到 MessageTimeline 的 Turn（React.memo）；内联箭头会让引用每帧变化、
   // memo 失效，所以这里用 useCallback 固定下来，配合轮次引用稳定让流式期间只重渲染变化的轮次。
-  const retryTimelinePrompt = useCallback((input: string): void => {
-    void sendPrompt(input, "chat", []).catch((error) => setWarning(errorMessage(error)));
-  }, [sendPrompt]);
+  const retryTimelinePrompt = useCallback(async (input: string, userMessageIndex: number, idempotencyKey: string): Promise<void> => {
+    const sessionId = selectedRef.current;
+    if (!sessionId) {
+      setWarning("当前消息还没有可重试的会话。");
+      return;
+    }
+    try {
+      await editUserMessage(input, userMessageIndex, idempotencyKey);
+    } catch (error) {
+      setWarning(errorMessage(error));
+    }
+  }, [editUserMessage]);
   const openExternalLink = useCallback((url: string): void => {
     void window.biny.openExternal(url).catch((error) => setWarning(errorMessage(error)));
   }, []);
@@ -1061,19 +1097,26 @@ export function App(): React.JSX.Element {
     const models = workspace?.models ?? [];
     const selectedModel = models.find((model) => model.alias === info?.modelAlias) ?? models[0];
     const contextWindow = contextBudget?.contextWindow ?? info?.contextWindow ?? selectedModel?.contextWindow;
-    const inputBudgetTokens = contextBudget?.maxTokens ?? info?.maxInputTokens ?? selectedModel?.inputBudgetTokens;
     const usedTokens = contextBudget?.usedTokens ?? lastReportedInputTokens(document);
-    const displayContextWindow = contextWindow ?? inputBudgetTokens;
+    const displayContextWindow = contextWindow
+      ?? contextBudget?.maxTokens
+      ?? info?.maxInputTokens
+      ?? selectedModel?.inputBudgetTokens;
     if (!displayContextWindow || !usedTokens) return undefined;
     const effectiveContextWindow = contextBudget?.effectiveContextWindow
       ?? info?.effectiveContextWindow
-      ?? selectedModel?.effectiveContextWindow
-      ?? inputBudgetTokens
-      ?? displayContextWindow;
+      ?? selectedModel?.effectiveContextWindow;
+    // 展示口径：分母是「可用输入额度」，不含输出预留与 headroom；拿不到预算元数据时
+    // 按统一有效窗口比例从原始窗口折算，避免把预留摊进用户看到的额度。
+    const inputBudgetTokens = Math.min(displayContextWindow, contextBudget?.maxTokens
+      ?? info?.maxInputTokens
+      ?? selectedModel?.inputBudgetTokens
+      ?? effectiveContextWindow
+      ?? Math.max(1, Math.floor((displayContextWindow * defaultEffectiveContextWindowPercent) / 100)));
     const reservedTokens = contextBudget?.contextReserveTokens
       ?? info?.contextReserveTokens
       ?? selectedModel?.contextReserveTokens
-      ?? Math.max(0, displayContextWindow - effectiveContextWindow);
+      ?? Math.max(0, displayContextWindow - inputBudgetTokens);
     const toolTokens = contextBudget?.toolSchemaReserveTokens ?? selectedModel?.toolSchemaReserveTokens;
     const otherTokens = Math.max(0, reservedTokens - Math.min(reservedTokens, toolTokens ?? 0));
     return {
@@ -1087,16 +1130,21 @@ export function App(): React.JSX.Element {
   }, [contextBudget, document, workspace?.models, workspace?.runtime?.info]);
   const clearToast = useCallback(() => setToast(undefined), []);
   const sessionSummary = workspace?.sessions.find((session) => session.id === selectedSessionId) ?? document?.session;
-  const activeRunSnapshot = activeRun(workspace?.runtime);
-  const pendingPermissionSnapshot = pendingPermission(workspace?.runtime);
+  // 并行池化后按「选中会话自己的 runtime」取运行态；还没加载进池时回退主 runtime。
+  const selectedRuntimeSnapshot = (selectedSessionId !== undefined ? workspace?.sessionRuntimes?.[selectedSessionId] : undefined) ?? workspace?.runtime;
+  const activeRunSnapshot = activeRun(selectedRuntimeSnapshot);
+  const pendingPermissionSnapshot = pendingPermission(selectedRuntimeSnapshot);
   const activeSessionId = activeRunSnapshot?.sessionId ?? pendingPermissionSnapshot?.sessionId;
   const selectedActiveRun = activeRunSnapshot?.sessionId === selectedSessionId ? activeRunSnapshot : undefined;
   const selectedPendingPermission = pendingPermissionSnapshot?.sessionId === selectedSessionId ? pendingPermissionSnapshot : undefined;
   const selectedRunId = selectedActiveRun?.runId ?? selectedPendingPermission?.runId;
   const selectedRunning = Boolean(activeSessionId && activeSessionId === selectedSessionId);
   const selectedThinking = selectedActiveRun?.status === "thinking";
-  const activeElsewhere = Boolean(activeSessionId && selectedSessionId && activeSessionId !== selectedSessionId);
-  const runtimeBusy = Boolean(workspace?.runtime && workspace.runtime.state.kind !== "idle");
+  // 全局忙 = 任一 runtime 非空闲（配置/模型/权限等全局操作仍需等全部静下来）。
+  const runtimeBusy = Boolean(
+    (workspace?.runtime && workspace.runtime.state.kind !== "idle")
+    || Object.values(workspace?.sessionRuntimes ?? {}).some((snapshot) => snapshot.state.kind !== "idle")
+  );
   const confirmedPermissionMode = workspace?.permissionMode ?? workspace?.runtime?.permissionMode ?? "ask";
   const permissionMode = pendingPermissionMode ?? confirmedPermissionMode;
   const confirmedChatMemoryEnabled = selectedSessionId === undefined
@@ -1113,8 +1161,6 @@ export function App(): React.JSX.Element {
             ? "正在确认当前聊天的记忆状态…"
             : runtimeBusy
               ? "当前运行或后台维护尚未结束，请稍后再切换记忆。"
-              : activeElsewhere
-              ? "另一个会话正在运行，请先切回该会话。"
               : undefined;
   const toggleChatMemory = useCallback(async (): Promise<void> => {
     const projectId = projectRef.current;
@@ -1183,7 +1229,6 @@ export function App(): React.JSX.Element {
   }, []);
   const composer = (
     <Composer
-      activeElsewhere={activeElsewhere}
       sessionWriterConflict={writerConflict !== undefined}
       memoryEnabled={chatMemoryEnabled}
       memoryToggleBusy={memoryToggleBusy}
@@ -1192,13 +1237,15 @@ export function App(): React.JSX.Element {
       contextUsage={contextUsage}
       focusToken={focusToken}
       prefillInput={composerDraft}
+      submitDraft={composerSubmitDraft}
+      onSubmitDraftConsumed={() => setComposerSubmitDraft(undefined)}
       skills={composerSkills}
       modelSetupRequired={Boolean(workspace?.requiresModelConfiguration)}
       models={workspace?.pickerModels ?? workspace?.models ?? []}
       onPermissionMode={setPermissionMode}
       permissionModePending={pendingPermissionMode !== undefined}
       onSaveAttachment={saveAttachment}
-      onSend={sendPrompt}
+      onSend={sendPromptWithFlight}
       onSlashCommand={runSlashCommand}
       onExpandSkillCommand={expandSkillCommand}
       onStop={async () => {
@@ -1214,27 +1261,16 @@ export function App(): React.JSX.Element {
       running={selectedRunning}
       runtimeBusy={runtimeBusy}
       runtimeInfo={workspace?.runtime?.info}
+      workspaceContext={workspace?.project ? (
+        <WorkspaceContextBar
+          onCreateProject={() => void createEmptyProject()}
+          onSelectProject={(projectId) => { void selectProject(projectId); }}
+          project={workspace.project}
+          projects={projects}
+        />
+      ) : undefined}
     />
   );
-  const composerWithContext = workspace?.project ? (
-    <div className="biny-composer-stack">
-      <WorkspaceContextBar
-        branches={projectBranches}
-        branchesLoading={branchesLoading}
-        onCreateBranch={createProjectBranch}
-        onCreateProject={() => void createEmptyProject()}
-        onOpenBranches={() => {
-          const projectId = projectRef.current;
-          if (projectId) void loadProjectBranches(projectId);
-        }}
-        onSelectBranch={(branchName) => { void switchProjectBranch(branchName); }}
-        onSelectProject={(projectId) => { void selectProject(projectId); }}
-        project={workspace.project}
-        projects={projects}
-      />
-      {composer}
-    </div>
-  ) : composer;
 
   return (
     <DesktopShell
@@ -1252,16 +1288,12 @@ export function App(): React.JSX.Element {
             closeRequest={settingsCloseRequest}
             modelSetupRequired={Boolean(workspace?.requiresModelConfiguration)}
             onAddMemoryEntry={addMemoryEntry}
-            onCancelMemoryEmbeddingDownload={cancelMemoryEmbeddingDownload}
-            onCancelMemoryEmbeddingRebuild={cancelMemoryEmbeddingRebuild}
             onCancelModelLogin={cancelModelLogin}
             onClearCookies={async () => await window.biny.clearCookies()}
             onClearMemory={clearMemory}
             onClose={closeSettings}
             onCompactMemory={compactMemory}
             onDeleteMemoryEntry={deleteMemoryEntry}
-            onDeleteMemoryEmbeddingModel={deleteMemoryEmbeddingModel}
-            onDownloadMemoryEmbeddingModel={downloadMemoryEmbeddingModel}
             onUpdateMemoryEntry={updateMemoryEntry}
             onExportCookies={async () => await window.biny.exportCookies()}
             onFetchModelCatalog={fetchModelCatalog}
@@ -1273,12 +1305,10 @@ export function App(): React.JSX.Element {
             onNotify={setWarning}
             onLoadCookieJarStatus={loadCookieJarStatus}
             onLoadMemoryOverview={loadMemoryOverview}
-            onLoadMemoryEmbeddingStatus={loadMemoryEmbeddingStatus}
             onLoadTelosOverview={loadTelosOverview}
             onOpenBrowser={openBrowser}
             onOpenChatDraft={(input) => { closeSettings(); prefillComposer(input); }}
             onOpenExternal={async (url) => await window.biny.openExternal(url)}
-            onRebuildMemoryEmbeddingIndex={rebuildMemoryEmbeddingIndex}
             onResolveTelosDrift={resolveTelosDrift}
             onReviewBehaviorPattern={reviewBehaviorPattern}
             onSaveTelos={saveTelos}
@@ -1328,33 +1358,26 @@ export function App(): React.JSX.Element {
       sidebarLayout={sidebarLayout}
       sideNav={(
         <Sidebar
-          activeNavigation={page === "extensions" ? "extensions" : runtimePanelOpen ? "runtime" : undefined}
           activeProjectId={workspace?.project.id}
           onCreateEmptyProject={() => void createEmptyProject()}
           onNewTask={(projectId) => void newTask(projectId)}
+          onImportSession={(projectId) => void importSessionIntoProject(projectId)}
           onOpenProject={() => void openProject()}
-          onOpenRuntime={openRuntimePanel}
           onOpenTerminalProject={(projectId) => { void window.biny.openProjectTerminal(projectId).catch((error) => setWarning(errorMessage(error))); }}
           onProjectPinned={(projectId, pinned) => void toggleProjectPinned(projectId, pinned)}
           onRefreshProject={(projectId) => { void window.biny.refreshProject(projectId).then(mergeProjectSnapshot).catch((error) => setWarning(errorMessage(error))); }}
           onRemoveProject={(projectId) => void removeProject(projectId)}
+          onSearch={openSearch}
           onRenameProject={renameProject}
           onReorderProjects={(projectIds) => void reorderProjects(projectIds)}
           onRevealProject={(projectId) => { void window.biny.revealProject(projectId).catch((error) => setWarning(errorMessage(error))); }}
-          onSearch={openSearch}
           onSelectSession={(projectId, sessionId) => void navigateToSession(projectId, sessionId)}
           onLoadSessionChildren={loadSessionChildren}
           onSessionMenu={(session) => void openSessionMenu(session)}
-          onSessionPin={(session) => { void toggleSessionPinned(session); }}
-          onExtensions={openExtensions}
           onSettings={() => openSettings()}
           onResizeKeyDown={onSidebarResizeKeyDown}
           onResizePointerDown={onSidebarResizePointerDown}
           onToggleSidebar={toggleSidebar}
-          canGoBack={canNavigateBack(navigationState)}
-          canGoForward={canNavigateForward(navigationState)}
-          onNavigateBack={() => { void navigateHistory(-1); }}
-          onNavigateForward={() => { void navigateHistory(1); }}
           layout={sidebarLayout}
           projects={projects}
           selectedSessionId={selectedSessionId}
@@ -1366,7 +1389,10 @@ export function App(): React.JSX.Element {
       )}
       theme={themePreference}
     >
-      {page === "extensions" ? <SkillHubView onError={setWarning} /> : <Workspace
+      {page === "extensions" ? <SkillHubView
+        onError={setWarning}
+        onOpenRuntime={openRuntimePanel}
+      /> : <Workspace
         loading={loading}
         onCreateBranch={openTurnBranch}
         onDeleteUserMessage={deleteUserMessage}
@@ -1398,9 +1424,13 @@ export function App(): React.JSX.Element {
         onRuntimeError={reportRuntimeError}
         onRuntimeMutation={mutateRuntime}
         onRuntimeRefresh={refreshRuntimeProjection}
-        onPrefillPrompt={prefillComposer}
+        onSubmitPrompt={submitComposerPrompt}
+        homeFlight={homeFlight ?? undefined}
+        onHomeFlightLanded={() => setHomeFlight(null)}
+        onOpenRuntime={openRuntimePanel}
+        onOpenExtensions={openExtensions}
       >
-        {composerWithContext}
+        {composer}
       </Workspace>}
     </DesktopShell>
   );

@@ -15,7 +15,6 @@ import { createToolPermissionRequest } from "../src/tools/display/ToolDisplay.js
 import { collectProjectContext } from "../src/project/ProjectContext.js";
 import { createGitDiffTool } from "../src/tools/git/diff.js";
 import { createGitStatusTool } from "../src/tools/git/status.js";
-import { createGrepSearchTool } from "../src/tools/search/grepSearch.js";
 import { createSearchFilesTool } from "../src/tools/search/searchFiles.js";
 import { runShellCommand } from "../src/tools/shell/runCommand.js";
 import type { RunnableToolExecution, ToolExecution } from "../src/tools/types.js";
@@ -112,7 +111,7 @@ async function testSearchReportsTruncatedFiles(workspaceRoot: string): Promise<v
   assert.equal(searchResult.matches.some((match) => match.path === relativePath && match.text === prefixQuery), true);
   assert.equal(searchResult.truncatedFiles?.includes(relativePath), true);
 
-  const grep = runnable(createGrepSearchTool({ workspaceRoot, ignore: [] }).resolveExecution({ query: suffixQuery }));
+  const grep = runnable(createSearchFilesTool({ workspaceRoot, ignore: [] }).resolveExecution({ query: suffixQuery }));
   const grepResult = await grep.execute({ toolCallId: "grep-bounded" });
   assert.equal(grepResult.matches.some((match) => match.path === relativePath), false);
   assert.equal(grepResult.truncatedFiles?.includes(relativePath), true);

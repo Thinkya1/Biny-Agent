@@ -22,7 +22,7 @@ import type { CommandCardData } from "./commandCard.js";
 import type { CommandRuntime } from "./CommandRuntime.js";
 import type { InteractiveRuntimeHandle } from "./InteractiveAgentRuntime.js";
 import type { CommandSurface } from "./commandRegistry.js";
-import type { TaskRunStatus } from "./TaskRunStore.js";
+import { isTaskRunTerminal, type TaskRunStatus } from "./TaskRunStore.js";
 import type {
   AgentPersonalizationState,
   ChatPersonalizationOverridePatch,
@@ -115,7 +115,7 @@ export async function executeRuntimeCommand(
       services.graphs.createWake(graph.graphId, "graph_resumed");
       return result(command, "Graph", JSON.stringify(graph, null, 2));
     }
-    if (action === "cancel") return result(command, "Graph", JSON.stringify(services.graphs.cancelGraph(graphId), null, 2));
+    if (action === "cancel") return result(command, "Graph", JSON.stringify(await cancelRuntimeGraph(runtime, services, graphId), null, 2));
     throw new Error("Usage: /graph inspect <id> | start <id> | pause <id> | resume <id> | cancel <id> | events <id>");
   }
   if (command === "/capabilities") {
@@ -307,6 +307,39 @@ async function executeSubagentCommand(
     return result(command, "Subagent", "Usage: /subagent <read-only task> | start <read-only task> | status | cancel <task-id> | agents");
   }
   return result(command, "Subagent", await runForegroundSubagent(runtime, services, task) || "Subagent returned no text.");
+}
+
+/**
+ * 取消 Graph 的编排入口：先落 durable 终态，再取消仍在运行的子代理任务、AgentRun
+ * 和 TaskRun。Host 的 graph.cancel 操作与 /graph cancel 命令都走这里，避免绕过编排。
+ */
+export async function cancelRuntimeGraph(
+  runtime: InteractiveRuntimeHandle,
+  services: CommandRuntime,
+  graphId: string
+): Promise<unknown> {
+  const graph = services.graphs.inspectGraph(graphId);
+  const activeRuns = graph.nodes
+    .filter((node) => node.status === "running" && node.taskRunId !== undefined)
+    .map((node) => {
+      const task = services.taskRuns.get(node.taskRunId!);
+      return {
+        taskRunId: node.taskRunId!,
+        runId: task?.attempts.at(-1)?.runId
+      };
+    });
+  const result = services.graphs.cancelGraph(graphId);
+  for (const active of activeRuns) {
+    services.subagents?.cancelTask(active.taskRunId, "Graph cancelled.");
+    if (active.runId !== undefined) runtime.cancelRun(active.runId);
+    try {
+      const task = services.taskRuns.get(active.taskRunId);
+      if (task && !isTaskRunTerminal(task.status)) services.taskRuns.transition(active.taskRunId, "cancelled");
+    } catch {
+      // Graph cancellation is already durable; a late task snapshot must not undo it.
+    }
+  }
+  return result;
 }
 
 async function runForegroundSubagent(

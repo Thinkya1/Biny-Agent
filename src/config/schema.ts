@@ -40,16 +40,55 @@ const agentSchema = z.object({
 
 const permissionSchema = z.object({
   mode: z.enum(["ask", "read-only", "auto", "full-access"]).default("ask"),
-  allowTools: z.array(z.string()).default(["read_file", "list_files", "search_files", "grep_search", "git_status", "git_diff", "web_search", "save_memory"]),
+  allowTools: z.array(z.string()).default(["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory"]),
   allowPaths: z.array(z.string()).default([]),
   denyPaths: z.array(z.string()).default([".env", ".env.local", ".ssh/", "node_modules/"]),
   criticalAlwaysAsk: z.boolean().default(true)
 }).default({
   mode: "ask",
-  allowTools: ["read_file", "list_files", "search_files", "grep_search", "git_status", "git_diff", "web_search", "save_memory"],
+  allowTools: ["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory"],
   allowPaths: [],
   denyPaths: [".env", ".env.local", ".ssh/", "node_modules/"],
   criticalAlwaysAsk: true
+});
+
+/**
+ * 自动压缩策略。reserve/keep 缺省时按当前模型可用输入预算动态缩放；显式配置时作为额外上限。
+ * 触发阈值优先级：显式 reserveTokens > triggerPercent > 模型参考线/动态推导。
+ */
+export const compactionSchema = z.object({
+  enabled: z.boolean().default(true),
+  reserveTokens: z.number().int().min(256).max(262_144).optional(),
+  /** 触发阈值 = 当前输入预算 × 该百分比；与显式 reserveTokens 同时配置时以后者为准。 */
+  triggerPercent: z.number().min(0.5).max(0.95).optional(),
+  /** 与 keepRecentTokens 共同构成保留段双上限，取更保守（保留更少）的安全切分点。 */
+  keepRecentTokens: z.number().int().min(256).max(1_000_000).optional(),
+  keepRecentMessages: z.number().int().min(1).max(500).optional(),
+  maxSummaryTokens: z.number().int().min(256).max(32_768).default(4_096),
+  /** 压缩摘要专用模型别名；缺省跟随当前对话模型。 */
+  summaryModel: z.string().trim().min(1).max(128).optional()
+}).default({
+  enabled: true,
+  reserveTokens: undefined,
+  triggerPercent: undefined,
+  keepRecentTokens: undefined,
+  keepRecentMessages: undefined,
+  maxSummaryTokens: 4_096,
+  summaryModel: undefined
+});
+
+/**
+ * 聊天采样参数（全局）。temperature 缺省不下发请求体（跟随模型/provider 默认）；
+ * maxOutputTokens 缺省跟随模型别名配置，显式配置后全局覆盖。
+ */
+export const chatParamsSchema = z.object({
+  /** 采样温度 0–2；越低越确定，越高越发散。 */
+  temperature: z.number().min(0).max(2).optional(),
+  /** 单次回复的最大输出 token 数。 */
+  maxOutputTokens: z.number().int().min(256).max(131_072).optional()
+}).default({
+  temperature: undefined,
+  maxOutputTokens: undefined
 });
 
 const contextSchema = z.object({
@@ -59,18 +98,12 @@ const contextSchema = z.object({
   // results are archived under .biny/tool-results with a bounded preview.
   maxTurnToolResultBytes: z.number().int().min(1_024).max(16 * 1024 * 1024).default(128 * 1024),
   instructionsMaxBytes: z.number().int().min(1_024).max(131_072).default(32 * 1024),
-  compaction: z.object({
-    enabled: z.boolean().default(true),
-    // reserve/keep 缺省时按当前模型可用输入预算动态缩放；显式配置时作为额外上限。
-    reserveTokens: z.number().int().min(256).max(262_144).optional(),
-    keepRecentTokens: z.number().int().min(256).max(1_000_000).optional(),
-    maxSummaryTokens: z.number().int().min(256).max(32_768).default(4_096)
-  }).default({ enabled: true, reserveTokens: undefined, keepRecentTokens: undefined, maxSummaryTokens: 4_096 }),
+  compaction: compactionSchema,
   memory: memoryPolicySchema
 }).default({
   maxTurnToolResultBytes: 128 * 1024,
   instructionsMaxBytes: 32 * 1024,
-  compaction: { enabled: true, reserveTokens: undefined, keepRecentTokens: undefined, maxSummaryTokens: 4_096 },
+  compaction: { enabled: true, reserveTokens: undefined, triggerPercent: undefined, keepRecentTokens: undefined, keepRecentMessages: undefined, maxSummaryTokens: 4_096, summaryModel: undefined },
   memory: {
     enabled: false,
     useMemories: true,
@@ -80,7 +113,7 @@ const contextSchema = z.object({
     rewriteModel: undefined,
     extractModel: undefined,
     consolidationModel: undefined,
-    embeddingModel: undefined,
+    embeddingModel: { kind: "local", model: "multilingual-e5-small" },
     similarityThresholds: {},
     cloudEmbeddingConsents: {},
     excludeExternalContext: true,
@@ -254,6 +287,7 @@ export const defaultSubagentAllowedTools = [
   "read_file",
   "list_files",
   "search_files",
+  // "grep_search" 已下线；保留在 enum 里只为老配置能通过校验（注册表中已无此工具，名字惰性）。
   "grep_search",
   "git_status",
   "git_diff",
@@ -532,6 +566,7 @@ const canonicalConfigSchema = z.object({
   personalization: personalizationSettingsSchema,
   activity: activitySettingsSchema,
   context: contextSchema,
+  chat: chatParamsSchema,
   diagnostics: diagnosticsSchema,
   checkpoints: checkpointsSchema,
   sandbox: sandboxSchema,
@@ -607,6 +642,15 @@ const canonicalConfigSchema = z.object({
     }
   }
 
+  const compactionSummaryAlias = config.context.compaction.summaryModel;
+  if (compactionSummaryAlias && !config.models[compactionSummaryAlias]) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["context", "compaction", "summaryModel"],
+      message: `Unknown compaction summary model alias: ${compactionSummaryAlias}`
+    });
+  }
+
   const subagentAlias = config.extensions.subagent.model;
   if (subagentAlias) {
     const subagentModel = config.models[subagentAlias];
@@ -646,6 +690,8 @@ const canonicalConfigSchema = z.object({
 export const configSchema = z.preprocess(rejectLegacyModelConfig, canonicalConfigSchema);
 
 export type AgentConfig = z.infer<typeof canonicalConfigSchema>;
+export type CompactionConfig = AgentConfig["context"]["compaction"];
+export type ChatParamsConfig = AgentConfig["chat"];
 export type ModelProvider = z.infer<typeof modelProviderSchema>;
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
 export type ProviderEmbeddingModelConfig = z.infer<typeof providerEmbeddingModelSchema>;
@@ -730,7 +776,7 @@ export const defaultConfig: AgentConfig = {
   },
   permission: {
     mode: "ask",
-    allowTools: ["read_file", "list_files", "search_files", "grep_search", "git_status", "git_diff", "web_search", "save_memory"],
+    allowTools: ["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory"],
     allowPaths: [],
     denyPaths: [".env", ".env.local", ".ssh/", "node_modules/"],
     criticalAlwaysAsk: true
@@ -740,6 +786,7 @@ export const defaultConfig: AgentConfig = {
   },
   personalization: { enabled: true, personality: "none", customInstructions: "" },
   activity: defaultActivitySettings,
+  chat: { temperature: undefined, maxOutputTokens: undefined },
   checkpoints: { enabled: true },
   sandbox: { mode: "off", allowNetwork: true },
   hooks: { beforeTool: [], afterTool: [] },
@@ -753,7 +800,7 @@ export const defaultConfig: AgentConfig = {
   context: {
     maxTurnToolResultBytes: 128 * 1024,
     instructionsMaxBytes: 32 * 1024,
-    compaction: { enabled: true, reserveTokens: undefined, keepRecentTokens: undefined, maxSummaryTokens: 4_096 },
+    compaction: { enabled: true, reserveTokens: undefined, triggerPercent: undefined, keepRecentTokens: undefined, keepRecentMessages: undefined, maxSummaryTokens: 4_096, summaryModel: undefined },
     memory: {
       enabled: false,
       useMemories: true,
@@ -763,7 +810,7 @@ export const defaultConfig: AgentConfig = {
       rewriteModel: undefined,
       extractModel: undefined,
       consolidationModel: undefined,
-      embeddingModel: undefined,
+      embeddingModel: { kind: "local", model: "multilingual-e5-small" },
       similarityThresholds: {},
       cloudEmbeddingConsents: {},
       excludeExternalContext: true,

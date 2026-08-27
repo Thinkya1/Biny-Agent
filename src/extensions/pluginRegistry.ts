@@ -1,23 +1,25 @@
 /**
- * Biny 官方 Plugin Registry 与项目受管安装目录。
+ * Biny Plugin Registry 与项目受管安装目录（Alma 式仓库目录安装）。
  *
- * 安装阶段只把经过来源、大小和 SHA-256 校验的 tar.gz 解包到 `.biny/plugins`，不会
- * import，也不会执行包内脚本。运行时只读取清单中显式启用的 entry；解包器只接受普通
- * 文件和目录，拒绝符号链接、硬链接、特殊文件以及任何越过目标目录的路径。
+ * 市场条目只指向 GitHub 仓库里的一个目录（repository + path），免打包、免哈希：
+ * 安装 = 通过 GitHub tree API 列出目录文件、逐个 raw 下载写入 `.biny/plugins/<id>`。
+ * 安装阶段不 import、不执行包内脚本；运行时只加载清单中显式启用的 entry。
+ * 保留的安全边界：路径穿越防护、符号链接拒绝、文件数量/大小兜底上限、默认关闭。
  */
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
-import { gunzipSync } from "node:zlib";
 import path from "node:path";
 import { z } from "zod";
 import { projectBinyDir } from "../config/paths.js";
+import { getSharedProxyAwareFetch } from "../network/proxyFetch.js";
 
 export const BINY_PLUGIN_REGISTRY_URL = "https://raw.githubusercontent.com/Thinkya1/Biny/main/plugins/registry.json";
-const registryOrigin = new URL(BINY_PLUGIN_REGISTRY_URL).origin;
-const maxPackageBytes = 32 * 1024 * 1024;
-const maxExtractedBytes = 16 * 1024 * 1024;
-const maxExtractedFiles = 512;
+const githubApiBase = "https://api.github.com";
+const maxPluginFiles = 256;
+const maxPluginTotalBytes = 16 * 1024 * 1024;
 const maxFileBytes = 4 * 1024 * 1024;
+const maxTreeEntries = 100_000;
+const maxResponseBytes = 8 * 1024 * 1024;
 
 const pluginMarketEntrySchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/u),
@@ -25,17 +27,32 @@ const pluginMarketEntrySchema = z.object({
   version: z.string().trim().min(1).max(64),
   category: z.string().trim().min(1).max(40),
   description: z.string().max(2_000),
-  details: z.string().max(16_000),
-  downloadUrl: z.string().url().max(2_000),
-  sizeBytes: z.number().int().positive().max(maxPackageBytes),
-  sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-  archive: z.literal("tar.gz"),
-  entry: z.string().trim().min(1).max(512).optional()
+  details: z.string().max(16_000).optional().default(""),
+  author: z.object({
+    name: z.string().trim().min(1).max(120),
+    email: z.string().max(200).optional()
+  }).strict().optional(),
+  tags: z.array(z.string().trim().min(1).max(40)).max(16).optional().default([]),
+  repository: z.string().url().max(2_000),
+  path: z.string().trim().min(1).max(512),
+  /** 显式文件清单时直接逐个 raw 下载，完全绕开 GitHub tree API 的未认证限额。 */
+  files: z.array(z.string().trim().min(1).max(512)).max(256).optional(),
+  /** 缺省 main；仓库默认分支不同（如 master）时显式声明。 */
+  branch: z.string().trim().min(1).max(200).optional(),
+  entry: z.string().trim().min(1).max(512).optional(),
+  homepage: z.string().url().max(2_000).optional(),
+  featured: z.boolean().optional().default(false)
 }).strict();
 
 const pluginRegistrySchema = z.object({
   format: z.literal(1),
   plugins: z.array(pluginMarketEntrySchema).max(256)
+}).strict();
+
+const pluginSourceSchema = z.object({
+  repository: z.string().max(2_000),
+  path: z.string().max(512),
+  branch: z.string().max(200)
 }).strict();
 
 const managedPluginSchema = z.object({
@@ -46,8 +63,10 @@ const managedPluginSchema = z.object({
   description: z.string().max(2_000),
   directory: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/u),
   entry: z.string().regex(/^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]+$/u),
-  sizeBytes: z.number().int().positive().max(maxPackageBytes),
-  sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  source: pluginSourceSchema.optional(),
+  // 旧 tar.gz 时代清单遗留字段，仅作解析兼容，新安装不再写入。
+  sizeBytes: z.number().int().positive().optional(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   enabled: z.boolean(),
   installedAt: z.string().datetime(),
   error: z.string().max(2_000).optional()
@@ -74,23 +93,33 @@ export interface PluginRegistryCache {
   document: PluginRegistryDocument;
 }
 
-export function parsePluginRegistry(value: unknown, sourceUrl = BINY_PLUGIN_REGISTRY_URL): PluginRegistryDocument {
+export function parsePluginRegistry(value: unknown): PluginRegistryDocument {
   const document = pluginRegistrySchema.parse(value);
-  for (const plugin of document.plugins) assertOfficialUrl(plugin.downloadUrl, sourceUrl);
   const ids = new Set<string>();
   for (const plugin of document.plugins) {
     if (ids.has(plugin.id)) throw new Error(`Plugin Registry 存在重复 id：${plugin.id}`);
     ids.add(plugin.id);
+    parsePluginRepository(plugin.repository);
   }
   return document;
 }
 
-export function assertOfficialUrl(value: string, sourceUrl = BINY_PLUGIN_REGISTRY_URL): void {
-  const url = new URL(value);
-  const sourceOrigin = new URL(sourceUrl).origin;
-  if (url.protocol !== "https:" || url.origin !== registryOrigin || sourceOrigin !== registryOrigin) {
-    throw new Error("Plugin 只允许来自 Biny 官方 HTTPS Registry 的地址。");
+/** 市场条目的 repository 必须是 GitHub 仓库首页地址；安装走 GitHub tree/raw API。 */
+export function parsePluginRepository(value: string): { owner: string; name: string } {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`Plugin 仓库地址无效：${value}`);
   }
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com") {
+    throw new Error("Plugin 仓库必须是 GitHub HTTPS 地址。");
+  }
+  const parts = url.pathname.replace(/\/+$/u, "").split("/").filter(Boolean);
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new Error("Plugin 仓库地址必须形如 https://github.com/owner/repo。");
+  }
+  return { owner: parts[0], name: parts[1] };
 }
 
 export async function readProjectPluginManifest(workspaceRoot: string): Promise<ProjectPluginManifest> {
@@ -111,6 +140,15 @@ export async function writeProjectPluginManifest(workspaceRoot: string, manifest
   const parsed = managedPluginManifestSchema.parse(manifest);
   const root = await ensurePluginRoot(workspaceRoot);
   await writeJsonAtomic(path.join(root, "manifest.json"), parsed);
+}
+
+// 清单的读-改-写整体串行：并发安装/启停/卸载共享同一条链，避免后写覆盖先读。
+let pluginWriteQueue: Promise<unknown> = Promise.resolve();
+
+function enqueuePluginWrite<T>(operation: () => Promise<T>): Promise<T> {
+  const run = pluginWriteQueue.then(() => operation());
+  pluginWriteQueue = run.catch(() => undefined);
+  return run;
 }
 
 export async function readPluginRegistryCache(workspaceRoot: string): Promise<PluginRegistryCache | undefined> {
@@ -154,30 +192,64 @@ export async function listEnabledProjectPluginPaths(workspaceRoot: string): Prom
   return paths;
 }
 
-export async function installPluginPackage(options: {
+export async function installPluginFromRepository(options: {
   workspaceRoot: string;
   plugin: PluginMarketEntry;
   fetcher?: typeof globalThis.fetch;
 }): Promise<ManagedPlugin> {
-  assertOfficialUrl(options.plugin.downloadUrl);
-  const fetcher = options.fetcher ?? globalThis.fetch;
-  const response = await fetcher(options.plugin.downloadUrl);
-  if (!response.ok) throw new Error(`Plugin 下载失败：HTTP ${String(response.status)}。`);
-  if (response.url) assertOfficialUrl(response.url);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength !== options.plugin.sizeBytes) {
-    throw new Error(`Plugin 包大小不匹配：期望 ${String(options.plugin.sizeBytes)}，实际 ${String(bytes.byteLength)}。`);
+  const repository = parsePluginRepository(options.plugin.repository);
+  const fetcher = options.fetcher ?? getSharedProxyAwareFetch();
+  const pluginDirectory = normalizeRepoDirectory(options.plugin.path);
+  // files 清单优先：raw 下载不吃 api.github.com 的未认证限额；
+  // 缺省时退回 tree API 自动发现（main/master），限额耗尽会给出明确报错。
+  let files: Array<{ path: string; size?: number }>;
+  let branch = options.plugin.branch ?? "main";
+  if (options.plugin.files?.length) {
+    files = options.plugin.files.map((relative) => ({ path: `${pluginDirectory}/${relative}` }));
+  } else {
+    const discovered = await fetchPluginTreeWithFallback(repository, fetcher);
+    branch = discovered.branch;
+    files = discovered.tree.filter((entry) =>
+      entry.type === "blob"
+      && isSafeRepoPath(entry.path)
+      && (entry.path === pluginDirectory || entry.path.startsWith(`${pluginDirectory}/`))
+    );
+    if (!files.length) throw new Error(`仓库 ${options.plugin.repository} 里找不到目录 ${pluginDirectory}。`);
   }
-  const digest = createHash("sha256").update(bytes).digest("hex");
-  if (digest !== options.plugin.sha256) throw new Error("Plugin 包 SHA-256 校验失败。");
+  if (files.length > maxPluginFiles) throw new Error(`Plugin 文件数量超过 ${String(maxPluginFiles)} 个。`);
+  const declaredTotal = files.reduce((total, entry) => total + (entry.size ?? 0), 0);
+  if (declaredTotal > maxPluginTotalBytes) throw new Error("Plugin 目录超过大小上限。");
 
   const pluginsRoot = await ensurePluginRoot(options.workspaceRoot);
   const tempDirectory = path.join(pluginsRoot, `.install-${randomUUID()}`);
   const targetDirectory = path.join(pluginsRoot, options.plugin.id);
   await fs.mkdir(tempDirectory, { recursive: false, mode: 0o700 });
   try {
-    const extracted = await extractTarGz(bytes, tempDirectory);
-    const entry = options.plugin.entry ?? chooseEntry(extracted);
+    const downloaded: string[] = [];
+    let totalBytes = 0;
+    for (const file of files) {
+      const relative = file.path.slice(pluginDirectory.length).replace(/^\//u, "");
+      assertSafeRelativePath(relative);
+      const url = githubRawFileUrl(repository, branch, file.path);
+      const response = await fetcher(url, { signal: AbortSignal.timeout(30_000), headers: { "user-agent": "Biny PluginHub" } });
+      if (!response.ok) throw new Error(`Plugin 文件下载失败（${relative}）：HTTP ${String(response.status)}。`);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > maxFileBytes || totalBytes + bytes.byteLength > maxPluginTotalBytes) {
+        throw new Error("Plugin 下载后超过文件大小限制。");
+      }
+      const target = path.resolve(tempDirectory, relative);
+      await assertParentDirectories(tempDirectory, path.dirname(target));
+      const handle = await fs.open(target, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
+      try {
+        await handle.writeFile(bytes);
+      } finally {
+        await handle.close();
+      }
+      downloaded.push(relative);
+      totalBytes += bytes.byteLength;
+    }
+
+    const entry = options.plugin.entry ?? chooseEntry(downloaded);
     assertSafeRelativePath(entry);
     const entryPath = await resolveContainedFile(tempDirectory, entry);
     const relativeEntry = path.relative(tempDirectory, entryPath).split(path.sep).join("/");
@@ -189,37 +261,39 @@ export async function installPluginPackage(options: {
       description: options.plugin.description,
       directory: options.plugin.id,
       entry: relativeEntry,
-      sizeBytes: options.plugin.sizeBytes,
-      sha256: options.plugin.sha256,
+      source: { repository: options.plugin.repository, path: pluginDirectory, branch },
       enabled: false,
       installedAt: new Date().toISOString(),
       error: undefined
     };
-    const existing = await readProjectPluginManifest(options.workspaceRoot);
-    const old = existing.plugins.find((plugin) => plugin.id === options.plugin.id);
-    if (old?.enabled) manifestEntry.enabled = true;
-    const backupDirectory = path.join(pluginsRoot, `.backup-${options.plugin.id}-${randomUUID()}`);
-    let hadOldDirectory = false;
-    try {
+    // 目录轮换与清单更新进入串行队列：并发安装其他 Plugin 时不会读到过期清单再整体覆盖。
+    await enqueuePluginWrite(async () => {
+      const existing = await readProjectPluginManifest(options.workspaceRoot);
+      const old = existing.plugins.find((plugin) => plugin.id === options.plugin.id);
+      if (old?.enabled) manifestEntry.enabled = true;
+      const backupDirectory = path.join(pluginsRoot, `.backup-${options.plugin.id}-${randomUUID()}`);
+      let hadOldDirectory = false;
       try {
-        const oldStat = await fs.lstat(targetDirectory);
-        if (oldStat.isSymbolicLink() || !oldStat.isDirectory()) throw new Error("现有 Plugin 目录不安全。");
-        await fs.rename(targetDirectory, backupDirectory);
-        hadOldDirectory = true;
+        try {
+          const oldStat = await fs.lstat(targetDirectory);
+          if (oldStat.isSymbolicLink() || !oldStat.isDirectory()) throw new Error("现有 Plugin 目录不安全。");
+          await fs.rename(targetDirectory, backupDirectory);
+          hadOldDirectory = true;
+        } catch (error) {
+          if (!isNotFound(error)) throw error;
+        }
+        await fs.rename(tempDirectory, targetDirectory);
+        await writeProjectPluginManifest(options.workspaceRoot, {
+          format: 1,
+          plugins: [...existing.plugins.filter((plugin) => plugin.id !== options.plugin.id), manifestEntry]
+        });
+        if (hadOldDirectory) await fs.rm(backupDirectory, { recursive: true, force: true });
       } catch (error) {
-        if (!isNotFound(error)) throw error;
+        await fs.rm(targetDirectory, { recursive: true, force: true }).catch(() => undefined);
+        if (hadOldDirectory) await fs.rename(backupDirectory, targetDirectory).catch(() => undefined);
+        throw error;
       }
-      await fs.rename(tempDirectory, targetDirectory);
-      await writeProjectPluginManifest(options.workspaceRoot, {
-        format: 1,
-        plugins: [...existing.plugins.filter((plugin) => plugin.id !== options.plugin.id), manifestEntry]
-      });
-      if (hadOldDirectory) await fs.rm(backupDirectory, { recursive: true, force: true });
-    } catch (error) {
-      await fs.rm(targetDirectory, { recursive: true, force: true }).catch(() => undefined);
-      if (hadOldDirectory) await fs.rename(backupDirectory, targetDirectory).catch(() => undefined);
-      throw error;
-    }
+    });
     return manifestEntry;
   } catch (error) {
     await fs.rm(tempDirectory, { recursive: true, force: true }).catch(() => undefined);
@@ -227,30 +301,86 @@ export async function installPluginPackage(options: {
   }
 }
 
+interface GitTreeEntry {
+  path: string;
+  type?: string;
+  size?: number;
+}
+
+async function fetchPluginTreeWithFallback(
+  repository: { owner: string; name: string },
+  fetcher: typeof globalThis.fetch
+): Promise<{ tree: GitTreeEntry[]; branch: string }> {
+  let lastError: unknown;
+  for (const branch of ["main", "master"]) {
+    try {
+      const url = `${githubApiBase}/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/git/trees/${encodeURIComponent(branch)}?recursive=1`;
+      const response = await fetcher(url, { signal: AbortSignal.timeout(15_000), headers: { "user-agent": "Biny PluginHub" } });
+      if (!response.ok) {
+        if (response.status === 403 || response.status === 429) {
+          throw new Error("GitHub API 未认证限额耗尽（60 次/小时）。可在 registry 条目里声明 files 清单绕开，或稍后重试。");
+        }
+        throw new Error(`GitHub 仓库目录请求失败：HTTP ${String(response.status)}。`);
+      }
+      const text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > maxResponseBytes) throw new Error("GitHub 仓库目录响应过大。");
+      const payload = JSON.parse(text) as { tree?: unknown; truncated?: unknown };
+      if (!Array.isArray(payload.tree)) throw new Error("GitHub 返回的仓库目录格式无效。");
+      if (payload.truncated || payload.tree.length > maxTreeEntries) throw new Error(`仓库目录超过 ${String(maxTreeEntries)} 个条目。`);
+      const tree = (payload.tree as GitTreeEntry[]).filter((entry) => typeof entry?.path === "string");
+      return { tree, branch };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("无法读取 Plugin 仓库。");
+}
+
+function githubRawFileUrl(repository: { owner: string; name: string }, branch: string, filePath: string): string {
+  const encodedPath = filePath.split("/").map((part) => encodeURIComponent(part)).join("/");
+  return `https://raw.githubusercontent.com/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/${encodeURIComponent(branch)}/${encodedPath}`;
+}
+
+function normalizeRepoDirectory(value: string): string {
+  const normalized = value.replace(/\\/gu, "/").replace(/^\.\//u, "").replace(/\/+$/u, "");
+  if (!normalized || normalized === "." || normalized.split("/").some((part) => part === ".." || part === "")) {
+    throw new Error(`Plugin 仓库内路径无效：${value}`);
+  }
+  return normalized;
+}
+
+function isSafeRepoPath(value: string): boolean {
+  return !value.startsWith("/") && !value.split("/").some((part) => part === ".." || part === "");
+}
+
 export async function setProjectPluginEnabled(workspaceRoot: string, pluginId: string, enabled: boolean): Promise<ManagedPlugin> {
-  const manifest = await readProjectPluginManifest(workspaceRoot);
-  const plugin = manifest.plugins.find((candidate) => candidate.id === pluginId);
-  if (!plugin) throw new Error(`Plugin 不存在：${pluginId}`);
-  const root = await ensurePluginRoot(workspaceRoot, true);
-  await assertContainedDirectory(root, path.join(root, plugin.directory));
-  const next = { ...plugin, enabled, error: undefined };
-  await writeProjectPluginManifest(workspaceRoot, {
-    format: 1,
-    plugins: manifest.plugins.map((candidate) => candidate.id === pluginId ? next : candidate)
+  return await enqueuePluginWrite(async () => {
+    const manifest = await readProjectPluginManifest(workspaceRoot);
+    const plugin = manifest.plugins.find((candidate) => candidate.id === pluginId);
+    if (!plugin) throw new Error(`Plugin 不存在：${pluginId}`);
+    const root = await ensurePluginRoot(workspaceRoot, true);
+    await assertContainedDirectory(root, path.join(root, plugin.directory));
+    const next = { ...plugin, enabled, error: undefined };
+    await writeProjectPluginManifest(workspaceRoot, {
+      format: 1,
+      plugins: manifest.plugins.map((candidate) => candidate.id === pluginId ? next : candidate)
+    });
+    return next;
   });
-  return next;
 }
 
 export async function uninstallProjectPlugin(workspaceRoot: string, pluginId: string): Promise<void> {
-  const manifest = await readProjectPluginManifest(workspaceRoot);
-  const plugin = manifest.plugins.find((candidate) => candidate.id === pluginId);
-  if (!plugin) throw new Error(`Plugin 不存在：${pluginId}`);
-  const root = await ensurePluginRoot(workspaceRoot, true);
-  const directory = await assertContainedDirectory(root, path.join(root, plugin.directory));
-  await fs.rm(directory, { recursive: true, force: true });
-  await writeProjectPluginManifest(workspaceRoot, {
-    format: 1,
-    plugins: manifest.plugins.filter((candidate) => candidate.id !== pluginId)
+  await enqueuePluginWrite(async () => {
+    const manifest = await readProjectPluginManifest(workspaceRoot);
+    const plugin = manifest.plugins.find((candidate) => candidate.id === pluginId);
+    if (!plugin) throw new Error(`Plugin 不存在：${pluginId}`);
+    const root = await ensurePluginRoot(workspaceRoot, true);
+    const directory = await assertContainedDirectory(root, path.join(root, plugin.directory));
+    await fs.rm(directory, { recursive: true, force: true });
+    await writeProjectPluginManifest(workspaceRoot, {
+      format: 1,
+      plugins: manifest.plugins.filter((candidate) => candidate.id !== pluginId)
+    });
   });
 }
 
@@ -262,72 +392,10 @@ export function projectPluginManifestPath(workspaceRoot: string): string {
   return path.join(projectPluginRoot(workspaceRoot), "manifest.json");
 }
 
-async function extractTarGz(bytes: Uint8Array, destination: string): Promise<string[]> {
-  const archive = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes;
-  const files: string[] = [];
-  let offset = 0;
-  let totalBytes = 0;
-  while (offset + 512 <= archive.byteLength) {
-    const header = archive.subarray(offset, offset + 512);
-    offset += 512;
-    if (header.every((byte) => byte === 0)) break;
-    verifyTarChecksum(header);
-    const name = tarString(header.subarray(0, 100));
-    const prefix = tarString(header.subarray(345, 500));
-    const relative = prefix ? `${prefix}/${name}` : name;
-    assertSafeRelativePath(relative);
-    const type = header[156] ?? 0;
-    const size = parseTarOctal(header.subarray(124, 136));
-    if (size > maxFileBytes || totalBytes + size > maxExtractedBytes) throw new Error("Plugin 解包后超过文件大小限制。");
-    const end = offset + Math.ceil(size / 512) * 512;
-    if (end > archive.byteLength) throw new Error("Plugin tar 包被截断。");
-    const target = path.resolve(destination, relative);
-    if (type === 5) {
-      await fs.mkdir(target, { recursive: true, mode: 0o700 });
-    } else if (type === 0 || type === 48) {
-      if (files.length >= maxExtractedFiles) throw new Error("Plugin 文件数量超过限制。");
-      await assertParentDirectories(destination, path.dirname(target));
-      const handle = await fs.open(target, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
-      try {
-        await handle.writeFile(archive.subarray(offset, offset + size));
-      } finally {
-        await handle.close();
-      }
-      files.push(relative);
-      totalBytes += size;
-    } else {
-      throw new Error("Plugin tar 包包含不允许的符号链接、硬链接或特殊文件。");
-    }
-    offset = end;
-  }
-  if (!files.length) throw new Error("Plugin tar 包没有可执行模块。");
-  return files;
-}
-
 function chooseEntry(files: string[]): string {
   const candidates = files.filter((file) => [".js", ".mjs", ".cjs"].includes(path.posix.extname(file).toLowerCase()));
   if (candidates.length !== 1) throw new Error("Plugin 必须明确提供 entry，或包内只能有一个 JavaScript 模块。");
   return candidates[0]!;
-}
-
-function verifyTarChecksum(header: Uint8Array): void {
-  const declared = parseTarOctal(header.subarray(148, 156));
-  let actual = 0;
-  for (let index = 0; index < header.length; index += 1) actual += index >= 148 && index < 156 ? 0x20 : header[index]!;
-  if (declared !== actual) throw new Error("Plugin tar 包校验和无效。");
-}
-
-function parseTarOctal(value: Uint8Array): number {
-  const text = tarString(value).trim();
-  if (!/^[0-7]+$/u.test(text)) throw new Error("Plugin tar 包包含无效文件大小。");
-  const parsed = Number.parseInt(text, 8);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error("Plugin tar 包文件大小无效。");
-  return parsed;
-}
-
-function tarString(value: Uint8Array): string {
-  const end = value.indexOf(0);
-  return new TextDecoder().decode(end === -1 ? value : value.subarray(0, end)).trim();
 }
 
 function assertSafeRelativePath(value: string): void {
@@ -368,8 +436,12 @@ async function ensurePluginRoot(workspaceRoot: string, optional = false): Promis
     const stat = await fs.lstat(root);
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("项目 Plugin 目录必须是真实目录。");
   } catch (error) {
-    if (isNotFound(error) && !optional) await fs.mkdir(root, { recursive: false, mode: 0o700 });
-    else if (!isNotFound(error)) throw error;
+    if (!isNotFound(error)) throw error;
+    if (optional) return root;
+    // 并发写操作可能同时创建目录：recursive 创建容忍撞车，建完重新校验安全性。
+    await fs.mkdir(root, { recursive: true, mode: 0o700 });
+    const created = await fs.lstat(root);
+    if (created.isSymbolicLink() || !created.isDirectory()) throw new Error("项目 Plugin 目录必须是真实目录。");
   }
   return root;
 }
@@ -407,14 +479,19 @@ async function writeJsonAtomic(target: string, value: unknown): Promise<void> {
     if (!isNotFound(error)) throw error;
   }
   const temporary = `${target}.${randomUUID()}.tmp`;
-  const handle = await fs.open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
   try {
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await handle.sync();
+    const handle = await fs.open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(temporary, target);
   } finally {
-    await handle.close();
+    // 写入或 rename 失败时清理残留临时文件；成功后 rename 已消费掉它，force 删除是空操作。
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
   }
-  await fs.rename(temporary, target);
 }
 
 function isNotFound(error: unknown): boolean {

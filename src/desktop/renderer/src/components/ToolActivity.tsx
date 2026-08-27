@@ -67,7 +67,8 @@ export const ToolActivity = memo(function ToolActivity({ projectId, tool, onPrev
         onToggle={() => setOverride({ status: tool.status, expanded: !expanded })}
         state={rowState}
         summary={summary}
-        title={VARIANT_TITLES[variant]}
+        // 无法分类的工具（others）回退显示原始工具名，避免出现无信息的「Tool call」。
+        title={variant === "others" ? tool.tool : VARIANT_TITLES[variant]}
         variant={variant}
       >
         <div className="tool-details">
@@ -420,15 +421,6 @@ function ToolPayload({ tool, onPreviewFile }: { tool: TimelineTool; onPreviewFil
       output={output ?? null}
       outputError={tool.status === "failed" || tool.status === "denied" || tool.status === "unknown" || tool.status === "cancelled"}
     />
-  );
-}
-
-function CopyableCodeBlock({ value, label }: { value: string; label: string }): React.JSX.Element {
-  return (
-    <div className="copyable-code-block">
-      <CopyButton className="copy-button" label={label} value={value} />
-      <pre className="tool-payload"><code>{value}</code></pre>
-    </div>
   );
 }
 

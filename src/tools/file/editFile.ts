@@ -72,7 +72,8 @@ export function createEditFileTool(context: ToolContext): Tool<EditFileArgs, Edi
           if (!content.includes(args.oldText)) {
             throw new Error(`oldText was not found in ${args.path}`);
           }
-          const next = content.replace(args.oldText, args.newText);
+          // 函数形式的替换值才会被原样插入；字符串形式会把 newText 里的 $$、$& 等序列当成模式解释。
+          const next = content.replace(args.oldText, () => args.newText);
           signal?.throwIfAborted();
           await atomicWriteUtf8File(
             absolutePath,

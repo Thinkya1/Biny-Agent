@@ -55,8 +55,10 @@ export async function fetchModelCatalogSnapshot(
   if ((request.config.requiresApiKey ?? request.definition.requiresApiKey) && !apiKey) {
     throw new Error(`No credentials available for provider ${request.alias}.`);
   }
-  // Anthropic 原生协议用 x-api-key，OAuth 场景和 OpenAI 兼容端点用 Bearer。
+  // Anthropic 原生协议用 x-api-key，Gemini 原生协议用 x-goog-api-key，
+  // OAuth 场景和 OpenAI 兼容端点用 Bearer。
   const authMode = request.config.authMode ?? request.definition.authModes[0];
+  const googleNative = request.config.apiBackend === "google_generative_ai" && authMode !== "oauth-bearer";
   const headers: Record<string, string> = codex
     ? {
       Authorization: apiKey ? `Bearer ${apiKey}` : "",
@@ -65,6 +67,8 @@ export async function fetchModelCatalogSnapshot(
     }
     : protocol === "anthropic" && authMode !== "oauth-bearer"
     ? { "x-api-key": apiKey ?? "", "anthropic-version": "2023-06-01" }
+    : googleNative
+    ? { "x-goog-api-key": apiKey ?? "" }
     : { Authorization: apiKey ? `Bearer ${apiKey}` : "" };
   if (protocol === "anthropic" && authMode === "oauth-bearer") headers["anthropic-version"] = "2023-06-01";
   Object.assign(headers, request.config.headers);
@@ -113,7 +117,10 @@ export function parseModelCatalog(
     const visibility = stringValue(item.visibility)?.toLowerCase();
     if (visibility === "hide" || visibility === "hidden") return [];
     const slug = stringValue(item.slug);
-    const id = stringValue(item.id) ?? stringValue(item.model) ?? stringValue(item.name) ?? slug;
+    // Google 风格的目录只给资源名（name: "models/gemini-x"）；从 name 取 id 时剥掉资源段，
+    // 让模型 id 保持可直接用于请求的形状。
+    const resourceName = stringValue(item.name)?.replace(/^models\//u, "");
+    const id = stringValue(item.id) ?? stringValue(item.model) ?? resourceName ?? slug;
     if (!id) return [];
     const contextWindow = numberValue(item.context_window)
       ?? numberValue(item.contextWindow)

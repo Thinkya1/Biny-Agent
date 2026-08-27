@@ -11,6 +11,10 @@ import type { WebCookiesConfig, WebSearchConfig } from "../../config/schema.js";
 import { ToolAccesses } from "../access.js";
 import type { Tool } from "../types.js";
 import { cookieHeaderFor, defaultCookieJarPath, readCookieJar } from "./cookieJar.js";
+import { readBounded } from "./fetch.js";
+
+// 搜索响应体必须有上限：结果页 HTML 由远端控制，无界读取会把内存交给对端决定。
+const maxSearchResponseBytes = 2 * 1024 * 1024;
 
 const defaultConfig: WebSearchConfig = {
   enabled: true,
@@ -491,7 +495,7 @@ async function fetchText(
       headers,
       signal: controller.signal
     });
-    const body = await response.text();
+    const { text: body } = await readBounded(response, maxSearchResponseBytes);
     if (!response.ok) {
       const detail = body.replace(/\s+/g, " ").trim().slice(0, 180);
       throw new Error(`Web search provider returned HTTP ${response.status}${detail ? `: ${detail}` : "."}`);

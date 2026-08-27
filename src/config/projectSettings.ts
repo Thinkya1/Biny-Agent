@@ -36,8 +36,14 @@ const agentOverrideSchema = z.object({
 const compactionOverrideSchema = z.object({
   enabled: z.boolean().optional(),
   reserveTokens: z.number().int().min(256).max(262_144).optional(),
+  /** 触发阈值 = 当前输入预算 × 该百分比；显式 reserveTokens 优先。 */
+  triggerPercent: z.number().min(0.5).max(0.95).optional(),
   keepRecentTokens: z.number().int().min(256).max(1_000_000).optional(),
-  maxSummaryTokens: z.number().int().min(256).max(32_768).optional()
+  /** 与 keepRecentTokens 双上限，取更保守（保留更少）的切分点。 */
+  keepRecentMessages: z.number().int().min(1).max(500).optional(),
+  maxSummaryTokens: z.number().int().min(256).max(32_768).optional(),
+  /** 引用全局 config 已定义的模型别名；缺省跟随当前对话模型。 */
+  summaryModel: z.string().trim().min(1).max(128).optional()
 }).strict();
 
 const contextOverrideSchema = z.object({

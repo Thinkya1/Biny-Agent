@@ -20,7 +20,7 @@ import { replaySession } from "../src/session/replay.js";
 import { ensureAgentDirs } from "../src/session/store.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import type { Tool } from "../src/tools/types.js";
-import type { AgentModel, ModelRequestMetrics, ModelStreamContext } from "../src/agent/core/types.js";
+import type { AgentModel, ModelRequestMetrics, ModelStreamContext, ModelStreamOptions } from "../src/agent/core/types.js";
 import type { AgentSessionEvent } from "../src/agent/types.js";
 
 async function main(): Promise<void> {
@@ -42,6 +42,9 @@ async function main(): Promise<void> {
   await testKimiPromptCacheKey();
   await testOpenAiPromptCacheKey();
   await testCompatibleEmptyAssistantHistory();
+  await testAnthropicSkipsEmptyAssistantHistory();
+  await testGoogleSkipsEmptyAssistantHistory();
+  await testChatParamsApplyToFirstModelRequest();
   await testNativeTimeout();
   await testOpenAiResponsesTransport();
   await testStreamingProtocolsRequireTerminalEvents();
@@ -1218,6 +1221,125 @@ async function testCompatibleEmptyAssistantHistory(): Promise<void> {
     type: "function",
     function: { name: "lookup", arguments: JSON.stringify({ query: "value" }) }
   }]);
+}
+
+async function testAnthropicSkipsEmptyAssistantHistory(): Promise<void> {
+  let requestBody: Record<string, unknown> | undefined;
+  const model = createNativeModel({
+    provider: "anthropic",
+    modelId: "claude-test",
+    api: "anthropic_messages",
+    baseUrl: "https://example.test/anthropic",
+    apiKey: "token",
+    fetch: async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(JSON.stringify({ type: "message", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+  });
+  for await (const _event of await model.stream({
+    messages: [
+      { role: "user", content: "continue" },
+      { role: "assistant", content: [{ type: "reasoning", text: "orphan reasoning" }] },
+      { role: "assistant", content: [] },
+      { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "lookup", arguments: { query: "value" } }] },
+      { role: "toolResult", toolCallId: "call-1", toolName: "lookup", content: [{ type: "text", text: "result" }] }
+    ],
+    tools: []
+  })) {
+    // Drain the transport so the request body is captured.
+  }
+  const messages = requestBody?.messages as Array<Record<string, unknown>>;
+  // 与 OpenAI 路径对齐：无签名 reasoning-only 与空 assistant 都必须跳过，否则 Anthropic 对空 content 返回 400。
+  assert.deepEqual(messages.map((message) => message.role), ["user", "assistant", "user"]);
+  assert.deepEqual(messages[1]?.content, [{ type: "tool_use", id: "call-1", name: "lookup", input: { query: "value" } }]);
+  assert.deepEqual(messages[2]?.content, [{ type: "tool_result", tool_use_id: "call-1", content: "result", is_error: false }]);
+}
+
+async function testGoogleSkipsEmptyAssistantHistory(): Promise<void> {
+  let requestBody: Record<string, unknown> | undefined;
+  const model = createNativeModel({
+    provider: "google-native",
+    modelId: "gemini-test",
+    api: "google_generative_ai",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    apiKey: "google-key",
+    fetch: async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] })}\n\n`, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      });
+    }
+  });
+  for await (const _event of await model.stream({
+    messages: [
+      { role: "user", content: "continue" },
+      { role: "assistant", content: [] },
+      { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "lookup", arguments: { query: "value" } }] },
+      { role: "toolResult", toolCallId: "call-1", toolName: "lookup", content: [{ type: "text", text: "result" }] }
+    ],
+    tools: []
+  })) {
+    // Drain the transport so the request body is captured.
+  }
+  const contents = requestBody?.contents as Array<Record<string, unknown>>;
+  // 与 OpenAI 路径对齐：空 assistant 必须跳过，否则 Gemini 对空 parts 返回 400。
+  assert.deepEqual(contents.map((message) => message.role), ["user", "model", "user"]);
+  assert.deepEqual(contents[1]?.parts, [{ functionCall: { id: "call-1", name: "lookup", args: { query: "value" } } }]);
+}
+
+async function testChatParamsApplyToFirstModelRequest(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-chat-params-first-"));
+  await ensureAgentDirs(workspaceRoot);
+  const observedOptions: Array<ModelStreamOptions | undefined> = [];
+  const model: AgentModel = {
+    provider: "test",
+    modelId: "chat-params-model",
+    stream: async (_context, options) => {
+      observedOptions.push(options === undefined ? undefined : { ...options });
+      return (async function* () {
+        yield { type: "start" as const };
+        yield { type: "text-delta" as const, text: "ok" };
+        yield { type: "finish" as const, reason: "stop" as const };
+      })();
+    }
+  };
+  const config = configSchema.parse({
+    ...defaultConfig,
+    defaultModel: "chat-params-model",
+    providers: { test: { type: "openai", apiKey: "test-key", baseUrl: "https://example.test/v1" } },
+    models: { "chat-params-model": { provider: "test", model: "chat-params-model" } },
+    chat: { temperature: 0.3, maxOutputTokens: 2_048 },
+    context: {
+      ...defaultConfig.context,
+      memory: { ...defaultConfig.context.memory, useMemories: false, generateMemories: false }
+    }
+  });
+  const recorder = new SessionRecorder(workspaceRoot);
+  const agent = new AgentSession({
+    workspaceRoot,
+    config,
+    model,
+    toolRegistry: new ToolRegistry(),
+    permissionManager: new PermissionManager(config.permission),
+    recorder
+  });
+  await agent.initialize();
+  try {
+    for await (const _event of agent.prompt("hi")) {
+      // Drain the turn so the first model request is issued.
+    }
+    // 回归：全局聊天采样参数必须覆盖每回合第 1 个请求；此前只在 prepareNextTurn（第 2 步起）生效。
+    assert.equal(observedOptions.length, 1);
+    assert.equal(observedOptions[0]?.temperature, 0.3);
+    assert.equal(observedOptions[0]?.maxOutputTokens, 2_048);
+  } finally {
+    await agent.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
 }
 
 async function testCompatibleSystemRole(): Promise<void> {

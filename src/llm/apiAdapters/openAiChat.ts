@@ -53,6 +53,9 @@ export async function* streamOpenAi(
   if (options.maxOutputTokens !== undefined) {
     body[config.maxTokensField ?? "max_tokens"] = options.maxOutputTokens;
   }
+  if (options.temperature !== undefined) {
+    body.temperature = options.temperature;
+  }
   applyOpenAiReasoning(body, config, options);
   const cacheCapability = config.promptCache ?? promptCacheCapability({
     provider: config.provider,

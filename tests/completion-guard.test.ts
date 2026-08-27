@@ -30,6 +30,7 @@ async function main(): Promise<void> {
   testTextClaimEscalatesToReview();
   testDeclarationSnapshotRoundTrip();
   await testAgentDoesNotFinishImmediatelyAfterMutation();
+  await testEvaluatorFailureReleasesRun();
   console.log("completion guard tests passed");
 }
 
@@ -239,6 +240,80 @@ async function testAgentDoesNotFinishImmediatelyAfterMutation(): Promise<void> {
     assert.deepEqual(requestKinds, ["agent", "agent", "agent", "completion-review", "agent", "completion-review"]);
     assert.equal(outcome.status, "completed");
     assert.equal(await readFile(path.join(workspaceRoot, "result.txt"), "utf8"), "written");
+  } finally {
+    await agent.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 评审器基础设施故障（如模型不支持关 thinking、网络错误）必须放行：
+ * 结构性检查已过 + 完成已声明，评审崩了不能烧 continuation 预算，更不能把回合判成 incomplete。
+ */
+async function testEvaluatorFailureReleasesRun(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-completion-guard-"));
+  await ensureAgentDirs(workspaceRoot);
+  let agentRequests = 0;
+  let reviews = 0;
+  const model: AgentModel = {
+    provider: "test",
+    modelId: "completion-guard-model",
+    supportsTools: true,
+    stream: async (context) => {
+      const evaluator = context.tools.length === 0;
+      if (evaluator) reviews += 1;
+      else agentRequests += 1;
+      const response = evaluator
+        ? [
+          // 模拟 provider 侧参数错误：评审请求直接以 error 事件崩掉。
+          { type: "error" as const, error: new Error("deepseek-v4-flash does not support disabling thinking") }
+        ]
+        : agentRequests === 1
+          ? [
+            { type: "tool-call" as const, id: "write-1", name: "write_file", arguments: { path: "result.txt", content: "written" } },
+            { type: "finish" as const, reason: "tool-calls" as const }
+          ]
+          : agentRequests === 2
+            ? [
+              { type: "tool-call" as const, id: "declare-1", name: "attempt_completion", arguments: { summary: "result.txt 已创建", evidence: "write_file 返回成功" } },
+              { type: "finish" as const, reason: "tool-calls" as const }
+            ]
+            : [
+              { type: "text-delta" as const, text: "文件已写入，任务完成。" },
+              { type: "finish" as const, reason: "stop" as const }
+            ];
+      return (async function* () {
+        for (const event of response) yield event;
+      })();
+    }
+  };
+  const config = configSchema.parse({
+    ...defaultConfig,
+    context: {
+      ...defaultConfig.context,
+      memory: { ...defaultConfig.context.memory, useMemories: false, generateMemories: false }
+    }
+  });
+  const recorder = new SessionRecorder(workspaceRoot);
+  const registry = new ToolRegistry();
+  registry.registerBuiltinTool(createWriteFileTool({ workspaceRoot, ignore: [] }));
+  registry.registerBuiltinTool(createAttemptCompletionTool());
+  const agent = new AgentSession({
+    workspaceRoot,
+    config,
+    model,
+    toolRegistry: registry,
+    permissionManager: new PermissionManager(config.permission),
+    recorder
+  });
+  await agent.initialize();
+  try {
+    const outcome = await agent.runTask("create result.txt and finish the task", {
+      confirmPermission: async () => ({ approved: true, scope: "once" })
+    });
+    assert.equal(outcome.status, "completed", "evaluator infrastructure failure must fail open, not mark the run incomplete");
+    assert.equal(reviews, 1, "a crashed evaluator must not burn continuation attempts");
+    assert.equal(agentRequests, 3, "no extra continuation turns after evaluator failure");
   } finally {
     await agent.close();
     await rm(workspaceRoot, { recursive: true, force: true });

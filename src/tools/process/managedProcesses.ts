@@ -36,11 +36,13 @@ export interface StopProcessArgs extends ProcessIdArgs {
   reason?: string;
 }
 
-export interface ListProcessesArgs {
+export interface ProcessStatusArgs {
+  /** 提供时只返回该进程；省略时列出全部受管进程。 */
+  processId?: string;
   includeExited?: boolean;
 }
 
-export interface ListProcessesResult {
+export interface ProcessStatusResult {
   processes: ManagedProcessSnapshot[];
 }
 
@@ -81,8 +83,6 @@ const startProcessArgsSchema = z.object({
   readiness: z.discriminatedUnion("type", [httpProbeSchema, tcpProbeSchema, logProbeSchema]).optional()
 }) satisfies z.ZodType<StartProcessArgs>;
 
-const processIdArgsSchema = z.object({ processId: z.string().uuid() }) satisfies z.ZodType<ProcessIdArgs>;
-
 export function createManagedProcessTools(
   context: ToolContext,
   service: ManagedProcessService
@@ -91,8 +91,7 @@ export function createManagedProcessTools(
     createStartProcessTool(context, service),
     createProcessStatusTool(service),
     createReadProcessOutputTool(service),
-    createStopProcessTool(service),
-    createListProcessesTool(service)
+    createStopProcessTool(service)
   ] as Array<Tool<unknown, unknown>>;
 }
 
@@ -166,28 +165,38 @@ export function createStartProcessTool(
 
 export function createProcessStatusTool(
   service: ManagedProcessService
-): Tool<ProcessIdArgs, ManagedProcessSnapshot> {
+): Tool<ProcessStatusArgs, ProcessStatusResult> {
+  const schema = z.object({
+    processId: z.string().uuid().optional(),
+    includeExited: z.boolean().optional()
+  }) satisfies z.ZodType<ProcessStatusArgs>;
   return {
     name: "process_status",
-    description: "Get the current state, readiness evidence, PID/process group, URL, log path, and cleanup policy for a Biny-managed process.",
-    promptSnippet: "Inspect a managed process and its readiness evidence",
+    description: "List Biny-managed processes with current state, readiness evidence, PID/process group, URLs, log paths, and cleanup policy; or inspect one process in full when processId is given (exactly one entry).",
+    promptSnippet: "List managed processes, or inspect one and its readiness evidence",
     parameters: {
       type: "object",
-      properties: { processId: { type: "string", description: "Opaque runtime process ID returned by start_process." } },
-      required: ["processId"],
+      properties: {
+        processId: { type: "string", description: "Opaque runtime process ID returned by start_process. Omit to list all managed processes instead." },
+        includeExited: { type: "boolean", description: "When listing, include stopped, failed, and naturally exited processes; defaults to true. Ignored when processId is given." }
+      },
       additionalProperties: false
     },
-    schema: processIdArgsSchema,
+    schema,
     capability: "process.status",
     risk: "read",
     resolveExecution(args) {
+      const inspecting = args.processId !== undefined;
       return {
         accesses: ToolAccesses.none(),
-        display: { kind: "generic", summary: `Inspect managed process ${args.processId}` },
-        description: `Inspect managed process ${args.processId}`,
-        approvalRule: `process_status(${args.processId})`,
+        display: { kind: "generic", summary: inspecting ? `Inspect managed process ${args.processId}` : "List managed processes" },
+        description: inspecting ? `Inspect managed process ${args.processId}` : "List managed processes",
+        approvalRule: inspecting ? `process_status(${args.processId})` : "list_processes",
         async execute() {
-          return await service.status(args.processId);
+          if (args.processId !== undefined) {
+            return { processes: [await service.status(args.processId)] };
+          }
+          return { processes: await service.list({ includeExited: args.includeExited }) };
         }
       };
     }
@@ -276,34 +285,3 @@ export function createStopProcessTool(
   };
 }
 
-export function createListProcessesTool(
-  service: ManagedProcessService
-): Tool<ListProcessesArgs, ListProcessesResult> {
-  const schema = z.object({ includeExited: z.boolean().optional() }) satisfies z.ZodType<ListProcessesArgs>;
-  return {
-    name: "list_processes",
-    description: "List Biny-managed processes with current state, readiness evidence, URLs, logs, and cleanup policy.",
-    promptSnippet: "List current and exited Biny-managed processes",
-    parameters: {
-      type: "object",
-      properties: {
-        includeExited: { type: "boolean", description: "Include stopped, failed, and naturally exited processes; defaults to true." }
-      },
-      additionalProperties: false
-    },
-    schema,
-    capability: "process.list",
-    risk: "read",
-    resolveExecution(args) {
-      return {
-        accesses: ToolAccesses.none(),
-        display: { kind: "generic", summary: "List managed processes" },
-        description: "List managed processes",
-        approvalRule: "list_processes",
-        async execute() {
-          return { processes: await service.list({ includeExited: args.includeExited }) };
-        }
-      };
-    }
-  };
-}

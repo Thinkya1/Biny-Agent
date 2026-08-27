@@ -3,7 +3,7 @@
  *
  * 远程请求、仓库目录解析和文件落盘都在主进程完成；这里仅管理筛选、分页和弹层状态。
  */
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   DesktopDiscoverableSkill,
   DesktopSkillDiscoverySnapshot,
@@ -37,6 +37,7 @@ export function SkillDiscoveryView({ onBack, onError, onInstalled }: {
   const [skillsShOffset, setSkillsShOffset] = useState(0);
   const [skillsShLoading, setSkillsShLoading] = useState(false);
   const [skillsShHasSearched, setSkillsShHasSearched] = useState(false);
+  const skillsShRequestRef = useRef(0);
 
   const loadSnapshot = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -94,18 +95,22 @@ export function SkillDiscoveryView({ onBack, onError, onInstalled }: {
   const searchSkillsShResults = useCallback(async (nextQuery: string, offset: number, append: boolean): Promise<void> => {
     const trimmed = nextQuery.trim();
     if (trimmed.length < 2) return;
+    // 请求序号防护：旧响应晚到时直接丢弃，避免覆盖更新一次搜索的结果。
+    const nextRequestId = skillsShRequestRef.current + 1;
+    skillsShRequestRef.current = nextRequestId;
     setSkillsShLoading(true);
     try {
       const result = await window.biny.searchSkills(trimmed, pageSize, offset);
+      if (nextRequestId !== skillsShRequestRef.current) return;
       setSkillsShSkills((current) => append ? [...current, ...result.skills.filter((item) => !current.some((existing) => existing.key === item.key))] : result.skills);
       setSkillsShTotal(result.totalCount);
       setSkillsShQuery(result.query);
       setSkillsShOffset(offset);
       setSkillsShHasSearched(true);
     } catch (error) {
-      onError(errorMessage(error));
+      if (nextRequestId === skillsShRequestRef.current) onError(errorMessage(error));
     } finally {
-      setSkillsShLoading(false);
+      if (nextRequestId === skillsShRequestRef.current) setSkillsShLoading(false);
     }
   }, [onError]);
 
@@ -160,7 +165,6 @@ export function SkillDiscoveryView({ onBack, onError, onInstalled }: {
             hasSearched={skillsShHasSearched}
             input={skillsShInput}
             loading={skillsShLoading}
-            offset={skillsShOffset}
             skills={skillsShSkills}
             total={skillsShTotal}
             onInput={setSkillsShInput}
@@ -223,11 +227,10 @@ const DiscoveryCard = memo(function DiscoveryCard({ skill, installing, onInstall
   );
 });
 
-const SkillsShPanel = memo(function SkillsShPanel({ hasSearched, input, loading, offset, skills, total, onInput, onLoadMore, onSearch, installingKey, onInstall, onView }: {
+const SkillsShPanel = memo(function SkillsShPanel({ hasSearched, input, loading, skills, total, onInput, onLoadMore, onSearch, installingKey, onInstall, onView }: {
   hasSearched: boolean;
   input: string;
   loading: boolean;
-  offset: number;
   skills: DesktopSkillsShDiscoverableSkill[];
   total: number;
   onInput(input: string): void;
@@ -246,7 +249,7 @@ const SkillsShPanel = memo(function SkillsShPanel({ hasSearched, input, loading,
       {!hasSearched ? <DiscoveryEmpty detail="输入至少 2 个字符，搜索 skills.sh 公共技能目录。" /> : !skills.length && !loading ? <DiscoveryEmpty detail="没有找到匹配的 skills.sh 技能。" /> : <>
         <div className="biny-discovery-result-meta">共找到 {total} 个结果</div>
         <div className="biny-discovery-grid">{skills.map((skill) => <SkillsShCard key={skill.key} skill={skill} installing={installingKey === skill.key} onInstall={() => onInstall(skill)} onView={() => onView(skill.readmeUrl)} />)}</div>
-        {offset + skills.length < total ? <button className="biny-discovery-load-more" disabled={loading} onClick={onLoadMore} type="button">{loading ? "加载中…" : "加载更多"}</button> : null}
+        {skills.length < total ? <button className="biny-discovery-load-more" disabled={loading} onClick={onLoadMore} type="button">{loading ? "加载中…" : "加载更多"}</button> : null}
       </>}
     </>
   );
