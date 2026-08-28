@@ -725,6 +725,13 @@ export class RuntimeHostServer {
       // 候选入队时已经应用当回合的有效策略。这里按真实队列处理，避免聊天覆盖允许贡献后，
       // 又被当前全局开关拦住，导致已经承诺生成的候选永久滞留。
       if (this.runtime.getSnapshot().state.kind !== "idle") return;
+      try {
+        // 身份演进是同一空闲维护窗口内的可选旁路；失败不能阻断普通 Memory 整理。
+        await commands.agent.proposeIdentityEvolution(controller.signal);
+      } catch {
+        controller.signal.throwIfAborted();
+      }
+      if (this.runtime.getSnapshot().state.kind !== "idle") return;
       let rebuildRequested = false;
       try {
         await commands.agent.getLocalMemory().processEligibleCandidates(

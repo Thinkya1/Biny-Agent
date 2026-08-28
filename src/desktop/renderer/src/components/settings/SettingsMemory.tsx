@@ -9,6 +9,7 @@ import type { ModelChoice } from "../../../../../llm/ModelManager.js";
 import type { EmbeddingModelRef, LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
 import type {
   DesktopEmbeddingModelDescriptor,
+  DesktopAlmaImportScan,
   DesktopMemoryCompactionResult,
   DesktopMemoryEmbeddingCancellationResult,
   DesktopMemoryEmbeddingDeleteResult,
@@ -20,6 +21,9 @@ import type {
   DesktopMemoryOriginFilter,
   DesktopMemoryOverview,
   DesktopMemorySearchMatch,
+  DesktopIdentityDocumentKind,
+  DesktopIdentityOverview,
+  DesktopIdentityReviewResult,
   DesktopModelConfigurationInput,
   DesktopModelConnectionTestResult,
   DesktopBehaviorPatternReviewAction,
@@ -35,6 +39,7 @@ import { SettingsCheckbox } from "./SettingsCheckbox.js";
 import { SettingsDetailLayer } from "./SettingsDetailLayer.js";
 import { useSettingsDraft } from "./SettingsDraftContext.js";
 import { MemoryEvolutionSection } from "./MemoryEvolutionSection.js";
+import { IdentitySection } from "./IdentitySection.js";
 
 const memoryKindOptions: Array<{ value: DesktopMemoryKind; label: string }> = [
   { value: "preference", label: "偏好" },
@@ -98,6 +103,10 @@ interface SettingsMemoryProps {
   onDeleteEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
   onClear(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
   onCompact(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
+  onLoadIdentityOverview(): Promise<DesktopIdentityOverview>;
+  onImportAlmaIdentity(root?: string): Promise<DesktopAlmaImportScan>;
+  onSaveIdentityDocument(document: DesktopIdentityDocumentKind, content: string, expectedRevision: number, reason?: string): Promise<DesktopIdentityOverview>;
+  onReviewIdentityProposal(proposalId: string, action: "accept" | "reject", expectedRevision: number): Promise<DesktopIdentityReviewResult>;
   onLoadTelosOverview(): Promise<DesktopTelosOverview>;
   onSaveTelos(input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
   onReviewBehaviorPattern(patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
@@ -128,6 +137,10 @@ export function SettingsMemory({
   onDeleteEntry,
   onClear,
   onCompact,
+  onLoadIdentityOverview,
+  onImportAlmaIdentity,
+  onSaveIdentityDocument,
+  onReviewIdentityProposal,
   onLoadTelosOverview,
   onSaveTelos,
   onReviewBehaviorPattern,
@@ -436,6 +449,16 @@ export function SettingsMemory({
 
   return (
     <div className="settings-sections memory-settings-v3" hidden={hidden}>
+      <IdentitySection
+        active={!hidden}
+        hidden={hidden}
+        onImport={onImportAlmaIdentity}
+        onLoad={onLoadIdentityOverview}
+        onNotify={onNotify}
+        onReview={onReviewIdentityProposal}
+        onSave={onSaveIdentityDocument}
+        projectId={projectId}
+      />
       <section id="memory-overview" tabIndex={-1}>
         <h3>记忆功能</h3>
         <SettingsCheckbox checked={policy.enabled} detail="关闭后保留已有记忆，但暂停检索和自动生成" label="启用记忆" onChange={(enabled) => changePolicy({ enabled })} />

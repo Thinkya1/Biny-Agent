@@ -47,6 +47,8 @@ export interface BuildSystemPromptOptions {
   tools?: readonly PromptTool[];
   extensionPrompt?: string;
   personalization?: ResolvedChatPersonalization;
+  /** 已读取的 SOUL/IDENTITY/STYLE/USER；正文只进入模型 prompt，不进入 telemetry。 */
+  identityPrompt?: string;
   /** 已读取的用户 TELOS；只作为指导，不进入 telemetry 明文。 */
   telosPrompt?: string;
   permissionMode?: PermissionMode;
@@ -61,6 +63,8 @@ const activeRunSummaryStart = "<!-- biny-active-run-summary:start -->";
 const activeRunSummaryEnd = "<!-- biny-active-run-summary:end -->";
 const personalizationPromptStart = "<!-- biny-personalization:start -->";
 const personalizationPromptEnd = "<!-- biny-personalization:end -->";
+const identityPromptStart = "<!-- biny-identity:start -->";
+const identityPromptEnd = "<!-- biny-identity:end -->";
 
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
   return [
@@ -73,6 +77,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
       AUTONOMY_AND_BOUNDARIES_PROMPT.trim(),
       `Current permission mode: ${options.permissionMode ?? "runtime-managed"}.`
     ].join("\n"),
+    options.identityPrompt?.trim()
+      ? [identityPromptStart, options.identityPrompt.trim(), identityPromptEnd].join("\n")
+      : "",
     options.personalization ? personalizationPrompt(options.personalization, options.telosPrompt) : "",
     `Current working directory: ${normalizePath(options.cwd)}`,
     stableRuntimePrompt(options.tools ?? []),
@@ -93,9 +100,15 @@ export function stableSystemPromptForCache(systemPrompt: string | undefined): st
  */
 export function systemPromptForTelemetry(systemPrompt: string | undefined): string | undefined {
   if (!systemPrompt) return systemPrompt;
-  const start = systemPrompt.indexOf(personalizationPromptStart);
-  if (start === -1) return systemPrompt;
-  const end = systemPrompt.indexOf(personalizationPromptEnd, start + personalizationPromptStart.length);
+  const withoutIdentity = replacePromptBlock(
+    systemPrompt,
+    identityPromptStart,
+    identityPromptEnd,
+    `${identityPromptStart}\n<biny_identity omitted="true" />\n${identityPromptEnd}`
+  );
+  const start = withoutIdentity.indexOf(personalizationPromptStart);
+  if (start === -1) return withoutIdentity;
+  const end = withoutIdentity.indexOf(personalizationPromptEnd, start + personalizationPromptStart.length);
   const metadata = personalizationMetadataFromSystemPrompt(systemPrompt);
   const replacement = metadata === undefined
     ? `${personalizationPromptStart}\n<biny_personalization omitted="true" />\n${personalizationPromptEnd}`
@@ -105,8 +118,8 @@ export function systemPromptForTelemetry(systemPrompt: string | undefined): stri
       personalizationPromptEnd
     ].join("\n");
   return end === -1
-    ? `${systemPrompt.slice(0, start)}${replacement}`
-    : `${systemPrompt.slice(0, start)}${replacement}${systemPrompt.slice(end + personalizationPromptEnd.length)}`;
+    ? `${withoutIdentity.slice(0, start)}${replacement}`
+    : `${withoutIdentity.slice(0, start)}${replacement}${withoutIdentity.slice(end + personalizationPromptEnd.length)}`;
 }
 
 export interface PersistedPersonalizationRuntimePolicy extends PersonalizationMetadata {

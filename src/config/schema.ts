@@ -91,6 +91,15 @@ export const chatParamsSchema = z.object({
   maxOutputTokens: undefined
 });
 
+const identityPolicySchema = z.object({
+  /** SOUL/IDENTITY/STYLE 的全局身份区块开关。 */
+  enabled: z.boolean().default(true),
+  /** USER.md 是否进入模型上下文；用户资料可以独立关闭。 */
+  userEnabled: z.boolean().default(true)
+}).strict().default({ enabled: true, userEnabled: true });
+
+export type IdentityPolicy = z.infer<typeof identityPolicySchema>;
+
 const contextSchema = z.object({
   // 不配置时按当前模型的上下文窗口自动推导；配置了就作为额外上限。
   maxInputTokens: z.number().int().min(2_048).max(2_000_000).optional(),
@@ -99,11 +108,13 @@ const contextSchema = z.object({
   maxTurnToolResultBytes: z.number().int().min(1_024).max(16 * 1024 * 1024).default(128 * 1024),
   instructionsMaxBytes: z.number().int().min(1_024).max(131_072).default(32 * 1024),
   compaction: compactionSchema,
+  identity: identityPolicySchema,
   memory: memoryPolicySchema
 }).default({
   maxTurnToolResultBytes: 128 * 1024,
   instructionsMaxBytes: 32 * 1024,
   compaction: { enabled: true, reserveTokens: undefined, triggerPercent: undefined, keepRecentTokens: undefined, keepRecentMessages: undefined, maxSummaryTokens: 4_096, summaryModel: undefined },
+  identity: { enabled: true, userEnabled: true },
   memory: {
     enabled: false,
     useMemories: true,
@@ -801,6 +812,7 @@ export const defaultConfig: AgentConfig = {
     maxTurnToolResultBytes: 128 * 1024,
     instructionsMaxBytes: 32 * 1024,
     compaction: { enabled: true, reserveTokens: undefined, triggerPercent: undefined, keepRecentTokens: undefined, keepRecentMessages: undefined, maxSummaryTokens: 4_096, summaryModel: undefined },
+    identity: { enabled: true, userEnabled: true },
     memory: {
       enabled: false,
       useMemories: true,

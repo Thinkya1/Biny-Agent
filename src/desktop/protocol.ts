@@ -18,6 +18,14 @@ import type { EmbeddingModelDescriptor } from "../llm/embedding/types.js";
 import type { LocalEmbeddingModelId } from "../llm/embedding/types.js";
 import type { MemoryEmbeddingRuntimeStatus } from "../agent/context/MemoryEmbeddingService.js";
 import type { MemoryMaintenanceStatus } from "../agent/context/memoryTypes.js";
+import type {
+  IdentityDocumentKind,
+  IdentityOverview,
+  IdentityProposal,
+  IdentityReviewResult
+} from "../agent/context/identityTypes.js";
+import type { AlmaImportScanResult } from "../agent/context/almaImport.js";
+import type { IdentityPolicy } from "../config/schema.js";
 import type { ModelChoice, ModelRuntimeInfo, ThinkingSelection } from "../llm/ModelManager.js";
 import type { MemoryPolicy } from "../personalization/index.js";
 import type { PermissionMode, PermissionResult } from "../permission/PermissionManager.js";
@@ -40,6 +48,12 @@ import type {
 
 export type DesktopActivitySettings = ActivitySettings;
 export type DesktopActivitySettingsInput = ActivitySettingsInput;
+export type DesktopIdentitySettings = IdentityPolicy;
+export type DesktopIdentityDocumentKind = IdentityDocumentKind;
+export type DesktopIdentityOverview = IdentityOverview;
+export type DesktopAlmaImportScan = AlmaImportScanResult;
+export type DesktopIdentityProposal = IdentityProposal;
+export type DesktopIdentityReviewResult = IdentityReviewResult;
 
 /** 指定日期的 Activity 打工日记；markdown 可直接渲染，blocked/message 说明补分析为何被跳过。 */
 export type DesktopActivityReport = ActivityReportResult;
@@ -101,6 +115,10 @@ export const desktopIpc = {
   saveChatPersonalization: "desktop:personalization:save-chat",
   memoryOverview: "desktop:memory:overview",
   saveMemorySettings: "desktop:memory:save-settings",
+  identityOverview: "desktop:identity:overview",
+  importAlmaIdentity: "desktop:identity:import-alma",
+  saveIdentityDocument: "desktop:identity:save-document",
+  reviewIdentityProposal: "desktop:identity:review-proposal",
   settingsSnapshot: "desktop:settings:snapshot",
   saveSettings: "desktop:settings:save",
   stageSettingsCredential: "desktop:settings:credential:stage",
@@ -1102,6 +1120,7 @@ export interface DesktopSettingsSnapshot {
   fontPreference: DesktopFontPreference;
   personalization: DesktopPersonalizationSettings;
   activity: ActivitySettings;
+  identity: DesktopIdentitySettings;
   memory: DesktopMemorySettings;
   compaction: DesktopCompactionSettings;
   chatParams: DesktopChatParamsSettings;
@@ -1137,6 +1156,7 @@ export interface DesktopSettingsSaveInput {
   personalization?: DesktopPersonalizationSettings;
   /** 外发策略不属于 renderer 可写入的输入；主进程会保留当前策略并仅更新采集参数。 */
   activity?: ActivitySettingsInput;
+  identity?: DesktopIdentitySettings;
   memory?: DesktopMemorySettings;
   compaction?: DesktopCompactionSettings;
   chatParams?: DesktopChatParamsSettings;
@@ -1355,6 +1375,10 @@ export interface DesktopApi {
   saveChatPersonalization(projectId: string, sessionId: string, input: DesktopChatPersonalizationOverride, expectedRevision: string): Promise<DesktopWorkspaceSnapshot>;
   memoryOverview(projectId: string, filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview>;
   saveMemorySettings(projectId: string, input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot>;
+  identityOverview(projectId: string): Promise<DesktopIdentityOverview>;
+  importAlmaIdentity(projectId: string, root?: string): Promise<DesktopAlmaImportScan>;
+  saveIdentityDocument(projectId: string, document: DesktopIdentityDocumentKind, content: string, expectedRevision: number, reason?: string): Promise<DesktopIdentityOverview>;
+  reviewIdentityProposal(projectId: string, proposalId: string, action: "accept" | "reject", expectedRevision: number): Promise<DesktopIdentityReviewResult>;
   settingsSnapshot(projectId: string, sessionId?: string): Promise<DesktopSettingsSnapshot>;
   saveSettings(projectId: string, input: DesktopSettingsSaveInput): Promise<DesktopSettingsSaveResult>;
   activitySnapshot(): Promise<ActivityRuntimeSnapshot>;

@@ -7,6 +7,7 @@ import type {
   DesktopCompactionSettings,
   DesktopActivitySettingsInput,
   DesktopFontPreference,
+  DesktopIdentitySettings,
   DesktopMemorySettings,
   DesktopModelConfigurationInput,
   DesktopPersonalizationSettings,
@@ -33,6 +34,7 @@ export interface DesktopSettingsDraft {
   fontPreference: DesktopFontPreference;
   personalization: DesktopPersonalizationSettings;
   activity: DesktopActivitySettingsInput;
+  identity: DesktopIdentitySettings;
   memory: DesktopMemorySettings;
   compaction: DesktopCompactionSettings;
   chatParams: DesktopChatParamsSettings;
@@ -53,6 +55,7 @@ export interface SettingsDraftContextValue {
   setFontPreference(value: DesktopFontPreference): void;
   setPersonalization(value: DesktopPersonalizationSettings): void;
   setActivity(value: DesktopActivitySettingsInput): void;
+  setIdentity(value: DesktopIdentitySettings): void;
   setMemory(value: DesktopMemorySettings): void;
   setCompaction(value: DesktopCompactionSettings): void;
   setChatParams(value: DesktopChatParamsSettings): void;

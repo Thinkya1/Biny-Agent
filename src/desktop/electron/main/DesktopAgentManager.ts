@@ -19,6 +19,8 @@ import type {
   MemoryOverview,
   MemorySearchResult
 } from "../../../agent/context/memoryTypes.js";
+import { discoverAlmaWorkspace, importAlmaWorkspace } from "../../../agent/context/almaImport.js";
+import { IdentityStorage } from "../../../agent/context/identityStorage.js";
 import { TelosStorage } from "../../../agent/context/telosStorage.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -94,6 +96,10 @@ import type {
   DesktopMemorySearchMatch,
   DesktopMemorySettingsInput,
   DesktopMemorySettingsSnapshot,
+  DesktopAlmaImportScan,
+  DesktopIdentityDocumentKind,
+  DesktopIdentityOverview,
+  DesktopIdentityReviewResult,
   DesktopModelCatalogResult,
   DesktopModelConfigurationInput,
   DesktopModelConnection,
@@ -161,6 +167,7 @@ export interface DesktopSettingsConfigSnapshot {
   revision: string;
   personalization: AgentConfig["personalization"];
   activity: AgentConfig["activity"];
+  identity: AgentConfig["context"]["identity"];
   memory: AgentConfig["context"]["memory"];
   compaction: AgentConfig["context"]["compaction"];
   chatParams: AgentConfig["chat"];
@@ -210,6 +217,7 @@ export class DesktopAgentManager {
   private readonly modelLoginOperations = new Map<string, AbortController>();
   private readonly stagedSettingsCredentials = new Map<string, StagedSettingsCredential>();
   private readonly modelLogin: DesktopModelLoginService;
+  private readonly identityStorage = new IdentityStorage();
   private closing = false;
 
   constructor(
@@ -842,6 +850,15 @@ export class DesktopAgentManager {
         }
       });
     }
+    if (input.identity !== undefined) {
+      next = configSchema.parse({
+        ...next,
+        context: {
+          ...next.context,
+          identity: input.identity
+        }
+      });
+    }
     if (input.compaction !== undefined) {
       next = configSchema.parse({
         ...next,
@@ -1313,6 +1330,43 @@ export class DesktopAgentManager {
       input.expectedRevision
     );
     return { configRevision: requireConfigRevision(state), settings: { ...state.memory } };
+  }
+
+  async identityOverview(projectId: string): Promise<DesktopIdentityOverview> {
+    this.projects.requireProject(projectId);
+    return await this.identityStorage.overview();
+  }
+
+  async importAlmaIdentity(projectId: string, root?: string): Promise<DesktopAlmaImportScan> {
+    this.assertNoRunningTasks("任务运行期间不能导入身份资料。");
+    this.projects.requireProject(projectId);
+    const sourceRoot = root ?? await discoverAlmaWorkspace();
+    if (!sourceRoot) throw new Error("没有找到 Alma/OpenSquilla 身份工作区。");
+    return await importAlmaWorkspace(this.identityStorage, sourceRoot);
+  }
+
+  async saveIdentityDocument(
+    projectId: string,
+    document: DesktopIdentityDocumentKind,
+    content: string,
+    expectedRevision: number,
+    reason?: string
+  ): Promise<DesktopIdentityOverview> {
+    this.assertNoRunningTasks("任务运行期间不能编辑身份资料。");
+    this.projects.requireProject(projectId);
+    await this.identityStorage.setDocumentProposal(document, content, expectedRevision, reason);
+    return await this.identityStorage.overview();
+  }
+
+  async reviewIdentityProposal(
+    projectId: string,
+    proposalId: string,
+    action: "accept" | "reject",
+    expectedRevision: number
+  ): Promise<DesktopIdentityReviewResult> {
+    this.assertNoRunningTasks("任务运行期间不能审核身份提案。");
+    this.projects.requireProject(projectId);
+    return await this.identityStorage.reviewProposal(proposalId, action, expectedRevision);
   }
 
   async searchMemory(projectId: string, filter: DesktopMemoryOriginFilter, query: string): Promise<DesktopMemorySearchMatch[]> {
@@ -2706,6 +2760,7 @@ function describeSettingsConfigSnapshot(config: AgentConfig, revision: string, p
     revision,
     personalization: { ...config.personalization },
     activity: structuredClone(config.activity),
+    identity: structuredClone(config.context.identity),
     memory: structuredClone(config.context.memory),
     compaction: structuredClone(config.context.compaction),
     chatParams: structuredClone(config.chat),

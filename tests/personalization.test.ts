@@ -131,6 +131,16 @@ function testOverrideResolutionAndPromptPrivacy(): void {
     }
   });
 
+  const identityPrompt = buildSystemPrompt({
+    mode: "qa",
+    cwd: "/tmp/work",
+    identityPrompt: "<biny_identity>local private identity</biny_identity>"
+  });
+  assert.match(identityPrompt, /local private identity/u);
+  const identityTelemetry = systemPromptForTelemetry(identityPrompt) ?? "";
+  assert.match(identityTelemetry, /<biny_identity omitted="true" \/>/u);
+  assert.doesNotMatch(identityTelemetry, /local private identity/u);
+
   const disabled = resolveChatPersonalization({
     enabled: false,
     personality: "friendly",

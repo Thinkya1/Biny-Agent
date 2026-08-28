@@ -150,6 +150,7 @@ async function testProjectOverridesAndGlobalPersistence(): Promise<void> {
     assert.equal(effective.context.compaction.reserveTokens, 2_048);
     assert.equal(effective.context.compaction.keepRecentTokens, 8_192);
     assert.equal(effective.context.compaction.maxSummaryTokens, 1_024);
+    assert.deepEqual(effective.context.identity, defaultConfig.context.identity);
     // 个性化和记忆策略只有 global + chat 两层；旧 project memory override 迁移后被移除。
     assert.equal(effective.context.memory.maxRecalled, defaultConfig.context.memory.maxRecalled);
     assert.equal(effective.sandbox.mode, "workspace-write");

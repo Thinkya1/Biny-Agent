@@ -8,7 +8,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Dialog } from "@astryxdesign/core/Dialog";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
-import type { DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { DesktopAlmaImportScan, DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopIdentityDocumentKind, DesktopIdentityOverview, DesktopIdentityReviewResult, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
   apiFormatForConnection,
   apiFormatOption,
@@ -71,6 +71,10 @@ interface SettingsOverlayProps {
   onDeleteMemoryEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
   onClearMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
   onCompactMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
+  onLoadIdentityOverview(): Promise<DesktopIdentityOverview>;
+  onImportAlmaIdentity(root?: string): Promise<DesktopAlmaImportScan>;
+  onSaveIdentityDocument(document: DesktopIdentityDocumentKind, content: string, expectedRevision: number, reason?: string): Promise<DesktopIdentityOverview>;
+  onReviewIdentityProposal(proposalId: string, action: "accept" | "reject", expectedRevision: number): Promise<DesktopIdentityReviewResult>;
   onLoadTelosOverview(): Promise<DesktopTelosOverview>;
   onSaveTelos(input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
   onReviewBehaviorPattern(patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
@@ -188,6 +192,10 @@ function SettingsOverlayContent({
   onDeleteMemoryEntry,
   onClearMemory,
   onCompactMemory,
+  onLoadIdentityOverview,
+  onImportAlmaIdentity,
+  onSaveIdentityDocument,
+  onReviewIdentityProposal,
   onLoadTelosOverview,
   onSaveTelos,
   onReviewBehaviorPattern,
@@ -443,6 +451,10 @@ function SettingsOverlayContent({
             onDeleteEntry={onDeleteMemoryEntry}
             onClear={onClearMemory}
             onCompact={onCompactMemory}
+            onLoadIdentityOverview={onLoadIdentityOverview}
+            onImportAlmaIdentity={onImportAlmaIdentity}
+            onSaveIdentityDocument={onSaveIdentityDocument}
+            onReviewIdentityProposal={onReviewIdentityProposal}
             onLoadTelosOverview={onLoadTelosOverview}
             onSaveTelos={onSaveTelos}
             onReviewBehaviorPattern={onReviewBehaviorPattern}

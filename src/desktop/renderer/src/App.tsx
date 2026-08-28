@@ -334,14 +334,18 @@ export function App(): React.JSX.Element {
     fetchModelCatalog,
     fetchModelCatalogCandidate,
     loadCookieJarStatus,
+    loadIdentityOverview,
     loadMemoryOverview,
     loadMemoryEmbeddingStatus,
     loadTelosOverview,
+    importAlmaIdentity,
     openBrowser,
     resolveTelosDrift,
     reviewBehaviorPattern,
     rebuildMemoryEmbeddingIndex,
     saveTelos,
+    saveIdentityDocument,
+    reviewIdentityProposal,
     searchMemory,
     snoozeTelosDrift,
     startModelLogin,
@@ -1311,6 +1315,10 @@ export function App(): React.JSX.Element {
             onNotify={setWarning}
             onLoadCookieJarStatus={loadCookieJarStatus}
             onLoadMemoryOverview={loadMemoryOverview}
+            onLoadIdentityOverview={loadIdentityOverview}
+            onImportAlmaIdentity={importAlmaIdentity}
+            onSaveIdentityDocument={saveIdentityDocument}
+            onReviewIdentityProposal={reviewIdentityProposal}
             onLoadMemoryEmbeddingStatus={loadMemoryEmbeddingStatus}
             onDownloadMemoryEmbeddingModel={downloadMemoryEmbeddingModel}
             onCancelMemoryEmbeddingDownload={cancelMemoryEmbeddingDownload}

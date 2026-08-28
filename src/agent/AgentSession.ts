@@ -73,6 +73,9 @@ import { evaluateCompletion } from "./completionReview.js";
 import { ContextMemory } from "./context/ContextMemory.js";
 import { LocalMemory, withFreshRevision, redactSecrets } from "./context/LocalMemory.js";
 import { TelosStorage } from "./context/telosStorage.js";
+import { IdentityStorage } from "./context/identityStorage.js";
+import { proposeIdentityEvolution } from "./context/identityEvolution.js";
+import type { IdentityProposal } from "./context/identityTypes.js";
 import { runMemoryCommand } from "./context/memoryCommands.js";
 import { MemoryVectorIndex } from "./context/MemoryVectorIndex.js";
 import { HybridMemoryRetriever } from "./context/HybridMemoryRetriever.js";
@@ -242,6 +245,7 @@ interface ActiveRunMessageQueues {
 }
 
 const maxQueuedRunMessages = 100;
+type MemoryModelField = "memoryModel" | "rewriteModel" | "extractModel" | "consolidationModel";
 
 /**
  * Stateful core agent for one workspace. Hosts use this public surface instead
@@ -251,6 +255,8 @@ export class AgentSession {
   private readonly contextMemory: ContextMemory;
   private readonly localMemory: LocalMemory;
   private readonly telosStorage: TelosStorage;
+  private readonly identityStorage: IdentityStorage;
+  private readonly memoryModelFor: (field: MemoryModelField) => AgentModel;
   private readonly localEmbeddingManager: LocalEmbeddingManager;
   private readonly memoryRetriever: HybridMemoryRetriever;
   private readonly memoryEmbeddingService: MemoryEmbeddingService;
@@ -296,7 +302,7 @@ export class AgentSession {
     // 抽取与整理可使用不同模型。getter 读取 root-turn 快照，因此外部配置变更不会让运行中的
     // turn 漂移；下一根回合才会切换。按 alias 缓存 adapter，避免每个候选重复创建。
     const memoryModels = new Map<string, AgentModel>();
-    const memoryModel = (field: "memoryModel" | "rewriteModel" | "extractModel" | "consolidationModel"): AgentModel => {
+    const memoryModel = (field: MemoryModelField): AgentModel => {
       const alias = this.activeConfig.context.memory[field]
         ?? (field === "memoryModel" ? undefined : this.activeConfig.context.memory.memoryModel);
       if (!alias) return getModel();
@@ -306,17 +312,19 @@ export class AgentSession {
       memoryModels.set(alias, created);
       return created;
     };
+    this.memoryModelFor = memoryModel;
     const initialContextBudget = options.modelManager?.getContextBudget();
     this.localMemory = new LocalMemory(
       persistenceRoot,
-      () => memoryModel("extractModel"),
+      () => this.memoryModelFor("extractModel"),
       onUsage,
       undefined,
       onModelRequest,
       () => this.sideModelRequestContext(),
-      () => memoryModel("consolidationModel")
+      () => this.memoryModelFor("consolidationModel")
     );
     this.telosStorage = new TelosStorage(options.workspaceRoot);
+    this.identityStorage = new IdentityStorage();
     this.localEmbeddingManager = new LocalEmbeddingManager(path.join(globalAgentDir(), "models", "embeddings"));
     this.memoryEmbeddingService = new MemoryEmbeddingService({
       localMemory: this.localMemory,
@@ -336,7 +344,7 @@ export class AgentSession {
       ),
       queryRewriteEnabled: () => this.activePersonalization.queryRewrite,
       rewriteQuery: async (query, signal) => {
-        const result = await generateNativeText(memoryModel("rewriteModel"), [{
+        const result = await generateNativeText(this.memoryModelFor("rewriteModel"), [{
           role: "user",
           content: [{
             type: "text",
@@ -406,6 +414,7 @@ export class AgentSession {
   async initialize(): Promise<void> {
     await this.contextMemory.initialize();
     await this.telosStorage.initialize();
+    await this.identityStorage.initialize();
   }
 
   /** 技能元数据、具名子代理清单与 MCP instructions 共同构成 system prompt 的扩展段。 */
@@ -622,6 +631,32 @@ export class AgentSession {
   /** TELOS 由独立存储维护；Desktop/Host 通过 AgentSession 取得同一份本地权威。 */
   getTelosStorage(): TelosStorage {
     return this.telosStorage;
+  }
+
+  /** 身份资料由同一个 AgentSession 读取，Desktop 也可通过本地存储服务复用这份权威。 */
+  getIdentityStorage(): IdentityStorage {
+    return this.identityStorage;
+  }
+
+  /** 空闲维护阶段从本地候选提出 STYLE/USER 演进；提案仍需 Desktop 人工接受。 */
+  async proposeIdentityEvolution(signal?: AbortSignal): Promise<IdentityProposal | undefined> {
+    await this.refreshMemoryConfig();
+    if (!this.activeConfig.context.identity.enabled) return undefined;
+    const scan = await this.localMemory.listEligibleCandidates({ limit: 8, signal });
+    if (!scan.candidates.length) return undefined;
+    const modelAlias = this.activeConfig.context.memory.extractModel
+      ?? this.activeConfig.context.memory.memoryModel;
+    return await proposeIdentityEvolution({
+      storage: this.identityStorage,
+      candidates: scan.candidates,
+      model: this.memoryModelFor("extractModel"),
+      signal,
+      onUsage: async (usage, operation) => {
+        this.recordModelUsage(usage, operation, modelAlias);
+      },
+      onRequestMetrics: (metrics) => this.recordModelRequest(metrics),
+      requestContext: { ...(this.sideModelRequestContext() ?? {}), operation: "memory" }
+    });
   }
 
   /** 手动浏览与自动召回共用混合检索；跨项目内容仅在显式选择对应 origin 时可见。 */
@@ -935,12 +970,16 @@ export class AgentSession {
       const telosPrompt = turnPersonalization.telos.enabled
         ? await this.telosStorage.promptText()
         : undefined;
+      const identityPrompt = this.activeConfig.context.identity.enabled
+        ? await this.identityStorage.promptText(this.activeConfig.context.identity.userEnabled)
+        : undefined;
       const baseSystemPrompt = buildSystemPrompt({
         mode: mode === "plan" ? "plan" : "qa",
         permissionMode,
         extensionPrompt: this.extensionPrompt(),
         tools: initialTools,
         personalization: turnPersonalization,
+        identityPrompt,
         telosPrompt,
         cwd: this.options.workspaceRoot
       });

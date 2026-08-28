@@ -709,6 +709,7 @@ export class DesktopSettingsTransaction {
       fontPreference: preferences.fontPreference,
       personalization: config.personalization,
       activity: structuredClone(config.activity),
+      identity: structuredClone(config.identity),
       memory: config.memory,
       compaction: structuredClone(config.compaction),
       chatParams: structuredClone(config.chatParams),
@@ -872,6 +873,7 @@ function createJournal(
   const preferencesIncluded = input.themePreference !== undefined || input.fontPreference !== undefined;
   const configIncluded = input.personalization !== undefined
     || input.activity !== undefined
+    || input.identity !== undefined
     || input.memory !== undefined
     || input.compaction !== undefined
     || input.chatParams !== undefined
@@ -1181,6 +1183,7 @@ function listAppliedFields(input: DesktopSettingsSaveInput): string[] {
   if (input.fontPreference !== undefined) fields.push("fontPreference");
   if (input.personalization !== undefined) fields.push("personalization");
   if (input.activity !== undefined) fields.push("activity");
+  if (input.identity !== undefined) fields.push("identity");
   if (input.memory !== undefined) fields.push("memory");
   if (input.compaction !== undefined) fields.push("compaction");
   if (input.chatParams !== undefined) fields.push("chatParams");

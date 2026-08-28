@@ -12,6 +12,7 @@ import type {
   DesktopChatPersonalizationOverride,
   DesktopCompactionSettings,
   DesktopFontPreference,
+  DesktopIdentitySettings,
   DesktopMemorySettings,
   DesktopModelConfigurationInput,
   DesktopPersonalizationSettings,
@@ -93,6 +94,10 @@ export function SettingsDraftProvider({
 
   const setActivity = useCallback((value: DesktopActivitySettingsInput): void => {
     setDraft((current) => current ? { ...current, activity: value } : current);
+  }, []);
+
+  const setIdentity = useCallback((value: DesktopIdentitySettings): void => {
+    setDraft((current) => current ? { ...current, identity: value } : current);
   }, []);
 
   const setMemory = useCallback((value: DesktopMemorySettings): void => {
@@ -279,6 +284,7 @@ export function SettingsDraftProvider({
     setFontPreference,
     setPersonalization,
     setActivity,
+    setIdentity,
     setMemory,
     setCompaction,
     setChatParams,
@@ -312,6 +318,7 @@ export function SettingsDraftProvider({
     setMemory,
     setPersonalization,
     setActivity,
+    setIdentity,
     setThemePreference,
     setWebSearch,
     setSkills,
@@ -329,6 +336,7 @@ function draftFromSnapshot(snapshot: DesktopSettingsSnapshot): DesktopSettingsDr
     fontPreference: { ...snapshot.fontPreference },
     personalization: { ...snapshot.personalization },
     activity: activityInputFromSnapshot(snapshot.activity),
+    identity: structuredClone(snapshot.identity),
     memory: structuredClone(snapshot.memory),
     compaction: structuredClone(snapshot.compaction),
     chatParams: structuredClone(snapshot.chatParams),
@@ -357,6 +365,7 @@ function countDirtyFields(snapshot: DesktopSettingsSnapshot, draft: DesktopSetti
   if (!sameJson(draft.fontPreference, snapshot.fontPreference)) count += 1;
   if (!sameJson(draft.personalization, snapshot.personalization)) count += 1;
   if (!sameJson(draft.activity, activityInputFromSnapshot(snapshot.activity))) count += 1;
+  if (!sameJson(draft.identity, snapshot.identity)) count += 1;
   if (!sameJson(draft.memory, snapshot.memory)) count += 1;
   if (!sameJson(draft.compaction, snapshot.compaction)) count += 1;
   if (!sameJson(draft.chatParams, snapshot.chatParams)) count += 1;
@@ -400,6 +409,7 @@ function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraf
     fontPreference: sameJson(draft.fontPreference, snapshot.fontPreference) ? undefined : draft.fontPreference,
     personalization: sameJson(draft.personalization, snapshot.personalization) ? undefined : draft.personalization,
     activity: sameJson(draft.activity, activityInputFromSnapshot(snapshot.activity)) ? undefined : draft.activity,
+    identity: sameJson(draft.identity, snapshot.identity) ? undefined : draft.identity,
     memory: sameJson(draft.memory, snapshot.memory) ? undefined : draft.memory,
     compaction: sameJson(draft.compaction, snapshot.compaction) ? undefined : draft.compaction,
     chatParams: sameJson(draft.chatParams, snapshot.chatParams) ? undefined : draft.chatParams,

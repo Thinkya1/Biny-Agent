@@ -79,6 +79,23 @@ const api: DesktopApi = {
   saveChatPersonalization: async (projectId, sessionId, input, expectedRevision) => await ipcRenderer.invoke(desktopIpc.saveChatPersonalization, projectId, sessionId, input, expectedRevision),
   memoryOverview: async (projectId, filter) => await ipcRenderer.invoke(desktopIpc.memoryOverview, projectId, filter),
   saveMemorySettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.saveMemorySettings, projectId, input),
+  identityOverview: async (projectId) => await ipcRenderer.invoke(desktopIpc.identityOverview, projectId),
+  importAlmaIdentity: async (projectId, root) => await ipcRenderer.invoke(desktopIpc.importAlmaIdentity, projectId, root),
+  saveIdentityDocument: async (projectId, document, content, expectedRevision, reason) => await ipcRenderer.invoke(
+    desktopIpc.saveIdentityDocument,
+    projectId,
+    document,
+    content,
+    expectedRevision,
+    reason
+  ),
+  reviewIdentityProposal: async (projectId, proposalId, action, expectedRevision) => await ipcRenderer.invoke(
+    desktopIpc.reviewIdentityProposal,
+    projectId,
+    proposalId,
+    action,
+    expectedRevision
+  ),
   settingsSnapshot: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.settingsSnapshot, projectId, sessionId),
   saveSettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.saveSettings, projectId, input),
   activitySnapshot: async () => await ipcRenderer.invoke(desktopIpc.activitySnapshot),

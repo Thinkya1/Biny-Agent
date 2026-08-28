@@ -74,6 +74,10 @@ export const chatPersonalizationSchema = z.object({
   contributeMemories: z.union([z.literal("inherit"), z.boolean()])
 }).strict();
 export const memorySettingsSchema = memoryPolicySchema;
+export const identitySettingsSchema = z.object({
+  enabled: z.boolean(),
+  userEnabled: z.boolean()
+}).strict();
 export const personalizationSettingsSchema = z.object({
   expectedRevision: configRevisionSchema,
   settings: z.object({
@@ -95,6 +99,7 @@ export const settingsSaveInputSchema = z.object({
   fontPreference: fontPreferenceSchema.optional(),
   personalization: personalizationSettingsSchema.shape.settings.optional(),
   activity: activitySettingsInputSchema.optional(),
+  identity: identitySettingsSchema.optional(),
   memory: memorySettingsSchema.optional(),
   compaction: compactionSchema.optional(),
   chatParams: chatParamsSchema.optional(),

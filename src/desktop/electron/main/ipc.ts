@@ -68,6 +68,11 @@ interface IpcContext {
 const promptSchema = z.string().min(1).max(1_000_000);
 const userMessageIndexSchema = z.number().int().nonnegative();
 const titleSchema = z.string().trim().min(1).max(120);
+const identityDocumentSchema = z.enum(["soul", "identity", "style", "user"]);
+const identityContentSchema = z.string().max(64 * 1024);
+const identityRootSchema = z.string().trim().min(1).max(4_096).optional();
+const identityReasonSchema = z.string().max(1_000).optional();
+const identityReviewActionSchema = z.enum(["accept", "reject"]);
 const branchNameSchema = z.string().trim().min(1).max(255);
 const revisionSchema = z.string().max(200).optional();
 const idempotencyKeySchema = z.string().trim().min(1).max(240).optional();
@@ -651,6 +656,49 @@ export function registerDesktopIpc(context: IpcContext): void {
 
   handleRecoveryGated(desktopIpc.saveMemorySettings, async (_event, projectId: unknown, input: unknown) => {
     return await context.agents.saveMemorySettings(idSchema.parse(projectId), memorySettingsInputSchema.parse(input));
+  });
+
+  handleRecoveryGated(desktopIpc.identityOverview, async (_event, projectId: unknown) => {
+    return await context.agents.identityOverview(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.importAlmaIdentity, async (_event, projectId: unknown, root: unknown) => {
+    return await context.agents.importAlmaIdentity(
+      idSchema.parse(projectId),
+      identityRootSchema.parse(root)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.saveIdentityDocument, async (
+    _event,
+    projectId: unknown,
+    document: unknown,
+    content: unknown,
+    expectedRevision: unknown,
+    reason: unknown
+  ) => {
+    return await context.agents.saveIdentityDocument(
+      idSchema.parse(projectId),
+      identityDocumentSchema.parse(document),
+      identityContentSchema.parse(content),
+      z.number().int().nonnegative().parse(expectedRevision),
+      identityReasonSchema.parse(reason)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.reviewIdentityProposal, async (
+    _event,
+    projectId: unknown,
+    proposalId: unknown,
+    action: unknown,
+    expectedRevision: unknown
+  ) => {
+    return await context.agents.reviewIdentityProposal(
+      idSchema.parse(projectId),
+      idSchema.parse(proposalId),
+      identityReviewActionSchema.parse(action),
+      z.number().int().nonnegative().parse(expectedRevision)
+    );
   });
 
   handle(desktopIpc.settingsSnapshot, async (_event, projectId: unknown, sessionId: unknown) => {
