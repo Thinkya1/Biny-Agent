@@ -104,8 +104,8 @@ export function App(): React.JSX.Element {
   /** 首页 → 聊天过场信号；发送失败清空触发 Workspace 回滚，落地后由 Workspace 回调清空。 */
   const [homeFlight, setHomeFlight] = useState<{ text: string; nonce: number } | null>(null);
   const homeFlightNonceRef = useRef(0);
-  const [projectBranches, setProjectBranches] = useState<DesktopGitBranch[]>([]);
-  const [branchesLoading, setBranchesLoading] = useState(false);
+  const [_projectBranches, setProjectBranches] = useState<DesktopGitBranch[]>([]);
+  const [_branchesLoading, setBranchesLoading] = useState(false);
   const [deletedUserMessages, setDeletedUserMessages] = useState<Set<string>>(() => new Set());
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -594,7 +594,7 @@ export function App(): React.JSX.Element {
     }
   }, [adoptWorkspace]);
 
-  const switchProjectBranch = useCallback(async (branchName: string): Promise<void> => {
+  const _switchProjectBranch = useCallback(async (branchName: string): Promise<void> => {
     const projectId = projectRef.current;
     if (!projectId) return;
     try {
@@ -608,7 +608,7 @@ export function App(): React.JSX.Element {
     }
   }, [loadProjectBranches, mergeProjectSnapshot]);
 
-  const createProjectBranch = useCallback(async (branchName: string): Promise<void> => {
+  const _createProjectBranch = useCallback(async (branchName: string): Promise<void> => {
     const projectId = projectRef.current;
     if (!projectId) return;
     try {

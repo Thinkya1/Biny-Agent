@@ -85,7 +85,6 @@ export function WorkspaceContextBar({
 function ProjectMenu({
   anchorRef,
   currentProjectId,
-  missing,
   onCreate,
   onClose,
   onSelect,

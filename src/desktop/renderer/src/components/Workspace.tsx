@@ -101,8 +101,8 @@ export function Workspace({
   onSubmitPrompt,
   homeFlight,
   onHomeFlightLanded,
-  onOpenRuntime,
-  onOpenExtensions,
+  onOpenRuntime: _onOpenRuntime,
+  onOpenExtensions: _onOpenExtensions,
   children
 }: WorkspaceProps): React.JSX.Element {
   const streaming = running || turns.some((turn) => turn.status === "running" || turn.status === "waiting_permission");
