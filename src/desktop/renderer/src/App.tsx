@@ -323,18 +323,24 @@ export function App(): React.JSX.Element {
 
   const {
     addMemoryEntry,
+    cancelMemoryEmbeddingDownload,
+    cancelMemoryEmbeddingRebuild,
     cancelModelLogin,
     clearMemory,
     compactMemory,
     deleteMemoryEntry,
+    deleteMemoryEmbeddingModel,
+    downloadMemoryEmbeddingModel,
     fetchModelCatalog,
     fetchModelCatalogCandidate,
     loadCookieJarStatus,
     loadMemoryOverview,
+    loadMemoryEmbeddingStatus,
     loadTelosOverview,
     openBrowser,
     resolveTelosDrift,
     reviewBehaviorPattern,
+    rebuildMemoryEmbeddingIndex,
     saveTelos,
     searchMemory,
     snoozeTelosDrift,
@@ -1305,6 +1311,12 @@ export function App(): React.JSX.Element {
             onNotify={setWarning}
             onLoadCookieJarStatus={loadCookieJarStatus}
             onLoadMemoryOverview={loadMemoryOverview}
+            onLoadMemoryEmbeddingStatus={loadMemoryEmbeddingStatus}
+            onDownloadMemoryEmbeddingModel={downloadMemoryEmbeddingModel}
+            onCancelMemoryEmbeddingDownload={cancelMemoryEmbeddingDownload}
+            onDeleteMemoryEmbeddingModel={deleteMemoryEmbeddingModel}
+            onRebuildMemoryEmbeddingIndex={rebuildMemoryEmbeddingIndex}
+            onCancelMemoryEmbeddingRebuild={cancelMemoryEmbeddingRebuild}
             onLoadTelosOverview={loadTelosOverview}
             onOpenBrowser={openBrowser}
             onOpenChatDraft={(input) => { closeSettings(); prefillComposer(input); }}
