@@ -250,8 +250,6 @@ export function Workspace({
             </div>
           </div>
           <div className="biny-chat-actions">
-            
-            
             <button
               aria-expanded={inspectorOpen}
               aria-label={inspectorOpen ? "收起工作区工具" : "打开工作区工具"}
