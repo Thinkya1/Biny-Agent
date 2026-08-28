@@ -142,6 +142,18 @@ export function useDesktopSettingsActions({
     return await memoryOverview(requireProject(projectIdRef.current), filter);
   }, [projectIdRef]);
 
+  const loadMemoryStats = useCallback(async (filter?: DesktopMemoryOriginFilter) => {
+    const memoryStats = window.biny.memoryStats;
+    if (typeof memoryStats !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await memoryStats(requireProject(projectIdRef.current), filter);
+  }, [projectIdRef]);
+
+  const loadMemoryEntries = useCallback(async (filter: DesktopMemoryOriginFilter, offset: number, limit: number) => {
+    const memoryEntries = window.biny.memoryEntries;
+    if (typeof memoryEntries !== "function") throw new Error(desktopApiVersionMismatchMessage);
+    return await memoryEntries(requireProject(projectIdRef.current), filter, offset, limit);
+  }, [projectIdRef]);
+
   const loadIdentityOverview = useCallback(async () => {
     const load = window.biny.identityOverview;
     if (typeof load !== "function") throw new Error(desktopApiVersionMismatchMessage);
@@ -245,6 +257,8 @@ export function useDesktopSettingsActions({
     loadCookieJarStatus,
     loadMemoryEmbeddingStatus,
     loadMemoryOverview,
+    loadMemoryStats,
+    loadMemoryEntries,
     loadIdentityOverview,
     loadTelosOverview,
     importAlmaIdentity,

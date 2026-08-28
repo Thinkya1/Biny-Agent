@@ -654,6 +654,22 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
+  handleRecoveryGated(desktopIpc.memoryStats, async (_event, projectId: unknown, filter: unknown) => {
+    return await context.agents.memoryStats(
+      idSchema.parse(projectId),
+      filter === undefined ? undefined : memoryOriginFilterSchema.parse(filter)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.memoryEntries, async (_event, projectId: unknown, filter: unknown, offset: unknown, limit: unknown) => {
+    return await context.agents.memoryEntries(
+      idSchema.parse(projectId),
+      memoryOriginFilterSchema.parse(filter),
+      typeof offset === "number" && Number.isInteger(offset) && offset >= 0 ? offset : 0,
+      typeof limit === "number" && Number.isInteger(limit) && limit > 0 ? limit : 20
+    );
+  });
+
   handleRecoveryGated(desktopIpc.saveMemorySettings, async (_event, projectId: unknown, input: unknown) => {
     return await context.agents.saveMemorySettings(idSchema.parse(projectId), memorySettingsInputSchema.parse(input));
   });

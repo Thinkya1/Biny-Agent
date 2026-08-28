@@ -336,6 +336,8 @@ export function App(): React.JSX.Element {
     loadCookieJarStatus,
     loadIdentityOverview,
     loadMemoryOverview,
+    loadMemoryStats,
+    loadMemoryEntries,
     loadMemoryEmbeddingStatus,
     loadTelosOverview,
     importAlmaIdentity,
@@ -1314,7 +1316,8 @@ export function App(): React.JSX.Element {
             onImportCookies={async () => await window.biny.importCookies()}
             onNotify={setWarning}
             onLoadCookieJarStatus={loadCookieJarStatus}
-            onLoadMemoryOverview={loadMemoryOverview}
+            onLoadMemoryStats={loadMemoryStats}
+            onLoadMemoryEntries={loadMemoryEntries}
             onLoadIdentityOverview={loadIdentityOverview}
             onImportAlmaIdentity={importAlmaIdentity}
             onSaveIdentityDocument={saveIdentityDocument}

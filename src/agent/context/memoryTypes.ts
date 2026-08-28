@@ -166,6 +166,8 @@ export interface MemoryListOptions extends MemoryReadOptions {
   origins?: MemoryOriginSelector[];
   topic?: string;
   limit?: number;
+  /** 分页起始偏移；与 limit 组合实现 offset 分页。 */
+  offset?: number;
 }
 
 export interface MemoryEntriesResult {
@@ -173,6 +175,8 @@ export interface MemoryEntriesResult {
   /** 条目 ID 到权威 Markdown 相对路径的映射，供向量独占命中仍能引用真实文件。 */
   paths?: Record<string, string>;
   storeRevision: number;
+  /** 应用 filter（origin/topic）后、分页前的条目总数；供分页 UI 计算页数。 */
+  total: number;
 }
 
 export interface ScopedMemoryWriteResult {

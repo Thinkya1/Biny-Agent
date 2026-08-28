@@ -763,6 +763,8 @@ button:disabled { opacity: 0.42; }
 .memory-entry-delete { opacity: 0.55; }
 .memory-entry:hover .memory-entry-delete { opacity: 1; }
 .memory-empty-hint { margin: 9px 0 0; color: var(--text-tertiary); font-size: calc(11.5px * var(--font-scale)); }
+.memory-pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 12px; }
+.memory-pagination-status { color: var(--text-tertiary); font-size: calc(11.5px * var(--font-scale)); font-variant-numeric: tabular-nums; }
 
 .settings-check-row { display: flex; width: 100%; min-height: 52px; align-items: flex-start; gap: 10px; padding: 10px 0; border: 0; color: var(--text); background: transparent; font: inherit; text-align: left; }
 .settings-check-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }

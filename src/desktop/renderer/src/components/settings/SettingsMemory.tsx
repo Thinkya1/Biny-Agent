@@ -19,7 +19,8 @@ import type {
   DesktopMemoryEntryPatch,
   DesktopMemoryKind,
   DesktopMemoryOriginFilter,
-  DesktopMemoryOverview,
+  DesktopMemoryEntriesPage,
+  DesktopMemoryStats,
   DesktopMemorySearchMatch,
   DesktopIdentityDocumentKind,
   DesktopIdentityOverview,
@@ -57,37 +58,8 @@ const memoryFilters: Array<{ value: DesktopMemoryOriginFilter; label: string }> 
   { value: "other_workspaces", label: "其他项目" }
 ];
 
-// 记忆可能被其他 Host 或 TUI 修改，因此缓存只用于首屏展示，进入页面后仍会后台校验。
-// 按项目和筛选条件隔离，避免切换项目时短暂显示另一项目的记忆。
-const memoryOverviewCache = new Map<string, DesktopMemoryOverview>();
-const maxMemoryOverviewCacheSize = 16;
-
-function memoryOverviewCacheKey(projectId: string | undefined, filter: DesktopMemoryOriginFilter): string | undefined {
-  return projectId === undefined ? undefined : `${projectId}:${filter}`;
-}
-
-function readMemoryOverviewCache(projectId: string | undefined, filter: DesktopMemoryOriginFilter): DesktopMemoryOverview | undefined {
-  const key = memoryOverviewCacheKey(projectId, filter);
-  if (key === undefined) return undefined;
-  const cached = memoryOverviewCache.get(key);
-  if (cached !== undefined) {
-    memoryOverviewCache.delete(key);
-    memoryOverviewCache.set(key, cached);
-  }
-  return cached;
-}
-
-function writeMemoryOverviewCache(projectId: string | undefined, filter: DesktopMemoryOriginFilter, overview: DesktopMemoryOverview): void {
-  const key = memoryOverviewCacheKey(projectId, filter);
-  if (key === undefined) return;
-  memoryOverviewCache.delete(key);
-  memoryOverviewCache.set(key, overview);
-  while (memoryOverviewCache.size > maxMemoryOverviewCacheSize) {
-    const oldest = memoryOverviewCache.keys().next().value;
-    if (oldest === undefined) break;
-    memoryOverviewCache.delete(oldest);
-  }
-}
+// 记忆条目按页加载；统计与条目分开取，翻页期间 revision 变化会回第 0 页。
+const MEMORY_PAGE_SIZE = 20;
 
 interface SettingsMemoryProps {
   models: ModelChoice[];
@@ -96,12 +68,13 @@ interface SettingsMemoryProps {
   hidden?: boolean;
   workspaceAvailable: boolean;
   sessionRunning: boolean;
-  onLoad(filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview>;
+  onLoadStats(filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryStats>;
+  onLoadEntries(filter: DesktopMemoryOriginFilter, offset: number, limit: number): Promise<DesktopMemoryEntriesPage>;
   onSearch(filter: DesktopMemoryOriginFilter, query: string): Promise<DesktopMemorySearchMatch[]>;
-  onAdd(input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryOverview>;
-  onUpdate(entryId: string, patch: DesktopMemoryEntryPatch, expectedRevision: number): Promise<DesktopMemoryOverview>;
-  onDeleteEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
-  onClear(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  onAdd(input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryStats>;
+  onUpdate(entryId: string, patch: DesktopMemoryEntryPatch, expectedRevision: number): Promise<DesktopMemoryStats>;
+  onDeleteEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryStats>;
+  onClear(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryStats>;
   onCompact(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
   onLoadIdentityOverview(): Promise<DesktopIdentityOverview>;
   onImportAlmaIdentity(root?: string): Promise<DesktopAlmaImportScan>;
@@ -130,7 +103,8 @@ export function SettingsMemory({
   hidden,
   workspaceAvailable,
   sessionRunning,
-  onLoad,
+  onLoadStats,
+  onLoadEntries,
   onSearch,
   onAdd,
   onUpdate,
@@ -158,9 +132,11 @@ export function SettingsMemory({
 }: SettingsMemoryProps): React.JSX.Element {
   const { draft, setMemory, snapshot } = useSettingsDraft();
   const [filter, setFilter] = useState<DesktopMemoryOriginFilter>("current_workspace");
-  const [storedOverview, setStoredOverview] = useState<DesktopMemoryOverview | undefined>(() => readMemoryOverviewCache(projectId, "current_workspace"));
-  const [storedOverviewKey, setStoredOverviewKey] = useState<string | undefined>(() => memoryOverviewCacheKey(projectId, "current_workspace"));
-  const [loadError, setLoadError] = useState<string>();
+  const [stats, setStats] = useState<DesktopMemoryStats>();
+  const [page, setPage] = useState(0);
+  const [entriesPage, setEntriesPage] = useState<DesktopMemoryEntriesPage>();
+  const [statsError, setStatsError] = useState<string>();
+  const [entriesError, setEntriesError] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
   const [busyAction, setBusyAction] = useState<string>();
   const [query, setQuery] = useState("");
@@ -178,33 +154,44 @@ export function SettingsMemory({
   const [embeddingQuery, setEmbeddingQuery] = useState("");
   const embeddingMenuRef = useRef<HTMLDivElement>(null);
   const memoryLoadRequestRef = useRef(0);
+  const entriesRequestRef = useRef(0);
 
-  const currentOverviewKey = memoryOverviewCacheKey(projectId, filter);
-  const overview = storedOverviewKey === currentOverviewKey ? storedOverview : undefined;
-
-  const applyOverview = useCallback((nextFilter: DesktopMemoryOriginFilter, next: DesktopMemoryOverview): void => {
-    writeMemoryOverviewCache(projectId, nextFilter, next);
-    setStoredOverview(next);
-    setStoredOverviewKey(memoryOverviewCacheKey(projectId, nextFilter));
-  }, [projectId]);
-
-  const load = useCallback(async (nextFilter: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview> => {
+  const loadStats = useCallback(async (nextFilter: DesktopMemoryOriginFilter): Promise<DesktopMemoryStats | undefined> => {
     const requestId = memoryLoadRequestRef.current + 1;
     memoryLoadRequestRef.current = requestId;
     setRefreshing(true);
     try {
-      const next = await onLoad(nextFilter);
-      if (memoryLoadRequestRef.current === requestId && memoryOverviewCacheKey(projectId, nextFilter) === currentOverviewKey) {
-        applyOverview(nextFilter, next);
-        setLoadError(undefined);
-      } else {
-        writeMemoryOverviewCache(projectId, nextFilter, next);
+      const next = await onLoadStats(nextFilter);
+      if (memoryLoadRequestRef.current === requestId) {
+        setStats(next);
+        setStatsError(undefined);
       }
       return next;
+    } catch (error) {
+      if (memoryLoadRequestRef.current === requestId) setStatsError(errorMessage(error));
+      return undefined;
     } finally {
       if (memoryLoadRequestRef.current === requestId) setRefreshing(false);
     }
-  }, [applyOverview, currentOverviewKey, onLoad, projectId]);
+  }, [onLoadStats]);
+
+  const loadEntries = useCallback(async (nextFilter: DesktopMemoryOriginFilter, nextPage: number): Promise<void> => {
+    const requestId = entriesRequestRef.current + 1;
+    entriesRequestRef.current = requestId;
+    try {
+      const next = await onLoadEntries(nextFilter, nextPage * MEMORY_PAGE_SIZE, MEMORY_PAGE_SIZE);
+      if (entriesRequestRef.current !== requestId) return;
+      // 翻页期间若有新写入（revision 变了），回第 0 页重读，避免条目重复/跳过。
+      if (nextPage > 0 && stats !== undefined && next.revision !== stats.revision) {
+        setPage(0);
+        return;
+      }
+      setEntriesPage(next);
+      setEntriesError(undefined);
+    } catch (error) {
+      if (entriesRequestRef.current === requestId) setEntriesError(errorMessage(error));
+    }
+  }, [onLoadEntries, stats]);
 
   const refreshEmbeddingStatus = useCallback(async (): Promise<void> => {
     try {
@@ -215,10 +202,9 @@ export function SettingsMemory({
     }
   }, [onLoadEmbeddingStatus]);
 
-  const refreshMemoryData = useCallback(async (nextFilter: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview> => {
-    const [next] = await Promise.all([load(nextFilter), refreshEmbeddingStatus()]);
-    return next;
-  }, [load, refreshEmbeddingStatus]);
+  const refreshMemoryData = useCallback(async (nextFilter: DesktopMemoryOriginFilter): Promise<void> => {
+    await Promise.all([loadStats(nextFilter), loadEntries(nextFilter, page), refreshEmbeddingStatus()]);
+  }, [loadStats, loadEntries, refreshEmbeddingStatus, page]);
 
   useEffect(() => {
     let cancelled = false;
@@ -251,19 +237,24 @@ export function SettingsMemory({
     return () => window.clearInterval(poll);
   }, [embeddingStatus?.operation?.state, onLoadEmbeddingStatus]);
 
+  // 切换 filter / 项目：清空并回第 0 页，重新拉统计与第一页条目。
   useEffect(() => {
-    let cancelled = false;
-    const cached = readMemoryOverviewCache(projectId, filter);
-    setStoredOverview(cached);
-    setStoredOverviewKey(currentOverviewKey);
-    setLoadError(undefined);
+    setStats(undefined);
+    setEntriesPage(undefined);
+    setStatsError(undefined);
+    setEntriesError(undefined);
     setSearchResults(undefined);
     setQuery("");
-    if (!workspaceAvailable || projectId === undefined) return () => { cancelled = true; };
-    load(filter)
-      .catch((error: unknown) => { if (!cancelled) setLoadError(errorMessage(error)); });
-    return () => { cancelled = true; };
-  }, [currentOverviewKey, filter, load, projectId, workspaceAvailable]);
+    setPage(0);
+    if (!workspaceAvailable || projectId === undefined) return;
+    void loadStats(filter);
+  }, [filter, projectId, workspaceAvailable, loadStats]);
+
+  // 页码或 filter 变化时拉取该页条目。
+  useEffect(() => {
+    if (!workspaceAvailable || projectId === undefined) return;
+    void loadEntries(filter, page);
+  }, [filter, page, projectId, workspaceAvailable, loadEntries]);
 
 
 
@@ -278,8 +269,6 @@ export function SettingsMemory({
 
   if (!workspaceAvailable) return <MemoryPageState detail="记忆来源和当前项目筛选需要 workspace 上下文。请先返回应用并添加或选择一个项目。" title="请先选择项目" />;
   if (!draft) return <MemoryPageState title="正在加载记忆设置…" />;
-  if (loadError && !overview) return <MemoryPageState detail={loadError} title="无法加载记忆库" />;
-  if (!overview) return <MemoryPageState title="正在读取单一记忆库…" />;
 
   const policy = draft.memory;
   const effectiveMemoryModel = models.find((model) => model.alias === policy.memoryModel)
@@ -292,14 +281,19 @@ export function SettingsMemory({
   const persistedEmbedding = snapshot?.memory.embeddingModel;
   const embeddingDraftChanged = !sameOptionalEmbeddingRef(policy.embeddingModel, persistedEmbedding);
   const embeddingOperation = embeddingStatus?.operation;
-  const entriesById = new Map(overview.entries.map((entry) => [entry.id, entry] as const));
+  // 条目来自当前页；统计来自独立的 stats。两者未就绪都不阻塞配置区。
+  const pageEntries = entriesPage?.entries ?? [];
+  const entriesById = new Map(pageEntries.map((entry) => [entry.id, entry] as const));
   const displayed = searchResults === undefined
-    ? overview.entries.map(entryListItem)
+    ? pageEntries.map(entryListItem)
     : searchResults.map((match) => ({ ...match, entry: entriesById.get(match.id) }));
-  const visibleEntryCount = overview.entries.length;
-  const clearEntryCount = filter === "all" ? overview.totalEntries : visibleEntryCount;
+  const filterTotal = entriesPage?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(filterTotal / MEMORY_PAGE_SIZE));
+  const clearEntryCount = filter === "all" ? (stats?.totalEntries ?? 0) : filterTotal;
   const clearConfirmation = `清空 ${String(clearEntryCount)} 条记忆`;
-  const immediateDisabled = sessionRunning || busyAction !== undefined;
+  // 写操作需要最新 revision；stats 未就绪时禁用（条目操作同理依赖 entriesPage 已加载）。
+  const currentRevision = stats?.revision ?? entriesPage?.revision;
+  const immediateDisabled = sessionRunning || busyAction !== undefined || currentRevision === undefined;
 
   const changePolicy = (patch: Partial<typeof policy>): void => setMemory({ ...policy, ...patch });
   const telos = policy.telos ?? {
@@ -348,14 +342,17 @@ export function SettingsMemory({
 
   const runMutation = async (
     action: string,
-    operation: () => Promise<DesktopMemoryOverview>,
+    operation: () => Promise<DesktopMemoryStats>,
     success: string
   ): Promise<boolean> => {
     if (immediateDisabled) return false;
     setBusyAction(action);
     try {
       const next = await operation();
-      applyOverview(filter, next);
+      setStats(next);
+      setStatsError(undefined);
+      // 条目变了，重读当前页（revision 变化时 loadEntries 内部会回第 0 页）。
+      await loadEntries(filter, page);
       setSearchResults(undefined);
       setQuery("");
       onNotify(success);
@@ -391,7 +388,7 @@ export function SettingsMemory({
     if (immediateDisabled) return;
     setBusyAction("compact");
     try {
-      const result = await onCompact(filter, overview.revision);
+      const result = await onCompact(filter, currentRevision!);
       setCompactReport(result.error
         ? `整理部分完成：${result.error}`
         : result.after < result.before
@@ -486,9 +483,6 @@ export function SettingsMemory({
         <SettingsCheckbox checked={policy.generateMemories} detail="从已完成的回合中提取可复用信息" disabled={!policy.enabled} label="自动生成记忆" onChange={(generateMemories) => changePolicy({ generateMemories })} />
         <div className="memory-mode-nested">
           <SettingsCheckbox checked={policy.excludeExternalContext} detail="网页、附件、MCP、插件和子代理内容不自动沉淀" disabled={!policy.enabled} label="排除外部上下文" onChange={(excludeExternalContext) => changePolicy({ excludeExternalContext })} />
-        </div>
-        <div className="memory-mode-nested">
-          <SettingsCheckbox checked={policy.generateMemories} detail="自动从对话中提取并存储可复用事实（随自动生成一同开关）" disabled={!policy.enabled || !policy.generateMemories} label="自动总结对话" onChange={(value) => changePolicy({ generateMemories: value })} />
         </div>
       </section>
 
@@ -585,18 +579,22 @@ export function SettingsMemory({
 
       <section className="memory-statistics-section" id="memory-statistics" tabIndex={-1}>
         <h3>统计</h3>
-        <div className="memory-stat-grid">
-          <MemoryStat label="记忆总数" value={overview.memoryStats.total} />
-          <MemoryStat label="自动生成" value={overview.memoryStats.autoGenerated} />
-          <MemoryStat label="手动添加" value={overview.memoryStats.manualAdded} />
-        </div>
+        {stats ? (
+          <div className="memory-stat-grid">
+            <MemoryStat label="记忆总数" value={stats.memoryStats.total} />
+            <MemoryStat label="自动生成" value={stats.memoryStats.autoGenerated} />
+            <MemoryStat label="手动添加" value={stats.memoryStats.manualAdded} />
+          </div>
+        ) : (
+          <p className="memory-empty-hint">{statsError ?? "正在读取记忆库…"}</p>
+        )}
       </section>
 
       <section className="memory-scope-section" id="memory-library" tabIndex={-1}>
         <div className="section-heading-row">
           <div><h3>记忆库</h3><p>按来源查看、搜索和维护已保存的记忆。</p></div>
           <span aria-live="polite">{refreshing ? "后台同步中…" : null}</span>
-          <button className="ghost-button settings-inline-action" disabled={immediateDisabled} onClick={() => { void refreshMemoryData(filter).catch((error: unknown) => setLoadError(errorMessage(error))); }} type="button"><Icon name="refresh" size={13} /> 刷新</button>
+          <button className="ghost-button settings-inline-action" disabled={immediateDisabled} onClick={() => { void refreshMemoryData(filter); }} type="button"><Icon name="refresh" size={13} /> 刷新</button>
         </div>
         <div className="memory-library-toolbar">
           <div aria-label="记忆来源" className="settings-segmented memory-filter-tabs" role="tablist">
@@ -604,10 +602,10 @@ export function SettingsMemory({
           </div>
           <button className="settings-inline-action" disabled={immediateDisabled} onClick={() => setEditor({ mode: "add" })} type="button"><Icon name="add" size={14} /> 添加记忆</button>
         </div>
-        <p className="memory-empty-hint">最近维护：{overview.maintenance.lastFinishedAt ? formatMemoryDate(overview.maintenance.lastFinishedAt) : overview.maintenance.lastScanAt ? formatMemoryDate(overview.maintenance.lastScanAt) : "尚未执行"} · 最近重建：{embeddingStatus?.index.active?.completedAt ? formatMemoryDate(embeddingStatus.index.active.completedAt) : "尚未完成"}</p>
+        <p className="memory-empty-hint">最近维护：{stats?.maintenance.lastFinishedAt ? formatMemoryDate(stats.maintenance.lastFinishedAt) : stats?.maintenance.lastScanAt ? formatMemoryDate(stats.maintenance.lastScanAt) : "尚未执行"} · 最近重建：{embeddingStatus?.index.active?.completedAt ? formatMemoryDate(embeddingStatus.index.active.completedAt) : "尚未完成"}</p>
         <div className="setting-row">
           <span><strong>整理当前来源</strong><small>只在相同来源、workspace 与 topic 内合并；即时保存</small></span>
-          <button className="ghost-button" disabled={immediateDisabled || visibleEntryCount < 2} onClick={() => { void compact(); }} type="button">{busyAction === "compact" ? "整理中…" : "立即整理"}</button>
+          <button className="ghost-button" disabled={immediateDisabled || filterTotal < 2} onClick={() => { void compact(); }} type="button">{busyAction === "compact" ? "整理中…" : "立即整理"}</button>
         </div>
         {compactReport ? <pre className="settings-memory-report">{compactReport}</pre> : null}
       </section>
@@ -620,13 +618,15 @@ export function SettingsMemory({
           <button className="ghost-button" disabled={busyAction !== undefined || !query.trim()} onClick={() => { void search(); }} type="button">{busyAction === "search" ? "搜索中…" : "搜索"}</button>
         </div>
         <div className="section-heading-row memory-list-heading">
-          <span>{searchResults === undefined ? `${String(visibleEntryCount)} 条记忆` : `${String(searchResults.length)} 个结果`}</span>
+          <span>{searchResults === undefined ? `${String(filterTotal)} 条记忆` : `${String(searchResults.length)} 个结果`}</span>
           <button className="ghost-button is-danger" disabled={immediateDisabled || clearEntryCount === 0} onClick={() => { setClearPhrase(""); setClearOpen(true); }} type="button">清空当前来源</button>
         </div>
-        {displayed.length ? <div className="memory-entry-list">{displayed.map((item) => (
+        {searchResults === undefined && entriesPage === undefined ? (
+          <p className="memory-empty-hint">{entriesError ? `无法加载记忆库：${entriesError}` : "正在读取记忆库…"}</p>
+        ) : displayed.length ? <div className="memory-entry-list">{displayed.map((item) => (
           <article className="memory-entry" key={item.id}>
             <div className="memory-entry-head">
-              <span className="memory-origin-tag">{memoryOriginLabel(item.origin, overview)}</span>
+              <span className="memory-origin-tag">{memoryOriginLabel(item.origin, stats, filter)}</span>
               <span className="memory-topic-tag">{item.topic}</span>
               <span className="memory-kind-tag">{memoryKindLabel(item.kind)}</span>
               <span className="memory-importance">重要度 {item.importance}/5</span>
@@ -641,6 +641,13 @@ export function SettingsMemory({
             <small className="memory-provenance">{memoryLineageLabel(item.lineage)}{item.lastRecalledAt ? ` · 最近召回 ${formatMemoryDate(item.lastRecalledAt)}` : ""}</small>
           </article>
         ))}</div> : <p className="memory-empty-hint">{searchResults === undefined ? "当前来源还没有记忆。" : "没有匹配的记忆。"}</p>}
+        {searchResults === undefined && pageCount > 1 ? (
+          <div className="memory-pagination" role="navigation" aria-label="记忆分页">
+            <button className="ghost-button" disabled={page === 0 || busyAction !== undefined} onClick={() => setPage((value) => Math.max(0, value - 1))} type="button">上一页</button>
+            <span className="memory-pagination-status">第 {page + 1} / {pageCount} 页</span>
+            <button className="ghost-button" disabled={page + 1 >= pageCount || busyAction !== undefined} onClick={() => setPage((value) => value + 1)} type="button">下一页</button>
+          </div>
+        ) : null}
       </section>
 
       {sessionRunning ? <p className="settings-effective-hint is-blocked">当前任务运行中：可以编辑记忆策略草稿；条目、整理、下载和索引动作将在任务结束后可用。</p> : <p className="settings-effective-hint">策略通过底部“保存”提交；点击“取消”时会确认未保存草稿。条目与维护动作会立即保存。</p>}
@@ -652,8 +659,8 @@ export function SettingsMemory({
             onCancel={() => setEditor(undefined)}
             onSubmit={async (value) => {
               const ok = editor.mode === "add"
-                ? await runMutation("add", async () => await onAdd(value, overview.revision), "记忆已添加")
-                : await runMutation("edit", async () => await onUpdate(editor.entry.id, patchFromInput(value), overview.revision), "记忆已更新");
+                ? await runMutation("add", async () => await onAdd(value, currentRevision!), "记忆已添加")
+                : await runMutation("edit", async () => await onUpdate(editor.entry.id, patchFromInput(value), currentRevision!), "记忆已更新");
               if (ok) setEditor(undefined);
             }}
             saving={busyAction === "add" || busyAction === "edit"}
@@ -665,7 +672,7 @@ export function SettingsMemory({
         <SettingsDetailLayer onClose={() => setDeleteTarget(undefined)}>
           <section aria-labelledby="memory-delete-title" className="settings-confirm-panel" role="dialog">
             <h3 id="memory-delete-title">删除这条记忆？</h3><p>“{deleteTarget.title}”会立即从 Markdown 记忆库删除。</p>
-            <div className="settings-confirm-actions"><button className="ghost-button" onClick={() => setDeleteTarget(undefined)} type="button">取消</button><button className="ghost-button is-danger" disabled={busyAction === "delete"} onClick={() => { void runMutation("delete", async () => await onDeleteEntry(deleteTarget.id, overview.revision), "记忆已删除").then((ok) => { if (ok) setDeleteTarget(undefined); }); }} type="button">删除</button></div>
+            <div className="settings-confirm-actions"><button className="ghost-button" onClick={() => setDeleteTarget(undefined)} type="button">取消</button><button className="ghost-button is-danger" disabled={busyAction === "delete"} onClick={() => { void runMutation("delete", async () => await onDeleteEntry(deleteTarget.id, currentRevision!), "记忆已删除").then((ok) => { if (ok) setDeleteTarget(undefined); }); }} type="button">删除</button></div>
           </section>
         </SettingsDetailLayer>
       ) : null}
@@ -676,7 +683,7 @@ export function SettingsMemory({
             <h3 id="memory-clear-title">清空当前来源的 {clearEntryCount} 条记忆</h3>
             <p>此操作会立即删除当前筛选范围内的 Markdown 条目。请输入 <strong>{clearConfirmation}</strong> 确认。</p>
             <input aria-label="清空确认短语" data-settings-detail-autofocus onChange={(event) => setClearPhrase(event.target.value)} value={clearPhrase} />
-            <div className="settings-confirm-actions"><button className="ghost-button" onClick={() => setClearOpen(false)} type="button">取消</button><button className="ghost-button is-danger" disabled={clearPhrase !== clearConfirmation || busyAction === "clear"} onClick={() => { void runMutation("clear", async () => await onClear(filter, overview.revision), `已清空 ${String(clearEntryCount)} 条记忆`).then((ok) => { if (ok) setClearOpen(false); }); }} type="button">永久清空</button></div>
+            <div className="settings-confirm-actions"><button className="ghost-button" onClick={() => setClearOpen(false)} type="button">取消</button><button className="ghost-button is-danger" disabled={clearPhrase !== clearConfirmation || busyAction === "clear"} onClick={() => { void runMutation("clear", async () => await onClear(filter, currentRevision!), `已清空 ${String(clearEntryCount)} 条记忆`).then((ok) => { if (ok) setClearOpen(false); }); }} type="button">永久清空</button></div>
           </section>
         </SettingsDetailLayer>
       ) : null}
@@ -685,7 +692,7 @@ export function SettingsMemory({
         <SettingsDetailLayer onClose={() => setPrivacyModel(undefined)}>
           <section aria-labelledby="memory-privacy-title" className="settings-confirm-panel" role="dialog">
             <h3 id="memory-privacy-title">确认使用云端 Embedding</h3>
-            <p>Biny 会向 <strong>{privacyModel.endpoint ?? privacyModel.displayName}</strong> 上传当前记忆库的 {overview.totalEntries} 条记忆内容用于建立索引，并在语义检索时上传查询。确认只针对这个 provider endpoint；同一 endpoint 下的其他 Embedding 模型会复用这次确认。</p>
+            <p>Biny 会向 <strong>{privacyModel.endpoint ?? privacyModel.displayName}</strong> 上传当前记忆库的 {stats?.totalEntries ?? 0} 条记忆内容用于建立索引，并在语义检索时上传查询。确认只针对这个 provider endpoint；同一 endpoint 下的其他 Embedding 模型会复用这次确认。</p>
             <div className="settings-confirm-actions"><button className="ghost-button" onClick={() => setPrivacyModel(undefined)} type="button">取消</button><button data-settings-detail-autofocus onClick={() => {
               setMemory({
                 ...policy,
@@ -1088,10 +1095,10 @@ function patchFromInput(input: DesktopMemoryEntryInput): DesktopMemoryEntryPatch
 
 
 
-function memoryOriginLabel(origin: DesktopMemoryEntry["origin"], overview: DesktopMemoryOverview): string {
+function memoryOriginLabel(origin: DesktopMemoryEntry["origin"], stats: DesktopMemoryStats | undefined, filter: DesktopMemoryOriginFilter): string {
   if (origin.kind === "user") return "通用偏好";
-  const currentOnly = overview.origins.currentWorkspace > 0 && overview.entries.some((entry) => entry.origin.kind === "workspace" && entry.origin.workspaceId === origin.workspaceId);
-  return currentOnly && overview.filter === "current_workspace" ? "当前项目" : origin.workspaceName;
+  // 不再依赖分页后的当前页条目判断「当前项目」；在 current_workspace 筛选下，workspace 条目即当前项目。
+  return filter === "current_workspace" ? "当前项目" : origin.workspaceName;
 }
 
 function memoryKindLabel(kind: DesktopMemoryKind): string {

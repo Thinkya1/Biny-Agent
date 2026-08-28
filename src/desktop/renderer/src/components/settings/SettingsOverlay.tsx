@@ -8,7 +8,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Dialog } from "@astryxdesign/core/Dialog";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
-import type { DesktopAlmaImportScan, DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopIdentityDocumentKind, DesktopIdentityOverview, DesktopIdentityReviewResult, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { DesktopAlmaImportScan, DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopIdentityDocumentKind, DesktopIdentityOverview, DesktopIdentityReviewResult, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntriesPage, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryStats, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
   apiFormatForConnection,
   apiFormatOption,
@@ -64,12 +64,13 @@ interface SettingsOverlayProps {
   onFetchModelCatalogCandidate(configuration: DesktopModelConfigurationInput): Promise<DesktopModelCatalogResult>;
   sessionId?: string;
   sessionRunning: boolean;
-  onLoadMemoryOverview(filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview>;
+  onLoadMemoryStats(filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryStats>;
+  onLoadMemoryEntries(filter: DesktopMemoryOriginFilter, offset: number, limit: number): Promise<DesktopMemoryEntriesPage>;
   onSearchMemory(filter: DesktopMemoryOriginFilter, query: string): Promise<DesktopMemorySearchMatch[]>;
-  onAddMemoryEntry(input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryOverview>;
-  onUpdateMemoryEntry(entryId: string, patch: DesktopMemoryEntryPatch, expectedRevision: number): Promise<DesktopMemoryOverview>;
-  onDeleteMemoryEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
-  onClearMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  onAddMemoryEntry(input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryStats>;
+  onUpdateMemoryEntry(entryId: string, patch: DesktopMemoryEntryPatch, expectedRevision: number): Promise<DesktopMemoryStats>;
+  onDeleteMemoryEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryStats>;
+  onClearMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryStats>;
   onCompactMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
   onLoadIdentityOverview(): Promise<DesktopIdentityOverview>;
   onImportAlmaIdentity(root?: string): Promise<DesktopAlmaImportScan>;
@@ -185,7 +186,8 @@ function SettingsOverlayContent({
   onFetchModelCatalog,
   onFetchModelCatalogCandidate,
   sessionRunning,
-  onLoadMemoryOverview,
+  onLoadMemoryStats,
+  onLoadMemoryEntries,
   onSearchMemory,
   onAddMemoryEntry,
   onUpdateMemoryEntry,
@@ -444,7 +446,8 @@ function SettingsOverlayContent({
             projectId={workspace?.project.id}
             hidden={tab !== "记忆"}
             workspaceAvailable={workspace !== undefined}
-            onLoad={onLoadMemoryOverview}
+            onLoadStats={onLoadMemoryStats}
+            onLoadEntries={onLoadMemoryEntries}
             onSearch={onSearchMemory}
             onAdd={onAddMemoryEntry}
             onUpdate={onUpdateMemoryEntry}

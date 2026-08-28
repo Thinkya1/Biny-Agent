@@ -18,7 +18,38 @@ async function main(): Promise<void> {
   await testBoundedIndexConcurrentCasAndUsageProjection();
   await testCandidateOriginEligibilityAndExactContent();
   await testSingleRootSafetyBoundary();
+  await testListEntriesPagination();
   console.log("memory v3 tests passed");
+}
+
+/** 分页：offset/limit 切片 + total 为分页前计数，页间不重复不遗漏。 */
+async function testListEntriesPagination(): Promise<void> {
+  await withIsolatedMemory(async (workspaceRoot) => {
+    const storage = new MemoryStorage(workspaceRoot);
+    let revision = 0;
+    for (let index = 0; index < 7; index += 1) {
+      revision = (await storage.writeEntry(projectEntry(
+        `分页条目 ${String(index)}`,
+        `分页测试内容 ${String(index)}，用于验证 offset 与 limit 切片正确且 total 准确。`
+      ), { expectedRevision: revision })).revision;
+    }
+    const page0 = await storage.listEntries({ origins: ["all"], offset: 0, limit: 3 });
+    assert.equal(page0.entries.length, 3);
+    assert.equal(page0.total, 7);
+    const page1 = await storage.listEntries({ origins: ["all"], offset: 3, limit: 3 });
+    assert.equal(page1.entries.length, 3);
+    assert.equal(page1.total, 7);
+    const page2 = await storage.listEntries({ origins: ["all"], offset: 6, limit: 3 });
+    assert.equal(page2.entries.length, 1);
+    assert.equal(page2.total, 7);
+    // 三页并集 = 全集，无重复。
+    const ids = new Set([...page0.entries, ...page1.entries, ...page2.entries].map((entry) => entry.id));
+    assert.equal(ids.size, 7, "分页必须覆盖全部条目且无重复");
+    // offset 超出范围返回空页但 total 仍准确。
+    const beyond = await storage.listEntries({ origins: ["all"], offset: 100, limit: 3 });
+    assert.equal(beyond.entries.length, 0);
+    assert.equal(beyond.total, 7);
+  });
 }
 
 async function testSingleStoreCasOriginAndEdit(): Promise<void> {

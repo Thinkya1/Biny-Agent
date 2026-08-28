@@ -19,6 +19,7 @@ import type {
   MemoryOverview,
   MemorySearchResult
 } from "../../../agent/context/memoryTypes.js";
+import { MemoryStorage } from "../../../agent/context/memoryStorage.js";
 import { discoverAlmaWorkspace, importAlmaWorkspace } from "../../../agent/context/almaImport.js";
 import { IdentityStorage } from "../../../agent/context/identityStorage.js";
 import { TelosStorage } from "../../../agent/context/telosStorage.js";
@@ -91,8 +92,10 @@ import type {
   DesktopMemoryEmbeddingStatus,
   DesktopMemoryEntryInput,
   DesktopMemoryEntryPatch,
+  DesktopMemoryEntriesPage,
   DesktopMemoryOverview,
   DesktopMemoryOriginFilter,
+  DesktopMemoryStats,
   DesktopMemorySearchMatch,
   DesktopMemorySettingsInput,
   DesktopMemorySettingsSnapshot,
@@ -1213,20 +1216,34 @@ export class DesktopAgentManager {
 
   /** 单一记忆库条目与 revision；filter 只影响视图，不参与物理存储。 */
   async memoryOverview(projectId: string, filter: DesktopMemoryOriginFilter = "all"): Promise<DesktopMemoryOverview> {
-    this.projects.requireProject(projectId);
-    const [personalization, store] = await Promise.all([
-      this.currentPersonalizationState(projectId),
-      this.readMemoryStore(projectId, filter)
-    ]);
+    const project = this.projects.requireProject(projectId);
+    const managed = this.runtimes.get(projectId);
+    // runtime 未驻留时不触发冷启动：记忆策略/config revision 直接读 config 文件，
+    // 记忆条目直接读全局记忆库（存储层无锁快照读）。
+    const [config, store] = managed
+      ? await Promise.all([
+          this.currentPersonalizationState(projectId).then((state) => ({
+            configRevision: requireConfigRevision(state),
+            memory: state.memory
+          })),
+          this.readMemoryStoreFromRuntime(managed, filter)
+        ])
+      : await Promise.all([
+          this.requireVersionedConfig().loadVersioned!(project.path).then((current) => ({
+            configRevision: current.revision,
+            memory: current.config.context.memory
+          })),
+          this.readMemoryStoreFromDisk(projectId, filter)
+        ]);
     const entries = store.entries.entries;
     const topicCounts = new Map<string, number>();
     for (const entry of entries) topicCounts.set(entry.topic, (topicCounts.get(entry.topic) ?? 0) + 1);
     return {
       filter,
-      configRevision: requireConfigRevision(personalization),
+      configRevision: config.configRevision,
       // entries 与 storeRevision 来自同一份单库快照；overview 只补充统计，不能替代 CAS revision。
       revision: store.entries.storeRevision,
-      settings: { ...personalization.memory },
+      settings: { ...config.memory },
       totalEntries: store.overview.entryCount,
       memoryStats: memoryStats(store.allEntries),
       candidateCount: store.overview.candidateCount,
@@ -1237,13 +1254,66 @@ export class DesktopAgentManager {
     };
   }
 
-  async memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus> {
+  /** 记忆库统计：不含条目内容，runtime 驻留与否都返回（config 与全局库均可廉价直读）。 */
+  async memoryStats(projectId: string, filter: DesktopMemoryOriginFilter = "all"): Promise<DesktopMemoryStats> {
+    const project = this.projects.requireProject(projectId);
+    const managed = this.runtimes.get(projectId);
+    const [config, store] = managed
+      ? await Promise.all([
+          this.currentPersonalizationState(projectId).then((state) => ({ configRevision: requireConfigRevision(state), memory: state.memory })),
+          this.readMemoryStoreFromRuntime(managed, filter)
+        ])
+      : await Promise.all([
+          this.requireVersionedConfig().loadVersioned!(project.path).then((current) => ({ configRevision: current.revision, memory: current.config.context.memory })),
+          this.readMemoryStoreFromDisk(projectId, filter)
+        ]);
+    const all = store.allEntries.entries;
+    const topicCounts = new Map<string, number>();
+    for (const entry of all) topicCounts.set(entry.topic, (topicCounts.get(entry.topic) ?? 0) + 1);
+    return {
+      filter,
+      configRevision: config.configRevision,
+      revision: store.entries.storeRevision,
+      settings: { ...config.memory },
+      totalEntries: store.overview.entryCount,
+      memoryStats: memoryStats(store.allEntries),
+      candidateCount: store.overview.candidateCount,
+      origins: { ...store.overview.origins },
+      maintenance: { ...store.maintenance },
+      topics: [...topicCounts.entries()].map(([topic, count]) => ({ topic, entries: count }))
+    };
+  }
+
+  /** 记忆条目分页读取；offset 分页，revision 供翻页一致性判断。 */
+  async memoryEntries(
+    projectId: string,
+    filter: DesktopMemoryOriginFilter,
+    offset: number,
+    limit: number
+  ): Promise<DesktopMemoryEntriesPage> {
     this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
-    const status = commands
-      ? await commands.agent.memoryEmbeddingStatus()
-      : await requireRemoteRuntime(runtime).memoryEmbeddingStatus();
-    return describeMemoryEmbeddingStatus(status);
+    const store = await this.readMemoryStorePaged(projectId, filter, offset, limit);
+    return {
+      filter,
+      revision: store.storeRevision,
+      entries: store.entries,
+      total: store.total,
+      offset,
+      limit
+    };
+  }
+
+  async memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus> {
+    const project = this.projects.requireProject(projectId);
+    const managed = this.runtimes.get(projectId);
+    if (managed) {
+      const status = managed.commands
+        ? await managed.commands.agent.memoryEmbeddingStatus()
+        : await requireRemoteRuntime(managed.runtime).memoryEmbeddingStatus();
+      return describeMemoryEmbeddingStatus(status);
+    }
+    // runtime 未驻留时不触发冷启动：返回降级状态（索引细节待会话建立后补齐）；运行中的下载/重建此时不存在。
+    return describeMemoryEmbeddingStatus(await this.readEmbeddingStatusFromDisk(project.path));
   }
 
   async downloadMemoryEmbeddingModel(
@@ -1373,10 +1443,7 @@ export class DesktopAgentManager {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.ensureRuntime(projectId);
     const result = commands
-      ? await runtime.runExclusiveOperation(
-        "memory",
-        async () => await commands.agent.searchMemory(query, [], { origins: [filter], limit: 8 })
-      )
+      ? await commands.agent.searchMemory(query, [], { origins: [filter], limit: 8 })
       : await requireRemoteRuntime(runtime).memory<MemorySearchResult>("search-v3", { selector: filter, query, limit: 8 });
     return result.matches.map((match) => ({
       id: match.entry.id,
@@ -1399,7 +1466,7 @@ export class DesktopAgentManager {
     projectId: string,
     input: DesktopMemoryEntryInput,
     expectedRevision: number
-  ): Promise<DesktopMemoryOverview> {
+  ): Promise<DesktopMemoryStats> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.runtimeForGlobalWrite(
       projectId,
@@ -1435,7 +1502,7 @@ export class DesktopAgentManager {
     if (!result.written) {
       throw new Error(result.path ? "已存在等价的记忆条目，未重复保存。" : "内容太短，至少需要 20 个字符才能作为持久记忆。");
     }
-    return await this.memoryOverview(projectId);
+    return await this.memoryStats(projectId);
   }
 
   async updateMemoryEntry(
@@ -1443,7 +1510,7 @@ export class DesktopAgentManager {
     entryId: string,
     patch: DesktopMemoryEntryPatch,
     expectedRevision: number
-  ): Promise<DesktopMemoryOverview> {
+  ): Promise<DesktopMemoryStats> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.runtimeForGlobalWrite(
       projectId,
@@ -1463,14 +1530,14 @@ export class DesktopAgentManager {
         expectedRevision
       });
     if (!result.written) throw new Error("未找到该记忆条目，或修改后的正文不足 20 个字符。");
-    return await this.memoryOverview(projectId);
+    return await this.memoryStats(projectId);
   }
 
   async deleteMemoryEntry(
     projectId: string,
     entryId: string,
     expectedRevision: number
-  ): Promise<DesktopMemoryOverview> {
+  ): Promise<DesktopMemoryStats> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.runtimeForGlobalWrite(
       projectId,
@@ -1486,10 +1553,10 @@ export class DesktopAgentManager {
       )
       : await requireRemoteRuntime(runtime).memory<{ deleted: boolean }>("delete-v3", { id: entryId, expectedRevision });
     if (!result.deleted) throw new Error("未找到该记忆条目，可能已被删除。");
-    return await this.memoryOverview(projectId);
+    return await this.memoryStats(projectId);
   }
 
-  async clearMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview> {
+  async clearMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryStats> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.runtimeForGlobalWrite(
       projectId,
@@ -1500,7 +1567,7 @@ export class DesktopAgentManager {
     } else {
       await requireRemoteRuntime(runtime).memory("clear-v3", { selector: filter, expectedRevision });
     }
-    return await this.memoryOverview(projectId);
+    return await this.memoryStats(projectId);
   }
 
   async compactMemory(
@@ -1537,10 +1604,7 @@ export class DesktopAgentManager {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.ensureRuntime(projectId);
     if (commands) {
-      return await runtime.runExclusiveOperation(
-        "telos",
-        async () => await requireLocalTelos(commands).overview()
-      );
+      return await requireLocalTelos(commands).overview();
     }
     const remote = requireRemoteRuntime(runtime);
     if (supportsTelos(remote)) return await remote.telos<DesktopTelosOverview>("overview-v1");
@@ -2568,21 +2632,26 @@ export class DesktopAgentManager {
     projectId: string,
     filter: DesktopMemoryOriginFilter
   ): Promise<{ overview: MemoryOverview; entries: MemoryEntriesResult; allEntries: MemoryEntriesResult; maintenance: MemoryMaintenanceStatus }> {
-    const { runtime, commands } = await this.ensureRuntime(projectId);
+    const managed = this.runtimes.get(projectId);
+    if (managed) return await this.readMemoryStoreFromRuntime(managed, filter);
+    return await this.readMemoryStoreFromDisk(projectId, filter);
+  }
+
+  /** runtime 已驻留：普通读取不占用 Runtime 独占，允许各投影短暂跨 revision。 */
+  private async readMemoryStoreFromRuntime(
+    managed: ManagedRuntime,
+    filter: DesktopMemoryOriginFilter
+  ): Promise<{ overview: MemoryOverview; entries: MemoryEntriesResult; allEntries: MemoryEntriesResult; maintenance: MemoryMaintenanceStatus }> {
+    const { runtime, commands } = managed;
     if (commands) {
-      return await runtime.runExclusiveOperation("memory", async () => {
-        const memory = requireLocalMemory(commands);
-        // 根锁只覆盖单次读；跨进程写入可能落在两个投影之间，所以用共享 revision 复读确认。
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          const overview = await memory.getOverview();
-          const entries = await memory.listMemoryEntries({ origins: [filter] });
-          const allEntries = await memory.listMemoryEntries({ origins: ["all"] });
-          if (overview.storeRevision === entries.storeRevision && overview.storeRevision === allEntries.storeRevision) {
-            return { overview, entries, allEntries, maintenance: await memory.loadMaintenanceStatus() };
-          }
-        }
-        throw new Error("读取记忆库时发生连续并发写入，请稍后重试。");
-      });
+      const memory = requireLocalMemory(commands);
+      const [overview, entries, allEntries, maintenance] = await Promise.all([
+        memory.getOverview(),
+        memory.listMemoryEntries({ origins: [filter] }),
+        memory.listMemoryEntries({ origins: ["all"] }),
+        memory.loadMaintenanceStatus()
+      ]);
+      return { overview, entries, allEntries, maintenance };
     }
     const remote = requireRemoteRuntime(runtime);
     return await remote.memory<{
@@ -2591,6 +2660,69 @@ export class DesktopAgentManager {
       allEntries: MemoryEntriesResult;
       maintenance: MemoryMaintenanceStatus;
     }>("overview-v3", { selector: filter });
+  }
+
+  /**
+   * runtime 未驻留：不触发冷启动，主进程直接读记忆文件（存储层无锁快照读）。
+   * 读到的是上一次已提交的一致性快照；与正在写入的进程并发时，靠文件级原子写保证不读到半截。
+   */
+  private async readMemoryStoreFromDisk(
+    projectId: string,
+    filter: DesktopMemoryOriginFilter
+  ): Promise<{ overview: MemoryOverview; entries: MemoryEntriesResult; allEntries: MemoryEntriesResult; maintenance: MemoryMaintenanceStatus }> {
+    const project = this.projects.requireProject(projectId);
+    const storage = new MemoryStorage(project.path);
+    const [overview, entries, allEntries, maintenance] = await Promise.all([
+      storage.getOverview(),
+      storage.listEntries({ origins: [filter] }),
+      storage.listEntries({ origins: ["all"] }),
+      storage.readMaintenanceStatus()
+    ]);
+    return { overview, entries, allEntries, maintenance };
+  }
+
+  /** 记忆条目分页读取；runtime 驻留走 runtime，未驻留直连。 */
+  private async readMemoryStorePaged(
+    projectId: string,
+    filter: DesktopMemoryOriginFilter,
+    offset: number,
+    limit: number
+  ): Promise<{ entries: MemoryEntriesResult["entries"]; total: number; storeRevision: number }> {
+    const managed = this.runtimes.get(projectId);
+    if (managed?.commands) {
+      const memory = requireLocalMemory(managed.commands);
+      const result = await memory.listMemoryEntries({ origins: [filter], offset, limit });
+      return { entries: result.entries, total: result.total, storeRevision: result.storeRevision };
+    }
+    if (managed) {
+      const result = await requireRemoteRuntime(managed.runtime).memory<MemoryEntriesResult>("list-v3", { selector: filter, offset, limit });
+      return { entries: result.entries, total: result.total, storeRevision: result.storeRevision };
+    }
+    const project = this.projects.requireProject(projectId);
+    const storage = new MemoryStorage(project.path);
+    const result = await storage.listEntries({ origins: [filter], offset, limit });
+    return { entries: result.entries, total: result.total, storeRevision: result.storeRevision };
+  }
+
+  /** runtime 未驻留时的降级 embedding 状态：不加载 transformers、不打开向量索引（避免副作用），仅给出可渲染的最小信息。 */
+  private async readEmbeddingStatusFromDisk(workspaceRoot: string): Promise<MemoryEmbeddingRuntimeStatus> {
+    const config = (await this.requireVersionedConfig().loadVersioned!(workspaceRoot)).config;
+    const activeModel = config.context.memory.embeddingModel;
+    const descriptors = describeEmbeddingModels(config);
+    const storage = new MemoryStorage(workspaceRoot);
+    const totalEntries = (await storage.getOverview()).entryCount;
+    // 不打开向量索引（会 mkdir+migrate），所以索引进度未知：active 视为无，全部待处理。
+    return {
+      activeModel,
+      models: descriptors,
+      localModels: [],
+      index: { building: 0, failed: 0 },
+      totalEntries,
+      indexedEntries: 0,
+      pendingEntries: totalEntries,
+      failedEntries: 0,
+      degradedReason: "打开会话后显示索引进度与运行中操作"
+    };
   }
 
   private buildConfigWithAuthenticatedLogin(current: AgentConfig, authenticated: AuthenticatedModelLogin): AgentConfig {

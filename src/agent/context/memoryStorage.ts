@@ -1,12 +1,14 @@
 /**
  * LocalMemory v3 的纯磁盘存储层。
  *
- * 单一 memory 根目录通过 mkdir 锁串行化跨进程写入；entry、state、candidate 和 MEMORY.md 都先写
- * 同目录临时文件、fsync 后 rename。模型调用不在目录锁内执行，避免长时间占锁。
+ * 单一全局 memory 根目录的跨进程写入由一个全局 SQLite 权威库（.memory-authority.sqlite 上的
+ * BEGIN IMMEDIATE 写事务）串行化；进程持锁期间崩溃会让事务随连接断开自动回滚，无需 stale 锁回收。
+ * entry、state、candidate 和 MEMORY.md 都先写同目录临时文件、fsync 后 rename。模型调用不在写锁内执行。
  */
 import { constants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { globalAgentDir } from "../../config/paths.js";
 import { redactSecrets } from "../../utils/secrets.js";
@@ -60,9 +62,9 @@ const usageFileName = ".memory-usage.json";
 const pendingMutationFileName = ".pending-mutation.json";
 const entryDirectoryName = "entries";
 const candidateDirectoryName = ".candidates";
-const lockDirectoryName = ".memory.lock";
-const lockTimeoutMs = 5_000;
-const staleLockMs = 120_000;
+/** 全局记忆写权威库：与 memory 根同目录，BEGIN IMMEDIATE 事务即跨进程写锁。 */
+const authorityDatabaseName = ".memory-authority.sqlite";
+const authorityBusyTimeoutMs = 5_000;
 const maxStateChars = 32_000;
 const maxCandidateFileChars = 8_000;
 const maxPendingMutationChars = 1_000_000;
@@ -181,6 +183,10 @@ const usageSchema = z.object({
 });
 
 export class MemoryStorage {
+  private authority: DatabaseSync | undefined;
+  /** 同一实例内的写串行化：避免并发写对共享权威连接发起嵌套 BEGIN；跨进程互斥仍由 BEGIN IMMEDIATE 兜底。 */
+  private writeTail: Promise<unknown> = Promise.resolve();
+
   constructor(readonly workspaceRoot: string) {}
 
   async getOverview(options: MemoryReadOptions = {}): Promise<MemoryOverview> {
@@ -195,18 +201,19 @@ export class MemoryStorage {
     };
   }
 
-  /** v3 单库列表入口。 */
+  /** v3 单库列表入口；offset/limit 组合做分页，total 为分页前计数。 */
   async listEntries(options: MemoryListOptions = {}): Promise<MemoryEntriesResult> {
     options.signal?.throwIfAborted();
     const snapshot = await this.readScope("project", options.signal);
     const selectors = normalizeOriginSelectors(options.origins);
     const workspaceId = currentWorkspaceId(snapshot.directory);
     const topic = options.topic === undefined ? undefined : normalizeMemoryTopic(options.topic);
-    const records = snapshot.entries
+    const matched = snapshot.entries
       .filter(({ entry }) => matchesOriginSelectors(entry.origin, selectors, workspaceId))
       .filter(({ entry }) => topic === undefined || entry.topic === topic)
-      .sort((left, right) => compareEntriesForDisplay(left.entry, right.entry))
-      .slice(0, normalizeLimit(options.limit, Number.MAX_SAFE_INTEGER));
+      .sort((left, right) => compareEntriesForDisplay(left.entry, right.entry));
+    const offset = normalizeLimit(options.offset, 0);
+    const records = matched.slice(offset, offset + normalizeLimit(options.limit, Number.MAX_SAFE_INTEGER));
     return {
       entries: records.map(({ entry }) => entry),
       paths: snapshot.directory === undefined
@@ -215,7 +222,8 @@ export class MemoryStorage {
           entry.id,
           path.relative(snapshot.directory!.storageRoot, path.join(snapshot.directory!.path, entryDirectoryName, fileName))
         ])),
-      storeRevision: snapshot.state.revision
+      storeRevision: snapshot.state.revision,
+      total: matched.length
     };
   }
 
@@ -627,20 +635,19 @@ export class MemoryStorage {
     options.signal?.throwIfAborted();
     const directory = await resolveScopeDirectory(this.workspaceRoot, "project", false);
     if (!directory) return emptyMaintenanceStatus();
-    return await this.withResolvedScopeLock(directory, options.signal, async () => {
-      const content = await readOptionalSafeFile(directory, maintenanceFileName, maxStateChars, options.signal);
-      if (!content) return emptyMaintenanceStatus();
-      let raw: unknown;
-      try {
-        raw = JSON.parse(content);
-      } catch {
-        throw new Error("Invalid memory maintenance status JSON.");
-      }
-      const parsed = maintenanceSchema.safeParse(raw);
-      if (!parsed.success) throw new Error("Invalid memory maintenance status.");
-      const { version: _version, ...status } = parsed.data;
-      return status;
-    });
+    // 维护状态是单文件原子写，无锁读拿到的要么是旧值要么是新值，不会读到半截。
+    const content = await readOptionalSafeFile(directory, maintenanceFileName, maxStateChars, options.signal);
+    if (!content) return emptyMaintenanceStatus();
+    let raw: unknown;
+    try {
+      raw = JSON.parse(content);
+    } catch {
+      throw new Error("Invalid memory maintenance status JSON.");
+    }
+    const parsed = maintenanceSchema.safeParse(raw);
+    if (!parsed.success) throw new Error("Invalid memory maintenance status.");
+    const { version: _version, ...status } = parsed.data;
+    return status;
   }
 
   async writeMaintenanceStatus(status: MemoryMaintenanceStatus, signal?: AbortSignal): Promise<void> {
@@ -661,22 +668,37 @@ export class MemoryStorage {
     });
   }
 
+  /** 读路径不取目录锁：所有持久化文件都经 atomicWriteFile 落盘，读者只会看到完整快照。 */
   private async readScope(scope: MemoryScope, signal?: AbortSignal): Promise<ScopeSnapshot> {
     signal?.throwIfAborted();
     const existing = await resolveScopeDirectory(this.workspaceRoot, scope, false);
     if (!existing) return emptySnapshot();
-    return await this.withResolvedScopeLock(existing, signal, async () => await this.readScopeLocked(existing, new Date(), signal));
+    return await this.readScopeUnlocked(existing, new Date(), signal);
   }
 
+  /** 锁内读：供写路径在持有目录锁时复用，做 revision CAS 与恢复。 */
   private async readScopeLocked(directory: PinnedScopeDirectory, now: Date, signal?: AbortSignal): Promise<ScopeSnapshot> {
+    return await this.readScopeInternal(directory, now, signal, true);
+  }
+
+  /** 无锁读：跳过待提交恢复的写回与 reconcile 落盘，读到的是上一次已提交的一致性快照。 */
+  private async readScopeUnlocked(directory: PinnedScopeDirectory, now: Date, signal?: AbortSignal): Promise<ScopeSnapshot> {
+    return await this.readScopeInternal(directory, now, signal, false);
+  }
+
+  private async readScopeInternal(directory: PinnedScopeDirectory, now: Date, signal: AbortSignal | undefined, locked: boolean): Promise<ScopeSnapshot> {
     signal?.throwIfAborted();
     await assertPinnedScopeDirectory(this.workspaceRoot, directory);
-    const state = await recoverPendingMutationLocked(directory, await readState(directory), signal);
+    const rawState = await readState(directory);
+    // 只有持锁写方才负责恢复中断的 mutation 并把 reconcile 结果落盘；无锁读不重放未提交内容。
+    const state = locked
+      ? await recoverPendingMutationLocked(directory, rawState, signal)
+      : rawState;
     const entries = await applyUsageProjection(directory, await readEntryRecords(directory, signal), signal);
     const candidates = await readCandidates(directory, false, signal);
     const reconciled = reconcileState(state, entries, candidates, now);
-    if (reconciled.revision !== state.revision) await atomicWriteFile(directory, stateFileName, renderState(reconciled));
-    return { directory, state: reconciled, entries, candidates };
+    if (locked && reconciled.revision !== state.revision) await atomicWriteFile(directory, stateFileName, renderState(reconciled));
+    return { directory, state: locked ? reconciled : state, entries, candidates };
   }
 
   private async withScopeLock<T>(
@@ -690,45 +712,55 @@ export class MemoryStorage {
     return await this.withResolvedScopeLock(directory, signal, async () => await operation(directory));
   }
 
+  /**
+   * 记忆写的跨进程互斥：全局权威库上的 BEGIN IMMEDIATE 写事务即写锁。
+   * SQLite 对同一数据库文件做文件级互斥；持锁期间进程崩溃会让事务随连接断开回滚，锁自动释放。
+   * 文件读写在这个临界区内 await，SQLite 锁只保护「谁在改」，真正的崩溃安全仍由 atomicWriteFile 保证。
+   */
   private async withResolvedScopeLock<T>(
     directory: PinnedScopeDirectory,
     signal: AbortSignal | undefined,
     operation: () => Promise<T>
   ): Promise<T> {
-    const lockPath = path.join(directory.path, lockDirectoryName);
-    const deadline = Date.now() + lockTimeoutMs;
-    let identity: { dev: number | bigint; ino: number | bigint } | undefined;
-    while (!identity) {
-      signal?.throwIfAborted();
-      try {
-        await fs.mkdir(lockPath, { mode: 0o700 });
-        const stat = await fs.lstat(lockPath);
-        if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("Memory lock must be a real directory.");
-        identity = { dev: stat.dev, ino: stat.ino };
-      } catch (error) {
-        if (!isAlreadyExists(error)) throw error;
-        const stat = await fs.lstat(lockPath).catch(() => undefined);
-        if (stat && (stat.isSymbolicLink() || !stat.isDirectory())) {
-          throw new Error("Memory lock must be a real directory.");
-        }
-        if (stat && !stat.isSymbolicLink() && stat.isDirectory() && Date.now() - stat.mtimeMs > staleLockMs) {
-          const stalePath = `${lockPath}.stale-${randomUUID()}`;
-          await fs.rename(lockPath, stalePath).catch(() => undefined);
-          await fs.rmdir(stalePath).catch(() => undefined);
-        }
-        if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${directory.scope} memory directory lock.`);
-        await waitForLock(signal);
-      }
-    }
+    const run = this.writeTail.then(() => this.withAuthorityTransaction(directory, signal, operation));
+    // 队列只承载背压，不把上一次失败传给下一次。
+    this.writeTail = run.catch(() => undefined);
+    return await run;
+  }
+
+  private async withAuthorityTransaction<T>(
+    directory: PinnedScopeDirectory,
+    signal: AbortSignal | undefined,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    signal?.throwIfAborted();
+    const database = this.memoryAuthority(directory);
+    database.exec("BEGIN IMMEDIATE");
     try {
       await assertPinnedScopeDirectory(this.workspaceRoot, directory);
-      return await operation();
-    } finally {
-      const current = await fs.lstat(lockPath).catch(() => undefined);
-      if (current?.isDirectory() && !current.isSymbolicLink() && current.dev === identity.dev && current.ino === identity.ino) {
-        await fs.rmdir(lockPath).catch(() => undefined);
+      signal?.throwIfAborted();
+      const result = await operation();
+      database.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {
+        // 保留原始错误；连接关闭时 SQLite 会回收残留事务。
       }
+      throw error;
     }
+  }
+
+  /** 打开（并缓存）全局记忆写权威库；与 memory 根同目录，保证锁的粒度与库一致。 */
+  private memoryAuthority(directory: PinnedScopeDirectory): DatabaseSync {
+    if (this.authority) return this.authority;
+    const databasePath = path.join(directory.path, authorityDatabaseName);
+    // 不设 WAL：多进程可能同时首次打开，切换日志模式要拿写锁会相互冲突。
+    // 权威库不写任何业务数据，默认 rollback-journal 已足够；BEGIN IMMEDIATE 本身即写锁。
+    const database = new DatabaseSync(databasePath, { timeout: authorityBusyTimeoutMs });
+    this.authority = database;
+    return database;
   }
 
   private async commitSnapshot(
@@ -1385,22 +1417,6 @@ function safeCounter(value: number): number {
 function safeOptionalTime(value: string | undefined): string | undefined {
   if (value === undefined || !Number.isFinite(Date.parse(value))) return undefined;
   return new Date(value).toISOString();
-}
-
-function waitForLock(signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, 25);
-    const onAbort = (): void => {
-      clearTimeout(timeout);
-      signal?.removeEventListener("abort", onAbort);
-      reject(signal?.reason instanceof Error ? signal.reason : new Error("Memory lock wait aborted."));
-    };
-    if (signal?.aborted) onAbort();
-    else signal?.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 function isNotFound(error: unknown): boolean {
