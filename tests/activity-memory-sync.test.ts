@@ -30,7 +30,7 @@ class FakeLocalMemory {
     };
   }
 
-  async writeEntry(input: MemoryEntryInput, options: { expectedRevision: number }): Promise<{ written: boolean; entry?: MemoryEntry; revision: number }> {
+  async writeEntry(input: MemoryEntryInput, _options: { expectedRevision: number }): Promise<{ written: boolean; entry?: MemoryEntry; revision: number }> {
     if (this.forceError) throw new Error("memory write exploded");
     const duplicate = this.duplicateByTopic && this.writes.some((entry) => entry.topic === input.topic);
     if (duplicate) return { written: false, revision: this.revision };

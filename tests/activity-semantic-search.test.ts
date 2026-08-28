@@ -19,6 +19,8 @@ await testSemanticSearchEmbedsAndRanks();
 await testSemanticSearchFallsBackWhenNoRuntime();
 await testSemanticSearchExcludesPlaceholderSessions();
 await testSemanticSearchSkipsTrivialSessionsInBackfill();
+await testSemanticSearchToleratesPassageBatchFailure();
+await testSemanticSearchKeepsExistingVectorsWhenBatchFails();
 
 /** 语义检索：补嵌入缺失向量 → 查询向量 → cosine top N 命中相关 session。 */
 async function testSemanticSearchEmbedsAndRanks(): Promise<void> {
@@ -110,6 +112,65 @@ async function testSemanticSearchSkipsTrivialSessionsInBackfill(): Promise<void>
     assert.equal(result.embedded, 1, "只补真实行的向量");
     assert.deepEqual(result.hits.map((hit) => hit.sessionId), [real]);
   });
+}
+
+/** passage 批次嵌入失败不穿透：没有任何可用向量时友好返回 ok:false，而不是把异常抛给工具层。 */
+async function testSemanticSearchToleratesPassageBatchFailure(): Promise<void> {
+  await withStore(async (store) => {
+    seedAnalyzedSession(store, todayAt(9), { summary: "修复登录崩溃", sourceEventCount: 5 });
+    const runtime = failingPassageRuntime([{ match: /登录/u, vector: vec([1, 0, 0, 0]) }]);
+    const result = await searchActivitySemantic({
+      store,
+      getEmbeddingRuntime: async () => runtime,
+      query: "登录"
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.reason, "no_vectors");
+  });
+}
+
+/** 批次失败只跳过本批：已有向量继续参与检索，缺的行仍待下次补嵌入。 */
+async function testSemanticSearchKeepsExistingVectorsWhenBatchFails(): Promise<void> {
+  await withStore(async (store) => {
+    const login = seedAnalyzedSession(store, todayAt(9), {
+      summary: "修复登录崩溃",
+      topics: ["登录", "auth"],
+      sourceEventCount: 5
+    });
+    const healthy = ruleRuntime([{ match: /登录/u, vector: vec([1, 0, 0, 0]) }]);
+    const first = await searchActivitySemantic({
+      store,
+      getEmbeddingRuntime: async () => healthy,
+      query: "登录"
+    });
+    assert.equal(first.ok, true, "先在健康运行时下写入旧向量");
+
+    seedAnalyzedSession(store, todayAt(11), { summary: "写公众号文章", sourceEventCount: 5 });
+    const degraded = failingPassageRuntime([{ match: /登录/u, vector: vec([1, 0, 0, 0]) }]);
+    const second = await searchActivitySemantic({
+      store,
+      getEmbeddingRuntime: async () => degraded,
+      query: "登录"
+    });
+    assert.equal(second.ok, true, "新批次失败不应拖垮整体检索");
+    if (!second.ok) return;
+    assert.equal(second.embedded, 0, "失败批次不计入新嵌入数");
+    assert.deepEqual(second.hits.map((hit) => hit.sessionId), [login], "已有向量仍可命中");
+    assert.equal(store.listAnalysisEmbeddingSources(FINGERPRINT).length, 1, "失败批次的行仍缺向量，留给下次补");
+  });
+}
+
+/** passage 嵌入必失败、query 按规则返回的 fake 运行时：验证批次失败被容错而非穿透。 */
+function failingPassageRuntime(rules: ReadonlyArray<{ match: RegExp; vector: Float32Array }>): EmbeddingModelRuntime {
+  const base = ruleRuntime(rules);
+  return {
+    ...base,
+    embed: async (request) => {
+      if (request.inputType === "passage") throw new Error("embedding backend offline");
+      return await base.embed(request);
+    }
+  };
 }
 
 // —— helpers ——

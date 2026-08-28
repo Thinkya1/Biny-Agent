@@ -268,6 +268,12 @@ function testReportRangeParsing(): void {
   assert.equal(new Date(explicit.startIso).getHours(), 0);
 
   assert.throws(() => resolveActivityReportRange("last week", NOW), /无法识别/u);
+  // Date 构造对越界日期会进位（2026-02-31 → 3 月 3 日）而非报错，必须按无效输入拒绝。
+  assert.throws(() => resolveActivityReportRange("2026-02-29", NOW), /无效日期/u);
+  assert.throws(() => resolveActivityReportRange("2026-02-31", NOW), /无效日期/u);
+  assert.throws(() => resolveActivityReportRange("2026-13-01", NOW), /无效日期/u);
+  const leapDay = resolveActivityReportRange("2028-02-29", NOW);
+  assert.equal(leapDay.label, "2028-02-29", "真正的闰日仍应解析成功");
 }
 
 function localPolicy(): ActivityPrivacyPolicy {

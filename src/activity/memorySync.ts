@@ -6,21 +6,19 @@
  * 存储层按「同 topic + 内容等价」去重，重复同步返回 written=false 且不推进 revision，
  * 因此周期 sweep 与工具调用各自跑一遍也不会产生重复记忆。
  *
- * 记忆条目来自脱敏后的分析结果（project/summary/topics/highlights/decisions），本身已经过
- * redactActivityText；写入前仍然过 memoryStorage 的 sanitize（redactSecrets + 长度校验）。
+ * 记忆条目来自分析结果（project/summary/topics/highlights/decisions），分析阶段已决定哪些
+ * 内容值得沉淀；写入前仍然经过 memoryStorage 的格式、来源和长度校验，不再盲目改写正文。
  * lineage 复用 completed_task（当前记忆格式里唯一面向「由已完成工作派生」的机器来源），
  * externalContext=false，sessionId 指向来源 session，方便回溯。
  */
-import type { MemoryEntry, MemoryEntryInput } from "../agent/context/memoryTypes.js";
-import { MemoryRevisionConflictError } from "../agent/context/memoryTypes.js";
+import type { MemoryEntryInput } from "../agent/context/memoryTypes.js";
+import { withFreshRevision } from "../agent/context/LocalMemory.js";
 import type { LocalMemory } from "../agent/context/LocalMemory.js";
 import type { ActivitySessionAnalysis, ActivityStore } from "./store.js";
 
 export interface ActivityMemorySyncDeps {
   store: ActivityStore;
   memory: LocalMemory;
-  /** 写入成功后同步到记忆向量索引；缺省时条目只落 Markdown，可由重建补齐。 */
-  indexEntry?: (entry: MemoryEntry) => Promise<void>;
   signal?: AbortSignal;
   now?: () => Date;
 }
@@ -61,24 +59,14 @@ async function writeAnalysisMemory(
   analysis: ActivitySessionAnalysis
 ): Promise<boolean> {
   const input = buildMemoryEntry(analysis);
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const overview = await deps.memory.getOverview();
-    try {
-      const written = await deps.memory.writeEntry(input, {
-        expectedRevision: overview.storeRevision,
-        signal: deps.signal,
-        now: deps.now?.()
-      });
-      if (written.written && written.entry && deps.indexEntry) {
-        // Markdown 是权威数据；向量索引失败只留待重建，不能让记忆写失败。
-        await deps.indexEntry(written.entry).catch(() => undefined);
-      }
-      return written.written;
-    } catch (error) {
-      if (!(error instanceof MemoryRevisionConflictError) || attempt === 2) throw error;
-    }
-  }
-  return false;
+  const result = await withFreshRevision(deps.memory, deps.signal, async (expectedRevision) => (
+    await deps.memory.writeEntry(input, {
+      expectedRevision,
+      signal: deps.signal,
+      now: deps.now?.()
+    })
+  ));
+  return result.written;
 }
 
 function buildMemoryEntry(analysis: ActivitySessionAnalysis): MemoryEntryInput {

@@ -32,6 +32,7 @@ await testRemovedProjectBudgetFieldsAreRejected();
 await testProjectCredentialFieldsAreRejected();
 await testProjectModelAliasMustBeGlobal();
 await testLegacyProjectConfigIsIgnored();
+await testVersionedActivityEmbeddingFieldsMigrateToMemory();
 await testVersionedGlobalConfigRejectsStaleWriters();
 await testInlineCredentialsRequirePersistentStorage();
 await testMcpCredentialReferencesStayOutOfConfig();
@@ -670,4 +671,28 @@ async function testMacKeychainCredentialStore(): Promise<void> {
   const addCall = calls.find((call) => call.args[0] === "add-generic-password");
   assert.equal(addCall?.args.at(-1), "-w");
   assert.equal(addCall?.args.includes("test-secret"), false);
+}
+
+async function testVersionedActivityEmbeddingFieldsMigrateToMemory(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-config-activity-embedding-"));
+  try {
+    // 复刻历史文件形态：配置已版本化，但嵌入字段还留在 activity.*（版本门内迁移够不到）。
+    const document = JSON.parse(JSON.stringify(defaultConfig)) as Record<string, any>;
+    document.format = "biny-config";
+    document.configVersion = 1;
+    delete document.context.memory.embeddingModel;
+    delete document.context.memory.cloudEmbeddingConsents;
+    const consents = { "alias@endpoint-hash": { endpointHash: "0123456789abcdef", confirmedAt: "2026-08-27T09:00:00.000Z" } };
+    document.activity.embeddingModel = { kind: "local", model: "paraphrase-multilingual-MiniLM-L12-v2" };
+    document.activity.embeddingConsents = consents;
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(path.join(root, "config.json"), JSON.stringify(document, null, 2) + "\n", "utf8");
+
+    const loaded = await loadConfigFile(root);
+    assert.equal("embeddingConsents" in (loaded.activity as Record<string, unknown>), false, "activity 段的嵌入字段必须被清除");
+    assert.deepEqual(loaded.context.memory.cloudEmbeddingConsents, consents, "已版本化文档的 embeddingConsents 也要迁回 memory.*");
+    assert.deepEqual(loaded.context.memory.embeddingModel, { kind: "local", model: "paraphrase-multilingual-MiniLM-L12-v2" });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 }

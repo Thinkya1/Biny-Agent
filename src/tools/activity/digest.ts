@@ -16,7 +16,6 @@ import { syncWorthwhileActivityMemories } from "../../activity/memorySync.js";
 import { ActivityStore } from "../../activity/store.js";
 import type { ActivitySettings } from "../../activity/settings.js";
 import type { LocalMemory } from "../../agent/context/LocalMemory.js";
-import type { MemoryEntry } from "../../agent/context/memoryTypes.js";
 import { ToolAccesses } from "../access.js";
 import type { Tool } from "../types.js";
 
@@ -29,8 +28,6 @@ export interface ActivityDigestToolDeps {
   loadSettings(): Promise<ActivitySettings>;
   /** worthMemory 同步的目标记忆库；缺省时只读分析、不同步记忆。 */
   getMemory?(): LocalMemory | undefined;
-  /** 记忆写入成功后的向量索引回调（对应 agent.indexMemoryEntry）。 */
-  indexMemoryEntry?(entry: MemoryEntry): Promise<void>;
   /** 可注入时钟，便于测试固定「现在」。 */
   now?(): Date;
 }
@@ -87,7 +84,6 @@ export function createActivityDigestTool(deps: ActivityDigestToolDeps): Tool<Act
               await syncWorthwhileActivityMemories({
                 store,
                 memory,
-                indexEntry: deps.indexMemoryEntry,
                 signal,
                 now: deps.now
               }).catch(() => undefined);
@@ -103,6 +99,4 @@ export function createActivityDigestTool(deps: ActivityDigestToolDeps): Tool<Act
 }
 
 /** digest 业务结果的可序列化形态，供测试与桌面侧复用。 */
-export interface ActivityDigestToolResult extends ActivityDigestResult {
-  // 透传业务层结果；工具直接返回 markdown，这里仅作为类型锚点导出。
-}
+export type ActivityDigestToolResult = ActivityDigestResult;

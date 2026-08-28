@@ -10,6 +10,7 @@ await testLegacyScreenshotMigration();
 await testStorageLimitKeepsEventSemantics();
 await testBrowserTabUrlStructuredStorageAndSearch();
 await testFtsRebuildIncludesBrowserUrl();
+await testRecordEventRollsBackWhenFtsInsertFails();
 
 async function testEventAndFallbackStorage(): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "biny-activity-events-"));
@@ -311,6 +312,34 @@ async function testFtsRebuildIncludesBrowserUrl(): Promise<void> {
     const rows = store.search("openai");
     assert.equal(rows.length, 1);
     assert.equal(rows[0]?.url, "https://chat.openai.com/c/abc-123");
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+/** insertEvent 的事务性：FTS 写入失败时事件行与 session 计数必须整体回滚，不留半截数据。 */
+async function testRecordEventRollsBackWhenFtsInsertFails(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "biny-activity-txn-"));
+  const store = new ActivityStore();
+  try {
+    await store.open(root);
+    const sessionId = store.startSession("2026-08-26T00:00:00.000Z");
+    // 用第二个连接拆掉 FTS 表，迫使 recordEvent 在事件行写入之后才失败。
+    const saboteur = new DatabaseSync(path.join(root, "activity.sqlite"));
+    saboteur.exec("DROP TABLE activity_fts;");
+    saboteur.close();
+    assert.throws(
+      () => store.recordEvent({
+        sessionId,
+        occurredAt: "2026-08-26T00:00:01.000Z",
+        eventType: "focus_changed",
+        application: "Test App"
+      }),
+      /activity_fts/u
+    );
+    assert.equal(store.snapshot().events, 0, "事件行必须随事务回滚");
+    assert.equal(store.snapshot().recentSessions[0]?.eventCount, 0, "session 计数必须随事务回滚");
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });

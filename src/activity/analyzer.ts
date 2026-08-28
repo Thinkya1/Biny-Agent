@@ -326,8 +326,14 @@ export function resolveActivityReportRange(date: string, now: Date = new Date())
     if (!match) {
       throw new Error(`无法识别的日期“${date}”。支持 today、yesterday 或 YYYY-MM-DD。`);
     }
-    base = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-    if (Number.isNaN(base.getTime())) throw new Error(`无效日期：${date}。`);
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    base = new Date(year, month - 1, day);
+    // Date 构造对越界日期（如 2026-02-31）会进位成另一天而非得到 NaN，必须回读组件校验。
+    if (base.getFullYear() !== year || base.getMonth() !== month - 1 || base.getDate() !== day) {
+      throw new Error(`无效日期：${date}。`);
+    }
   }
   const start = new Date(base.getFullYear(), base.getMonth(), base.getDate());
   const end = new Date(start.getTime());

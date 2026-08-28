@@ -7,7 +7,6 @@
  */
 import type { AgentModel } from "../../agent/core/types.js";
 import type { LocalMemory } from "../../agent/context/LocalMemory.js";
-import type { MemoryEntry } from "../../agent/context/memoryTypes.js";
 import type { ActivitySettings } from "../../activity/settings.js";
 import type { EmbeddingModelRuntime } from "../../llm/embedding/types.js";
 
@@ -18,9 +17,7 @@ export interface ActivityToolsDeps {
   loadSettings(): Promise<ActivitySettings>;
   /** worthMemory 同步的目标记忆库；缺省时只落标记不写记忆。 */
   getMemory?(): LocalMemory | undefined;
-  /** 记忆写入成功后的向量索引回调（对应 agent.indexMemoryEntry）。 */
-  indexMemoryEntry?(entry: MemoryEntry): Promise<void>;
-  /** 语义搜索的本地嵌入运行时；缺省时 activity_search_semantic 提示不可用。 */
+  /** 语义搜索的本地嵌入运行时；缺省时 activity_search 的 semantic 模式提示不可用。 */
   getEmbeddingRuntime?(): Promise<EmbeddingModelRuntime | undefined>;
   /** 可注入时钟，便于测试固定「今天」。 */
   now?(): Date;

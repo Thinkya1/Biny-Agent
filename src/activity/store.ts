@@ -682,51 +682,61 @@ export class ActivityStore {
       fallbackReason
     });
     const inputEventCount = Math.max(0, Math.trunc(input.inputEventCount ?? 0));
-    const result = database.prepare(`
-      INSERT INTO activity_events (
-        session_id, occurred_at, source, event_type, application, bundle_id,
-        window_title, ax_role, ax_title, url, redacted_text, mouse_event_type,
-        mouse_button, summary, ocr_text, input_event_count, fallback_reason,
-        snapshot_path, snapshot_bytes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      input.sessionId,
-      input.occurredAt,
-      source,
-      eventType,
-      application ?? null,
-      normalizeShortText(input.bundleId) ?? null,
-      windowTitle ?? null,
-      axRole ?? null,
-      axTitle ?? null,
-      url ?? null,
-      redactedText ?? null,
-      mouseEventType ?? null,
-      mouseButton,
-      summary,
-      ocrText ?? null,
-      inputEventCount,
-      fallbackReason ?? null,
-      snapshot?.relativeSnapshotPath ?? null,
-      snapshot?.bytes ?? 0
-    );
-    const eventId = Number(result.lastInsertRowid);
-    // url 进 FTS：浏览器标签 URL 是结构化列（不做内容脱敏），纳入全文索引后可按
-    // 站点/路径关键字检索；行内容只在用户主动 search() 时可见。
-    database.prepare("INSERT INTO activity_fts (event_id, summary, application, window_title, event_type, ax_role, ax_title, redacted_text, ocr_text, url, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-      eventId,
-      summary,
-      application ?? "",
-      windowTitle ?? "",
-      eventType,
-      axRole ?? "",
-      axTitle ?? "",
-      redactedText ?? "",
-      ocrText ?? "",
-      url ?? "",
-      input.occurredAt
-    );
-    database.prepare("UPDATE activity_sessions SET event_count = event_count + 1 WHERE id = ?").run(input.sessionId);
+    // 事件行、FTS 行、session 计数必须原子提交：任一步失败（或进程在两句之间崩溃）都会让
+    // FTS 与事件表永久不一致——FTS 只在缺列时重建，没有针对数据不一致的自愈入口。
+    database.exec("BEGIN IMMEDIATE;");
+    let eventId: number;
+    try {
+      const result = database.prepare(`
+        INSERT INTO activity_events (
+          session_id, occurred_at, source, event_type, application, bundle_id,
+          window_title, ax_role, ax_title, url, redacted_text, mouse_event_type,
+          mouse_button, summary, ocr_text, input_event_count, fallback_reason,
+          snapshot_path, snapshot_bytes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.sessionId,
+        input.occurredAt,
+        source,
+        eventType,
+        application ?? null,
+        normalizeShortText(input.bundleId) ?? null,
+        windowTitle ?? null,
+        axRole ?? null,
+        axTitle ?? null,
+        url ?? null,
+        redactedText ?? null,
+        mouseEventType ?? null,
+        mouseButton,
+        summary,
+        ocrText ?? null,
+        inputEventCount,
+        fallbackReason ?? null,
+        snapshot?.relativeSnapshotPath ?? null,
+        snapshot?.bytes ?? 0
+      );
+      eventId = Number(result.lastInsertRowid);
+      // url 进 FTS：浏览器标签 URL 是结构化列（不做内容脱敏），纳入全文索引后可按
+      // 站点/路径关键字检索；行内容只在用户主动 search() 时可见。
+      database.prepare("INSERT INTO activity_fts (event_id, summary, application, window_title, event_type, ax_role, ax_title, redacted_text, ocr_text, url, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+        eventId,
+        summary,
+        application ?? "",
+        windowTitle ?? "",
+        eventType,
+        axRole ?? "",
+        axTitle ?? "",
+        redactedText ?? "",
+        ocrText ?? "",
+        url ?? "",
+        input.occurredAt
+      );
+      database.prepare("UPDATE activity_sessions SET event_count = event_count + 1 WHERE id = ?").run(input.sessionId);
+      database.exec("COMMIT;");
+    } catch (error) {
+      database.exec("ROLLBACK;");
+      throw error;
+    }
     return {
       id: eventId,
       sessionId: input.sessionId,

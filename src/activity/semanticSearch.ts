@@ -9,7 +9,7 @@
  * ok=false，工具层渲染成友好提示，由模型回退到关键词 activity_search，不抛给调用方。
  */
 import type { ActivityStore } from "./store.js";
-import type { EmbeddingModelRuntime } from "../llm/embedding/types.js";
+import type { EmbeddingModelRuntime, EmbeddingResult } from "../llm/embedding/types.js";
 import { cosineSimilarity } from "../llm/embedding/vector.js";
 import { ACTIVITY_ANALYSIS_FAILED_SUMMARY, ACTIVITY_TRIVIAL_SUMMARY } from "./analyzer.js";
 
@@ -54,7 +54,7 @@ export async function searchActivitySemantic(deps: ActivitySemanticSearchDeps): 
     return {
       ok: false,
       reason: "no_runtime",
-      message: "本地嵌入模型不可用（未下载或运行时未配置）。可以改用 activity_search 做关键词检索。"
+      message: "本地嵌入模型不可用（未下载或运行时未配置）。可以改用 activity_search 的 keyword 模式做关键词检索。"
     };
   }
 
@@ -65,11 +65,19 @@ export async function searchActivitySemantic(deps: ActivitySemanticSearchDeps): 
   for (let offset = 0; offset < missing.length; offset += EMBED_BATCH_SIZE) {
     deps.signal?.throwIfAborted();
     const batch = missing.slice(offset, offset + EMBED_BATCH_SIZE);
-    const result = await runtime.embed({
-      texts: batch.map(embeddingText),
-      inputType: "passage",
-      signal: deps.signal
-    });
+    let result: EmbeddingResult;
+    try {
+      result = await runtime.embed({
+        texts: batch.map(embeddingText),
+        inputType: "passage",
+        signal: deps.signal
+      });
+    } catch (error) {
+      // 中止必须穿透；单个批次失败只跳过本批（缺的向量留到下次调用再补），
+      // 已写入的向量继续参与本次检索——见模块头「失败只留待下次」。
+      if (deps.signal?.aborted) throw error;
+      continue;
+    }
     result.embeddings.forEach((vector, index) => {
       const source = batch[index];
       if (!source) return;

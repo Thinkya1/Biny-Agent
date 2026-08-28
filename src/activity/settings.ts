@@ -64,7 +64,7 @@ const activitySettingsObjectSchema = z.object({
     "com.lastpass.LastPass"
   ]),
   maxStorageMb: z.number().int().min(256).max(1_048_576).default(10_240),
-  outputDirectory: z.string().trim().min(1).max(2_048).default("~/.biny/agent/activity-records")
+  outputDirectory: z.string().trim().min(1).max(2_048).default("~/.biny/agent/activity-records"),
 }).strict();
 
 export const activitySettingsInputSchema = z.preprocess(

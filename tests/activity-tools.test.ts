@@ -1,6 +1,6 @@
 /**
- * P2/P3 工具层测试：activity_digest / activity_search / activity_sessions /
- * activity_session_show 的渲染与执行；activity_report 的按日缓存（同一天重复提问不重复
+ * P2/P3 工具层测试：activity_digest / activity_search / activity_sessions
+ * 的渲染与执行；activity_report 的按日缓存（同一天重复提问不重复
  * 补分析、TTL 过期后重新生成）。
  *
  * 全部走「真实 ActivityStore + 临时目录 + 注入时钟」；模型只用于 report 补分析，
@@ -13,7 +13,7 @@ import path from "node:path";
 import { createActivityDigestTool } from "../src/tools/activity/digest.js";
 import { createActivitySearchTool } from "../src/tools/activity/search.js";
 import { createActivityReportTool, createInMemoryActivityReportCache } from "../src/tools/activity/report.js";
-import { createActivitySessionsTool, createActivitySessionShowTool } from "../src/tools/activity/sessions.js";
+import { createActivitySessionsTool } from "../src/tools/activity/sessions.js";
 import { ActivityStore, type ActivitySessionAnalysis } from "../src/activity/store.js";
 import { defaultActivitySettings, type ActivitySettings } from "../src/activity/settings.js";
 import type { AgentModel, ModelStreamEvent } from "../src/agent/core/types.js";
@@ -50,7 +50,7 @@ await testReportCacheInMemoryBehavior();
 async function testDigestRendersTimelineWithUnanalyzedSessions(): Promise<void> {
   await withStore(async (store, root) => {
     const analyzed = seedEndedSession(store, todayAt(14, 0), todayAt(14, 30), 3);
-    const unanalyzed = seedEndedSession(store, todayAt(13, 0), todayAt(13, 30), 3);
+    seedEndedSession(store, todayAt(13, 0), todayAt(13, 30), 3);
     store.recordAnalysis(analysisRow(analyzed, { project: "biny", topics: ["实现 analyzer"] }));
 
     const tool = createActivityDigestTool({
@@ -76,7 +76,7 @@ async function testKeywordSearchToolHitsRedactedSummaries(): Promise<void> {
   });
 }
 
-/** activity_sessions → activity_session_show：列表带分析，详情带事件时间线与分析。 */
+/** activity_sessions 双模式：无参列表带分析；带 sessionId 展开事件时间线与分析。 */
 async function testSessionsAndShowTools(): Promise<void> {
   await withStore(async (store, root) => {
     const sessionId = seedEndedSession(store, todayAt(9, 0), todayAt(10, 0), 3);
@@ -88,14 +88,13 @@ async function testSessionsAndShowTools(): Promise<void> {
     assert.ok(list.includes(sessionId), "列表带 session id 供下一步打开");
     assert.ok(list.includes("接入工具"));
 
-    const showTool = createActivitySessionShowTool({ loadSettings: async () => settingsFor(root) });
-    const detail = await executeTool(showTool, { sessionId });
+    const detail = await executeTool(sessionsTool, { sessionId });
     assert.match(detail, /## 会话/u);
     assert.ok(detail.includes(sessionId));
     assert.ok(detail.includes("事件时间线"));
     assert.ok(detail.includes("接入工具") || detail.includes("走工具"));
 
-    const missing = await executeTool(showTool, { sessionId: "no-such-session" });
+    const missing = await executeTool(sessionsTool, { sessionId: "no-such-session" });
     assert.match(missing, /没有找到会话/u);
   });
 }
@@ -133,7 +132,7 @@ async function testReportCacheExpiresAfterTtl(): Promise<void> {
       cache,
       now: () => new Date(NOW.getTime())
     });
-    const first = await executeTool(tool, {});
+    await executeTool(tool, {});
     assert.equal(calls(), 1);
     // TTL 窗口外又有新 session 结束；缓存已失效，第二次调用应重新补分析并纳入它。
     seedEndedSession(store, todayAt(11, 0), todayAt(12, 0), 3);

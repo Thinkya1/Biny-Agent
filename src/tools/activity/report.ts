@@ -17,7 +17,6 @@ import { ActivityPrivacyPolicy } from "../../activity/privacyPolicy.js";
 import { ActivityStore } from "../../activity/store.js";
 import type { ActivitySettings } from "../../activity/settings.js";
 import type { LocalMemory } from "../../agent/context/LocalMemory.js";
-import type { MemoryEntry } from "../../agent/context/memoryTypes.js";
 import { ToolAccesses } from "../access.js";
 import type { Tool } from "../types.js";
 
@@ -40,8 +39,6 @@ export interface ActivityReportToolDeps {
   cache?: ActivityReportCache;
   /** worthMemory 同步的目标记忆库；缺省时只生成报告、不同步记忆。 */
   getMemory?(): LocalMemory | undefined;
-  /** 记忆写入成功后的向量索引回调（对应 agent.indexMemoryEntry）。 */
-  indexMemoryEntry?(entry: MemoryEntry): Promise<void>;
   /** 可注入时钟，便于测试固定「今天」。 */
   now?: () => Date;
 }
@@ -133,7 +130,6 @@ export function createActivityReportTool(deps: ActivityReportToolDeps): Tool<Act
               await syncWorthwhileActivityMemories({
                 store,
                 memory,
-                indexEntry: deps.indexMemoryEntry,
                 signal,
                 now: deps.now
               }).catch(() => undefined);

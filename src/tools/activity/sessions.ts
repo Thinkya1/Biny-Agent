@@ -1,11 +1,11 @@
 /**
- * activity_sessions / activity_session_show 工具模块。
+ * activity_sessions 工具模块（列表 / 详情双模式）。
  *
- * sessions 用于「最近录到了哪些活动」的快速浏览；show 用于展开单个 session 的事件摘要
- * 与已落库的分析结果，是调试/回溯「我刚刚到底干了什么」的最后一级。
+ * 不带 sessionId 时列出最近录到的活动（快速浏览「录到了哪些」）；带 sessionId 时展开单个
+ * session 的事件摘要与已落库的分析结果，是调试/回溯「我刚刚到底干了什么」的最后一级。
  *
  * 读取的全部是 store 查询层提供的脱敏 occurredAt/summary/application；快照路径与 OCR
- * 原文不进入渲染文本，session_show 也只展示与工具、分析输入同级的摘要级信息。
+ * 原文不进入渲染文本，详情也只展示与工具、分析输入同级的摘要级信息。
  */
 import { z } from "zod";
 import { ActivityStore } from "../../activity/store.js";
@@ -14,11 +14,9 @@ import { ToolAccesses } from "../access.js";
 import type { Tool } from "../types.js";
 
 export interface ActivitySessionsArgs {
+  /** 提供时展开单个 session 详情；省略时列出最近会话。 */
+  sessionId?: string;
   limit?: number;
-}
-
-export interface ActivitySessionShowArgs {
-  sessionId: string;
 }
 
 export interface ActivitySessionsToolDeps {
@@ -30,89 +28,50 @@ export function createActivitySessionsTool(deps: ActivitySessionsToolDeps): Tool
   return {
     name: "activity_sessions",
     description: [
-      "List the user's most recent recorded activity sessions with their analysis (project, summary, topics) when available.",
-      "Use it to orient \"what sessions exist\" before digging into one session; activity_session_show opens a single session.",
+      "List the user's most recent recorded activity sessions with their analysis (project, summary, topics) when available, or show one session in full when sessionId is given.",
+      "Call without sessionId to orient \"what sessions exist\", then pass a session id from the list to open its timeline (start/end, event count, redacted event summaries, analysis).",
       "Reads only redacted on-device activity metadata; screenshots and OCR text never leave the device."
     ].join(" "),
-    promptSnippet: "List recent recorded activity sessions",
+    promptSnippet: "List recent activity sessions, or show one session's timeline by id",
     promptGuidelines: [
-      "Use activity_sessions to list what sessions exist, then activity_session_show to open one by its id"
+      "Call activity_sessions without sessionId to list what sessions exist, then pass a session id to inspect that session's event timeline"
     ],
     parameters: {
       type: "object",
       properties: {
-        limit: { type: "number", minimum: 1, maximum: 30, description: "Max number of sessions (default 10)." }
+        sessionId: { type: "string", minLength: 1, maxLength: 64, description: "Activity session id (uuid). Omit to list recent sessions instead." },
+        limit: { type: "number", minimum: 1, maximum: 30, description: "Max number of sessions when listing (default 10); ignored when sessionId is given." }
       },
       additionalProperties: false
     },
     schema: z.object({
+      sessionId: z.string().trim().min(1).max(64).optional(),
       limit: z.number().int().min(1).max(30).optional()
     }),
     capability: "activity.sessions",
     risk: "read",
     resolveExecution(args) {
+      const sessionId = args.sessionId;
+      const detail = sessionId !== undefined;
       return {
         accesses: ToolAccesses.none(),
-        display: { kind: "generic", summary: "列出最近的活动会话" },
-        description: "List recent activity sessions",
+        display: { kind: "generic", summary: detail ? `查看活动会话 ${sessionId.slice(0, 8)}` : "列出最近的活动会话" },
+        description: detail ? "Show activity session detail" : "List recent activity sessions",
         approvalRule: "activity_sessions",
         async execute() {
           const settings = await deps.loadSettings();
           const store = new ActivityStore();
           await store.open(settings.outputDirectory);
           try {
+            if (sessionId !== undefined) {
+              const record = store.getSessionRecord(sessionId);
+              if (!record) return `没有找到会话 ${sessionId}。`;
+              const events = store.listSessionEventSummaries(sessionId);
+              const analysis = store.getAnalysis(sessionId);
+              return renderSessionDetail(record, events, analysis);
+            }
             const rows = store.listRecentSessionsWithAnalysis("1970-01-01T00:00:00.000Z", args.limit ?? 10);
             return renderSessionList(rows);
-          } finally {
-            await store.close();
-          }
-        }
-      };
-    }
-  };
-}
-
-export function createActivitySessionShowTool(deps: ActivitySessionsToolDeps): Tool<ActivitySessionShowArgs, string> {
-  return {
-    name: "activity_session_show",
-    description: [
-      "Show one recorded activity session's timeline: start/end, event count, redacted event summaries, and its analysis when it exists.",
-      "Use it after activity_sessions to open a specific session by id.",
-      "Reads only redacted event summaries; screenshots and OCR text never leave the device."
-    ].join(" "),
-    promptSnippet: "Show one activity session's timeline",
-    promptGuidelines: [
-      "Use activity_session_show with a session id from activity_sessions to inspect that session's event timeline"
-    ],
-    parameters: {
-      type: "object",
-      properties: {
-        sessionId: { type: "string", minLength: 1, maxLength: 64, description: "Activity session id (uuid)." }
-      },
-      required: ["sessionId"],
-      additionalProperties: false
-    },
-    schema: z.object({
-      sessionId: z.string().trim().min(1).max(64)
-    }),
-    capability: "activity.session_show",
-    risk: "read",
-    resolveExecution(args) {
-      return {
-        accesses: ToolAccesses.none(),
-        display: { kind: "generic", summary: `查看活动会话 ${args.sessionId.slice(0, 8)}` },
-        description: "Show activity session detail",
-        approvalRule: "activity_session_show",
-        async execute() {
-          const settings = await deps.loadSettings();
-          const store = new ActivityStore();
-          await store.open(settings.outputDirectory);
-          try {
-            const record = store.getSessionRecord(args.sessionId);
-            if (!record) return `没有找到会话 ${args.sessionId}。`;
-            const events = store.listSessionEventSummaries(args.sessionId);
-            const analysis = store.getAnalysis(args.sessionId);
-            return renderSessionDetail(record, events, analysis);
           } finally {
             await store.close();
           }
