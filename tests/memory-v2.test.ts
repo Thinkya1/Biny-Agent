@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   await testSingleStoreCasOriginAndEdit();
   await testSharedLibraryAndLexicalFallbackBoundary();
   await testBoundedIndexConcurrentCasAndUsageProjection();
-  await testCandidateOriginEligibilityAndRedaction();
+  await testCandidateOriginEligibilityAndExactContent();
   await testSingleRootSafetyBoundary();
   console.log("memory v3 tests passed");
 }
@@ -169,7 +169,7 @@ async function testBoundedIndexConcurrentCasAndUsageProjection(): Promise<void> 
 }
 
 
-async function testCandidateOriginEligibilityAndRedaction(): Promise<void> {
+async function testCandidateOriginEligibilityAndExactContent(): Promise<void> {
   await withIsolatedMemory(async (workspaceRoot) => {
     const memory = new LocalMemory(workspaceRoot, unusedModel);
     const queued = await memory.enqueueCandidate({
@@ -181,7 +181,7 @@ async function testCandidateOriginEligibilityAndRedaction(): Promise<void> {
     }, { expectedRevision: 0, excludeExternalContext: true, now: new Date("2026-08-10T00:00:00.000Z") });
     assert.equal(queued.queued, true);
     assert.equal(queued.candidate?.origin.kind, "workspace");
-    assert.equal(queued.candidate?.summary.includes("sk-candidate-secret-value"), false);
+    assert.equal(queued.candidate?.summary.includes("sk-candidate-secret-value"), true);
     assert.equal((await memory.listEligibleCandidates({ now: new Date("2026-08-10T05:59:59.999Z") })).candidates.length, 0);
     assert.equal((await memory.listEligibleCandidates({ now: new Date("2026-08-10T06:00:00.000Z") })).candidates.length, 1);
   });

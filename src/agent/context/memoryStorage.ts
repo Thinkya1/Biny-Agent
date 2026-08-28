@@ -237,8 +237,8 @@ export class MemoryStorage {
     const ranked = rankMemoryEntries(
       snapshot.entries.map(({ entry }) => entry)
         .filter((entry) => matchesOriginSelectors(entry.origin, selectors, workspaceId)),
-      redactSecrets(query),
-      queryPaths.map((value) => redactSecrets(value)),
+      query,
+      queryPaths,
       now
     );
     const records = new Map(snapshot.entries.map((record) => [record.entry.id, record] as const));
@@ -450,8 +450,8 @@ export class MemoryStorage {
       if (input.lineage.externalContext && options.excludeExternalContext) {
         return { queued: false, revision: snapshot.state.revision, reason: "external_context_excluded" };
       }
-      // enqueue 和提升前各脱敏一次；候选绝不保存完整聊天，只保留有界 summary。
-      const summary = redactSecrets(redactSecrets(input.summary)).trim().slice(0, maxMemoryCandidateChars);
+      // 候选绝不保存完整聊天，只保留用户明确允许沉淀的有界 summary；正文不做盲目改写。
+      const summary = input.summary.trim().slice(0, maxMemoryCandidateChars);
       if (summary.length < 20) return { queued: false, revision: snapshot.state.revision, reason: "summary_too_short" };
       const duplicate = snapshot.candidates.find((candidate) => (
         candidate.lineage.runId === input.lineage.runId
@@ -470,9 +470,9 @@ export class MemoryStorage {
         completed: true,
         lineage: {
           source: "completed_task",
-          sessionId: redactSecrets(input.lineage.sessionId).trim().slice(0, 200),
-          turnId: redactSecrets(input.lineage.turnId).trim().slice(0, 200),
-          runId: redactSecrets(input.lineage.runId).trim().slice(0, 200),
+          sessionId: input.lineage.sessionId.trim().slice(0, 200),
+          turnId: input.lineage.turnId.trim().slice(0, 200),
+          runId: input.lineage.runId.trim().slice(0, 200),
           externalContext: input.lineage.externalContext
         },
         origin: candidateOrigin,

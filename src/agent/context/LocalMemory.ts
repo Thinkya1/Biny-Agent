@@ -424,8 +424,8 @@ export class LocalMemory {
   }
 
   private async extractCandidate(candidate: MemoryCandidate, signal?: AbortSignal): Promise<z.infer<typeof extractedEntrySchema> | undefined> {
-    // 候选摘要在 enqueue 时已脱敏，这里在进入模型和写入前各再经过一次过滤。
-    const summary = redactSecrets(redactSecrets(candidate.summary)).slice(0, 2_000);
+    // 候选只保留有界摘要；是否允许外发由模型运行时和云端同意策略决定，不在正文上盲目改写。
+    const summary = candidate.summary.slice(0, 2_000);
     const prompt = [
       "Extract at most one durable memory from this completed root-turn summary.",
       "Return JSON as {memory:null} when it is transient or lacks durable evidence.",

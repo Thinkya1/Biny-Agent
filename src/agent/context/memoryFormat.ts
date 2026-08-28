@@ -1,5 +1,5 @@
 /**
- * 记忆条目的序列化、脱敏和确定性检索。
+ * 记忆条目的序列化、有界校验和确定性检索。
  *
  * 每个 v3 Markdown 文件只承载一条 entry；YAML frontmatter 是机器可读事实，正文保留给用户
  * 审计。向量索引属于可重建派生数据，不进入本文件格式。
@@ -7,7 +7,6 @@
 import path from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
-import { redactSecrets } from "../../utils/secrets.js";
 import type {
   MemoryEntry,
   MemoryEntryInput,
@@ -116,9 +115,10 @@ export function sanitizeMemoryEntryInput(input: MemoryEntryInput): MemoryEntryIn
     origin: input.origin === undefined ? undefined : sanitizeMemoryOrigin(input.origin),
     audience: input.audience,
     kind: input.kind,
-    topic: normalizeMemoryTopic(redactSecrets(input.topic)),
-    title: redactSecrets(input.title).replace(/\s+/g, " ").trim().slice(0, 120),
-    summary: redactSecrets(input.summary).trim().slice(0, maxMemorySummaryChars),
+    // Memory 是用户明确选择的本地长期资料：只做长度/格式约束，不猜测哪些正文应该被改写。
+    topic: normalizeMemoryTopic(input.topic),
+    title: input.title.replace(/\s+/g, " ").trim().slice(0, 120),
+    summary: input.summary.trim().slice(0, maxMemorySummaryChars),
     decisions: sanitizeStringArray(input.decisions, 8, 500),
     paths: sanitizeStringArray(input.paths, 16, 500),
     keywords: sanitizeStringArray(input.keywords, 12, 120).map((value) => value.toLowerCase()),
@@ -129,7 +129,7 @@ export function sanitizeMemoryEntryInput(input: MemoryEntryInput): MemoryEntryIn
   return sanitized;
 }
 
-/** 写盘前再次脱敏，候选经过模型也不能绕过第一道过滤。 */
+/** 写盘前再次做边界校验；候选经过模型也不能绕过格式和长度约束。 */
 export function createStoredMemoryEntry(input: MemoryEntryInput, fields: StoredEntryFields): MemoryEntry {
   const safe = sanitizeMemoryEntryInput(sanitizeMemoryEntryInput(input));
   if (!safe.origin) throw new Error("Stored memory entry requires a resolved origin.");
@@ -354,7 +354,7 @@ export function memoryMatchFromRanked(ranked: RankedMemoryEntry, relativePath: s
 function createMemoryExcerpt(entry: MemoryEntry, terms: string[]): string {
   const candidates = [entry.summary, ...entry.decisions];
   const matched = candidates.find((value) => terms.some((term) => value.toLowerCase().includes(term)));
-  return redactSecrets(matched ?? entry.summary).slice(0, 500);
+  return (matched ?? entry.summary).slice(0, 500);
 }
 
 function containsProjectPath(entry: MemoryEntryInput, workspaceRoot: string): boolean {
@@ -367,13 +367,13 @@ function sanitizeStringArray(values: string[] | undefined, maxItems: number, max
   if (!values) return [];
   return [...new Set(values
     .filter((value): value is string => typeof value === "string")
-    .map((value) => redactSecrets(value).trim().slice(0, maxChars))
+    .map((value) => value.trim().slice(0, maxChars))
     .filter(Boolean))].slice(0, maxItems);
 }
 
 function sanitizeOptionalLineageValue(value: string | undefined, maxChars: number): string | undefined {
   if (value === undefined) return undefined;
-  return redactSecrets(value).trim().slice(0, maxChars) || undefined;
+  return value.trim().slice(0, maxChars) || undefined;
 }
 
 function sanitizeIdentifier(value: string): string {
@@ -434,7 +434,7 @@ function sanitizeMemoryOrigin(origin: MemoryOrigin): MemoryOrigin {
   return {
     kind: "workspace",
     workspaceId: origin.workspaceId,
-    workspaceName: redactSecrets(origin.workspaceName).replace(/\s+/g, " ").trim().slice(0, 120)
+    workspaceName: origin.workspaceName.replace(/\s+/g, " ").trim().slice(0, 120)
   };
 }
 

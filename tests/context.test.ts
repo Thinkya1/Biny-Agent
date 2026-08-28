@@ -143,7 +143,7 @@ async function main(): Promise<void> {
     await testTruncatedSessionTailAndDanglingToolRecovery();
     await testTurnStatusPersistence();
     await testSessionAndToolDisplayRedaction();
-    await testMemoryRedactionDedupAndWriter();
+    await testMemoryExactDurableContentAndWriter();
     await testMemoryCandidateLifecycleAndUsagePersistence();
     await testMemoryStorageBoundaries();
     await testMemoryEntryManagementAndCjkSearch();
@@ -1495,7 +1495,7 @@ async function testCredentialAndSymlinkBoundaries(): Promise<void> {
   });
 }
 
-async function testMemoryRedactionDedupAndWriter(): Promise<void> {
+async function testMemoryExactDurableContentAndWriter(): Promise<void> {
   await withTempWorkspace(async (workspaceRoot) => {
     const storeProvider = new ContextTestModel();
     const store = new LocalMemory(workspaceRoot, () => storeProvider.model);
@@ -1531,8 +1531,7 @@ async function testMemoryRedactionDedupAndWriter(): Promise<void> {
     assert.ok(first.path);
     const debugFile = path.join(globalAgentDir(), first.path);
     const stored = await fs.readFile(debugFile, "utf8");
-    assert.equal(stored.includes("sk-supersecretvalue123"), false);
-    assert.match(stored, /\[redacted\]/);
+    assert.equal(stored.includes("sk-supersecretvalue123"), true);
     assert.match(redactSecrets("Authorization: Bearer abcdefghijklmnop"), /\[redacted\]/);
     assert.equal(redactSecrets("aws_secret_access_key=not-a-real-value"), "aws_secret_access_key=[redacted]");
     assert.equal(redactSecrets("-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----"), "[redacted private key]");

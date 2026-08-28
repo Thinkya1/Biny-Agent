@@ -2776,8 +2776,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function completedMemoryCandidateSummary(task: string, answer: string): string | undefined {
   const taskSummary = boundedCandidateText(task, 600);
   const outcomeSummary = boundedCandidateText(answer, 1_200);
-  // 短寒暄和一次性确认不具备可复用价值。门槛只计算脱敏后的真实内容，
-  // 不能让固定的标签或占位符把 hi/ok 之类的回合推过 durable 候选门槛。
+  // 短寒暄和一次性确认不具备可复用价值。这里保留本地 durable memory 的原文，
+  // 只用长度门槛排除没有信息量的回合；外发边界由模型/Provider 策略决定。
   if (Array.from(`${taskSummary}\n${outcomeSummary}`).length < 180) return undefined;
   return [
     `Completed task: ${taskSummary || "(no public task summary)"}`,
@@ -2786,7 +2786,7 @@ function completedMemoryCandidateSummary(task: string, answer: string): string |
 }
 
 function boundedCandidateText(value: string, maxCharacters: number): string {
-  const normalized = redactSecrets(value).replace(/\s+/gu, " ").trim();
+  const normalized = value.replace(/\s+/gu, " ").trim();
   const characters = Array.from(normalized);
   return characters.length <= maxCharacters
     ? normalized
