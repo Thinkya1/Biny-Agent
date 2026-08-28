@@ -18,7 +18,7 @@ import type {
 } from "../../../../protocol.js";
 import { Icon } from "../Icon.js";
 
-type MemoryEvolutionView = "overview" | "patterns" | "strategy" | "drifts";
+type MemoryEvolutionView = "overview" | "review" | "strategy" | "history";
 
 interface TelosDraft {
   scope: DesktopTelosScope;
@@ -52,9 +52,9 @@ const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
 
 const viewItems: ReadonlyArray<{ id: MemoryEvolutionView; label: string }> = [
   { id: "overview", label: "概览" },
-  { id: "patterns", label: "行为模式" },
+  { id: "review", label: "待审核" },
   { id: "strategy", label: "长期策略" },
-  { id: "drifts", label: "策略偏差" }
+  { id: "history", label: "历史" }
 ];
 
 export function MemoryEvolutionSection({
@@ -75,8 +75,6 @@ export function MemoryEvolutionSection({
   const [draft, setDraft] = useState<TelosDraft>(() => blankDraft("workspace"));
   const [dirty, setDirty] = useState(false);
   const [query, setQuery] = useState("");
-  const [selectedPatternId, setSelectedPatternId] = useState<string>();
-  const [selectedDriftId, setSelectedDriftId] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [operation, setOperation] = useState<string>();
   const [error, setError] = useState<string>();
@@ -108,8 +106,6 @@ export function MemoryEvolutionSection({
     setDraft(blankDraft("workspace"));
     setDirty(false);
     setQuery("");
-    setSelectedPatternId(undefined);
-    setSelectedDriftId(undefined);
     void refresh();
   }, [active, projectId, refresh]);
 
@@ -122,8 +118,6 @@ export function MemoryEvolutionSection({
 
   const patterns = useMemo(() => filterRecords(overview?.patterns ?? [], query, (pattern) => `${pattern.title} ${pattern.statement}`), [overview?.patterns, query]);
   const drifts = useMemo(() => filterRecords(overview?.drifts ?? [], query, (drift) => `${drift.title} ${drift.summary}`), [overview?.drifts, query]);
-  const selectedPattern = overview?.patterns.find((pattern) => pattern.id === selectedPatternId);
-  const selectedDrift = overview?.drifts.find((drift) => drift.id === selectedDriftId);
 
   const run = useCallback(async (name: string, work: () => Promise<void>, success: string): Promise<void> => {
     if (disabled || operation !== undefined) return;
@@ -160,7 +154,6 @@ export function MemoryEvolutionSection({
     const message = action === "confirm" ? "行为模式已确认" : action === "reject" ? "行为模式已拒绝" : "行为模式已标记过期";
     await run(`pattern-${action}`, async () => {
       setOverview(await onReviewPattern(pattern.id, action, overview.revision));
-      setSelectedPatternId(pattern.id);
     }, message);
   }, [onReviewPattern, overview, run]);
 
@@ -169,9 +162,7 @@ export function MemoryEvolutionSection({
     const message = action === "dismiss" ? "已忽略此类策略偏差" : action === "resolve" ? "策略偏差已处理" : "已记录你的调整方向";
     await run(`drift-${action}`, async () => {
       setOverview(await onResolveDrift(drift.id, action, overview.revision));
-      setSelectedDriftId(drift.id);
-      if (action === "adjust_telos") setView("strategy");
-      if (action === "adjust_behavior") {
+      if (action === "adjust_telos") setView("strategy");      if (action === "adjust_behavior") {
         onOpenChatDraft(`我想检查最近的行为是否偏离了长期策略。\n\n观察到：${drift.summary}\n\n请先帮我列出可能的行为调整方案，不要自动执行。`);
       }
     }, message);
@@ -182,7 +173,6 @@ export function MemoryEvolutionSection({
     const until = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
     await run("drift-snooze", async () => {
       setOverview(await onSnoozeDrift(drift.id, until, overview.revision));
-      setSelectedDriftId(drift.id);
     }, "策略偏差已暂缓 7 天");
   }, [onSnoozeDrift, overview, run]);
 
@@ -193,6 +183,13 @@ export function MemoryEvolutionSection({
     setDirty(false);
   };
 
+  const pendingReviewCount = (overview?.counts.candidatePatterns ?? 0) + (overview?.counts.openDrifts ?? 0);
+  const healthText = overview
+    ? pendingReviewCount > 0
+      ? `${String(pendingReviewCount)} 项待审核 · ${String(overview.counts.openDrifts)} 条偏差待处理`
+      : "状态健康 · 无待办"
+    : "等待数据";
+
   return (
     <section aria-busy={loading || operation !== undefined} aria-labelledby="memory-evolution-title" className="memory-evolution-section" id="memory-evolution">
       <div className="section-heading-row memory-evolution-heading">
@@ -201,7 +198,11 @@ export function MemoryEvolutionSection({
           <p>长期策略由你确认保存；行为模式和策略偏差只作为可审核的推断。</p>
         </div>
         <div className="memory-evolution-status" aria-live="polite">
-          {loading ? "同步中…" : error ? "同步失败" : overview ? `revision ${String(overview.revision)}` : "等待数据"}
+          <span className={`memory-evolution-health${pendingReviewCount > 0 ? " has-pending" : ""}`}>
+            <span className="memory-evolution-health-dot" />
+            {loading ? "同步中…" : error ? "同步失败" : healthText}
+          </span>
+          {overview ? <span className="memory-evolution-rev">revision {String(overview.revision)}</span> : null}
           <button aria-label="刷新记忆进化" className="icon-button" disabled={loading || operation !== undefined || disabled} onClick={() => { void refresh(); }} title="刷新" type="button"><Icon name="refresh" size={14} /></button>
         </div>
       </div>
@@ -214,15 +215,26 @@ export function MemoryEvolutionSection({
             {viewItems.map((item) => (
               <button aria-selected={view === item.id} className={view === item.id ? "is-selected" : ""} key={item.id} onClick={() => setView(item.id)} role="tab" type="button">
                 {item.label}
-                {item.id === "patterns" ? <small>{overview.counts.candidatePatterns}</small> : null}
-                {item.id === "drifts" ? <small>{overview.counts.openDrifts}</small> : null}
+                {item.id === "review" && pendingReviewCount > 0 ? <span className="memory-evolution-tab-badge">{pendingReviewCount}</span> : null}
               </button>
             ))}
           </nav>
           {view === "overview" ? <EvolutionOverview overview={overview} onView={setView} /> : null}
-          {view === "patterns" ? <PatternBrowser patterns={patterns} query={query} selected={selectedPattern} operation={operation} onQueryChange={setQuery} onSelect={(pattern) => setSelectedPatternId(pattern.id)} onReview={(pattern, action) => { void reviewPattern(pattern, action); }} /> : null}
+          {view === "review" ? (
+            <ReviewInbox
+              drifts={drifts}
+              onResolve={(drift, action) => { void resolveDrift(drift, action); }}
+              onReview={(pattern, action) => { void reviewPattern(pattern, action); }}
+              onSnooze={(drift) => { void snoozeDrift(drift); }}
+              operation={operation}
+              overview={overview}
+              patterns={patterns}
+              query={query}
+              onQueryChange={setQuery}
+            />
+          ) : null}
           {view === "strategy" ? <StrategyEditor currentDocument={currentDocument} disabled={disabled} dirty={dirty} draft={draft} operation={operation} scope={scope} onChange={(next) => { setDraft(next); setDirty(true); }} onSave={() => { void saveStrategy(); }} onScopeChange={changeScope} /> : null}
-          {view === "drifts" ? <DriftBrowser drifts={drifts} query={query} selected={selectedDrift} operation={operation} onQueryChange={setQuery} onSelect={(drift) => setSelectedDriftId(drift.id)} onResolve={(drift, action) => { void resolveDrift(drift, action); }} onSnooze={(drift) => { void snoozeDrift(drift); }} /> : null}
+          {view === "history" ? <EvolutionHistory overview={overview} /> : null}
         </>
       ) : null}
     </section>
@@ -234,34 +246,122 @@ function EvolutionOverview({ overview, onView }: { overview: DesktopTelosOvervie
   const activeGoals = document?.goals.filter((goal) => goal.status === "active") ?? [];
   return (
     <div className="memory-evolution-overview">
-      <div className="memory-telos-intro"><div><span className="memory-telos-eyebrow">可确认的长期方向</span><h4>AI 记住事实，也尊重你的方向</h4><p>事实可以自动产生；行为模式是推断；长期策略只有在你点击保存后才会改变。</p></div><button className="primary-button" onClick={() => onView("strategy")} type="button">编辑长期策略</button></div>
-      <div className="memory-telos-metrics">
-        <Metric label="脱敏观察" value={overview.counts.observations} detail="用于形成行为模式" />
-        <Metric label="待确认模式" value={overview.counts.candidatePatterns} detail="等待你的审核" onClick={() => onView("patterns")} />
-        <Metric label="已确认模式" value={overview.counts.confirmedPatterns} detail="低优先级指导" onClick={() => onView("patterns")} />
-        <Metric label="待处理偏差" value={overview.counts.openDrifts} detail="只提出选择" onClick={() => onView("drifts")} />
+      <div className="memory-evolution-metrics">
+        <div className="memory-evolution-metric"><strong>{overview.counts.observations}</strong><span>脱敏观察</span><small>用于形成行为模式</small></div>
+        <button className="memory-evolution-metric is-clickable" onClick={() => onView("review")} type="button"><strong>{overview.counts.candidatePatterns}</strong><span>待确认模式</span><small>等待你的审核 →</small></button>
+        <div className="memory-evolution-metric"><strong>{overview.counts.confirmedPatterns}</strong><span>已确认模式</span><small>低优先级指导</small></div>
+        <button className="memory-evolution-metric is-clickable" onClick={() => onView("review")} type="button"><strong>{overview.counts.openDrifts}</strong><span>待处理偏差</span><small>只提出选择 →</small></button>
       </div>
-      <div className="memory-telos-overview-grid">
-        <article className="memory-telos-card"><span className="memory-telos-card-label">当前使命</span><strong>{document?.mission || "还没有明确使命"}</strong><small>{document ? `${document.scope === "workspace" ? "当前项目" : "通用"} · revision ${String(document.revision)}` : "在长期策略中添加"}</small></article>
-        <article className="memory-telos-card"><span className="memory-telos-card-label">当前目标</span>{activeGoals.length ? <ul>{activeGoals.slice(0, 3).map((goal) => <li key={goal.id}>{goal.text}</li>)}</ul> : <strong className="is-muted">还没有进行中的目标</strong>}</article>
-        <article className="memory-telos-card"><span className="memory-telos-card-label">边界</span><p>{document?.constraints[0]?.text ?? "尚未设置约束"}</p><small>{document?.antiGoals.length ? `反目标 ${String(document.antiGoals.length)} 条` : "可在编辑器中维护反目标"}</small></article>
+      <div className="memory-evolution-summary-card">
+        <div className="memory-evolution-summary-head">
+          <span className="memory-evolution-summary-meta">当前策略 · {document ? (document.scope === "workspace" ? "当前项目" : "通用") : "未设置"} · {document ? `rev ${String(document.revision)}` : "尚未保存"}</span>
+          <button className="memory-evolution-link" onClick={() => onView("strategy")} type="button">编辑 →</button>
+        </div>
+        <div className="memory-evolution-summary-mission">{document?.mission || "还没有明确使命"}</div>
+        <div className="memory-evolution-summary-meta">进行中目标 {String(activeGoals.length)} 项 · 约束 {String(document?.constraints.length ?? 0)} 条 · 反目标 {String(document?.antiGoals.length ?? 0)} 条</div>
       </div>
     </div>
   );
 }
 
-function Metric({ label, value, detail, onClick }: { label: string; value: number; detail: string; onClick?: () => void }): React.JSX.Element {
-  const content = <><span>{label}</span><strong>{value}</strong><small>{detail}</small></>;
-  return onClick ? <button className="memory-telos-metric" onClick={onClick} type="button">{content}</button> : <div className="memory-telos-metric is-static">{content}</div>;
+
+function ReviewInbox({ drifts, onResolve, onReview, onSnooze, operation, overview, patterns, query, onQueryChange }: {
+  drifts: DesktopTelosDrift[];
+  onResolve(drift: DesktopTelosDrift, action: DesktopTelosDriftResolutionAction): void;
+  onReview(pattern: DesktopBehaviorPattern, action: DesktopBehaviorPatternReviewAction): void;
+  onSnooze(drift: DesktopTelosDrift): void;
+  operation?: string;
+  overview: DesktopTelosOverview;
+  patterns: DesktopBehaviorPattern[];
+  query: string;
+  onQueryChange(value: string): void;
+}): React.JSX.Element {
+  const [openId, setOpenId] = useState<string>();
+  const [kindFilter, setKindFilter] = useState<"all" | "patterns" | "drifts">("all");
+  const candidates = patterns.filter((pattern) => pattern.status === "candidate");
+  const openDrifts = drifts.filter((drift) => drift.status === "open");
+  const items: Array<{ kind: "pattern" | "drift"; id: string; title: string; summary: string; time: string; evidence: DesktopTelosEvidence[]; pattern?: DesktopBehaviorPattern; drift?: DesktopTelosDrift }> = [
+    ...candidates.map((pattern) => ({
+      kind: "pattern" as const,
+      id: `pattern:${pattern.id}`,
+      title: pattern.title,
+      summary: pattern.statement,
+      time: pattern.updatedAt,
+      evidence: pattern.evidence,
+      pattern
+    })),
+    ...openDrifts.map((drift) => ({
+      kind: "drift" as const,
+      id: `drift:${drift.id}`,
+      title: drift.title,
+      summary: drift.summary,
+      time: drift.updatedAt,
+      evidence: drift.evidence,
+      drift
+    }))
+  ];
+  const filtered = items
+    .filter((item) => kindFilter === "all" || (kindFilter === "patterns" ? item.kind === "pattern" : item.kind === "drift"))
+    .filter((item) => {
+      const needle = query.trim().toLocaleLowerCase();
+      return !needle || `${item.title} ${item.summary}`.toLocaleLowerCase().includes(needle);
+    })
+    .sort((left, right) => right.time.localeCompare(left.time));
+  void overview;
+
+  return (
+    <div className="memory-review-inbox">
+      <div className="memory-review-inbox-head">
+        <h4>待审核</h4>
+        <div className="memory-review-inbox-filters">
+          <select aria-label="筛选审核类型" onChange={(event) => setKindFilter(event.target.value as "all" | "patterns" | "drifts")} value={kindFilter}>
+            <option value="all">全部</option>
+            <option value="patterns">待确认模式</option>
+            <option value="drifts">策略偏差</option>
+          </select>
+          <label className="memory-review-inbox-search"><Icon name="search" size={14} /><input aria-label="搜索待审核" onChange={(event) => onQueryChange(event.target.value)} placeholder="搜索…" type="search" value={query} /></label>
+        </div>
+      </div>
+      {filtered.length === 0 ? (
+        <div className="memory-review-empty"><span className="memory-review-empty-tick">✓</span>没有待审核的推断。系统状态健康。</div>
+      ) : filtered.map((item) => {
+        const isOpen = openId === item.id;
+        const busy = operation !== undefined;
+        return (
+          <article className={`memory-review-item${isOpen ? " is-open" : ""}`} key={item.id}>
+            <button className="memory-review-item-main" onClick={() => setOpenId(isOpen ? undefined : item.id)} type="button">
+              <span className="memory-review-item-top">
+                <span className={`memory-review-kind is-${item.kind}`}>{item.kind === "pattern" ? <><Icon name="brain" size={13} /> 待确认模式</> : <><Icon name="warning" size={13} /> 策略偏差</>}</span>
+                <span className="memory-review-time">{formatDate(item.time)}</span>
+              </span>
+              <span className="memory-review-title">{item.title}</span>
+              <span className="memory-review-summary">{item.summary}</span>
+            </button>
+            <div className="memory-review-actions">
+              {item.kind === "pattern" && item.pattern ? (
+                <>
+                  <button className="ghost-button" disabled={busy} onClick={() => onReview(item.pattern!, "reject")} type="button">拒绝</button>
+                  <button className="ghost-button" disabled={busy} onClick={() => onReview(item.pattern!, "expire")} type="button">标记过期</button>
+                  <button className="primary-button" disabled={busy} onClick={() => onReview(item.pattern!, "confirm")} type="button">确认采用</button>
+                </>
+              ) : null}
+              {item.kind === "drift" && item.drift ? (
+                <>
+                  <button className="ghost-button" disabled={busy} onClick={() => onSnooze(item.drift!)} type="button">稍后 7 天</button>
+                  <button className="ghost-button" disabled={busy} onClick={() => onResolve(item.drift!, "dismiss")} type="button">忽略</button>
+                  <button className="primary-button" disabled={busy} onClick={() => onResolve(item.drift!, item.drift!.suggestedAction === "adjust_telos" ? "adjust_telos" : "adjust_behavior")} type="button">{item.drift.suggestedAction === "adjust_telos" ? "调整目标" : "调整行为"}</button>
+                </>
+              ) : null}
+            </div>
+            {isOpen ? <div className="memory-review-evidence"><EvidenceTimeline items={item.evidence} /></div> : null}
+          </article>
+        );
+      })}
+    </div>
+  );
 }
 
-function PatternBrowser({ patterns, query, selected, operation, onQueryChange, onSelect, onReview }: { patterns: DesktopBehaviorPattern[]; query: string; selected?: DesktopBehaviorPattern; operation?: string; onQueryChange(value: string): void; onSelect(pattern: DesktopBehaviorPattern): void; onReview(pattern: DesktopBehaviorPattern, action: DesktopBehaviorPatternReviewAction): void }): React.JSX.Element {
-  return <EvolutionSplitPanel count={patterns.length} empty="还没有行为模式观察。开启“自动观察行为模式”后，成功完成的协作会形成候选。" heading="行为模式" list={<><EvolutionSearch label="搜索行为模式" placeholder="搜索模式描述" value={query} onChange={onQueryChange} />{patterns.map((pattern) => <button className={`memory-telos-list-item${selected?.id === pattern.id ? " is-selected" : ""}`} key={pattern.id} onClick={() => onSelect(pattern)} type="button"><span className="memory-telos-list-item-top"><strong>{pattern.title}</strong><StatusPill status={pattern.status} /></span><span>{pattern.statement}</span><small>{pattern.evidenceCount} 次观察 · 置信度 {Math.round(pattern.confidence * 100)}% · {formatDate(pattern.updatedAt)}</small></button>)}</>} detail={selected ? <PatternDetail operation={operation} pattern={selected} onReview={onReview} /> : <EvolutionPlaceholder title="选择一个行为模式" detail="行为模式是 AI 的推断，不等同于事实，也不能自动改变你的长期策略。" />} />;
-}
 
-function PatternDetail({ pattern, operation, onReview }: { pattern: DesktopBehaviorPattern; operation?: string; onReview(pattern: DesktopBehaviorPattern, action: DesktopBehaviorPatternReviewAction): void }): React.JSX.Element {
-  return <EvolutionArticle eyebrow="推断 · 行为模式" title={pattern.title} actions={pattern.status === "candidate" ? <><button className="ghost-button" disabled={operation !== undefined} onClick={() => onReview(pattern, "reject")} type="button">拒绝</button><button className="primary-button" disabled={operation !== undefined} onClick={() => onReview(pattern, "confirm")} type="button">确认模式</button></> : <button className="ghost-button" disabled={operation !== undefined} onClick={() => onReview(pattern, "expire")} type="button">标记过期</button>}><p className="memory-telos-detail-summary">{pattern.statement}</p><EvolutionMeta items={[["状态", statusLabel(pattern.status)], ["置信度", `${String(Math.round(pattern.confidence * 100))}%`], ["观察次数", String(pattern.evidenceCount)], ["时间范围", `${formatDate(pattern.firstObservedAt)} — ${formatDate(pattern.lastObservedAt)}`], ["范围", pattern.scope === "workspace" ? "当前项目" : "通用"]]} /><EvidenceTimeline items={pattern.evidence} /></EvolutionArticle>;
-}
 
 function StrategyEditor({ currentDocument, disabled, dirty, draft, operation, scope, onChange, onSave, onScopeChange }: { currentDocument?: DesktopTelosDocument; disabled: boolean; dirty: boolean; draft: TelosDraft; operation?: string; scope: DesktopTelosScope; onChange(draft: TelosDraft): void; onSave(): void; onScopeChange(scope: DesktopTelosScope): void }): React.JSX.Element {
   const updateRules = (key: "principles" | "constraints" | "antiGoals", index: number, text: string): void => onChange({ ...draft, [key]: draft[key].map((item, itemIndex) => itemIndex === index ? { ...item, text } : item) });
@@ -278,42 +378,42 @@ function RuleEditor({ disabled, label, items, onAdd, onChange, onRemove }: { dis
   return <fieldset className="memory-telos-fieldset" disabled={disabled}><legend>{label}</legend>{items.map((item, index) => <div className="memory-telos-rule-row" key={item.id}><textarea aria-label={`${label} ${String(index + 1)}`} autoComplete="off" name={`telos-${label}-${String(index + 1)}`} onChange={(event) => onChange(index, event.target.value)} placeholder={`添加一条${label}…`} rows={2} value={item.text} /><button aria-label={`删除${label} ${String(index + 1)}`} className="icon-button" onClick={() => onRemove(index)} type="button"><Icon name="trash" size={13} /></button></div>)}<button className="ghost-button" onClick={onAdd} type="button"><Icon name="add" size={13} /> 添加{label}</button></fieldset>;
 }
 
-function DriftBrowser({ drifts, query, selected, operation, onQueryChange, onSelect, onResolve, onSnooze }: { drifts: DesktopTelosDrift[]; query: string; selected?: DesktopTelosDrift; operation?: string; onQueryChange(value: string): void; onSelect(drift: DesktopTelosDrift): void; onResolve(drift: DesktopTelosDrift, action: DesktopTelosDriftResolutionAction): void; onSnooze(drift: DesktopTelosDrift): void }): React.JSX.Element {
-  return <EvolutionSplitPanel count={drifts.length} empty="还没有策略偏差提案。已确认的行为模式达到阈值后才会生成。" heading="策略偏差" list={<><EvolutionSearch label="搜索策略偏差" placeholder="搜索偏差或建议" value={query} onChange={onQueryChange} />{drifts.map((drift) => <button className={`memory-telos-list-item${selected?.id === drift.id ? " is-selected" : ""}`} key={drift.id} onClick={() => onSelect(drift)} type="button"><span className="memory-telos-list-item-top"><strong>{drift.title}</strong><StatusPill status={drift.status} /></span><span>{drift.summary}</span><small>策略版本 {String(drift.telosRevision)} · {formatDate(drift.updatedAt)}</small></button>)}</>} detail={selected ? <DriftDetail drift={selected} operation={operation} onResolve={onResolve} onSnooze={onSnooze} /> : <EvolutionPlaceholder title="选择一条策略偏差" detail="偏差只提出选择，不会自动调整目标或执行行为。" />} />;
+function EvolutionHistory({ overview }: { overview: DesktopTelosOverview }): React.JSX.Element {
+  const items = [...overview.patterns, ...overview.drifts]
+    .flatMap((record) => record.evidence.map((evidence) => ({ evidence, source: record.title })))
+    .sort((left, right) => right.evidence.observedAt.localeCompare(left.evidence.observedAt));
+  return (
+    <div className="memory-evolution-history">
+      {items.length === 0
+        ? <MemoryEvolutionState detail="确认模式或处理偏差后，相关证据会出现在这里。" title="暂无证据" />
+        : (
+          <div className="memory-evolution-history-list">
+            {items.map(({ evidence, source }) => (
+              <div className="memory-evolution-history-row" key={evidence.id}>
+                <span className="memory-evolution-history-dot" />
+                <div>
+                  <p>{evidence.summary}</p>
+                  <small>{formatDate(evidence.observedAt)} · 关联「{source}」 · {evidence.externalContext ? "含外部上下文" : "本地协作"}</small>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+    </div>
+  );
 }
 
-function DriftDetail({ drift, operation, onResolve, onSnooze }: { drift: DesktopTelosDrift; operation?: string; onResolve(drift: DesktopTelosDrift, action: DesktopTelosDriftResolutionAction): void; onSnooze(drift: DesktopTelosDrift): void }): React.JSX.Element {
-  const closed = drift.status === "dismissed" || drift.status === "resolved";
-  return <EvolutionArticle eyebrow="策略偏差提案" title={drift.title} actions={closed ? <StatusPill status={drift.status} /> : <><button className="ghost-button" disabled={operation !== undefined} onClick={() => onSnooze(drift)} type="button">稍后 7 天</button><button className="ghost-button" disabled={operation !== undefined} onClick={() => onResolve(drift, "dismiss")} type="button">忽略</button><button className="primary-button" disabled={operation !== undefined} onClick={() => onResolve(drift, "adjust_telos")} type="button">调整目标</button></>}><p className="memory-telos-detail-summary">{drift.summary}</p><EvolutionMeta items={[["状态", statusLabel(drift.status)], ["关联策略", `版本 ${String(drift.telosRevision)}`], ["建议方向", drift.suggestedAction === "adjust_telos" ? "检查目标或原则" : "检查行为"], ["创建时间", formatDate(drift.createdAt)]]} /><EvidenceTimeline items={drift.evidence} />{!closed ? <div className="memory-telos-detail-actions"><button className="ghost-button" disabled={operation !== undefined} onClick={() => onResolve(drift, "adjust_behavior")} type="button">调整行为（打开聊天草稿）</button><button className="ghost-button" disabled={operation !== undefined} onClick={() => onResolve(drift, "resolve")} type="button">标记已处理</button></div> : null}</EvolutionArticle>;
-}
 
-function EvolutionSplitPanel({ heading, count, list, detail, empty }: { heading: string; count: number; list: React.ReactNode; detail: React.ReactNode; empty: string }): React.JSX.Element {
-  return <section aria-label={heading} className="memory-telos-split memory-evolution-split"><aside className="memory-telos-list-pane"><div className="memory-telos-list-heading"><div><span className="memory-telos-eyebrow">浏览器</span><h4>{heading}</h4></div><span>{count}</span></div>{count ? list : <p className="memory-telos-empty">{empty}</p>}</aside><article className="memory-telos-detail-pane">{detail}</article></section>;
-}
 
-function EvolutionSearch({ label, placeholder, value, onChange }: { label: string; placeholder: string; value: string; onChange(value: string): void }): React.JSX.Element {
-  return <label className="memory-telos-search"><Icon name="search" size={14} /><input aria-label={label} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} type="search" value={value} /></label>;
-}
 
-function EvolutionArticle({ eyebrow, title, actions, children }: { eyebrow: string; title: string; actions?: React.ReactNode; children: React.ReactNode }): React.JSX.Element {
-  return <div className="memory-telos-detail"><div className="memory-telos-detail-heading"><div><span className="memory-telos-eyebrow">{eyebrow}</span><h4>{title}</h4></div>{actions ? <div className="memory-telos-detail-buttons">{actions}</div> : null}</div>{children}</div>;
-}
 
-function EvolutionMeta({ items }: { items: Array<[string, string]> }): React.JSX.Element {
-  return <dl className="memory-telos-meta">{items.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
-}
+
 
 function EvidenceTimeline({ items }: { items: DesktopTelosEvidence[] }): React.JSX.Element {
   return <section aria-label="来源证据" className="memory-telos-evidence"><div className="memory-telos-evidence-heading"><span>来源与证据</span><small>{items.length} 条</small></div>{items.length ? <ol>{items.map((item) => <li key={item.id}><span className="memory-telos-evidence-dot" /><div><p>{item.summary}</p><small>{formatDate(item.observedAt)} · {item.externalContext ? "含外部上下文" : "本地协作"}{item.sessionId ? ` · session ${item.sessionId.slice(0, 8)}` : ""}{item.turnId ? ` · turn ${item.turnId.slice(0, 8)}` : ""}{item.runId ? ` · run ${item.runId.slice(0, 8)}` : ""}</small></div></li>)}</ol> : <p className="memory-telos-empty">没有可展示的证据。</p>}</section>;
 }
 
-function StatusPill({ status }: { status: string }): React.JSX.Element {
-  return <span className={`memory-telos-status-pill is-${status}`}>{statusLabel(status)}</span>;
-}
 
-function EvolutionPlaceholder({ title, detail }: { title: string; detail: string }): React.JSX.Element {
-  return <div className="memory-telos-placeholder"><Icon name="brain" size={22} /><h4>{title}</h4><p>{detail}</p></div>;
-}
 
 function MemoryEvolutionState({ title, detail, action }: { title: string; detail?: string; action?: React.ReactNode }): React.JSX.Element {
   return <div className="memory-evolution-state"><Icon name="brain" size={20} /><strong>{title}</strong>{detail ? <p>{detail}</p> : null}{action}</div>;
@@ -341,18 +441,6 @@ function filterRecords<T>(records: T[], query: string, text: (record: T) => stri
   return records.filter((record) => text(record).toLocaleLowerCase().includes(needle));
 }
 
-function statusLabel(status: string): string {
-  return {
-    candidate: "待确认",
-    confirmed: "已确认",
-    rejected: "已拒绝",
-    expired: "已过期",
-    open: "开放",
-    snoozed: "已暂缓",
-    dismissed: "已忽略",
-    resolved: "已处理"
-  }[status] ?? status;
-}
 
 function formatDate(value: string): string {
   return dateFormatter.format(new Date(value));

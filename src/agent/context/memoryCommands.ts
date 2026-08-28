@@ -5,7 +5,6 @@
  * 两套物理目录或两份 revision。
  */
 import {
-  MemoryRevisionConflictError,
   type MemoryAudience,
   type MemoryEntry,
   type MemoryKind,
@@ -13,6 +12,7 @@ import {
   type MemorySearchOptions,
   type MemorySearchResult
 } from "./memoryTypes.js";
+import { withFreshRevision } from "./LocalMemory.js";
 import type { LocalMemory } from "./LocalMemory.js";
 
 const memoryKinds: MemoryKind[] = ["preference", "working_style", "fact", "decision", "workflow", "gotcha"];
@@ -69,7 +69,7 @@ export async function runMemoryCommand(
     if (parsed.audience === "universal" && kind !== "preference" && kind !== "working_style") {
       return "Universal memory only accepts preference or working_style entries.";
     }
-    const result = await mutateWithFreshRevision(memory, async (expectedRevision) => await memory.writeEntry({
+    const result = await withFreshRevision(memory, undefined, async (expectedRevision) => await memory.writeEntry({
       audience: parsed.audience,
       kind,
       topic,
@@ -98,7 +98,7 @@ export async function runMemoryCommand(
     if (!targets.length) return `No memory entry or topic named ${selector} in ${selectorLabel(parsed.origin)}.`;
     let deleted = 0;
     for (const target of targets) {
-      const result = await mutateWithFreshRevision(memory, async (expectedRevision) => (
+      const result = await withFreshRevision(memory, undefined, async (expectedRevision) => (
         await memory.deleteEntryById(target.id, { expectedRevision })
       ));
       if (result.deleted) deleted += 1;
@@ -128,7 +128,7 @@ export async function runMemoryCommand(
       return "Consolidation requires current or user so entries from different origins are never merged.";
     }
     const topic = parsed.rest.join(" ").trim() || undefined;
-    const result = await mutateWithFreshRevision(memory, async (expectedRevision) => (
+    const result = await withFreshRevision(memory, undefined, async (expectedRevision) => (
       await memory.consolidateEntries(parsed.origin, { expectedRevision, topic })
     ));
     if (result.error) return `Memory consolidation failed without changing data: ${result.error}`;
@@ -140,17 +140,6 @@ export async function runMemoryCommand(
   return memoryCommandUsage;
 }
 
-async function mutateWithFreshRevision<T>(memory: LocalMemory, mutation: (expectedRevision: number) => Promise<T>): Promise<T> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const overview = await memory.getOverview();
-    try {
-      return await mutation(overview.storeRevision);
-    } catch (error) {
-      if (!(error instanceof MemoryRevisionConflictError) || attempt === 2) throw error;
-    }
-  }
-  throw new Error("Memory revision retry exhausted.");
-}
 
 function readOptionalAudience(args: string[]): { audience: MemoryAudience; rest: string[] } {
   const rest = [...args];

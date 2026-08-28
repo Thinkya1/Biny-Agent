@@ -7,7 +7,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Dialog } from "@astryxdesign/core/Dialog";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
-import type { DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
+import type { DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryOverview, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
   apiFormatForConnection,
   apiFormatOption,
@@ -76,6 +77,12 @@ interface SettingsOverlayProps {
   onResolveTelosDrift(driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number): Promise<DesktopTelosOverview>;
   onSnoozeTelosDrift(driftId: string, until: string, expectedRevision: number): Promise<DesktopTelosOverview>;
   onOpenChatDraft(input: string): void;
+  onLoadMemoryEmbeddingStatus(): Promise<DesktopMemoryEmbeddingStatus>;
+  onDownloadMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
+  onCancelMemoryEmbeddingDownload(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingCancellationResult>;
+  onDeleteMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingDeleteResult>;
+  onRebuildMemoryEmbeddingIndex(): Promise<DesktopMemoryEmbeddingStatus>;
+  onCancelMemoryEmbeddingRebuild(): Promise<DesktopMemoryEmbeddingCancellationResult>;
   onOpenExternal(url: string): Promise<void>;
   onLoadCookieJarStatus(): Promise<DesktopCookieJarStatus>;
   onOpenBrowser(url?: string): Promise<void>;
@@ -187,6 +194,12 @@ function SettingsOverlayContent({
   onResolveTelosDrift,
   onSnoozeTelosDrift,
   onOpenChatDraft,
+  onLoadMemoryEmbeddingStatus,
+  onDownloadMemoryEmbeddingModel,
+  onCancelMemoryEmbeddingDownload,
+  onDeleteMemoryEmbeddingModel,
+  onRebuildMemoryEmbeddingIndex,
+  onCancelMemoryEmbeddingRebuild,
   onOpenExternal,
   onLoadCookieJarStatus,
   onOpenBrowser,
@@ -436,6 +449,13 @@ function SettingsOverlayContent({
             onResolveTelosDrift={onResolveTelosDrift}
             onSnoozeTelosDrift={onSnoozeTelosDrift}
             onOpenChatDraft={onOpenChatDraft}
+            embeddingModels={settingsDraft.snapshot?.models.embeddingModels ?? []}
+            onLoadEmbeddingStatus={onLoadMemoryEmbeddingStatus}
+            onDownloadEmbeddingModel={onDownloadMemoryEmbeddingModel}
+            onCancelEmbeddingDownload={onCancelMemoryEmbeddingDownload}
+            onDeleteEmbeddingModel={onDeleteMemoryEmbeddingModel}
+            onRebuildEmbeddingIndex={onRebuildMemoryEmbeddingIndex}
+            onCancelEmbeddingRebuild={onCancelMemoryEmbeddingRebuild}
             onTestModelConfiguration={onTestModelConfiguration}
             onNotify={(nextMessage) => notifyForTab("记忆", nextMessage)}
             sessionRunning={runtimeBusy}

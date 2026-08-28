@@ -16,13 +16,15 @@ export interface ConfigMigrationResult {
 
 export function migrateGlobalConfigDocument(value: unknown): ConfigMigrationResult {
   if (!isRecord(value)) return { document: value };
-  if (value.format !== undefined || value.configVersion !== undefined) {
-    return { document: value };
-  }
   const document = structuredClone(value);
-  document.format = GLOBAL_CONFIG_FORMAT;
-  document.configVersion = GLOBAL_CONFIG_VERSION;
-  migrateMemoryPolicy(document);
+  if (value.format === undefined && value.configVersion === undefined) {
+    document.format = GLOBAL_CONFIG_FORMAT;
+    document.configVersion = GLOBAL_CONFIG_VERSION;
+    migrateMemoryPolicy(document);
+  }
+  // 嵌入字段曾在配置已版本化之后短暂写进 activity.*，版本门内的迁移够不到这批文件；
+  // 严格 schema 不认识这两个键，所以这段清理必须对所有版本无条件执行。
+  migrateActivityEmbeddingPolicy(document);
   return { document };
 }
 
@@ -64,21 +66,42 @@ function migrateMemoryPolicy(document: Record<string, unknown>): void {
     if (memory.extractModel === undefined) memory.extractModel = memory.model;
     if (memory.consolidationModel === undefined) memory.consolidationModel = memory.model;
   }
-  // 嵌入模型曾短暂迁到 activity 设置段，语义检索回归记忆层后迁回 memory.*。
-  const activity = isRecord(document.activity) ? document.activity : undefined;
-  if (activity) {
-    if (memory.embeddingModel === undefined && activity.embeddingModel !== undefined) {
-      memory.embeddingModel = activity.embeddingModel;
-    }
-    if (memory.cloudEmbeddingConsents === undefined && activity.embeddingConsents !== undefined) {
-      memory.cloudEmbeddingConsents = activity.embeddingConsents;
-    }
-    delete activity.embeddingModel;
-    delete activity.embeddingConsents;
-  }
   delete memory.enabled;
   delete memory.autoRemember;
   delete memory.model;
+}
+
+/**
+ * 嵌入模型曾短暂迁到 activity 设置段，语义检索回归记忆层后迁回 memory.*。
+ * 与 migrateMemoryPolicy 不同：这段不受版本门限制，且 memory 段缺省时补最小容器承接，
+ * 保证任何历史文件里的 activity.embeddingModel/embeddingConsents 都会被清掉。
+ */
+function migrateActivityEmbeddingPolicy(document: Record<string, unknown>): void {
+  const activity = isRecord(document.activity) ? document.activity : undefined;
+  if (!activity) return;
+  const hasEmbeddingModel = activity.embeddingModel !== undefined;
+  const hasEmbeddingConsents = activity.embeddingConsents !== undefined;
+  if (!hasEmbeddingModel && !hasEmbeddingConsents) return;
+
+  let context = isRecord(document.context) ? document.context : undefined;
+  let memory = context && isRecord(context.memory) ? context.memory : undefined;
+  if (!memory) {
+    // memory 段缺省时 schema 会套默认；这里只补最小容器来承接迁移值。
+    if (!context) {
+      context = {};
+      document.context = context;
+    }
+    memory = {};
+    context.memory = memory;
+  }
+  if (hasEmbeddingModel && memory.embeddingModel === undefined) {
+    memory.embeddingModel = activity.embeddingModel;
+  }
+  if (hasEmbeddingConsents && memory.cloudEmbeddingConsents === undefined) {
+    memory.cloudEmbeddingConsents = activity.embeddingConsents;
+  }
+  delete activity.embeddingModel;
+  delete activity.embeddingConsents;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

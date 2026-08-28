@@ -17,6 +17,7 @@ import {
 import { MemoryStorage } from "./memoryStorage.js";
 import {
   MemoryRevisionConflictError,
+  type MemoryDerivedIndexSink,
   type MemoryCandidate,
   type MemoryCandidateInput,
   type MemoryCandidateMutationOptions,
@@ -27,7 +28,6 @@ import {
   type MemoryConsolidationOptions,
   type MemoryConsolidationResult,
   type MemoryDeleteResult,
-  type MemoryDerivedIndexSink,
   type MemoryEntriesResult,
   type MemoryEntry,
   type MemoryEntryInput,
@@ -135,19 +135,30 @@ export class LocalMemory {
     return await this.storage.clearEntries(selector, options);
   }
 
+  /** 记录「条目被实际引用」的使用投影；这也是 consolidate 选择优先级的输入。 */
+  async recordRecallUsage(ids: string[], options: MemoryReadOptions & { now?: Date } = {}): Promise<void> {
+    await this.storage.recordRecallUsage(ids, options);
+  }
+
+  /** 混合检索器在自动注入后回写使用统计；与 recordRecallUsage 共用同一投影。 */
   async recordInjectedRecall(ids: string[], options: MemoryReadOptions & { now?: Date } = {}): Promise<void> {
-    await this.storage.recordInjectedRecall(ids, options);
+    await this.storage.recordRecallUsage(ids, options);
   }
 
   async enqueueCandidate(input: MemoryCandidateInput, options: MemoryCandidateMutationOptions): Promise<MemoryCandidateMutationResult> {
     return await this.storage.enqueueCandidate(input, options);
   }
 
-  async scanEligibleCandidates(options: MemoryCandidateScanOptions = {}): Promise<MemoryCandidateScanResult> {
+  /** 只读观察：当前已到期的候选队列（供测试与未来审核界面使用；处理仍走维护窗口）。 */
+  async listEligibleCandidates(options: MemoryCandidateScanOptions = {}): Promise<MemoryCandidateScanResult> {
     return await this.storage.scanEligibleCandidates(options);
   }
 
-  async removeCandidate(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
+  private async scanEligibleCandidates(options: MemoryCandidateScanOptions = {}): Promise<MemoryCandidateScanResult> {
+    return await this.storage.scanEligibleCandidates(options);
+  }
+
+  private async removeCandidate(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
     return await this.storage.removeCandidate(id, options);
   }
 
@@ -353,20 +364,25 @@ export class LocalMemory {
                 // Markdown 已提交；索引失败不得把候选重新标成失败并诱发重复写入。
                 await derivedIndex.indexEntry(writeResult.entry).catch(() => undefined);
               }
-            }
-            const overview = await this.storage.getOverview({ signal: options.signal });
-            const selector = input.origin?.kind === "user" || input.audience === "universal" ? "user" : "current_workspace";
-            const consolidation = await this.consolidateEntries(selector, {
-              expectedRevision: overview.storeRevision,
-              topic: input.topic,
-              signal: options.signal
-            });
-            if (consolidation.revision !== overview.storeRevision) {
-              // 整理会同时新增和删除多个 ID，不能把它伪装成单条增量写。
-              try {
-                derivedIndex?.requestRebuild();
-              } catch {
-                // 派生索引通知失败不改变已经提交的 Markdown。
+              // 写入即整理：同 topic 合并防止碎片化；整理失败不影响已提交条目。
+              const overview = await this.storage.getOverview({ signal: options.signal });
+              const selector = input.origin?.kind === "user" || input.audience === "universal" ? "user" : "current_workspace";
+              const consolidation = await this.consolidateEntries(selector, {
+                expectedRevision: overview.storeRevision,
+                topic: input.topic,
+                signal: options.signal
+              }).catch((error) => {
+                options.signal?.throwIfAborted();
+                lastError ??= error instanceof Error ? error.message : String(error);
+                return undefined;
+              });
+              if (consolidation && consolidation.revision !== overview.storeRevision) {
+                // 整理会同时新增和删除多个 ID，不能把它伪装成单条增量写。
+                try {
+                  derivedIndex?.requestRebuild();
+                } catch {
+                  // 派生索引通知失败不改变已经提交的 Markdown。
+                }
               }
             }
           }
@@ -474,6 +490,7 @@ export class LocalMemory {
   ): Promise<z.infer<typeof consolidationSchema>> {
     const prompt = [
       "Consolidate this project memory topic file into fewer durable entries when facts overlap.",
+      "Prefer merging entries that were never cited by the user's answers (usageCount 0 / oldest lastRecalledAt); keep frequently cited entries prominent.",
       "Return JSON {entries:[...]}; every output must list sourceEntryIds.",
       "Every input id must appear in at least one output sourceEntryIds so lineage is lossless.",
       "Never delete information merely because it is old. Never invent facts or secrets.",
@@ -488,7 +505,9 @@ export class LocalMemory {
         decisions: entry.decisions,
         paths: entry.paths,
         keywords: entry.keywords,
-        importance: entry.importance
+        importance: entry.importance,
+        usageCount: entry.recallCount,
+        lastUsedAt: entry.lastRecalledAt
       })))
     ].join("\n\n");
     const parsed = consolidationSchema.safeParse(parseNativeJson(await this.modelText(
@@ -537,17 +556,29 @@ export class LocalMemory {
     signal: AbortSignal | undefined,
     operation: (expectedRevision: number) => Promise<T>
   ): Promise<T> {
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      signal?.throwIfAborted();
-      const overview = await this.storage.getOverview({ signal });
-      try {
-        return await operation(overview.storeRevision);
-      } catch (error) {
-        if (!(error instanceof MemoryRevisionConflictError) || attempt === 3) throw error;
-      }
-    }
-    throw new Error("Unable to mutate memory after repeated revision conflicts.");
+    return await withFreshRevision(this.storage, signal, operation);
   }
+}
+
+/**
+ * 共享的 CAS 重试包装：重读 storeRevision 后重放操作，最多 4 次。
+ * 写入路径的幂等性由存储层去重保证，因此重放是安全的。
+ */
+export async function withFreshRevision<T>(
+  memory: Pick<LocalMemory, "getOverview"> | { getOverview(options?: MemoryReadOptions): Promise<MemoryOverview> },
+  signal: AbortSignal | undefined,
+  operation: (expectedRevision: number) => Promise<T>
+): Promise<T> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    signal?.throwIfAborted();
+    const overview = await memory.getOverview({ signal });
+    try {
+      return await operation(overview.storeRevision);
+    } catch (error) {
+      if (!(error instanceof MemoryRevisionConflictError) || attempt === 3) throw error;
+    }
+  }
+  throw new Error("Unable to mutate memory after repeated revision conflicts.");
 }
 
 export function formatMemoryMatches(matches: Array<{ topic: string; excerpt: string }>): string {
@@ -569,7 +600,6 @@ export type {
   MemoryConsolidationOptions,
   MemoryConsolidationResult,
   MemoryDeleteResult,
-  MemoryDerivedIndexSink,
   MemoryEntriesResult,
   MemoryEntry,
   MemoryEntryInput,

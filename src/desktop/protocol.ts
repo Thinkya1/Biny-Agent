@@ -15,6 +15,8 @@ import type { ActivitySearchResult } from "../activity/store.js";
 import type { ModelCatalogEntry } from "../ai/types.js";
 import type { ChatParamsConfig, CompactionConfig, ModelApiBackend, ModelCompatibility, ModelLimits, ModelProvider, ThinkingLevelMap, WebSearchConfig } from "../config/schema.js";
 import type { EmbeddingModelDescriptor } from "../llm/embedding/types.js";
+import type { LocalEmbeddingModelId } from "../llm/embedding/types.js";
+import type { MemoryEmbeddingRuntimeStatus } from "../agent/context/MemoryEmbeddingService.js";
 import type { MemoryMaintenanceStatus } from "../agent/context/memoryTypes.js";
 import type { ModelChoice, ModelRuntimeInfo, ThinkingSelection } from "../llm/ModelManager.js";
 import type { MemoryPolicy } from "../personalization/index.js";
@@ -119,6 +121,12 @@ export const desktopIpc = {
   deleteMemoryEntry: "desktop:memory:delete-entry",
   clearMemory: "desktop:memory:clear",
   compactMemory: "desktop:memory:compact",
+  memoryEmbeddingStatus: "desktop:memory:embedding-status",
+  downloadMemoryEmbeddingModel: "desktop:memory:embedding-download",
+  cancelMemoryEmbeddingDownload: "desktop:memory:embedding-cancel-download",
+  deleteMemoryEmbeddingModel: "desktop:memory:embedding-delete",
+  rebuildMemoryEmbeddingIndex: "desktop:memory:embedding-rebuild",
+  cancelMemoryEmbeddingRebuild: "desktop:memory:embedding-cancel-rebuild",
   telosOverview: "desktop:telos:overview",
   saveTelos: "desktop:telos:save",
   reviewBehaviorPattern: "desktop:telos:review-pattern",
@@ -1025,6 +1033,21 @@ export interface DesktopEmbeddingModelDescriptor extends EmbeddingModelDescripto
   privacyEndpointHash?: string;
 }
 
+export type DesktopMemoryEmbeddingStatus = Omit<MemoryEmbeddingRuntimeStatus, "models"> & {
+  models: DesktopEmbeddingModelDescriptor[];
+};
+
+export interface DesktopMemoryEmbeddingCancellationResult {
+  cancelled: boolean;
+  status: DesktopMemoryEmbeddingStatus;
+}
+
+export interface DesktopMemoryEmbeddingDeleteResult {
+  filesDeleted: number;
+  bytesFreed: number;
+  status: DesktopMemoryEmbeddingStatus;
+}
+
 
 export interface DesktopMemorySettingsInput {
   expectedRevision: string;
@@ -1351,6 +1374,12 @@ export interface DesktopApi {
   deleteMemoryEntry(projectId: string, entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
   clearMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
   compactMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
+  memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus>;
+  downloadMemoryEmbeddingModel(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
+  cancelMemoryEmbeddingDownload(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingCancellationResult>;
+  deleteMemoryEmbeddingModel(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingDeleteResult>;
+  rebuildMemoryEmbeddingIndex(projectId: string): Promise<DesktopMemoryEmbeddingStatus>;
+  cancelMemoryEmbeddingRebuild(projectId: string): Promise<DesktopMemoryEmbeddingCancellationResult>;
   telosOverview(projectId: string): Promise<DesktopTelosOverview>;
   saveTelos(projectId: string, input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
   reviewBehaviorPattern(projectId: string, patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;

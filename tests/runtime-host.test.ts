@@ -62,6 +62,20 @@ async function main(): Promise<void> {
     excludeExternalContext: true,
     maxRecalled: 3
   };
+  const indexedMemoryEntries: string[] = [];
+  let downloadedEmbeddingModel: string | undefined;
+  let removedEmbeddingModel: string | undefined;
+  let embeddingRebuilds = 0;
+  const embeddingStatus = () => ({
+    activeModel: { kind: "local" as const, model: "multilingual-e5-small" as const },
+    models: [],
+    localModels: [],
+    index: { building: 0, failed: 0 },
+    totalEntries: 0,
+    indexedEntries: 0,
+    pendingEntries: 0,
+    failedEntries: 0
+  });
   const personalizationState = () => ({
     global: globalPersonalization,
     memory: memoryPolicy,
@@ -194,6 +208,17 @@ async function main(): Promise<void> {
           revision: options.expectedRevision + 1
         })
       }),
+      indexMemoryEntry: async (entry: { id: string }) => { indexedMemoryEntries.push(entry.id); },
+      removeMemoryEmbeddingEntries: () => undefined,
+      memoryEmbeddingStatus: async () => embeddingStatus(),
+      downloadMemoryEmbeddingModel: async (model: string) => { downloadedEmbeddingModel = model; },
+      cancelMemoryEmbeddingDownload: (model: string) => model === "multilingual-e5-small",
+      removeMemoryEmbeddingModel: async (model: string) => {
+        removedEmbeddingModel = model;
+        return { filesDeleted: 2, bytesFreed: 128 };
+      },
+      rebuildMemoryEmbeddingIndex: async () => { embeddingRebuilds += 1; },
+      cancelMemoryEmbeddingRebuild: () => true
     }
   } as unknown as CommandRuntime;
   const hostPaths = runtimeHostPaths(workspace);
@@ -362,6 +387,21 @@ async function main(): Promise<void> {
     written: 0,
     failed: 0
   });
+
+  assert.equal((await client.memoryEmbeddingStatus()).activeModel?.kind, "local");
+  await client.downloadMemoryEmbeddingModel("multilingual-e5-small");
+  assert.equal(downloadedEmbeddingModel, "multilingual-e5-small");
+  assert.deepEqual(await client.cancelMemoryEmbeddingDownload("multilingual-e5-small"), {
+    cancelled: true,
+    status: embeddingStatus()
+  });
+  const deletedEmbedding = await client.deleteMemoryEmbeddingModel("paraphrase-multilingual-MiniLM-L12-v2");
+  assert.equal(removedEmbeddingModel, "paraphrase-multilingual-MiniLM-L12-v2");
+  assert.equal(deletedEmbedding.filesDeleted, 2);
+  assert.equal(deletedEmbedding.bytesFreed, 128);
+  await client.rebuildMemoryEmbeddingIndex();
+  assert.equal(embeddingRebuilds, 1);
+  assert.deepEqual(await client.cancelMemoryEmbeddingRebuild(), { cancelled: true, status: embeddingStatus() });
 
 
   // 同一 run 的取消可绕过滞后的 revision；Host 改为按 runId 匹配而不是取消当前运行。

@@ -448,3 +448,52 @@ function parseFrontmatter(content: string): unknown | undefined {
     return undefined;
   }
 }
+
+export const memoryOverviewMaxChars = 4_000;
+
+/**
+ * 注入系统提示的有界记忆概览（codex 式 agentic 检索的锚点）。
+ *
+ * 只聚合 user 与当前工作区条目；跨项目内容绝不进入自动注入，模型显式选择其它 origin 时
+ * 才能通过工具看到。返回空串表示本回合没有值得注入的记忆。
+ */
+export function buildMemoryOverview(entries: readonly MemoryEntry[], options: { maxChars?: number } = {}): string {
+  const maxChars = Math.max(512, options.maxChars ?? memoryOverviewMaxChars);
+  if (!entries.length) return "";
+  const byTopic = new Map<string, MemoryEntry[]>();
+  for (const entry of entries) {
+    const group = byTopic.get(entry.topic);
+    if (group) group.push(entry);
+    else byTopic.set(entry.topic, [entry]);
+  }
+  const lines: string[] = [];
+  let omittedEntries = 0;
+  let omittedTopics = 0;
+  // 每组保留 importance 最高、更新最近的少数标题；整行装不下时丢弃整组并累计提示。
+  for (const topic of [...byTopic.keys()].sort()) {
+    const group = [...(byTopic.get(topic) ?? [])].sort((left, right) => (
+      right.importance - left.importance
+      || right.updatedAt.localeCompare(left.updatedAt)
+      || left.id.localeCompare(right.id)
+    ));
+    const shown = group.slice(0, 4).map(({ title }) => title);
+    const extra = group.length - shown.length;
+    const line = `- ${topic}: ${shown.join("; ")}${extra > 0 ? ` (+${String(extra)} more)` : ""} (${String(group.length)})`;
+    if ([...lines, line].join("\n").length > maxChars - 400) {
+      omittedEntries += group.length;
+      omittedTopics += 1;
+      continue;
+    }
+    lines.push(line);
+  }
+  if (!lines.length) return "";
+  const header = [
+    "Durable memory overview (user preferences and current workspace only; never other projects):",
+    "When the task may benefit from these prior decisions, workflows or gotchas, retrieve details with the recall_memory tool."
+  ];
+  const budgetNote = omittedTopics > 0
+    ? `\n(${String(omittedEntries)} more entries across ${String(omittedTopics)} topics omitted beyond this overview budget)`
+    : "";
+  const citationsRule = "Disclosure: when recalled entries shaped your answer, append a <memory-citations> block at the very end listing the entry ids you used.";
+  return `${[...header, ...lines].join("\n")}${budgetNote}\n${citationsRule}`;
+}

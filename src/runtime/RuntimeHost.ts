@@ -72,6 +72,8 @@ import { listSessionSummaries } from "../session/events.js";
 import { ensureAgentDirs, sessionIdFromFile } from "../session/store.js";
 import { TurnStore } from "../session/turnStore.js";
 import { SessionWriterConflictError } from "./SessionLease.js";
+import type { LocalEmbeddingModelId } from "../llm/embedding/types.js";
+import type { MemoryEmbeddingRuntimeStatus } from "../agent/context/MemoryEmbeddingService.js";
 
 const protocolVersion = 3;
 const eventHistoryLimit = 4_000;
@@ -515,6 +517,7 @@ export class RuntimeHostServer {
   private memoryMaintenanceTimer: ReturnType<typeof setInterval> | undefined;
   private memoryMaintenanceAbort: AbortController | undefined;
   private memoryMaintenancePromise: Promise<void> | undefined;
+  private memoryEmbeddingRebuildTimer: ReturnType<typeof setTimeout> | undefined;
   private listening = false;
   private initialized = false;
 
@@ -722,9 +725,20 @@ export class RuntimeHostServer {
       // 候选入队时已经应用当回合的有效策略。这里按真实队列处理，避免聊天覆盖允许贡献后，
       // 又被当前全局开关拦住，导致已经承诺生成的候选永久滞留。
       if (this.runtime.getSnapshot().state.kind !== "idle") return;
-      // 候选入队时已经应用当回合的有效策略。这里按真实队列处理，避免聊天覆盖允许贡献后，
-      // 又被当前全局开关拦住，导致已经承诺生成的候选永久滞留。
-      await commands.agent.getLocalMemory().processEligibleCandidates({ signal: controller.signal });
+      let rebuildRequested = false;
+      try {
+        await commands.agent.getLocalMemory().processEligibleCandidates(
+          { signal: controller.signal },
+          {
+            indexEntry: async (entry) => await commands.agent.indexMemoryEntry(entry),
+            requestRebuild: () => { rebuildRequested = true; }
+          }
+        );
+      } finally {
+        // LocalMemory 只发失效信号；等整个批次退出后再启动 generation 重建，避免与下一条
+        // 候选的 Markdown mutation 竞态。即使维护被前台任务中断，已提交的整理也会到达这里。
+        if (rebuildRequested) this.scheduleMemoryEmbeddingRebuild();
+      }
     })().catch((error: unknown) => {
       if (!controller.signal.aborted) {
         // LocalMemory 将抽取/整理失败写入 maintenanceStatus；Host 不改变任何任务终态。
@@ -738,6 +752,18 @@ export class RuntimeHostServer {
     await promise;
   }
 
+  /** 整理已经提交 Markdown 后异步重建派生索引；失败只保留词法降级，不能改变整理结果。 */
+  private scheduleMemoryEmbeddingRebuild(): void {
+    if (this.closePromise || this.memoryEmbeddingRebuildTimer) return;
+    this.memoryEmbeddingRebuildTimer = setTimeout(() => {
+      this.memoryEmbeddingRebuildTimer = undefined;
+      void this.runtime.runExclusiveOperation(
+        "memory",
+        async (signal) => await this.commands.agent.rebuildMemoryEmbeddingIndex(signal)
+      ).catch(() => undefined);
+    }, 0);
+    this.memoryEmbeddingRebuildTimer.unref?.();
+  }
 
   private read(connection: HostConnection, chunk: string): void {
     connection.buffer += chunk;
@@ -1255,6 +1281,42 @@ export class RuntimeHostServer {
           "telos",
           async () => await this.executeTelos(payload)
         );
+      case "memory.embedding.status-v3":
+        return await this.commands.agent.memoryEmbeddingStatus();
+      case "memory.embedding.download-v3":
+        return await this.runtime.runExclusiveOperation(
+          "memory",
+          async (signal) => {
+            await this.commands.agent.downloadMemoryEmbeddingModel(readLocalEmbeddingModel(payload.model), signal);
+            return await this.commands.agent.memoryEmbeddingStatus();
+          }
+        );
+      case "memory.embedding.cancel-download-v3":
+        return {
+          cancelled: this.commands.agent.cancelMemoryEmbeddingDownload(readLocalEmbeddingModel(payload.model)),
+          status: await this.commands.agent.memoryEmbeddingStatus()
+        };
+      case "memory.embedding.delete-v3":
+        return await this.runtime.runExclusiveOperation(
+          "memory",
+          async () => ({
+            ...(await this.commands.agent.removeMemoryEmbeddingModel(readLocalEmbeddingModel(payload.model))),
+            status: await this.commands.agent.memoryEmbeddingStatus()
+          })
+        );
+      case "memory.embedding.rebuild-v3":
+        return await this.runtime.runExclusiveOperation(
+          "memory",
+          async (signal) => {
+            await this.commands.agent.rebuildMemoryEmbeddingIndex(signal);
+            return await this.commands.agent.memoryEmbeddingStatus();
+          }
+        );
+      case "memory.embedding.cancel-rebuild-v3":
+        return {
+          cancelled: this.commands.agent.cancelMemoryEmbeddingRebuild(),
+          status: await this.commands.agent.memoryEmbeddingStatus()
+        };
       case "runtime.restart":
         this.assertRevision(payload);
         {
@@ -1517,6 +1579,7 @@ export class RuntimeHostServer {
       const result = await memory.writeEntry(readMemoryEntryInput(payload.entry), {
         expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
       });
+      if (result.written && result.entry) await this.commands.agent.indexMemoryEntry(result.entry);
       return result;
     }
     if (action === "update-v3") {
@@ -1525,6 +1588,7 @@ export class RuntimeHostServer {
         readMemoryEntryPatch(payload.patch),
         { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") }
       );
+      if (result.written && result.entry) await this.commands.agent.indexMemoryEntry(result.entry);
       return result;
     }
     if (action === "delete-v3") {
@@ -1533,13 +1597,16 @@ export class RuntimeHostServer {
         id,
         { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") }
       );
+      if (result.deleted) this.commands.agent.removeMemoryEmbeddingEntries([id]);
       return result;
     }
     if (action === "clear-v3") {
       const selector = readMemoryOriginSelector(payload.selector, true);
+      const clearedIds = (await memory.listMemoryEntries({ origins: [selector] })).entries.map(({ id }) => id);
       const result = await memory.clearEntries(selector, {
         expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
       });
+      if (result.deletedEntries) this.commands.agent.removeMemoryEmbeddingEntries(clearedIds);
       return result;
     }
     if (action === "consolidate-v3") {
@@ -1549,6 +1616,7 @@ export class RuntimeHostServer {
         expectedRevision,
         topic: optionalString(payload.topic)
       });
+      if (result.revision !== expectedRevision) this.scheduleMemoryEmbeddingRebuild();
       return result;
     }
     throw new Error(`Unknown memory operation: ${action}`);
@@ -2207,6 +2275,34 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     return await this.request<T>("telos", { action, ...payload });
   }
 
+
+  async memoryEmbeddingStatus(): Promise<MemoryEmbeddingRuntimeStatus> {
+    return await this.request("memory.embedding.status-v3", {});
+  }
+
+  async downloadMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<MemoryEmbeddingRuntimeStatus> {
+    return await this.request("memory.embedding.download-v3", { model });
+  }
+
+  async cancelMemoryEmbeddingDownload(model: LocalEmbeddingModelId): Promise<{ cancelled: boolean; status: MemoryEmbeddingRuntimeStatus }> {
+    return await this.request("memory.embedding.cancel-download-v3", { model });
+  }
+
+  async deleteMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<{
+    filesDeleted: number;
+    bytesFreed: number;
+    status: MemoryEmbeddingRuntimeStatus;
+  }> {
+    return await this.request("memory.embedding.delete-v3", { model });
+  }
+
+  async rebuildMemoryEmbeddingIndex(): Promise<MemoryEmbeddingRuntimeStatus> {
+    return await this.request("memory.embedding.rebuild-v3", {});
+  }
+
+  async cancelMemoryEmbeddingRebuild(): Promise<{ cancelled: boolean; status: MemoryEmbeddingRuntimeStatus }> {
+    return await this.request("memory.embedding.cancel-rebuild-v3", {});
+  }
 
   /** 让 owner 按指定会话或新会话重建 AgentSession。 */
   async restartRuntime(sessionId?: string): Promise<InteractiveRuntimeSnapshot> {
@@ -2933,6 +3029,11 @@ function readMemoryKind(value: unknown): MemoryKind {
   throw new Error("Runtime Host memory entry kind is invalid.");
 }
 
+
+function readLocalEmbeddingModel(value: unknown): LocalEmbeddingModelId {
+  if (value === "multilingual-e5-small" || value === "paraphrase-multilingual-MiniLM-L12-v2") return value;
+  throw new Error("Runtime Host local embedding model is invalid.");
+}
 
 function readMemoryLineage(value: unknown): MemoryLineage {
   const record = asRecord(value);

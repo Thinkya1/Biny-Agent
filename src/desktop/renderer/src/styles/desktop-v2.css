@@ -3320,3 +3320,62 @@ select {
 @media (prefers-reduced-motion: reduce) {
   .memory-telos-page *, .memory-telos-page *::before, .memory-telos-page *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
 }
+
+/* ---- 记忆进化 · 状态条 / 徽标 ---- */
+.memory-evolution-health { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-secondary); }
+.memory-evolution-health-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); }
+.memory-evolution-health:not(.has-pending) .memory-evolution-health-dot { background: #18a058; }
+.memory-evolution-health.has-pending .memory-evolution-health-dot { background: #d97706; }
+.memory-evolution-rev { font-size: 12px; color: var(--text-tertiary); margin-left: 4px; }
+.memory-evolution-tab-badge { background: var(--accent); color: #fff; font-size: 11px; min-width: 17px; height: 17px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px; }
+
+/* ---- 记忆进化 · 概览指标（居中大字卡，参考统计页版式） ---- */
+.memory-evolution-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+.memory-evolution-metric {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  border: 1px solid var(--border); background: var(--surface-raised); border-radius: 12px;
+  padding: 20px 14px; min-height: 96px; font-family: inherit;
+}
+.memory-evolution-metric.is-clickable { cursor: pointer; }
+.memory-evolution-metric.is-clickable:hover { background: var(--surface-hover); }
+.memory-evolution-metric strong { font-size: 30px; font-weight: 600; line-height: 1; color: var(--text); }
+.memory-evolution-metric span { font-size: 13px; color: var(--text-secondary); margin-top: 8px; }
+.memory-evolution-metric small { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; }
+
+/* ---- 记忆进化 · 当前策略摘要卡 ---- */
+.memory-evolution-summary-card { border: 1px solid var(--border); background: var(--surface-raised); border-radius: 12px; padding: 16px; }
+.memory-evolution-summary-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.memory-evolution-summary-mission { font-size: 15px; font-weight: 600; margin: 8px 0 4px; }
+.memory-evolution-summary-meta { font-size: 12px; color: var(--text-tertiary); }
+.memory-evolution-link { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 13px; padding: 0; }
+
+/* ---- 待审核收件箱 ---- */
+.memory-review-inbox-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+.memory-review-inbox-head h4 { margin: 0; font-size: 15px; font-weight: 600; }
+.memory-review-inbox-filters { display: flex; gap: 8px; align-items: center; }
+.memory-review-inbox-filters select, .memory-review-inbox-search input {
+  background: var(--surface-soft); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); font-size: 13px; padding: 6px 10px;
+}
+.memory-review-inbox-search { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 8px; padding-left: 9px; color: var(--text-tertiary); }
+.memory-review-inbox-search input { border: 0; background: transparent; padding-left: 0; }
+.memory-review-item { border: 1px solid var(--border); border-radius: 10px; background: var(--surface-soft); margin-bottom: 10px; overflow: hidden; }
+.memory-review-item-main { display: block; width: 100%; text-align: left; background: transparent; border: 0; padding: 12px 14px 0; cursor: pointer; font-family: inherit; }
+.memory-review-item-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.memory-review-kind { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+.memory-review-kind.is-drift { color: #d97706; }
+.memory-review-time { font-size: 12px; color: var(--text-tertiary); }
+.memory-review-title { display: block; font-size: 14px; font-weight: 600; margin: 6px 0 2px; color: var(--text); }
+.memory-review-summary { display: block; font-size: 12px; color: var(--text-secondary); }
+.memory-review-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px 12px; }
+.memory-review-evidence { border-top: 1px dashed var(--border); padding: 10px 14px 12px; }
+.memory-review-empty { text-align: center; color: var(--text-secondary); padding: 40px 0; font-size: 14px; }
+.memory-review-empty-tick { display: block; font-size: 28px; color: #18a058; margin-bottom: 8px; }
+
+/* ---- 历史证据时间线 ---- */
+.memory-evolution-history-list { display: flex; flex-direction: column; }
+.memory-evolution-history-row { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px dashed var(--border); }
+.memory-evolution-history-row:last-child { border-bottom: 0; }
+.memory-evolution-history-row p { margin: 0; font-size: 13px; }
+.memory-evolution-history-row small { color: var(--text-tertiary); font-size: 12px; }
+.memory-evolution-history-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-top: 6px; flex: 0 0 auto; }

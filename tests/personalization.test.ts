@@ -122,6 +122,7 @@ function testOverrideResolutionAndPromptPrivacy(): void {
     useMemories: true,
     contributeMemories: false,
     excludeExternalContext: true,
+    maxRecalled: 5,
     telos: {
       enabled: false,
       autoObserve: false,
@@ -207,10 +208,16 @@ async function testGlobalAndProjectMigrations(): Promise<void> {
       enabled: true,
       useMemories: true,
       generateMemories: true,
+      queryRewrite: true,
       extractModel: "deepseek-v4-flash",
       consolidationModel: "deepseek-v4-flash",
-      excludeExternalContext: true
+      similarityThresholds: {},
+      cloudEmbeddingConsents: {},
+      excludeExternalContext: true,
+      maxRecalled: 2
     });
+    // 旧配置未声明嵌入模型时，读取方由调用点（非 schema 迁移）回落到本地默认。
+    assert.equal(migrated.context.memory.embeddingModel, undefined);
     const persisted = JSON.parse(await fs.readFile(path.join(globalRoot, "config.json"), "utf8")) as Record<string, unknown>;
     assert.equal(persisted.format, undefined, "plain config reads must not rewrite migrations");
     assert.equal(persisted.configVersion, undefined);

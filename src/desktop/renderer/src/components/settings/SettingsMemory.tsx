@@ -157,8 +157,8 @@ export function SettingsMemory({
   const [clearOpen, setClearOpen] = useState(false);
   const [clearPhrase, setClearPhrase] = useState("");
   const [advancedModels, setAdvancedModels] = useState(false);
-  const [privacyModel, setPrivacyModel] = useState<DesktopEmbeddingModelDescriptor>();
   const [compactReport, setCompactReport] = useState<string>();
+  const [privacyModel, setPrivacyModel] = useState<DesktopEmbeddingModelDescriptor>();
   const [embeddingStatus, setEmbeddingStatus] = useState<DesktopMemoryEmbeddingStatus>();
   const [embeddingStatusError, setEmbeddingStatusError] = useState<string>();
   const [embeddingMenuOpen, setEmbeddingMenuOpen] = useState(false);
@@ -203,26 +203,9 @@ export function SettingsMemory({
   }, [onLoadEmbeddingStatus]);
 
   const refreshMemoryData = useCallback(async (nextFilter: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview> => {
-    const [next] = await Promise.all([
-      load(nextFilter),
-      refreshEmbeddingStatus()
-    ]);
+    const [next] = await Promise.all([load(nextFilter), refreshEmbeddingStatus()]);
     return next;
   }, [load, refreshEmbeddingStatus]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const cached = readMemoryOverviewCache(projectId, filter);
-    setStoredOverview(cached);
-    setStoredOverviewKey(currentOverviewKey);
-    setLoadError(undefined);
-    setSearchResults(undefined);
-    setQuery("");
-    if (!workspaceAvailable || projectId === undefined) return () => { cancelled = true; };
-    load(filter)
-      .catch((error: unknown) => { if (!cancelled) setLoadError(errorMessage(error)); });
-    return () => { cancelled = true; };
-  }, [currentOverviewKey, filter, load, projectId, workspaceAvailable]);
 
   useEffect(() => {
     let cancelled = false;
@@ -232,9 +215,7 @@ export function SettingsMemory({
         setEmbeddingStatus(status);
         setEmbeddingStatusError(undefined);
       })
-      .catch((error: unknown) => {
-        if (!cancelled) setEmbeddingStatusError(errorMessage(error));
-      });
+      .catch((error: unknown) => { if (!cancelled) setEmbeddingStatusError(errorMessage(error)); });
     return () => { cancelled = true; };
   }, [onLoadEmbeddingStatus, snapshot?.configRevision]);
 
@@ -257,6 +238,23 @@ export function SettingsMemory({
     return () => window.clearInterval(poll);
   }, [embeddingStatus?.operation?.state, onLoadEmbeddingStatus]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const cached = readMemoryOverviewCache(projectId, filter);
+    setStoredOverview(cached);
+    setStoredOverviewKey(currentOverviewKey);
+    setLoadError(undefined);
+    setSearchResults(undefined);
+    setQuery("");
+    if (!workspaceAvailable || projectId === undefined) return () => { cancelled = true; };
+    load(filter)
+      .catch((error: unknown) => { if (!cancelled) setLoadError(errorMessage(error)); });
+    return () => { cancelled = true; };
+  }, [currentOverviewKey, filter, load, projectId, workspaceAvailable]);
+
+
+
+
   const testModel = useCallback(async (model: ModelChoice): Promise<DesktopModelConnectionTestResult> => {
     try {
       return await onTestModelConfiguration(modelConfigurationForChoice(model));
@@ -278,6 +276,9 @@ export function SettingsMemory({
   const activeThresholds = activeEmbedding === undefined
     ? undefined
     : policy.similarityThresholds[activeEmbedding.fingerprint] ?? activeEmbedding.recommendedThresholds;
+  const persistedEmbedding = snapshot?.memory.embeddingModel;
+  const embeddingDraftChanged = !sameOptionalEmbeddingRef(policy.embeddingModel, persistedEmbedding);
+  const embeddingOperation = embeddingStatus?.operation;
   const entriesById = new Map(overview.entries.map((entry) => [entry.id, entry] as const));
   const displayed = searchResults === undefined
     ? overview.entries.map(entryListItem)
@@ -286,9 +287,6 @@ export function SettingsMemory({
   const clearEntryCount = filter === "all" ? overview.totalEntries : visibleEntryCount;
   const clearConfirmation = `清空 ${String(clearEntryCount)} 条记忆`;
   const immediateDisabled = sessionRunning || busyAction !== undefined;
-  const persistedEmbedding = snapshot?.memory.embeddingModel;
-  const embeddingDraftChanged = !sameOptionalEmbeddingRef(policy.embeddingModel, persistedEmbedding);
-  const embeddingOperation = embeddingStatus?.operation;
 
   const changePolicy = (patch: Partial<typeof policy>): void => setMemory({ ...policy, ...patch });
   const telos = policy.telos ?? {
@@ -396,6 +394,7 @@ export function SettingsMemory({
     }
   };
 
+
   const runEmbeddingOperation = async (
     action: string,
     operation: () => Promise<DesktopMemoryEmbeddingStatus | DesktopMemoryEmbeddingDeleteResult>,
@@ -442,23 +441,21 @@ export function SettingsMemory({
         <SettingsCheckbox checked={policy.enabled} detail="关闭后保留已有记忆，但暂停检索和自动生成" label="启用记忆" onChange={(enabled) => changePolicy({ enabled })} />
       </section>
 
-      <section id="memory-retrieval" tabIndex={-1}>
+<section id="memory-retrieval" tabIndex={-1}>
         <h3>记忆检索</h3>
-        <SettingsCheckbox checked={policy.useMemories} detail="每个新回合自动检索并注入相关记忆" disabled={!policy.enabled} label="自动检索记忆" onChange={(useMemories) => changePolicy({ useMemories })} />
-        <div className="memory-mode-nested">
-          <SettingsCheckbox checked={policy.queryRewrite} detail="用记忆处理模型生成更适合检索的查询；3 秒失败后使用原问题" disabled={!policy.enabled || !policy.useMemories} label="查询重写" onChange={(queryRewrite) => changePolicy({ queryRewrite })} />
-          <label className="memory-slider-field">
-            <span><strong>最大召回数：{policy.maxRecalled}</strong><small>去重后仍受 12,000 字符整条注入预算限制</small></span>
-            <input aria-label="最大召回记忆数" max={20} min={1} onChange={(event) => changePolicy({ maxRecalled: Number(event.target.value) })} type="range" value={policy.maxRecalled} />
-          </label>
-          {activeEmbedding && activeThresholds ? (
-            <div className="memory-threshold-grid">
-              <ThresholdControl label="当前项目阈值" onChange={(value) => updateThreshold("currentWorkspace", value)} value={activeThresholds.currentWorkspace} />
-              <ThresholdControl label="跨项目阈值" onChange={(value) => updateThreshold("crossWorkspace", value)} value={activeThresholds.crossWorkspace} />
-              <button className="ghost-button" onClick={() => changePolicy({ similarityThresholds: { ...policy.similarityThresholds, [activeEmbedding.fingerprint]: activeEmbedding.recommendedThresholds } })} type="button">恢复该模型推荐值</button>
-            </div>
-          ) : <p className="memory-empty-hint">未选择可用 Embedding 时使用词法检索，自动召回不会注入其他项目内容。</p>}
-        </div>
+        <SettingsCheckbox checked={policy.useMemories} detail="每个新回合注入记忆概览并自动语义召回相关条目；回答末尾会标注引用以便统计使用情况" disabled={!policy.enabled} label="启用记忆召回" onChange={(useMemories) => changePolicy({ useMemories })} />
+        <SettingsCheckbox checked={policy.queryRewrite} detail="用记忆处理模型生成更适合检索的查询；3 秒失败后使用原问题" disabled={!policy.enabled || !policy.useMemories} label="查询重写" onChange={(queryRewrite) => changePolicy({ queryRewrite })} />
+        <label className="memory-slider-field">
+          <span><strong>最大召回数：{policy.maxRecalled}</strong><small>去重后仍受 12,000 字符整条注入预算限制</small></span>
+          <input aria-label="最大召回记忆数" max={20} min={1} onChange={(event) => changePolicy({ maxRecalled: Number(event.target.value) })} type="range" value={policy.maxRecalled} />
+        </label>
+        {activeEmbedding && activeThresholds ? (
+          <div className="memory-threshold-grid">
+            <ThresholdControl label="当前项目阈值" onChange={(value) => updateThreshold("currentWorkspace", value)} value={activeThresholds.currentWorkspace} />
+            <ThresholdControl label="跨项目阈值" onChange={(value) => updateThreshold("crossWorkspace", value)} value={activeThresholds.crossWorkspace} />
+            <button className="ghost-button" onClick={() => changePolicy({ similarityThresholds: { ...policy.similarityThresholds, [activeEmbedding.fingerprint]: activeEmbedding.recommendedThresholds } })} type="button">恢复该模型推荐值</button>
+          </div>
+        ) : <p className="memory-empty-hint">未选择可用 Embedding 时使用词法检索，自动召回不会注入其他项目内容。</p>}
       </section>
 
       <section id="memory-features" tabIndex={-1}>
@@ -466,6 +463,20 @@ export function SettingsMemory({
         <SettingsCheckbox checked={policy.generateMemories} detail="从已完成的回合中提取可复用信息" disabled={!policy.enabled} label="自动生成记忆" onChange={(generateMemories) => changePolicy({ generateMemories })} />
         <div className="memory-mode-nested">
           <SettingsCheckbox checked={policy.excludeExternalContext} detail="网页、附件、MCP、插件和子代理内容不自动沉淀" disabled={!policy.enabled} label="排除外部上下文" onChange={(excludeExternalContext) => changePolicy({ excludeExternalContext })} />
+        </div>
+        <div className="memory-mode-nested">
+          <SettingsCheckbox checked={policy.generateMemories} detail="自动从对话中提取并存储可复用事实（随自动生成一同开关）" disabled={!policy.enabled || !policy.generateMemories} label="自动总结对话" onChange={(value) => changePolicy({ generateMemories: value })} />
+        </div>
+      </section>
+
+      <section id="memory-sleep" tabIndex={-1}>
+        <div className="section-heading-row">
+          <div><h3>记忆睡眠</h3><p>每天按计划整理记忆库，合并重复与过期条目。</p></div>
+          <span className="settings-scope-badge">即将推出</span>
+        </div>
+        <SettingsCheckbox checked={false} detail="定时整理尚在规划中；当前整理通过「立即整理」手动触发" disabled label="启用每日记忆整理" onChange={() => undefined} />
+        <div className="memory-mode-nested">
+          <SettingsCheckbox checked={false} detail="整理触发时间、保留策略与快照导出将随每日整理一同提供" disabled label="整理触发时间与保留策略" onChange={() => undefined} />
         </div>
       </section>
 
@@ -506,6 +517,7 @@ export function SettingsMemory({
         ) : null}
       </section>
 
+
       <section id="memory-embedding" tabIndex={-1}>
         <div className="section-heading-row"><div><h3>Embedding 模型</h3><p>Embedding 与聊天模型分开；模型指纹变化后必须重建派生索引。</p></div><span className="settings-scope-badge">派生数据</span></div>
         <EmbeddingSelector
@@ -525,7 +537,6 @@ export function SettingsMemory({
           operation={embeddingOperation}
           selected={policy.embeddingModel}
         />
-        {loadError ? <p className="settings-effective-hint is-blocked">刷新记忆列表失败：{loadError}</p> : null}
         {policy.embeddingModel && !activeEmbedding ? <p className="settings-effective-hint is-blocked">当前不可用：{embeddingRefLabel(policy.embeddingModel)}。设置不会被自动替换。</p> : null}
         {embeddingStatusError ? <p className="settings-effective-hint is-blocked">无法读取 Embedding 状态：{embeddingStatusError}</p> : null}
         {activeEmbedding ? (
@@ -545,7 +556,7 @@ export function SettingsMemory({
             <button className="ghost-button" disabled={immediateDisabled || embeddingDraftChanged || !embeddingStatus?.activeModel} onClick={() => { void runEmbeddingOperation("rebuild", onRebuildEmbeddingIndex, () => "记忆向量索引已重建"); }} type="button">立即重建</button>
           )}
         </div>
-        {embeddingDraftChanged ? <p className="settings-effective-hint is-blocked">Embedding 选择尚未保存。请先点击“保存”提交；Biny 会后台重建；也可随后手动重建。</p> : null}
+        {embeddingDraftChanged ? <p className="settings-effective-hint is-blocked">Embedding 选择尚未保存。请先保存全部，提交成功后 Biny 会后台重建；也可随后手动重建。</p> : null}
         <p className="memory-empty-hint">下载、删除和重建属于立即动作；任务运行期间不可执行。云端会上传全部待索引记忆，并在每次语义检索时上传查询。</p>
       </section>
 
@@ -672,17 +683,178 @@ export function SettingsMemory({
           </section>
         </SettingsDetailLayer>
       ) : null}
+
     </div>
   );
+}
+
+function ThresholdControl({ label, onChange, value }: { label: string; onChange(value: number): void; value: number }): React.JSX.Element {
+  return <label className="memory-threshold-field"><span><strong>{label}</strong><em>{Math.round(value * 100)}%</em></span><input aria-label={label} max={100} min={0} onChange={(event) => onChange(Number(event.target.value) / 100)} type="range" value={Math.round(value * 100)} /></label>;
+}
+
+function EmbeddingSelector({
+  activeModel,
+  busy,
+  cancelDisabled,
+  menuOpen,
+  menuRef,
+  models,
+  onCancelDownload,
+  onDelete,
+  onDownload,
+  onOpen,
+  onQueryChange,
+  onSelect,
+  operation,
+  query,
+  selected
+}: {
+  activeModel?: EmbeddingModelRef;
+  busy: boolean;
+  cancelDisabled: boolean;
+  menuOpen: boolean;
+  menuRef: React.RefObject<HTMLDivElement | null>;
+  models: DesktopEmbeddingModelDescriptor[];
+  onCancelDownload(model: LocalEmbeddingModelId): Promise<void>;
+  onDelete(model: LocalEmbeddingModelId): Promise<void>;
+  onDownload(model: LocalEmbeddingModelId): Promise<void>;
+  onOpen(): void;
+  onQueryChange(value: string): void;
+  onSelect(model: DesktopEmbeddingModelDescriptor): void;
+  operation?: DesktopMemoryEmbeddingStatus["operation"];
+  query: string;
+  selected?: EmbeddingModelRef;
+}): React.JSX.Element {
+  const groups = [
+    { source: "local" as const, label: "本地模型" },
+    { source: "provider" as const, label: "云端模型" }
+  ];
+  const selectedModel = models.find((model) => sameEmbeddingRef(model.ref, selected));
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  return (
+    <div className="memory-embedding-select" ref={menuRef}>
+      <button aria-expanded={menuOpen} className="memory-embedding-trigger" onClick={onOpen} type="button">
+        <span>{selectedModel?.displayName ?? (selected ? embeddingRefLabel(selected) : "选择 Embedding 模型")}</span>
+        <small>{selectedModel ? selectedModel.source === "local" ? selectedModel.installed ? "已下载" : "需要下载" : "云端" : ""}</small>
+        <Icon name="chevron" size={14} />
+      </button>
+      {menuOpen ? (
+        <div className="memory-embedding-menu" role="dialog">
+          <label className="memory-embedding-search">
+            <Icon name="search" size={14} />
+            <input autoFocus onChange={(event) => onQueryChange(event.target.value)} placeholder="搜索嵌入模型…" type="search" value={query} />
+          </label>
+          {groups.map((group) => {
+            const candidates = models.filter((model) => model.source === group.source && (!normalizedQuery || `${model.displayName} ${model.description ?? ""} ${model.endpoint ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)));
+            if (!candidates.length) return null;
+            return (
+              <div className="memory-embedding-group" key={group.source}>
+                <strong>{group.label}</strong>
+                {candidates.map((model) => {
+                  const selectedItem = sameEmbeddingRef(model.ref, selected);
+                  const active = sameEmbeddingRef(model.ref, activeModel);
+                  const installed = model.source !== "local" || model.installed === true;
+                  const localModel = model.ref.kind === "local" ? model.ref.model : undefined;
+                  const downloading = localModel !== undefined && operation?.kind === "download" && operation.state === "running" && operation.model === localModel;
+                  return (
+                    <div className={`memory-embedding-option${selectedItem ? " is-selected" : ""}`} key={model.fingerprint}>
+                      <button disabled={!installed || model.available === false} onClick={() => onSelect(model)} role="radio" aria-checked={selectedItem} type="button">
+                        <span><strong>{model.displayName}</strong><small>{model.description}{model.endpoint ? ` · ${model.endpoint}` : ""}</small></span>
+                      </button>
+                      <span className="memory-embedding-option-action">
+                        {localModel === undefined ? <em>{model.available === false ? "当前不可用" : "云端"}</em>
+                          : downloading ? <button disabled={cancelDisabled} onClick={() => { void onCancelDownload(localModel); }} type="button">取消</button>
+                            : !installed ? <button disabled={busy} onClick={() => { void onDownload(localModel); }} type="button">{formatModelSize(model.modelSizeBytes)}</button>
+                              : active ? <em>当前活动</em>
+                                : <button aria-label={`删除 ${model.displayName} 缓存`} disabled={busy} onClick={() => { void onDelete(localModel); }} title="删除缓存" type="button"><Icon name="trash" size={13} /></button>}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+          {!models.some((model) => !normalizedQuery || `${model.displayName} ${model.description ?? ""} ${model.endpoint ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)) ? <p className="memory-empty-hint">没有匹配的模型。</p> : null}
+        </div>
+      ) : null}
+
+    </div>
+  );
+}
+
+function sameEmbeddingRef(left: EmbeddingModelRef, right?: EmbeddingModelRef): boolean {
+  return right !== undefined && (left.kind === "local"
+    ? right.kind === "local" && left.model === right.model
+    : right.kind === "provider" && left.provider === right.provider && left.model === right.model);
+}
+
+function sameOptionalEmbeddingRef(left?: EmbeddingModelRef, right?: EmbeddingModelRef): boolean {
+  if (!left || !right) return left === right;
+  return sameEmbeddingRef(left, right);
+}
+
+function mergeEmbeddingModels(
+  configured: DesktopEmbeddingModelDescriptor[],
+  runtime: DesktopEmbeddingModelDescriptor[]
+): DesktopEmbeddingModelDescriptor[] {
+  const merged = new Map<string, DesktopEmbeddingModelDescriptor>();
+  for (const descriptor of [...configured, ...runtime]) {
+    const key = descriptor.ref.kind === "local"
+      ? `local:${descriptor.ref.model}`
+      : `provider:${descriptor.ref.provider}:${descriptor.ref.model}`;
+    merged.set(key, descriptor);
+  }
+  return [...merged.values()];
+}
+
+function embeddingEndpointHash(descriptor: DesktopEmbeddingModelDescriptor): string {
+  return descriptor.privacyEndpointHash ?? "";
+}
+
+function requirePrivacyEndpointHash(descriptor: DesktopEmbeddingModelDescriptor): string {
+  if (!descriptor.privacyEndpointHash) throw new Error("云端 Embedding endpoint 身份不可用，请刷新模型目录后重试。");
+  return descriptor.privacyEndpointHash;
+}
+
+function hasCloudEmbeddingConsent(
+  consents: Record<string, { endpointHash: string; confirmedAt: string }>,
+  descriptor: DesktopEmbeddingModelDescriptor
+): boolean {
+  const endpointHash = embeddingEndpointHash(descriptor);
+  return Boolean(endpointHash) && Object.values(consents).some((consent) => consent.endpointHash === endpointHash);
+}
+
+function embeddingIndexLabel(status: DesktopMemoryEmbeddingStatus | undefined, draftChanged: boolean): string {
+  if (!status) return "正在读取索引状态…";
+  if (draftChanged) return "草稿模型与活动索引不同；保存前不会切换。";
+  const operation = status.operation;
+  if (operation?.kind === "rebuild" && operation.state === "running") {
+    return `正在重建 ${String(operation.processedEntries)} / ${String(operation.totalEntries)} 条`;
+  }
+  if (!status.index.active) return `未建立索引；${String(status.pendingEntries)} 条待处理`;
+  return `${String(status.indexedEntries)} / ${String(status.totalEntries)} 条已索引，${String(status.pendingEntries)} 条待处理`;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / (1024 ** index);
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+function formatModelSize(value?: number): string {
+  return value === undefined ? "需下载" : `约 ${Math.round(value / 1024 / 1024)} MB`;
+}
+
+function embeddingRefLabel(ref: EmbeddingModelRef): string {
+  return ref.kind === "local" ? ref.model : `${ref.provider}/${ref.model}`;
 }
 
 function MemoryPageState({ title, detail }: { title: string; detail?: string }): React.JSX.Element {
   return <div className="settings-sections"><section><h3>{title}</h3>{detail ? <p>{detail}</p> : null}</section></div>;
 }
 
-function ThresholdControl({ label, onChange, value }: { label: string; onChange(value: number): void; value: number }): React.JSX.Element {
-  return <label className="memory-threshold-field"><span><strong>{label}</strong><em>{Math.round(value * 100)}%</em></span><input aria-label={label} max={100} min={0} onChange={(event) => onChange(Number(event.target.value) / 100)} type="range" value={Math.round(value * 100)} /></label>;
-}
 
 function ModelAliasField({ fallbackModel, label, models, onChange, onTest, sessionRunning, value }: {
   fallbackModel?: ModelChoice;
@@ -819,95 +991,6 @@ function providerLabel(provider: string): string {
   return labels[provider.toLocaleLowerCase()] ?? provider;
 }
 
-function EmbeddingSelector({
-  activeModel,
-  busy,
-  cancelDisabled,
-  menuOpen,
-  menuRef,
-  models,
-  onCancelDownload,
-  onDelete,
-  onDownload,
-  onOpen,
-  onQueryChange,
-  onSelect,
-  operation,
-  query,
-  selected
-}: {
-  activeModel?: EmbeddingModelRef;
-  busy: boolean;
-  cancelDisabled: boolean;
-  menuOpen: boolean;
-  menuRef: React.RefObject<HTMLDivElement | null>;
-  models: DesktopEmbeddingModelDescriptor[];
-  onCancelDownload(model: LocalEmbeddingModelId): Promise<void>;
-  onDelete(model: LocalEmbeddingModelId): Promise<void>;
-  onDownload(model: LocalEmbeddingModelId): Promise<void>;
-  onOpen(): void;
-  onQueryChange(value: string): void;
-  onSelect(model: DesktopEmbeddingModelDescriptor): void;
-  operation?: DesktopMemoryEmbeddingStatus["operation"];
-  query: string;
-  selected?: EmbeddingModelRef;
-}): React.JSX.Element {
-  const groups = [
-    { source: "local" as const, label: "本地模型" },
-    { source: "provider" as const, label: "云端模型" }
-  ];
-  const selectedModel = models.find((model) => sameEmbeddingRef(model.ref, selected));
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  return (
-    <div className="memory-embedding-select" ref={menuRef}>
-      <button aria-expanded={menuOpen} className="memory-embedding-trigger" onClick={onOpen} type="button">
-        <span>{selectedModel?.displayName ?? (selected ? embeddingRefLabel(selected) : "选择 Embedding 模型")}</span>
-        <small>{selectedModel ? selectedModel.source === "local" ? selectedModel.installed ? "已下载" : "需要下载" : "云端" : ""}</small>
-        <Icon name="chevron" size={14} />
-      </button>
-      {menuOpen ? (
-        <div className="memory-embedding-menu" role="dialog">
-          <label className="memory-embedding-search">
-            <Icon name="search" size={14} />
-            <input autoFocus onChange={(event) => onQueryChange(event.target.value)} placeholder="搜索嵌入模型…" type="search" value={query} />
-          </label>
-          {groups.map((group) => {
-            const candidates = models.filter((model) => model.source === group.source && (!normalizedQuery || `${model.displayName} ${model.description ?? ""} ${model.endpoint ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)));
-            if (!candidates.length) return null;
-            return (
-              <div className="memory-embedding-group" key={group.source}>
-                <strong>{group.label}</strong>
-                {candidates.map((model) => {
-                  const selectedItem = sameEmbeddingRef(model.ref, selected);
-                  const active = sameEmbeddingRef(model.ref, activeModel);
-                  const installed = model.source !== "local" || model.installed === true;
-                  const localModel = model.ref.kind === "local" ? model.ref.model : undefined;
-                  const downloading = localModel !== undefined && operation?.kind === "download" && operation.state === "running" && operation.model === localModel;
-                  return (
-                    <div className={`memory-embedding-option${selectedItem ? " is-selected" : ""}`} key={model.fingerprint}>
-                      <button disabled={!installed || model.available === false} onClick={() => onSelect(model)} role="radio" aria-checked={selectedItem} type="button">
-                        <span><strong>{model.displayName}</strong><small>{model.description}{model.endpoint ? ` · ${model.endpoint}` : ""}</small></span>
-                      </button>
-                      <span className="memory-embedding-option-action">
-                        {localModel === undefined ? <em>{model.available === false ? "当前不可用" : "云端"}</em>
-                          : downloading ? <button disabled={cancelDisabled} onClick={() => { void onCancelDownload(localModel); }} type="button">取消</button>
-                            : !installed ? <button disabled={busy} onClick={() => { void onDownload(localModel); }} type="button">{formatModelSize(model.modelSizeBytes)}</button>
-                              : active ? <em>当前活动</em>
-                                : <button aria-label={`删除 ${model.displayName} 缓存`} disabled={busy} onClick={() => { void onDelete(localModel); }} title="删除缓存" type="button"><Icon name="trash" size={13} /></button>}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-          {!models.some((model) => !normalizedQuery || `${model.displayName} ${model.description ?? ""} ${model.endpoint ?? ""}`.toLocaleLowerCase().includes(normalizedQuery)) ? <p className="memory-empty-hint">没有匹配的模型。</p> : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function MemoryStat({ label, value }: { label: string; value: number }): React.JSX.Element {
   return <div className="memory-stat-card"><strong>{value}</strong><span>{label}</span></div>;
 }
@@ -976,70 +1059,11 @@ function patchFromInput(input: DesktopMemoryEntryInput): DesktopMemoryEntryPatch
   };
 }
 
-function sameEmbeddingRef(left: EmbeddingModelRef, right?: EmbeddingModelRef): boolean {
-  return right !== undefined && (left.kind === "local"
-    ? right.kind === "local" && left.model === right.model
-    : right.kind === "provider" && left.provider === right.provider && left.model === right.model);
-}
 
-function sameOptionalEmbeddingRef(left?: EmbeddingModelRef, right?: EmbeddingModelRef): boolean {
-  if (!left || !right) return left === right;
-  return sameEmbeddingRef(left, right);
-}
 
-function mergeEmbeddingModels(
-  configured: DesktopEmbeddingModelDescriptor[],
-  runtime: DesktopEmbeddingModelDescriptor[]
-): DesktopEmbeddingModelDescriptor[] {
-  const merged = new Map<string, DesktopEmbeddingModelDescriptor>();
-  for (const descriptor of [...configured, ...runtime]) {
-    const key = descriptor.ref.kind === "local"
-      ? `local:${descriptor.ref.model}`
-      : `provider:${descriptor.ref.provider}:${descriptor.ref.model}`;
-    merged.set(key, descriptor);
-  }
-  return [...merged.values()];
-}
 
-function embeddingEndpointHash(descriptor: DesktopEmbeddingModelDescriptor): string {
-  return descriptor.privacyEndpointHash ?? "";
-}
 
-function requirePrivacyEndpointHash(descriptor: DesktopEmbeddingModelDescriptor): string {
-  if (!descriptor.privacyEndpointHash) throw new Error("云端 Embedding endpoint 身份不可用，请刷新模型目录后重试。");
-  return descriptor.privacyEndpointHash;
-}
 
-function hasCloudEmbeddingConsent(
-  consents: Record<string, { endpointHash: string; confirmedAt: string }>,
-  descriptor: DesktopEmbeddingModelDescriptor
-): boolean {
-  const endpointHash = embeddingEndpointHash(descriptor);
-  return Boolean(endpointHash) && Object.values(consents).some((consent) => consent.endpointHash === endpointHash);
-}
-
-function embeddingIndexLabel(status: DesktopMemoryEmbeddingStatus | undefined, draftChanged: boolean): string {
-  if (!status) return "正在读取索引状态…";
-  if (draftChanged) return "草稿模型与活动索引不同；保存前不会切换。";
-  const operation = status.operation;
-  if (operation?.kind === "rebuild" && operation.state === "running") {
-    return `正在重建 ${String(operation.processedEntries)} / ${String(operation.totalEntries)} 条`;
-  }
-  if (!status.index.active) return `未建立索引；${String(status.pendingEntries)} 条待处理`;
-  return `${String(status.indexedEntries)} / ${String(status.totalEntries)} 条已索引，${String(status.pendingEntries)} 条待处理`;
-}
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-  const value = bytes / (1024 ** index);
-  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
-}
-
-function embeddingRefLabel(ref: EmbeddingModelRef): string {
-  return ref.kind === "local" ? ref.model : `${ref.provider}/${ref.model}`;
-}
 
 function memoryOriginLabel(origin: DesktopMemoryEntry["origin"], overview: DesktopMemoryOverview): string {
   if (origin.kind === "user") return "通用偏好";
@@ -1079,9 +1103,6 @@ function splitKeywords(value: string): string[] {
   return value.split(/[,，\n]/u).map((item) => item.trim()).filter(Boolean);
 }
 
-function formatModelSize(value?: number): string {
-  return value === undefined ? "需下载" : `约 ${Math.round(value / 1024 / 1024)} MB`;
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

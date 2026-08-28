@@ -38,7 +38,8 @@ import { createNativeModelSettings, validateModelConfiguration } from "../../../
 import { ModelRuntime } from "../../../llm/ModelRuntime.js";
 import { listLocalEmbeddingModels } from "../../../llm/embedding/LocalEmbeddingRuntime.js";
 import { listProviderEmbeddingModels } from "../../../llm/embedding/ProviderEmbeddingRuntime.js";
-import type { EmbeddingModelDescriptor } from "../../../llm/embedding/types.js";
+import type { EmbeddingModelDescriptor, LocalEmbeddingModelId } from "../../../llm/embedding/types.js";
+import type { MemoryEmbeddingRuntimeStatus } from "../../../agent/context/MemoryEmbeddingService.js";
 import { FileModelsStore, restoreProviderCatalogs, type ModelsStore } from "../../../llm/ModelsStore.js";
 import { hasUsableModelConfiguration, listConfiguredModelChoices, listPickerModelChoices, modelRuntimeInfo, type ModelRuntimeInfo, type ThinkingSelection } from "../../../llm/ModelManager.js";
 import type { PermissionMode, PermissionResult } from "../../../permission/PermissionManager.js";
@@ -83,6 +84,9 @@ import type {
   DesktopEmbeddingModelDescriptor,
   DesktopGitBranch,
   DesktopMemoryCompactionResult,
+  DesktopMemoryEmbeddingCancellationResult,
+  DesktopMemoryEmbeddingDeleteResult,
+  DesktopMemoryEmbeddingStatus,
   DesktopMemoryEntryInput,
   DesktopMemoryEntryPatch,
   DesktopMemoryOverview,
@@ -1216,6 +1220,91 @@ export class DesktopAgentManager {
     };
   }
 
+  async memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    const status = commands
+      ? await commands.agent.memoryEmbeddingStatus()
+      : await requireRemoteRuntime(runtime).memoryEmbeddingStatus();
+    return describeMemoryEmbeddingStatus(status);
+  }
+
+  async downloadMemoryEmbeddingModel(
+    projectId: string,
+    model: LocalEmbeddingModelId
+  ): Promise<DesktopMemoryEmbeddingStatus> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能下载 Embedding 模型。"
+    );
+    if (!commands) return describeMemoryEmbeddingStatus(await requireRemoteRuntime(runtime).downloadMemoryEmbeddingModel(model));
+    const status = await runtime.runExclusiveOperation("memory", async (signal) => {
+      await commands.agent.downloadMemoryEmbeddingModel(model, signal);
+      return await commands.agent.memoryEmbeddingStatus();
+    });
+    return describeMemoryEmbeddingStatus(status);
+  }
+
+  async cancelMemoryEmbeddingDownload(
+    projectId: string,
+    model: LocalEmbeddingModelId
+  ): Promise<DesktopMemoryEmbeddingCancellationResult> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    if (!commands) {
+      const result = await requireRemoteRuntime(runtime).cancelMemoryEmbeddingDownload(model);
+      return { cancelled: result.cancelled, status: describeMemoryEmbeddingStatus(result.status) };
+    }
+    const cancelled = commands.agent.cancelMemoryEmbeddingDownload(model);
+    return { cancelled, status: describeMemoryEmbeddingStatus(await commands.agent.memoryEmbeddingStatus()) };
+  }
+
+  async deleteMemoryEmbeddingModel(
+    projectId: string,
+    model: LocalEmbeddingModelId
+  ): Promise<DesktopMemoryEmbeddingDeleteResult> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能删除 Embedding 模型。"
+    );
+    if (!commands) {
+      const result = await requireRemoteRuntime(runtime).deleteMemoryEmbeddingModel(model);
+      return { ...result, status: describeMemoryEmbeddingStatus(result.status) };
+    }
+    const result = await runtime.runExclusiveOperation("memory", async () => ({
+      ...(await commands.agent.removeMemoryEmbeddingModel(model)),
+      status: await commands.agent.memoryEmbeddingStatus()
+    }));
+    return { ...result, status: describeMemoryEmbeddingStatus(result.status) };
+  }
+
+  async rebuildMemoryEmbeddingIndex(projectId: string): Promise<DesktopMemoryEmbeddingStatus> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(
+      projectId,
+      "任务运行期间不能重建记忆索引。"
+    );
+    if (!commands) return describeMemoryEmbeddingStatus(await requireRemoteRuntime(runtime).rebuildMemoryEmbeddingIndex());
+    const status = await runtime.runExclusiveOperation("memory", async (signal) => {
+      await commands.agent.rebuildMemoryEmbeddingIndex(signal);
+      return await commands.agent.memoryEmbeddingStatus();
+    });
+    return describeMemoryEmbeddingStatus(status);
+  }
+
+  async cancelMemoryEmbeddingRebuild(projectId: string): Promise<DesktopMemoryEmbeddingCancellationResult> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    if (!commands) {
+      const result = await requireRemoteRuntime(runtime).cancelMemoryEmbeddingRebuild();
+      return { cancelled: result.cancelled, status: describeMemoryEmbeddingStatus(result.status) };
+    }
+    const cancelled = commands.agent.cancelMemoryEmbeddingRebuild();
+    return { cancelled, status: describeMemoryEmbeddingStatus(await commands.agent.memoryEmbeddingStatus()) };
+  }
+
   async saveMemorySettings(projectId: string, input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot> {
     this.projects.requireProject(projectId);
     const state = await this.updateGlobalPersonalization(
@@ -1516,6 +1605,12 @@ export class DesktopAgentManager {
   /** 设置事务不再触发索引动作；记忆没有派生向量索引，只需在配置变更时重建运行时。 */
   settingsCommitted(prepared: PreparedDesktopSettingsConfig): void {
     if (prepared.beforeRevision !== prepared.targetRevision) this.scheduleIdleManagedRuntimeRebuild();
+  }
+
+  private scheduleMemoryEmbeddingRebuild(projectId: string): void {
+    setTimeout(() => {
+      void this.rebuildMemoryEmbeddingIndex(projectId).catch(() => undefined);
+    }, 0).unref?.();
   }
 
   /**
@@ -2642,6 +2737,13 @@ function describeEmbeddingModels(config: AgentConfig): DesktopEmbeddingModelDesc
   ].map(describeDesktopEmbeddingModel);
 }
 
+
+function describeMemoryEmbeddingStatus(status: MemoryEmbeddingRuntimeStatus): DesktopMemoryEmbeddingStatus {
+  return {
+    ...status,
+    models: status.models.map(describeDesktopEmbeddingModel)
+  };
+}
 
 function describeDesktopEmbeddingModel(descriptor: EmbeddingModelDescriptor): DesktopEmbeddingModelDescriptor {
   return {

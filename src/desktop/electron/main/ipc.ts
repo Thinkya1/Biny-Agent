@@ -121,6 +121,7 @@ const memoryKeywordListSchema = z.array(z.string().trim().min(1).max(120)).max(1
 const memoryUserEvidenceSchema = z.string().trim().min(1).max(1_000).optional();
 const memoryQuerySchema = z.string().trim().min(1).max(2_000);
 const memoryEntryIdSchema = z.string().min(1).max(512);
+const localEmbeddingModelSchema = z.enum(["multilingual-e5-small", "paraphrase-multilingual-MiniLM-L12-v2"]);
 const memoryRevisionSchema = z.number().int().nonnegative();
 const telosScopeSchema = z.enum(["universal", "workspace"]);
 const telosGoalSchema = z.object({
@@ -822,6 +823,39 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
+
+  handleRecoveryGated(desktopIpc.memoryEmbeddingStatus, async (_event, projectId: unknown) => {
+    return await context.agents.memoryEmbeddingStatus(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.downloadMemoryEmbeddingModel, async (_event, projectId: unknown, model: unknown) => {
+    return await context.agents.downloadMemoryEmbeddingModel(
+      idSchema.parse(projectId),
+      localEmbeddingModelSchema.parse(model)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.cancelMemoryEmbeddingDownload, async (_event, projectId: unknown, model: unknown) => {
+    return await context.agents.cancelMemoryEmbeddingDownload(
+      idSchema.parse(projectId),
+      localEmbeddingModelSchema.parse(model)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.deleteMemoryEmbeddingModel, async (_event, projectId: unknown, model: unknown) => {
+    return await context.agents.deleteMemoryEmbeddingModel(
+      idSchema.parse(projectId),
+      localEmbeddingModelSchema.parse(model)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.rebuildMemoryEmbeddingIndex, async (_event, projectId: unknown) => {
+    return await context.agents.rebuildMemoryEmbeddingIndex(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.cancelMemoryEmbeddingRebuild, async (_event, projectId: unknown) => {
+    return await context.agents.cancelMemoryEmbeddingRebuild(idSchema.parse(projectId));
+  });
 
   handle(desktopIpc.saveAttachment, async (_event, projectId: unknown, name: unknown, mimeType: unknown, bytes: unknown) => {
     if (!ArrayBuffer.isView(bytes) || bytes.byteLength > 50 * 1024 * 1024) throw new Error("Attachment is invalid or larger than 50 MB.");

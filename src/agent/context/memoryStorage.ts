@@ -15,13 +15,11 @@ import {
   createStoredMemoryEntry,
   maxMemoryCandidateChars,
   maxMemoryEntryChars,
-  maxMemorySummaryChars,
   memoryEntryEquals,
   memoryOriginsEqual,
   memoryMatchFromRanked,
   normalizeMemoryTopic,
   parseMemoryEntryFile,
-  parseLegacyV2MemoryEntryFile,
   rankMemoryEntries,
   renderMemoryEntry,
   sanitizeMemoryEntryInput
@@ -54,18 +52,14 @@ import {
   type ScopedMemoryWriteResult
 } from "./memoryTypes.js";
 
-export const memoryIndexFileName = "MEMORY.md";
-export const maxMemoryIndexChars = 24_000;
 export const memoryCandidateEligibilityMs = 6 * 60 * 60 * 1_000;
 
 const stateFileName = ".memory-state.json";
 const maintenanceFileName = ".maintenance.json";
 const usageFileName = ".memory-usage.json";
 const pendingMutationFileName = ".pending-mutation.json";
-const migrationFileName = ".migration-v2.json";
 const entryDirectoryName = "entries";
 const candidateDirectoryName = ".candidates";
-const legacyDirectoryName = ".legacy-v1";
 const lockDirectoryName = ".memory.lock";
 const lockTimeoutMs = 5_000;
 const staleLockMs = 120_000;
@@ -87,7 +81,6 @@ interface MemoryState {
   version: 3;
   revision: number;
   updatedAt: string;
-  migratedV2At?: string;
 }
 
 interface ScopeEntryRecord {
@@ -116,12 +109,8 @@ interface ScopeSnapshot {
   state: MemoryState;
   entries: ScopeEntryRecord[];
   candidates: MemoryCandidate[];
-  index?: string;
 }
 
-interface MemoryStorageOptions {
-  maxIndexChars?: number;
-}
 
 interface ReplaceEntriesResult {
   entries: MemoryEntry[];
@@ -155,36 +144,6 @@ const candidateSchema = z.object({
   revision: z.number().int().nonnegative()
 });
 
-const legacyCandidateSchema = z.object({
-  version: z.literal(2),
-  id: z.string().min(8).max(128),
-  summary: z.string().min(1).max(maxMemoryCandidateChars),
-  completed: z.literal(true),
-  lineage: z.object({
-    source: z.literal("completed_task"),
-    sessionId: z.string().min(1).max(200),
-    turnId: z.string().min(1).max(200),
-    runId: z.string().min(1).max(200),
-    externalContext: z.boolean()
-  }),
-  scopeHint: z.enum(["global", "project"]).optional(),
-  kindHint: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]).optional(),
-  createdAt: z.string(),
-  eligibleAt: z.string(),
-  revision: z.number().int().nonnegative()
-});
-
-const v2MigrationProgressSchema = z.object({
-  version: z.literal(3),
-  status: z.literal("copying"),
-  sourceDirectories: z.array(z.string().refine((value) => value === "global" || /^[a-f0-9]{24}$/u.test(value))),
-  sourceIndex: z.number().int().nonnegative().default(0),
-  phase: z.enum(["entries", "candidates"]).default("entries"),
-  offset: z.number().int().nonnegative().default(0),
-  updatedAt: z.string()
-});
-
-type V2MigrationProgress = z.infer<typeof v2MigrationProgressSchema>;
 
 const maintenanceSchema = z.object({
   version: z.literal(3),
@@ -222,11 +181,7 @@ const usageSchema = z.object({
 });
 
 export class MemoryStorage {
-  private readonly maxIndexChars: number;
-
-  constructor(readonly workspaceRoot: string, options: MemoryStorageOptions = {}) {
-    this.maxIndexChars = Math.max(1_024, options.maxIndexChars ?? maxMemoryIndexChars);
-  }
+  constructor(readonly workspaceRoot: string) {}
 
   async getOverview(options: MemoryReadOptions = {}): Promise<MemoryOverview> {
     options.signal?.throwIfAborted();
@@ -236,7 +191,6 @@ export class MemoryStorage {
       storeRevision: snapshot.state.revision,
       entryCount: snapshot.entries.length,
       candidateCount: snapshot.candidates.length,
-      indexChars: snapshot.index?.length ?? 0,
       origins
     };
   }
@@ -447,6 +401,7 @@ export class MemoryStorage {
         entryDeletes: [record.fileName],
         candidateDeletes: []
       }, options.signal);
+      await pruneUsageEntries(directory, [id], options.signal);
       return { deleted: true, revision: nextRevision };
     });
   }
@@ -472,6 +427,9 @@ export class MemoryStorage {
         entryDeletes: targets.map(({ fileName }) => fileName),
         candidateDeletes: candidates.map(({ id }) => id)
       }, options.signal);
+      if (targets.length) {
+        await pruneUsageEntries(directory, targets.map(({ entry }) => entry.id), options.signal);
+      }
       return {
         selector,
         deletedEntries: targets.length,
@@ -577,25 +535,28 @@ export class MemoryStorage {
    * 只有调用方确认条目已实际组装进模型上下文后才调用。usage 是可丢弃投影，
    * 不推进内容 revision，也不会污染权威 Markdown。
    */
+  /** 回写「条目被引用」的使用投影；同一投影在 delete/clear 时同步清理孤儿行。 */
+  /** 兼容旧调用名的别名；等价于 recordRecallUsage。 */
   async recordInjectedRecall(ids: string[], options: MemoryReadOptions & { now?: Date } = {}): Promise<void> {
+    await this.recordRecallUsage(ids, options);
+  }
+
+  async recordRecallUsage(ids: string[], options: MemoryReadOptions & { now?: Date } = {}): Promise<void> {
     options.signal?.throwIfAborted();
-    const unique = [...new Set(ids.filter(Boolean))];
-    if (!unique.length) return;
+    const uniqueIds = [...new Set(ids)];
+    if (!uniqueIds.length) return;
     await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.now ?? new Date(), options.signal);
-      const valid = new Set(snapshot.entries.map(({ entry }) => entry.id));
-      const targetIds = unique.filter((id) => valid.has(id));
-      if (!targetIds.length) return;
       const usage = await readUsage(directory, options.signal);
-      const recalledAt = (options.now ?? new Date()).toISOString();
-      for (const id of targetIds) {
-        const previous = usage[id];
+      const nowIso = (options.now ?? new Date()).toISOString();
+      let changed = false;
+      for (const id of uniqueIds) {
         usage[id] = {
-          recallCount: (previous?.recallCount ?? 0) + 1,
-          lastRecalledAt: recalledAt
+          recallCount: (usage[id]?.recallCount ?? 0) + 1,
+          lastRecalledAt: nowIso
         };
+        changed = true;
       }
-      await atomicWriteFile(directory, usageFileName, `${JSON.stringify({ version: 1, entries: usage }, null, 2)}\n`);
+      if (changed) await writeUsageFile(directory, usage);
     });
   }
 
@@ -660,9 +621,6 @@ export class MemoryStorage {
     });
   }
 
-  async readIndex(signal?: AbortSignal): Promise<string | undefined> {
-    return (await this.readScope("project", signal)).index;
-  }
 
   /** 维护状态是操作元数据，不改变 memory revision；后台失败和进程重启后仍可审计。 */
   async readMaintenanceStatus(options: MemoryReadOptions = {}): Promise<MemoryMaintenanceStatus> {
@@ -713,24 +671,12 @@ export class MemoryStorage {
   private async readScopeLocked(directory: PinnedScopeDirectory, now: Date, signal?: AbortSignal): Promise<ScopeSnapshot> {
     signal?.throwIfAborted();
     await assertPinnedScopeDirectory(this.workspaceRoot, directory);
-    const state = await recoverPendingMutationLocked(
-      directory,
-      await readState(directory),
-      this.maxIndexChars,
-      signal
-    );
-    const migrated = await migrateV2ScopesLocked(directory, state, now, this.maxIndexChars, signal);
+    const state = await recoverPendingMutationLocked(directory, await readState(directory), signal);
     const entries = await applyUsageProjection(directory, await readEntryRecords(directory, signal), signal);
     const candidates = await readCandidates(directory, false, signal);
-    const reconciled = reconcileState(migrated, entries, candidates, now);
-    let index = await readOptionalSafeFile(directory, memoryIndexFileName, this.maxIndexChars, signal);
-    const expectedIndex = renderIndex(directory.scope, reconciled.revision, entries, this.maxIndexChars);
-    if (index !== expectedIndex) {
-      await atomicWriteFile(directory, memoryIndexFileName, expectedIndex);
-      index = expectedIndex;
-    }
-    if (reconciled.revision !== migrated.revision) await atomicWriteFile(directory, stateFileName, renderState(reconciled));
-    return { directory, state: reconciled, entries, candidates, index };
+    const reconciled = reconcileState(state, entries, candidates, now);
+    if (reconciled.revision !== state.revision) await atomicWriteFile(directory, stateFileName, renderState(reconciled));
+    return { directory, state: reconciled, entries, candidates };
   }
 
   private async withScopeLock<T>(
@@ -793,13 +739,12 @@ export class MemoryStorage {
     _candidates: MemoryCandidate[],
     now: Date
   ): Promise<void> {
+    void previous;
     const state: MemoryState = {
       version: 3,
       revision,
-      updatedAt: now.toISOString(),
-      migratedV2At: previous.migratedV2At
+      updatedAt: now.toISOString()
     };
-    await atomicWriteFile(directory, memoryIndexFileName, renderIndex(directory.scope, revision, entries, this.maxIndexChars));
     // state 最后落盘，revision 因此充当这次目录 mutation 的 commit marker。
     await atomicWriteFile(directory, stateFileName, renderState(state));
   }
@@ -811,16 +756,16 @@ export class MemoryStorage {
   ): Promise<void> {
     signal?.throwIfAborted();
     await atomicWriteFile(directory, pendingMutationFileName, `${JSON.stringify(mutation)}\n`);
-    await recoverPendingMutationLocked(directory, await readState(directory), this.maxIndexChars, signal);
+    await recoverPendingMutationLocked(directory, await readState(directory), signal);
   }
 }
 
 function emptySnapshot(): ScopeSnapshot {
-  return { state: emptyState(), entries: [], candidates: [], index: undefined };
+  return { state: emptyState(), entries: [], candidates: [] };
 }
 
 function emptyState(): MemoryState {
-  return { version: 3, revision: 0, updatedAt: new Date(0).toISOString(), migratedV2At: undefined };
+  return { version: 3, revision: 0, updatedAt: new Date(0).toISOString() };
 }
 
 function emptyMaintenanceStatus(): MemoryMaintenanceStatus {
@@ -892,12 +837,7 @@ async function readState(directory: PinnedScopeDirectory): Promise<MemoryState> 
     if (parsed.version !== 3 || !Number.isSafeInteger(parsed.revision) || (parsed.revision ?? -1) < 0 || typeof parsed.updatedAt !== "string") {
       throw new Error("Invalid memory state.");
     }
-    return {
-      version: 3,
-      revision: parsed.revision as number,
-      updatedAt: parsed.updatedAt,
-      migratedV2At: typeof parsed.migratedV2At === "string" ? parsed.migratedV2At : undefined
-    };
+    return { version: 3, revision: parsed.revision as number, updatedAt: parsed.updatedAt };
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error(`Invalid memory state JSON in ${directory.scope} scope.`);
     throw error;
@@ -907,7 +847,6 @@ async function readState(directory: PinnedScopeDirectory): Promise<MemoryState> 
 async function recoverPendingMutationLocked(
   directory: PinnedScopeDirectory,
   state: MemoryState,
-  maxIndexChars: number,
   signal?: AbortSignal
 ): Promise<MemoryState> {
   const content = await readOptionalSafeFile(directory, pendingMutationFileName, maxPendingMutationChars, signal);
@@ -965,10 +904,9 @@ async function recoverPendingMutationLocked(
   const recovered: MemoryState = {
     version: 3,
     revision: mutation.toRevision,
-    updatedAt: mutation.createdAt,
-    migratedV2At: state.migratedV2At
+    updatedAt: mutation.createdAt
   };
-  await atomicWriteFile(directory, memoryIndexFileName, renderIndex(directory.scope, recovered.revision, entries, maxIndexChars));
+  void entries;
   await atomicWriteFile(directory, stateFileName, renderState(recovered));
   await unlinkSafeFile(directory, pendingMutationFileName);
   return recovered;
@@ -1042,6 +980,30 @@ async function readUsage(
   return parsed.data.entries;
 }
 
+async function writeUsageFile(
+  directory: PinnedScopeDirectory,
+  entries: Record<string, { recallCount: number; lastRecalledAt?: string }>
+): Promise<void> {
+  await atomicWriteFile(directory, usageFileName, `${JSON.stringify({ version: 1, entries }, null, 2)}\n`);
+}
+
+async function pruneUsageEntries(
+  directory: PinnedScopeDirectory,
+  ids: readonly string[],
+  signal?: AbortSignal
+): Promise<void> {
+  signal?.throwIfAborted();
+  const usage = await readUsage(directory, signal);
+  let changed = false;
+  for (const id of ids) {
+    if (usage[id] !== undefined) {
+      delete usage[id];
+      changed = true;
+    }
+  }
+  if (changed) await writeUsageFile(directory, usage);
+}
+
 async function applyUsageProjection(
   directory: PinnedScopeDirectory,
   records: ScopeEntryRecord[],
@@ -1076,573 +1038,37 @@ async function unlinkCandidate(directory: PinnedScopeDirectory, id: string): Pro
   await unlinkSafeChildFile(directory, candidatePath, `${id}.json`);
 }
 
-/**
- * 将旧 global/<workspace-id> scope 目录复制进单一 v3 库。旧目录全程只读并保留为冷备份；
- * migration manifest + 确定性 id 让进程中断后能够安全重放。
- */
-async function migrateV2ScopesLocked(
-  directory: PinnedScopeDirectory,
-  state: MemoryState,
-  now: Date,
-  maxIndexChars: number,
-  signal?: AbortSignal
-): Promise<MemoryState> {
-  if (state.migratedV2At) {
-    if (await readOptionalSafeFile(directory, migrationFileName, maxStateChars, signal) !== undefined) {
-      await unlinkSafeFile(directory, migrationFileName);
-    }
-    return state;
-  }
-  signal?.throwIfAborted();
-  const names = (await fs.readdir(directory.path, { withFileTypes: true }))
-    .filter((item) => item.isDirectory() && (item.name === "global" || /^[a-f0-9]{24}$/u.test(item.name)))
-    .map((item) => item.name)
-    .sort();
-  const savedProgress = await readV2MigrationProgress(directory, signal);
-  const progress: V2MigrationProgress = savedProgress
-    && sameStringList(savedProgress.sourceDirectories, names)
-    ? savedProgress
-    : {
-        version: 3,
-        status: "copying",
-        sourceDirectories: names,
-        sourceIndex: 0,
-        phase: "entries",
-        offset: 0,
-        updatedAt: now.toISOString()
-      };
-  await writeV2MigrationProgress(directory, progress);
 
-  const currentEntries = await readEntryRecords(directory, signal);
-  const currentCandidates = await readCandidates(directory, false, signal);
-  const records = [...currentEntries];
-  const candidates = [...currentCandidates];
-  const nextRevision = names.length || records.length || candidates.length
-    ? Math.max(state.revision, ...records.map(({ entry }) => entry.revision), ...candidates.map((candidate) => candidate.revision), 0) + 1
-    : state.revision;
-  const canonicalWorkspaceId = workspaceOrigin(directory.workspaceRoot).workspaceId;
-  const seenLegacyEntryIds = new Set<string>();
-  const seenLegacyCandidateIds = new Set<string>();
 
-  for (const [sourceIndex, sourceName] of names.entries()) {
-    const sourceAlreadyCompleted = sourceIndex < progress.sourceIndex;
-    signal?.throwIfAborted();
-    const sourcePath = path.join(directory.path, sourceName);
-    await assertLegacyScopeDirectory(directory, sourcePath);
-    const origin: MemoryOrigin = sourceName === "global"
-      ? { kind: "user" }
-      : {
-          kind: "workspace",
-          workspaceId: sourceName,
-          workspaceName: sourceName === canonicalWorkspaceId ? path.basename(directory.workspaceRoot) : `项目 ${sourceName.slice(0, 8)}`
-        };
-    const legacyEntriesPath = path.join(sourcePath, entryDirectoryName);
-    const legacyEntryNames = await listLegacyFiles(legacyEntriesPath, ".md");
-    const entryOffset = sourceAlreadyCompleted
-      ? legacyEntryNames.length
-      : sourceIndex === progress.sourceIndex
-        ? progress.phase === "entries" ? progress.offset : legacyEntryNames.length
-        : 0;
-    for (const [entryIndex, fileName] of legacyEntryNames.entries()) {
-      const content = await readLegacyRegularFile(path.join(legacyEntriesPath, fileName), maxMemoryEntryChars, signal);
-      const legacy = parseLegacyV2MemoryEntryFile(content);
-      if (!legacy) throw new Error(`Invalid v2 memory entry file: ${sourceName}/${fileName}`);
-      const legacyPath = `${sourceName}/entries/${fileName}`;
-      const createMigratedEntry = (id: string): MemoryEntry => createStoredMemoryEntry({
-        origin,
-        kind: legacy.kind,
-        topic: legacy.topic,
-        title: legacy.title,
-        summary: legacy.summary,
-        decisions: legacy.decisions,
-        paths: legacy.paths,
-        keywords: legacy.keywords,
-        importance: legacy.importance,
-        lineage: [
-          ...legacy.lineage,
-          { source: "migration", externalContext: false, sourceEntryIds: [legacy.id], legacyPath }
-        ]
-      }, {
-        id,
-        revision: nextRevision,
-        createdAt: legacy.createdAt,
-        updatedAt: legacy.updatedAt
-      });
-      const expected = createMigratedEntry(legacy.id);
-      const repeatedSourceId = seenLegacyEntryIds.has(legacy.id);
-      seenLegacyEntryIds.add(legacy.id);
-      let id = legacy.id;
-      const collision = records.find(({ entry }) => entry.id === id);
-      if (repeatedSourceId || (collision && !sameMigratedEntryPayload(collision.entry, expected))) {
-        id = deterministicMigrationId("entry", legacy.id, legacyPath, migrationEntryPayload(expected));
-      }
-      const resolvedCollision = records.find(({ entry }) => entry.id === id)?.entry;
-      if (resolvedCollision && !sameMigratedEntryPayload(resolvedCollision, expected)) {
-        throw new Error(`Deterministic v2 entry migration id collision: ${legacyPath}`);
-      }
-      if (entryIndex < entryOffset) {
-        const migrated = records.find(({ entry }) => entry.id === id)?.entry;
-        if (!migrated || !sameMigratedEntryPayload(migrated, expected)) {
-          throw new Error(`V2 migration progress references a missing entry: ${sourceName}/${fileName}`);
-        }
-        continue;
-      }
-      if (!records.some(({ entry }) => entry.id === id)) {
-        const entry = createMigratedEntry(id);
-        const activeFileName = chooseEntryFileName(entry, records);
-        await atomicWriteChildFile(directory, path.join(directory.path, entryDirectoryName), activeFileName, renderMemoryEntry(entry));
-        records.push({ entry, fileName: activeFileName });
-      }
-      await writeV2MigrationProgress(directory, {
-        ...progress,
-        sourceIndex,
-        phase: "entries",
-        offset: entryIndex + 1,
-        updatedAt: new Date().toISOString()
-      });
-    }
 
-    if (!sourceAlreadyCompleted) {
-      await writeV2MigrationProgress(directory, {
-        ...progress,
-        sourceIndex,
-        phase: "candidates",
-        offset: sourceIndex === progress.sourceIndex && progress.phase === "candidates" ? progress.offset : 0,
-        updatedAt: new Date().toISOString()
-      });
-    }
-
-    const legacyCandidatesPath = path.join(sourcePath, candidateDirectoryName);
-    const legacyCandidateNames = await listLegacyFiles(legacyCandidatesPath, ".json");
-    const candidateOffset = sourceAlreadyCompleted
-      ? legacyCandidateNames.length
-      : sourceIndex === progress.sourceIndex && progress.phase === "candidates" ? progress.offset : 0;
-    for (const [candidateIndex, fileName] of legacyCandidateNames.entries()) {
-      const content = await readLegacyRegularFile(path.join(legacyCandidatesPath, fileName), maxCandidateFileChars, signal);
-      let raw: unknown;
-      try {
-        raw = JSON.parse(content);
-      } catch {
-        throw new Error(`Invalid v2 memory candidate JSON: ${sourceName}/${fileName}`);
-      }
-      const parsed = legacyCandidateSchema.safeParse(raw);
-      if (!parsed.success) throw new Error(`Invalid v2 memory candidate: ${sourceName}/${fileName}`);
-      const legacyPath = `${sourceName}/.candidates/${fileName}`;
-      const { version: _version, scopeHint: _scopeHint, ...legacyCandidate } = parsed.data;
-      const expected: MemoryCandidate = {
-        ...legacyCandidate,
-        id: parsed.data.id,
-        origin,
-        audienceHint: parsed.data.scopeHint === "global" ? "universal" : "workspace",
-        revision: nextRevision
-      };
-      const repeatedSourceId = seenLegacyCandidateIds.has(parsed.data.id);
-      seenLegacyCandidateIds.add(parsed.data.id);
-      let id = parsed.data.id;
-      const collision = candidates.find((candidate) => candidate.id === id);
-      if (repeatedSourceId || (collision && !sameMigratedCandidatePayload(collision, expected))) {
-        id = deterministicMigrationId("candidate", parsed.data.id, legacyPath, migrationCandidatePayload(expected));
-      }
-      const resolvedCollision = candidates.find((candidate) => candidate.id === id);
-      if (resolvedCollision && !sameMigratedCandidatePayload(resolvedCollision, expected)) {
-        throw new Error(`Deterministic v2 candidate migration id collision: ${legacyPath}`);
-      }
-      if (candidateIndex < candidateOffset) {
-        const migrated = candidates.find((candidate) => candidate.id === id);
-        if (!migrated || !sameMigratedCandidatePayload(migrated, expected)) {
-          throw new Error(`V2 migration progress references a missing candidate: ${sourceName}/${fileName}`);
-        }
-        continue;
-      }
-      if (!candidates.some((candidate) => candidate.id === id)) {
-        const candidate: MemoryCandidate = {
-          ...expected,
-          id,
-        };
-        await writeCandidate(directory, candidate);
-        candidates.push(candidate);
-      }
-      await writeV2MigrationProgress(directory, {
-        ...progress,
-        sourceIndex,
-        phase: "candidates",
-        offset: candidateIndex + 1,
-        updatedAt: new Date().toISOString()
-      });
-    }
-    if (!sourceAlreadyCompleted) {
-      await writeV2MigrationProgress(directory, {
-        ...progress,
-        sourceIndex: sourceIndex + 1,
-        phase: "entries",
-        offset: 0,
-        updatedAt: new Date().toISOString()
-      });
-    }
-  }
-
-  const [verifiedEntries, verifiedCandidates] = await Promise.all([
-    readEntryRecords(directory, signal),
-    readCandidates(directory, false, signal)
-  ]);
-  const verifiedEntryIds = new Set(verifiedEntries.map(({ entry }) => entry.id));
-  const verifiedCandidateIds = new Set(verifiedCandidates.map((candidate) => candidate.id));
-  if (records.some(({ entry }) => !verifiedEntryIds.has(entry.id))
-    || candidates.some((candidate) => !verifiedCandidateIds.has(candidate.id))) {
-    throw new Error("Migrated v2 memory verification failed before activating the v3 store.");
-  }
-
-  const migrated: MemoryState = {
-    version: 3,
-    revision: nextRevision,
-    updatedAt: now.toISOString(),
-    migratedV2At: now.toISOString()
-  };
-  await atomicWriteFile(directory, memoryIndexFileName, renderIndex("project", migrated.revision, verifiedEntries, maxIndexChars));
-  await atomicWriteFile(directory, stateFileName, renderState(migrated));
-  await unlinkSafeFile(directory, migrationFileName);
-  return migrated;
-}
-
-async function readV2MigrationProgress(
-  directory: PinnedScopeDirectory,
-  signal?: AbortSignal
-): Promise<V2MigrationProgress | undefined> {
-  const content = await readOptionalSafeFile(directory, migrationFileName, maxStateChars, signal);
-  if (!content) return undefined;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(content);
-  } catch {
-    throw new Error("Invalid v2 memory migration progress JSON.");
-  }
-  const parsed = v2MigrationProgressSchema.safeParse(raw);
-  if (!parsed.success) throw new Error("Invalid v2 memory migration progress.");
-  return parsed.data;
-}
-
-async function writeV2MigrationProgress(directory: PinnedScopeDirectory, progress: V2MigrationProgress): Promise<void> {
-  await atomicWriteFile(directory, migrationFileName, `${JSON.stringify(progress, null, 2)}\n`);
-}
 
 /**
  * 迁移重放只能忽略 v3 写入时重新分配的 id/revision；其余规范化字段（包括来源路径与 lineage）
  * 都必须完全相同。这样同一旧 id 下 decisions、paths 等任一字段变化都不会被静默吞掉。
  */
-function migrationEntryPayload(entry: MemoryEntry): object {
-  return {
-    origin: entry.origin,
-    kind: entry.kind,
-    topic: entry.topic,
-    title: entry.title,
-    summary: entry.summary,
-    decisions: entry.decisions,
-    paths: entry.paths,
-    keywords: entry.keywords,
-    importance: entry.importance,
-    createdAt: entry.createdAt,
-    updatedAt: entry.updatedAt,
-    lineage: entry.lineage
-  };
-}
 
-function sameMigratedEntryPayload(left: MemoryEntry, right: MemoryEntry): boolean {
-  return JSON.stringify(migrationEntryPayload(left)) === JSON.stringify(migrationEntryPayload(right));
-}
 
-function migrationCandidatePayload(candidate: MemoryCandidate): object {
-  return {
-    summary: candidate.summary,
-    completed: candidate.completed,
-    lineage: candidate.lineage,
-    origin: candidate.origin,
-    audienceHint: candidate.audienceHint,
-    kindHint: candidate.kindHint,
-    createdAt: candidate.createdAt,
-    eligibleAt: candidate.eligibleAt
-  };
-}
 
-function sameMigratedCandidatePayload(left: MemoryCandidate, right: MemoryCandidate): boolean {
-  return JSON.stringify(migrationCandidatePayload(left)) === JSON.stringify(migrationCandidatePayload(right));
-}
 
-function deterministicMigrationId(
-  kind: "entry" | "candidate",
-  legacyId: string,
-  legacyPath: string,
-  payload: object
-): string {
-  return createHash("sha256")
-    .update(`${kind}\0${legacyId}\0${legacyPath}\0${JSON.stringify(payload)}`)
-    .digest("hex")
-    .slice(0, 32);
-}
 
-function sameStringList(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
 
-async function assertLegacyScopeDirectory(directory: PinnedScopeDirectory, sourcePath: string): Promise<void> {
-  await assertPinnedScopeDirectory(directory.workspaceRoot, directory);
-  const stat = await fs.lstat(sourcePath);
-  if (stat.isSymbolicLink() || !stat.isDirectory() || await fs.realpath(sourcePath) !== sourcePath) {
-    throw new Error("Legacy memory scope must be a real canonical directory.");
-  }
-}
 
-async function listLegacyFiles(directory: string, suffix: string): Promise<string[]> {
-  let items;
-  try {
-    items = await fs.readdir(directory, { withFileTypes: true });
-  } catch (error) {
-    if (isNotFound(error)) return [];
-    throw error;
-  }
-  return items.filter((item) => item.isFile() && item.name.endsWith(suffix)).map((item) => item.name).sort();
-}
 
-async function readLegacyRegularFile(filePath: string, maxChars: number, signal?: AbortSignal): Promise<string> {
-  signal?.throwIfAborted();
-  const initial = await fs.lstat(filePath);
-  if (initial.isSymbolicLink() || !initial.isFile() || initial.nlink !== 1 || await fs.realpath(filePath) !== filePath) {
-    throw unsafeLeafError(path.basename(filePath));
-  }
-  const handle = await fs.open(filePath, constants.O_RDONLY | noFollowFlag());
-  try {
-    const content = await handle.readFile({ encoding: "utf8", signal });
-    const current = await handle.stat();
-    if (!current.isFile() || current.nlink !== 1 || current.dev !== initial.dev || current.ino !== initial.ino) {
-      throw unsafeLeafError(path.basename(filePath));
-    }
-    return content.slice(0, maxChars);
-  } finally {
-    await handle.close();
-  }
-}
 
-async function _migrateV1Locked(
-  directory: PinnedScopeDirectory,
-  state: MemoryState,
-  now: Date,
-  maxIndexChars: number,
-  signal?: AbortSignal
-): Promise<MemoryState> {
-  signal?.throwIfAborted();
-  // MEMORY.md 即使不是迁移源也要验证，不能让索引软链/硬链绕过边界检查。
-  const legacyIndex = await readOptionalSafeFile(directory, memoryIndexFileName, Number.MAX_SAFE_INTEGER, signal);
-  const names = (await fs.readdir(directory.path, { withFileTypes: true }))
-    .filter((entry) => entry.name.endsWith(".md") && entry.name !== memoryIndexFileName)
-    .map((entry) => entry.name)
-    .sort();
-  const sources: Array<{ fileName: string; content: string; v2Entry?: MemoryEntry }> = [];
-  for (const fileName of names) {
-    const content = await readOptionalSafeFile(directory, fileName, Number.MAX_SAFE_INTEGER, signal);
-    if (content !== undefined) sources.push({ fileName, content, v2Entry: parseMemoryEntryFile(content) });
-  }
-  if (!sources.length) {
-    await sealLegacyBackupIfPresent(directory);
-    return state;
-  }
 
-  const legacyPath = path.join(directory.path, legacyDirectoryName);
-  await ensureSafeChildDirectory(directory, legacyPath, true, "legacy memory backup directory");
-  for (const source of sources) {
-    await writeBackupOnce(directory, legacyPath, source.fileName, source.content);
-  }
-  if (legacyIndex !== undefined) await writeBackupOnce(directory, legacyPath, memoryIndexFileName, legacyIndex);
 
-  const currentV2 = await readEntryRecords(directory, signal);
-  const nextRevision = Math.max(
-    state.revision,
-    ...currentV2.map(({ entry }) => entry.revision),
-    ...sources.map(({ v2Entry }) => v2Entry?.revision ?? 0),
-    0
-  ) + 1;
-  const expectedRecords: ScopeEntryRecord[] = [];
-  for (const source of sources) {
-    if (source.v2Entry) {
-      const fileName = chooseEntryFileName(source.v2Entry, [...currentV2, ...expectedRecords]);
-      expectedRecords.push({ entry: source.v2Entry, fileName });
-      continue;
-    }
-    const topic = normalizeMemoryTopic(source.fileName.replace(/\.md$/i, ""));
-    const sections = parseLegacySections(source.content);
-    for (const [sectionIndex, section] of sections.entries()) {
-      const chunks = splitLegacyContent(section.raw);
-      for (const [chunkIndex, chunk] of chunks.entries()) {
-        const id = createHash("sha256")
-          .update(`${directory.scope}\0${source.fileName}\0${String(sectionIndex)}\0${String(chunkIndex)}\0${chunk}`)
-          .digest("hex")
-          .slice(0, 32);
-        if (currentV2.some(({ entry }) => entry.id === id) || expectedRecords.some(({ entry }) => entry.id === id)) continue;
-        const suffix = chunks.length === 1 ? "" : ` (part ${String(chunkIndex + 1)}/${String(chunks.length)})`;
-        const entry = createStoredMemoryEntry({
-          origin: directory.scope === "global" ? { kind: "user" } : workspaceOrigin(directory.workspaceRoot),
-          kind: kindFromLegacyTopic(topic),
-          topic,
-          title: `${section.title}${suffix}`,
-          // active v2 也保留原始 section；超长内容按 Unicode 字符边界分片，不只依赖 backup。
-          summary: chunk,
-          decisions: chunkIndex === 0 ? section.decisions : [],
-          paths: chunkIndex === 0 ? section.paths : [],
-          keywords: chunkIndex === 0 ? section.keywords : [],
-          importance: 3,
-          lineage: {
-            source: "migration",
-            externalContext: false,
-            legacyPath: `${path.posix.join(legacyDirectoryName, source.fileName)}#section=${String(sectionIndex)}&chunk=${String(chunkIndex)}&chunks=${String(chunks.length)}`
-          }
-        }, {
-          id,
-          revision: nextRevision,
-          createdAt: section.date ?? now.toISOString(),
-          updatedAt: section.date ?? now.toISOString()
-        });
-        const fileName = `${topic}-${id.slice(0, 12)}.md`;
-        expectedRecords.push({ entry, fileName });
-      }
-    }
-  }
-  const entriesPath = path.join(directory.path, entryDirectoryName);
-  await ensureSafeChildDirectory(directory, entriesPath, true, "memory entry directory");
-  for (const record of expectedRecords) {
-    const existing = await readOptionalSafeChildFile(directory, entriesPath, record.fileName, maxMemoryEntryChars, signal);
-    if (existing === undefined) await atomicWriteChildFile(directory, entriesPath, record.fileName, renderMemoryEntry(record.entry));
-    else if (parseMemoryEntryFile(existing)?.id !== record.entry.id) throw new Error(`Migrated memory entry conflict: ${record.fileName}`);
-  }
 
-  // 删除旧源之前从磁盘重读：转换条目数、确定性 ID 和逐字节 backup 任一不符都停止迁移。
-  const verified = await readEntryRecords(directory, signal);
-  const expectedIds = new Set([...currentV2, ...expectedRecords].map(({ entry }) => entry.id));
-  const verifiedIds = new Set(verified.map(({ entry }) => entry.id));
-  if (verifiedIds.size < expectedIds.size || [...expectedIds].some((id) => !verifiedIds.has(id))) {
-    throw new Error("Migrated memory verification failed before removing legacy sources.");
-  }
-  for (const source of sources) {
-    const backup = await readOptionalSafeChildFile(directory, legacyPath, source.fileName, Number.MAX_SAFE_INTEGER, signal);
-    if (backup !== source.content) throw new Error(`Legacy memory backup verification failed: ${source.fileName}`);
-  }
 
-  for (const source of sources) await unlinkSafeFile(directory, source.fileName);
-  const records = verified;
-  const migratedState: MemoryState = {
-    version: 3,
-    revision: nextRevision,
-    updatedAt: now.toISOString(),
-    migratedV2At: state.migratedV2At
-  };
-  await atomicWriteFile(directory, memoryIndexFileName, renderIndex(directory.scope, nextRevision, records, maxIndexChars));
-  await atomicWriteFile(directory, stateFileName, renderState(migratedState));
-  await sealLegacyBackup(directory, legacyPath);
-  return migratedState;
-}
 
-interface LegacySection {
-  title: string;
-  date?: string;
-  summary: string;
-  decisions: string[];
-  paths: string[];
-  keywords: string[];
-  raw: string;
-}
 
-function parseLegacySections(content: string): LegacySection[] {
-  const lines = content.split("\n");
-  const starts = lines.map((line, index) => line.startsWith("## ") ? index : -1).filter((index) => index >= 0);
-  if (!starts.length) {
-    const summary = content.trim();
-    return summary ? [{ title: "Legacy project note", summary, decisions: [], paths: [], keywords: [], raw: content }] : [];
-  }
-  const sections: LegacySection[] = [];
-  const preamble = lines.slice(0, starts[0]).join("\n").trim();
-  if (preamble) sections.push({
-    title: "Legacy topic preamble",
-    summary: preamble,
-    decisions: [],
-    paths: [],
-    keywords: [],
-    raw: preamble
-  });
-  for (const [position, start] of starts.entries()) {
-    const end = starts[position + 1] ?? lines.length;
-    const rawLines = lines.slice(start, end);
-    const raw = rawLines.join("\n");
-    const title = rawLines[0]?.replace(/^##\s*/, "").trim() || "Legacy project note";
-    const dateValue = fieldValue(rawLines, "Date");
-    const summary = fieldValue(rawLines, "Summary") ?? rawLines.slice(1).map((line) => line.trim()).find(Boolean) ?? title;
-    sections.push({
-      title,
-      date: dateValue !== undefined && Number.isFinite(Date.parse(dateValue)) ? new Date(dateValue).toISOString() : undefined,
-      summary,
-      decisions: nestedListValues(rawLines, "Decisions"),
-      paths: splitField(fieldValue(rawLines, "Paths")),
-      keywords: splitField(fieldValue(rawLines, "Tags")),
-      raw
-    });
-  }
-  return sections;
-}
-
-function fieldValue(lines: string[], name: string): string | undefined {
-  const prefix = `- ${name}:`;
-  return lines.find((line) => line.trim().startsWith(prefix))?.trim().slice(prefix.length).trim() || undefined;
-}
-
-function nestedListValues(lines: string[], name: string): string[] {
-  const fieldIndex = lines.findIndex((line) => line.trim() === `- ${name}:`);
-  if (fieldIndex < 0) return [];
-  const values: string[] = [];
-  for (const line of lines.slice(fieldIndex + 1)) {
-    const match = line.match(/^\s{2,}-\s+(.+)$/u);
-    if (!match) break;
-    if (match[1]) values.push(match[1]);
-  }
-  return values;
-}
-
-function splitField(value: string | undefined): string[] {
-  return value?.split(",").map((item) => item.trim()).filter(Boolean) ?? [];
-}
-
-function kindFromLegacyTopic(topic: string): MemoryEntryInput["kind"] {
-  if (topic.includes("decision")) return "decision";
-  if (topic.includes("workflow")) return "workflow";
-  if (topic.includes("debug") || topic.includes("gotcha")) return "gotcha";
-  return "fact";
-}
 
 /**
  * v1 topic files were unbounded. Preserve their complete bytes in .legacy-v1
  * and split the active v2 representation without cutting a UTF-16 surrogate
  * pair; createStoredMemoryEntry applies the same character budget to summary.
  */
-function splitLegacyContent(content: string): string[] {
-  if (!content) return [];
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < content.length) {
-    let end = Math.min(content.length, start + maxMemorySummaryChars);
-    if (end < content.length && isHighSurrogate(content.charCodeAt(end - 1)) && isLowSurrogate(content.charCodeAt(end))) {
-      end -= 1;
-    }
-    // maxMemorySummaryChars is safely larger than one code unit, but retain a
-    // forward-progress guard should the budget ever be changed.
-    if (end <= start) end = Math.min(content.length, start + 1);
-    chunks.push(content.slice(start, end));
-    start = end;
-  }
-  return chunks;
-}
 
-function isHighSurrogate(value: number): boolean {
-  return value >= 0xd800 && value <= 0xdbff;
-}
 
-function isLowSurrogate(value: number): boolean {
-  return value >= 0xdc00 && value <= 0xdfff;
-}
 
 function reconcileState(state: MemoryState, entries: ScopeEntryRecord[], candidates: MemoryCandidate[], now: Date): MemoryState {
   const revision = Math.max(state.revision, ...entries.map(({ entry }) => entry.revision), ...candidates.map((candidate) => candidate.revision), 0);
@@ -1661,36 +1087,7 @@ function chooseEntryFileName(entry: MemoryEntry, records: ScopeEntryRecord[]): s
   return `${entry.topic}-${randomUUID()}.md`;
 }
 
-function renderIndex(scope: MemoryScope, revision: number, records: ScopeEntryRecord[], maxChars: number): string {
-  void scope;
-  const lines = [
-    "# Biny Memory",
-    "",
-    `Revision: ${String(revision)}`,
-    "",
-    "This bounded index links to auditable one-entry Markdown records.",
-    ""
-  ];
-  const sorted = [...records].sort(({ entry: left }, { entry: right }) => compareEntriesForDisplay(left, right));
-  let omitted = 0;
-  for (const { entry, fileName } of sorted) {
-    const origin = entry.origin.kind === "user" ? "user" : `workspace:${entry.origin.workspaceName}`;
-    const line = `- [${escapeIndexText(entry.title)}](entries/${fileName}) | ${origin} | ${entry.kind} | topic: ${entry.topic} | importance: ${String(entry.importance)} | updated: ${entry.updatedAt}`;
-    const candidate = `${[...lines, line, ""].join("\n")}`;
-    if (candidate.length > maxChars - 100) {
-      omitted += 1;
-      continue;
-    }
-    lines.push(line);
-  }
-  if (omitted) lines.push("", `... ${String(omitted)} entries omitted from this bounded index; entry files remain authoritative.`);
-  const rendered = `${lines.join("\n").trimEnd()}\n`;
-  return rendered.length <= maxChars ? rendered : `${rendered.slice(0, Math.max(0, maxChars - 1))}\n`;
-}
 
-function escapeIndexText(value: string): string {
-  return value.replaceAll("[", "").replaceAll("]", "").replace(/\s+/g, " ").trim();
-}
 
 function renderState(state: MemoryState): string {
   return `${JSON.stringify(state, null, 2)}\n`;
@@ -1853,14 +1250,6 @@ async function unlinkSafeChildFile(directory: PinnedScopeDirectory, childPath: s
   await syncDirectory(childPath);
 }
 
-async function writeBackupOnce(directory: PinnedScopeDirectory, legacyPath: string, fileName: string, content: string): Promise<void> {
-  const existing = await readOptionalSafeChildFile(directory, legacyPath, fileName, Number.MAX_SAFE_INTEGER);
-  if (existing !== undefined) {
-    if (existing !== content) throw new Error(`Legacy memory backup conflict: ${fileName}`);
-    return;
-  }
-  await atomicWriteChildFile(directory, legacyPath, fileName, content);
-}
 
 /**
  * Finish a verified v1 backup after migration commits. The backup stays
@@ -1868,23 +1257,7 @@ async function writeBackupOnce(directory: PinnedScopeDirectory, legacyPath: stri
  * the byte-for-byte verification above plus safe-leaf checks, not chmod bits
  * that would make normal workspace cleanup fail.
  */
-async function sealLegacyBackup(directory: PinnedScopeDirectory, legacyPath: string): Promise<void> {
-  const backup = await ensureSafeChildDirectory(directory, legacyPath, false, "legacy memory backup directory");
-  if (!backup) return;
-  const names = (await fs.readdir(legacyPath, { withFileTypes: true })).map((entry) => entry.name).sort();
-  for (const fileName of names) {
-    assertLeafName(fileName);
-    const content = await readOptionalSafeChildFile(directory, legacyPath, fileName, Number.MAX_SAFE_INTEGER);
-    if (content === undefined) throw new Error(`Legacy memory backup disappeared while sealing: ${fileName}`);
-  }
-  await syncDirectory(legacyPath);
-}
 
-async function sealLegacyBackupIfPresent(directory: PinnedScopeDirectory): Promise<void> {
-  const legacyPath = path.join(directory.path, legacyDirectoryName);
-  const backup = await ensureSafeChildDirectory(directory, legacyPath, false, "legacy memory backup directory");
-  if (backup) await sealLegacyBackup(directory, legacyPath);
-}
 
 async function syncDirectory(directory: string): Promise<void> {
   const handle = await fs.open(directory, constants.O_RDONLY);

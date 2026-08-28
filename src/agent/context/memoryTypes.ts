@@ -149,7 +149,6 @@ export interface MemoryOverview {
   storeRevision: number;
   entryCount: number;
   candidateCount: number;
-  indexChars: number;
   origins: MemoryOriginCounts;
 }
 
@@ -279,9 +278,6 @@ export interface MemoryConsolidationResult {
   error?: string;
 }
 
-export interface MemoryMaintenanceOptions extends MemoryReadOptions {
-  now?: Date;
-}
 
 /**
  * Markdown 写入后的派生索引同步边界。
@@ -292,6 +288,10 @@ export interface MemoryMaintenanceOptions extends MemoryReadOptions {
 export interface MemoryDerivedIndexSink {
   indexEntry(entry: MemoryEntry): Promise<void>;
   requestRebuild(): void;
+}
+
+export interface MemoryMaintenanceOptions extends MemoryReadOptions {
+  now?: Date;
 }
 
 export interface MemoryMaintenanceResult {

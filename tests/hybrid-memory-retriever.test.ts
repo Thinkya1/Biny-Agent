@@ -180,8 +180,8 @@ class FakeMemoryStore implements AutomaticMemoryStore {
 
   constructor(private readonly entries: MemoryEntry[]) {}
 
-  async listMemoryEntries(): Promise<{ entries: MemoryEntry[]; storeRevision: number }> {
-    return { entries: this.entries, storeRevision: 7 };
+  async listMemoryEntries(): Promise<{ entries: MemoryEntry[]; storeRevision: number; revision: { global: number; project: number } }> {
+    return { entries: this.entries, storeRevision: 7, revision: { global: 7, project: 7 } };
   }
 
   async search(query: string): Promise<MemorySearchResult> {
@@ -195,8 +195,11 @@ class FakeMemoryStore implements AutomaticMemoryStore {
         score: this.entries.length - index
       })),
       storeRevision: 7,
+      revision: { global: 7, project: 7 },
       report: {
         origins: { included: { user: 0, currentWorkspace: 0, otherWorkspaces: 0 }, trimmed: { user: 0, currentWorkspace: 0, otherWorkspaces: 0 } },
+        included: { global: 0, project: 0 },
+        trimmed: { global: 0, project: 0 },
         omitted: []
       }
     };
@@ -248,6 +251,7 @@ function memoryEntry(id: string, origin: MemoryEntry["origin"], summary = `Durab
   return {
     id,
     origin,
+    scope: origin.kind === "user" ? "global" : "project",
     kind: origin.kind === "user" ? "working_style" : "workflow",
     topic: "release",
     title: `${id} title`,

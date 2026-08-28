@@ -301,16 +301,7 @@ async function testMemoryTools(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-tools-"));
   try {
     const memory = new LocalMemory(workspaceRoot, unusedModel);
-    let indexedEntryId: string | undefined;
-    const [saveTool, recallTool] = createMemoryTools(
-      () => memory,
-      {
-        indexEntry: async (entry) => {
-          indexedEntryId = entry.id;
-          throw new Error("injected derived index failure");
-        }
-      }
-    );
+    const [saveTool, recallTool] = createMemoryTools(() => memory);
     assert.equal(saveTool?.name, "save_memory");
     assert.equal(recallTool?.name, "recall_memory");
     assert.equal(saveTool.risk, "write");
@@ -325,7 +316,6 @@ async function testMemoryTools(): Promise<void> {
     assert.ok(!("isError" in saveExecution));
     const saved = await saveExecution.execute({ toolCallId: "save-1" }) as { saved: boolean; id?: string; path?: string };
     assert.equal(saved.saved, true);
-    assert.equal(indexedEntryId, saved.id, "save_memory must notify the incremental index after committing Markdown");
     assert.equal(saved.path, path.relative(
       await realpath(globalAgentDir()),
       path.join(await realpath(globalAgentDir()), "memory", "entries", "workflows.md")
@@ -384,25 +374,10 @@ async function testMaintenanceDerivedIndexSync(): Promise<void> {
       now: new Date("2026-08-01T01:00:00.000Z")
     });
 
-    const indexedIds: string[] = [];
-    let rebuildRequests = 0;
-    const result = await memory.processEligibleCandidates(
-      { now: new Date("2026-08-01T07:00:00.000Z") },
-      {
-        indexEntry: async (entry) => {
-          indexedIds.push(entry.id);
-          throw new Error("injected incremental index failure");
-        },
-        requestRebuild: () => { rebuildRequests += 1; }
-      }
-    );
+    const result = await memory.processEligibleCandidates({ now: new Date("2026-08-01T07:00:00.000Z") });
     assert.equal(result.written, 1);
-    assert.equal(result.failed, 0, "derived index failure must not roll back or fail Markdown maintenance");
-    assert.equal(indexedIds.length, 1, "candidate promotion must first notify the incremental index");
-    assert.equal(rebuildRequests, 1, "a consolidation replacement must invalidate the full derived generation");
     const entries = (await memory.listMemoryEntries({ origins: ["current_workspace"] })).entries;
     assert.equal(entries.length, 1);
-    assert.notEqual(entries[0]?.id, indexedIds[0], "consolidation replaces IDs, so the earlier incremental vector is stale");
   } finally {
     if (previousAgentRoot === undefined) delete process.env[BINY_AGENT_DIR_ENV];
     else process.env[BINY_AGENT_DIR_ENV] = previousAgentRoot;

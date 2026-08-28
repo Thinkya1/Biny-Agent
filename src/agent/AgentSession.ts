@@ -75,10 +75,7 @@ import { LocalMemory, withFreshRevision, redactSecrets } from "./context/LocalMe
 import { TelosStorage } from "./context/telosStorage.js";
 import { runMemoryCommand } from "./context/memoryCommands.js";
 import { MemoryVectorIndex } from "./context/MemoryVectorIndex.js";
-import {
-  HybridMemoryRetriever,
-  memoryEntryContentHash
-} from "./context/HybridMemoryRetriever.js";
+import { HybridMemoryRetriever } from "./context/HybridMemoryRetriever.js";
 import {
   MemoryEmbeddingService,
   type MemoryEmbeddingRuntimeStatus
@@ -120,7 +117,7 @@ import {
   type GlobalPersonalizationUpdate,
   type ResolvedChatPersonalization
 } from "../personalization/index.js";
-import type { MemorySearchOptions, MemorySearchResult } from "./context/memoryTypes.js";
+import type { MemoryEntry, MemorySearchOptions, MemorySearchResult } from "./context/memoryTypes.js";
 
 export interface AgentSessionOptions {
   workspaceRoot: string;
@@ -2499,6 +2496,33 @@ export class AgentSession {
         configRevision: snapshot.revision
       }
     };
+  }
+
+  private providerEmbeddingModels(): EmbeddingModelDescriptor[] {
+    return new ProviderRegistry(this.activeConfig).listEmbeddingModels();
+  }
+
+  private async activeMemoryEmbeddingRuntime(): Promise<EmbeddingModelRuntime | undefined> {
+    const ref = this.activeConfig.context.memory.embeddingModel;
+    if (!ref) return undefined;
+    if (ref.kind === "local") return await this.localEmbeddingManager.createRuntime(ref.model);
+    const providers = new ProviderRegistry(this.activeConfig);
+    const descriptor = providers.listEmbeddingModels().find((candidate) => (
+      candidate.ref.kind === "provider"
+      && candidate.ref.provider === ref.provider
+      && candidate.ref.model === ref.model
+    ));
+    if (!descriptor?.endpoint || descriptor.available === false) {
+      throw new Error(`Embedding model ${ref.provider}/${ref.model} is currently unavailable.`);
+    }
+    const endpointHash = descriptor.privacyEndpointHash;
+    if (!endpointHash) throw new Error(`Embedding endpoint identity is unavailable for ${ref.provider}.`);
+    const confirmed = Object.values(this.activeConfig.context.memory.cloudEmbeddingConsents)
+      .some((consent) => consent.endpointHash === endpointHash);
+    if (!confirmed) {
+      throw new Error(`Cloud embedding privacy confirmation is required for ${ref.provider}.`);
+    }
+    return providers.createEmbeddingRuntime(ref);
   }
 
   private async refreshMemoryConfig(): Promise<void> {

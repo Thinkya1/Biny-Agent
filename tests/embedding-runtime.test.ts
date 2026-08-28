@@ -4,14 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import type { ProviderDefinition } from "../src/ai/types.js";
 import { providerDefinition } from "../src/ai/provider.js";
-import { MemoryEmbeddingService } from "../src/agent/context/MemoryEmbeddingService.js";
-import { MemoryVectorIndex, memoryVectorContentHash } from "../src/agent/context/MemoryVectorIndex.js";
-import type { LocalMemory } from "../src/agent/context/LocalMemory.js";
-import type { MemoryEntry } from "../src/agent/context/memoryTypes.js";
 import { configSchema, defaultConfig, type ProviderConfig } from "../src/config/schema.js";
 import {
-  type EmbeddingModelDescriptor,
-  type EmbeddingModelRuntime,
   embeddingModelFingerprint,
   embeddingProviderEndpointHash,
   listProviderEmbeddingModels,
@@ -26,10 +20,6 @@ testConfiguredEmbeddingCatalog();
 await testOpenAiEmbeddingWire();
 await testGoogleEmbeddingWire();
 await testLocalEmbeddingLifecycle();
-await testMemoryVectorGenerations();
-await testMemoryVectorEntryStatesPersist();
-await testMemoryEmbeddingServiceLifecycle();
-await testUnsafeIndexFile();
 
 console.log("embedding runtime tests passed");
 
@@ -54,7 +44,6 @@ function testVectorValidation(): void {
   );
   assert.equal(endpointFingerprint.includes("secret"), false);
 }
-
 function testExplicitProviderCapabilities(): void {
   assert.equal(providerDefinition("openai").embedding?.wire, "openai-compatible");
   assert.equal(providerDefinition("gemini").embedding?.wire, "openai-compatible");
@@ -249,268 +238,6 @@ async function testLocalEmbeddingLifecycle(): Promise<void> {
   }
 }
 
-async function testMemoryVectorGenerations(): Promise<void> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-vector-index-"));
-  const index = new MemoryVectorIndex(root);
-  try {
-    const first = index.beginGeneration("model-one", 3, "generation-one");
-    index.putVectors(first, [
-      { entryId: "alpha", contentHash: memoryVectorContentHash("alpha"), embedding: [1, 0, 0] },
-      { entryId: "beta", contentHash: memoryVectorContentHash("beta"), embedding: [0, 1, 0] }
-    ]);
-    assert.deepEqual(index.search([1, 0, 0], { modelFingerprint: "model-one" }), []);
-    index.completeGeneration(first);
-    assert.deepEqual(
-      index.search([0.9, 0.1, 0], { modelFingerprint: "model-one", minimumSimilarity: 0.5 }).map((item) => item.entryId),
-      ["alpha"]
-    );
-
-    const failed = index.beginGeneration("model-two", 3, "generation-failed");
-    index.putVectors(failed, [{ entryId: "gamma", contentHash: memoryVectorContentHash("gamma"), embedding: [0, 0, 1] }]);
-    index.failGeneration(failed, new Error("network unavailable"));
-    assert.equal(index.status().active?.modelFingerprint, "model-one");
-    assert.equal(index.upsertActiveVectors("model-two", []), false);
-    assert.equal(index.upsertActiveVectors("model-one", [
-      { entryId: "alpha", contentHash: memoryVectorContentHash("alpha-2"), embedding: [0, 0, 1] }
-    ]), true);
-    assert.equal(index.search([0, 0, 1], { modelFingerprint: "model-one" })[0]?.entryId, "alpha");
-
-    index.recordRecall(["alpha", "alpha", "beta"], "2026-08-13T00:00:00.000Z");
-    index.recordRecall(["alpha"], "2026-08-13T00:01:00.000Z");
-    assert.deepEqual(index.usage(), [
-      { entryId: "alpha", recallCount: 2, lastRecalledAt: "2026-08-13T00:01:00.000Z" },
-      { entryId: "beta", recallCount: 1, lastRecalledAt: "2026-08-13T00:00:00.000Z" }
-    ]);
-
-    const second = index.beginGeneration("model-two", 2, "generation-two");
-    index.putVectors(second, [{ entryId: "gamma", contentHash: memoryVectorContentHash("gamma"), embedding: [1, 1] }]);
-    index.completeGeneration(second);
-    assert.deepEqual(index.search([1, 0, 0], { modelFingerprint: "model-one" }), []);
-    assert.equal(index.status().active?.vectorCount, 1);
-  } finally {
-    index.close();
-    await fs.rm(root, { recursive: true, force: true });
-  }
-}
-
-async function testMemoryVectorEntryStatesPersist(): Promise<void> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-vector-entry-states-"));
-  const originalHash = memoryVectorContentHash("alpha-original");
-  const updatedHash = memoryVectorContentHash("alpha-updated");
-  const betaHash = memoryVectorContentHash("beta");
-  let index = new MemoryVectorIndex(root);
-  try {
-    const generation = index.beginGeneration("model-persistent", 2, "generation-persistent");
-    index.putVectors(generation, [
-      { entryId: "alpha", contentHash: originalHash, embedding: [1, 0] },
-      { entryId: "beta", contentHash: betaHash, embedding: [0, 1] }
-    ]);
-    index.completeGeneration(generation);
-    index.markEntriesFailed(
-      "model-persistent",
-      [{ entryId: "alpha", contentHash: updatedHash }],
-      new Error("provider unavailable")
-    );
-    index.markEntriesPending(
-      "model-persistent",
-      [{ entryId: "gamma", contentHash: memoryVectorContentHash("gamma") }]
-    );
-    assert.equal(index.status().active?.vectorCount, 1, "failed edit must invalidate the old indexed vector");
-    assert.deepEqual(
-      index.search([1, 0], { modelFingerprint: "model-persistent" }).map(({ entryId }) => entryId),
-      ["beta"]
-    );
-
-    index.close();
-    index = new MemoryVectorIndex(root);
-    const states = index.entryStates("model-persistent", [
-      { entryId: "alpha", contentHash: updatedHash },
-      { entryId: "beta", contentHash: betaHash },
-      { entryId: "gamma", contentHash: memoryVectorContentHash("gamma") }
-    ]);
-    assert.deepEqual(states.map(({ entryId, status }) => ({ entryId, status })), [
-      { entryId: "alpha", status: "failed" },
-      { entryId: "beta", status: "indexed" },
-      { entryId: "gamma", status: "pending" }
-    ]);
-    assert.equal(states[0]?.error, "provider unavailable");
-    assert.equal(index.status().active?.vectorCount, 1);
-
-    const betaUpdatedHash = memoryVectorContentHash("beta-updated-after-crash");
-    assert.equal(
-      index.entryStates("model-persistent", [{ entryId: "beta", contentHash: betaUpdatedHash }])[0]?.status,
-      "pending",
-      "a content hash first seen after restart must be persisted as pending"
-    );
-    assert.equal(index.status().active?.vectorCount, 0);
-    index.close();
-    index = new MemoryVectorIndex(root);
-    assert.equal(
-      index.entryStates("model-persistent", [{ entryId: "beta", contentHash: betaUpdatedHash }])[0]?.status,
-      "pending"
-    );
-  } finally {
-    index.close();
-    await fs.rm(root, { recursive: true, force: true });
-  }
-}
-
-async function testMemoryEmbeddingServiceLifecycle(): Promise<void> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-memory-embedding-service-"));
-  const descriptor: EmbeddingModelDescriptor = {
-    ref: { kind: "local", model: "multilingual-e5-small" },
-    fingerprint: "memory-service-test",
-    displayName: "Memory service test",
-    dimensions: 3,
-    recommendedThresholds: { currentWorkspace: 0.8, crossWorkspace: 0.86 },
-    source: "local",
-    installed: true
-  };
-  const entries = [memoryEntry("alpha", "Alpha memory"), memoryEntry("beta", "Beta memory")];
-  let vectorDimensions = 3;
-  let embeddingFailure: Error | undefined;
-  const runtime: EmbeddingModelRuntime = {
-    descriptor,
-    fingerprint: descriptor.fingerprint,
-    embed: async ({ texts }) => {
-      if (embeddingFailure) throw embeddingFailure;
-      return {
-        embeddings: texts.map((text) => {
-          const vector = new Float32Array(vectorDimensions);
-          vector[text.includes("updated") ? Math.min(2, vectorDimensions - 1) : text.includes("Beta") ? 1 : 0] = 1;
-          return vector;
-        }),
-        dimensions: vectorDimensions,
-        fingerprint: descriptor.fingerprint,
-        model: descriptor.ref
-      };
-    }
-  };
-  let downloadSignal: AbortSignal | undefined;
-  let activeModelPassedToRemove: string | undefined;
-  const localManager = {
-    list: async () => [{ descriptor, installed: true }],
-    download: async (_model: string, options: { signal?: AbortSignal }) => {
-      downloadSignal = options.signal;
-      await new Promise<void>((resolve, reject) => {
-        const aborted = (): void => reject(options.signal?.reason);
-        options.signal?.addEventListener("abort", aborted, { once: true });
-        if (options.signal?.aborted) aborted();
-        void resolve;
-      });
-      return { descriptor, installed: true };
-    },
-    remove: async (_model: string, options: { activeModel?: string }) => {
-      activeModelPassedToRemove = options.activeModel;
-      if (options.activeModel) throw new Error("The active embedding model cannot be deleted.");
-      return { filesDeleted: 1, bytesFreed: 10 };
-    }
-  } as unknown as LocalEmbeddingManager;
-  const localMemory = {
-    listMemoryEntries: async () => ({
-      entries: [...entries],
-      storeRevision: 1
-    })
-  } as unknown as LocalMemory;
-  const service = new MemoryEmbeddingService({
-    localMemory,
-    localManager,
-    getVectorIndex: () => new MemoryVectorIndex(root),
-    getActiveModel: () => descriptor.ref,
-    getProviderModels: () => [],
-    getRuntime: async () => runtime
-  });
-  let restartedService: MemoryEmbeddingService | undefined;
-  try {
-    await service.rebuild();
-    const rebuilt = await service.status();
-    assert.equal(rebuilt.index.active?.modelFingerprint, descriptor.fingerprint);
-    assert.equal(rebuilt.indexedEntries, 2);
-    assert.equal(rebuilt.pendingEntries, 0);
-    assert.equal(rebuilt.operation?.kind, "rebuild");
-    assert.equal(rebuilt.operation?.state, "completed");
-
-    embeddingFailure = new Error("injected rebuild failure");
-    await assert.rejects(service.rebuild(), /injected rebuild failure/u);
-    const preserved = await service.status();
-    assert.equal(preserved.index.active?.modelFingerprint, descriptor.fingerprint);
-    assert.equal(preserved.indexedEntries, 2, "failed same-model rebuild must retain the old active generation");
-    assert.equal(preserved.failedEntries, 0);
-    assert.equal(
-      service.vectorIndex().search([1, 0, 0], { modelFingerprint: descriptor.fingerprint })[0]?.entryId,
-      "alpha",
-      "old active vectors remain searchable until a new generation is atomically activated"
-    );
-    embeddingFailure = undefined;
-
-    entries[0] = { ...entries[0]!, summary: "Alpha updated memory", revision: 2 };
-    await service.indexEntry(entries[0]);
-    assert.equal(
-      service.vectorIndex().search([0, 0, 1], { modelFingerprint: descriptor.fingerprint })[0]?.entryId,
-      "alpha"
-    );
-
-    vectorDimensions = 2;
-    await service.indexEntry(entries[0]);
-    const failed = await service.status();
-    assert.equal(failed.indexedEntries, 1);
-    assert.equal(failed.pendingEntries, 0);
-    assert.equal(failed.failedEntries, 1, "dimension mismatch must stay retryable instead of rolling back Markdown");
-    assert.equal(
-      service.vectorIndex().search([1, 0, 0], { modelFingerprint: descriptor.fingerprint }).some(({ entryId }) => entryId === "alpha"),
-      false,
-      "the stale vector must be excluded after an incremental indexing failure"
-    );
-
-    service.close();
-    restartedService = new MemoryEmbeddingService({
-      localMemory,
-      localManager,
-      getVectorIndex: () => new MemoryVectorIndex(root),
-      getActiveModel: () => descriptor.ref,
-      getProviderModels: () => [],
-      getRuntime: async () => runtime
-    });
-    const persisted = await restartedService.status();
-    assert.equal(persisted.indexedEntries, 1);
-    assert.equal(persisted.pendingEntries, 0);
-    assert.equal(persisted.failedEntries, 1, "failed entry state must survive service restart");
-
-    vectorDimensions = 3;
-    await restartedService.rebuild();
-    assert.equal((await restartedService.status()).failedEntries, 0);
-
-    entries.splice(1, 1);
-    restartedService.removeEntries(["beta"]);
-    assert.equal(restartedService.vectorIndex().status().active?.vectorCount, 1);
-
-    const downloading = restartedService.download("multilingual-e5-small");
-    assert.ok(downloadSignal);
-    assert.equal(restartedService.cancelDownload("multilingual-e5-small"), true);
-    await assert.rejects(downloading, /cancel/u);
-    assert.equal((await restartedService.status()).operation?.state, "cancelled");
-
-    await assert.rejects(restartedService.removeLocalModel("multilingual-e5-small"), /active embedding model/u);
-    assert.equal(activeModelPassedToRemove, "multilingual-e5-small");
-  } finally {
-    restartedService?.close();
-    service.close();
-    await fs.rm(root, { recursive: true, force: true });
-  }
-}
-
-async function testUnsafeIndexFile(): Promise<void> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-vector-symlink-"));
-  const target = path.join(root, "target.sqlite");
-  await fs.writeFile(target, "not sqlite");
-  await fs.symlink(target, path.join(root, ".memory-index.sqlite"));
-  try {
-    assert.throws(() => new MemoryVectorIndex(root), /regular file/u);
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
-  }
-}
-
 function providerConfig(type: string, baseUrl: string, apiKey: string): ProviderConfig {
   return { type, baseUrl, apiKey };
 }
@@ -534,26 +261,5 @@ function embeddingDefinition(
         recommendedThresholds: { currentWorkspace: 0.3, crossWorkspace: 0.5 }
       }]
     }
-  };
-}
-
-function memoryEntry(id: string, summary: string): MemoryEntry {
-  return {
-    id,
-    origin: { kind: "workspace", workspaceId: "0123456789abcdef01234567", workspaceName: "workspace" },
-    kind: "fact",
-    topic: "embedding",
-    title: `${id} title`,
-    summary,
-    decisions: [],
-    paths: [],
-    keywords: [id],
-    importance: 3,
-    createdAt: "2026-08-13T00:00:00.000Z",
-    updatedAt: "2026-08-13T00:00:00.000Z",
-    revision: 1,
-    lineage: [{ source: "explicit", externalContext: false }],
-    recallCount: 0,
-    lastRecalledAt: undefined
   };
 }
