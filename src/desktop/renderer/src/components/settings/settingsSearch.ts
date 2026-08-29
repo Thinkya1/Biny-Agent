@@ -42,6 +42,8 @@ export const settingsSearchIndex: SettingsSearchResult[] = [
   { tab: "聊天", sectionId: "compaction-enable", title: "自动压缩", description: "启用开关与触发阈值", keywords: ["压缩", "上下文", "阈值", "compaction", "context"] },
   { tab: "聊天", sectionId: "compaction-keep", title: "保留策略", description: "保留最近消息条数与 token 上限", keywords: ["保留", "条数", "keep", "recent"] },
   { tab: "聊天", sectionId: "compaction-model", title: "压缩模型", description: "生成压缩摘要所用的模型", keywords: ["摘要", "模型", "summary", "model"] },
+  { tab: "快速对话", sectionId: "quickchat-shortcut", title: "全局快捷键", description: "唤醒或收起 QuickChat 悬浮窗", keywords: ["快速对话", "quickchat", "快捷键", "悬浮窗", "shortcut"] },
+  { tab: "快速对话", sectionId: "quickchat-behavior", title: "悬浮窗行为", description: "失焦隐藏、屏幕上下文注入与点击穿透", keywords: ["快速对话", "quickchat", "失焦", "屏幕上下文", "穿透", "悬浮窗"] },
   { tab: "联网搜索", sectionId: "web-search-cookies", title: "浏览器数据", description: "Cookie 导入、导出和清理", keywords: ["cookie", "浏览器", "导入", "导出"] },
   { tab: "关于", sectionId: "about-product", title: "关于 Biny", description: "版本与产品信息", keywords: ["版本", "about", "version"] }
 ];

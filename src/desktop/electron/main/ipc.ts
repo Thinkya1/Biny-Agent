@@ -33,7 +33,7 @@ import {
   thinkingSchema
 } from "./settingsSaveInputSchema.js";
 import { clampFontSize } from "../../fontPreference.js";
-import type { DesktopActiveView, DesktopBootstrap, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopSystemSettingsPane, DesktopThemePreference } from "../../protocol.js";
+import type { DesktopActiveView, DesktopBootstrap, DesktopQuickChatSettings, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopSystemSettingsPane, DesktopThemePreference } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 import { DesktopAgentManager } from "./DesktopAgentManager.js";
 import { ActivityRecorderService } from "./ActivityRecorderService.js";
@@ -44,6 +44,7 @@ import { DesktopSkillService } from "./DesktopSkillService.js";
 import { DesktopStateStore } from "./DesktopStateStore.js";
 import { DesktopSettingsTransaction } from "./DesktopSettingsTransaction.js";
 import { DesktopTerminalManager } from "./DesktopTerminalManager.js";
+import type { QuickChatWindowController } from "./quickChatWindow.js";
 import { runtimeMutationStartsWork } from "./settingsRuntimeGate.js";
 import { exportSessionBundle, exportSessionClaudeCode } from "../../../session/transfer.js";
 
@@ -58,6 +59,8 @@ interface IpcContext {
   skills: DesktopSkillService;
   mcp: DesktopMcpService;
   getWindow(): BrowserWindow | undefined;
+  /** 惰性创建/返回 QuickChat 悬浮窗控制器；toggle/hide/applySettings 经它落到窗口。 */
+  ensureQuickChatWindow(): QuickChatWindowController;
   bootstrap(): Promise<DesktopBootstrap>;
   updateSettingsDraftState(state: DesktopSettingsDraftState): void;
   resolveSettingsCloseRequest(requestId: string, response: DesktopSettingsCloseResponse): boolean;
@@ -85,6 +88,12 @@ const sessionTreePageOptionsSchema = z.object({
 const permissionModeSchema = z.enum(["ask", "read-only", "auto", "full-access"]);
 const activeViewSchema = z.enum(["chat", "runtime", "extensions"]);
 const systemSettingsPaneSchema = z.enum(["screen-recording", "accessibility", "input-monitoring"]);
+/** QuickChat 三开关的入参边界：逐字段布尔，额外字段拒绝，与 DesktopStateStore 归一化逻辑对齐。 */
+const quickChatSettingsSchema = z.object({
+  autoHideOnBlur: z.boolean(),
+  injectScreenContext: z.boolean(),
+  clickThrough: z.boolean()
+}).strict();
 const terminalSizeSchema = z.number().int().min(2).max(1_000);
 const terminalDataSchema = z.string().max(1_000_000);
 const activityQuerySchema = z.string().trim().max(500);
@@ -726,6 +735,7 @@ export function registerDesktopIpc(context: IpcContext): void {
 
   handle(desktopIpc.activitySnapshot, async () => context.activity.snapshot());
 
+  handle(desktopIpc.activitySettings, async () => context.activity.settingsSnapshot());
   handle(desktopIpc.activityRequestPermission, async (_event, pane: unknown) => {
     await context.activity.requestPermission(systemSettingsPaneSchema.parse(pane) as DesktopSystemSettingsPane);
   });
@@ -1132,6 +1142,29 @@ export function registerDesktopIpc(context: IpcContext): void {
     await context.state.setFontPreference(preference);
     return preference;
   });
+
+  // —— QuickChat 悬浮窗：显隐切换、三开关偏好、屏幕上下文 ——
+  // toggle/hide 是窗口控制，不走 recovery gate（设置恢复待处理时也应能收起小窗）。
+  handle(desktopIpc.quickChatToggle, async () => {
+    context.ensureQuickChatWindow().toggle();
+  });
+
+  handle(desktopIpc.quickChatHide, async () => {
+    context.ensureQuickChatWindow().hide();
+  });
+
+  handle(desktopIpc.quickChatSettings, async () => context.state.quickChatSettings());
+
+  handle(desktopIpc.setQuickChatSettings, async (_event, value: unknown) => {
+    const settings: DesktopQuickChatSettings = quickChatSettingsSchema.parse(value);
+    await context.state.setQuickChatSettings(settings);
+    // 立即对现存窗口应用穿透/失焦隐藏；窗口未创建时下次创建读最新设置。
+    context.ensureQuickChatWindow().applySettings(settings);
+    return settings;
+  });
+
+  // 屏幕上下文是只读快照，纯文本、不触发采集，不需要 recovery gate。
+  handle(desktopIpc.quickChatScreenContext, async () => context.activity.screenContextSnapshot());
 }
 
 function applyNativeThemePreference(preference: DesktopThemePreference): void {

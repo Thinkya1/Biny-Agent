@@ -39,6 +39,7 @@ import { SettingsDetailLayer } from "./SettingsDetailLayer.js";
 import { useSettingsDraft } from "./SettingsDraftContext.js";
 import { SettingsDraftProvider } from "./SettingsDraftProvider.js";
 import { SettingsMemory } from "./SettingsMemory.js";
+import { SettingsQuickChat } from "./SettingsQuickChat.js";
 import { SettingsPageFooter } from "./SettingsPageFooter.js";
 import { SettingsPersonalizationDraft } from "./SettingsPersonalizationDraft.js";
 import { SettingsExtensionsView } from "./SettingsExtensionsView.js";
@@ -98,12 +99,13 @@ interface SettingsOverlayProps {
   onCancelModelLogin(provider: DesktopModelLoginProvider, authRequestId: string): Promise<void>;
 }
 
-export type SettingsTab = "外观" | "个性化" | "聊天" | "模型" | "MCP 服务器" | "技能" | "插件" | "活动记录" | "记忆" | "联网搜索" | "关于";
+export type SettingsTab = "外观" | "个性化" | "聊天" | "快速对话" | "模型" | "MCP 服务器" | "技能" | "插件" | "活动记录" | "记忆" | "联网搜索" | "关于";
 
 const settingsNav: Array<{ badge?: string; icon: IconName; tab: SettingsTab; label: string }> = [
   { icon: "sun", tab: "外观", label: "外观" },
   { icon: "spark", tab: "个性化", label: "个性化" },
   { icon: "message", tab: "聊天", label: "聊天" },
+  { icon: "compose", tab: "快速对话", label: "快速对话" },
   { icon: "network", tab: "模型", label: "模型供应商" },
   { icon: "plug", tab: "MCP 服务器", label: "MCP 服务器" },
   { icon: "wand", tab: "技能", label: "技能" },
@@ -118,6 +120,7 @@ const settingsTitles: Record<SettingsTab, string> = {
   外观: "外观",
   个性化: "个性化",
   聊天: "聊天",
+  快速对话: "快速对话",
   模型: "模型供应商",
   "MCP 服务器": "MCP 服务器",
   技能: "技能",
@@ -139,6 +142,7 @@ const settingsSubtitles: Record<SettingsTab, string> = {
   记忆: "记忆检索、自动生成、长期策略与条目管理。",
   联网搜索: "配置联网搜索与数据来源。",
   聊天: "温度、输出额度与自动压缩策略。",
+  快速对话: "全局快捷键与悬浮窗行为。",
   关于: "版本与产品信息。"
 };
 
@@ -440,6 +444,7 @@ function SettingsOverlayContent({
           /> : null}
           {tab === "活动记录" ? <SettingsActivity /> : null}
           {tab === "聊天" ? (<><SettingsChatParams /><SettingsCompaction /></>) : null}
+          {tab === "快速对话" ? <SettingsQuickChat /> : null}
           {tab === "个性化" ? <SettingsPersonalizationDraft sessionRunning={runtimeBusy} /> : null}
           {memoryVisited ? <SettingsMemory
             models={settingsModels}

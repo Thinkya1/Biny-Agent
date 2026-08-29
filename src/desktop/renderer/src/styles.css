@@ -472,6 +472,15 @@ button:disabled { opacity: 0.42; }
 .font-size-input { width: 88px; }
 .font-size-unit { color: var(--text-secondary); font-size: calc(12px * var(--font-scale)); }
 
+/* 快速对话（QuickChat）设置页：快捷键行复用 appearance-card，开关行直接用统一 SettingsCheckbox。 */
+.quickchat-shortcut-row { display: flex; align-items: center; gap: 12px; }
+.quickchat-shortcut-icon { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 9px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.quickchat-shortcut-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
+.quickchat-shortcut-copy strong { color: var(--text); font-size: calc(13px * var(--font-scale)); font-weight: 600; }
+.quickchat-shortcut-copy small { color: var(--text-tertiary); font-size: calc(11px * var(--font-scale)); }
+.quickchat-kbd { flex: 0 0 auto; padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-secondary); background: var(--surface-selected); font: 11px var(--font-mono); }
+.quickchat-toggle-list { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.quickchat-hint { margin: 6px 0 0; color: var(--text-tertiary); font-size: calc(11px * var(--font-scale)); line-height: 1.5; }
 .settings-empty { padding: 18px 0; color: var(--text-tertiary); font-size: calc(12px * var(--font-scale)); }
 .settings-button-row { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 17px; }
 .settings-content button.is-danger { color: var(--red); }

@@ -130,6 +130,7 @@ export const desktopIpc = {
   settingsCloseRequest: "desktop:settings:close-request",
   settingsCloseResponse: "desktop:settings:close-response",
   activitySnapshot: "desktop:activity:snapshot",
+  activitySettings: "desktop:activity:settings",
   activityRequestPermission: "desktop:activity:request-permission",
   activitySearch: "desktop:activity:search",
   activityReport: "desktop:activity:report",
@@ -164,6 +165,11 @@ export const desktopIpc = {
   setFilePanelWidth: "desktop:ui:file-panel-width",
   setThemePreference: "desktop:ui:theme",
   setFontPreference: "desktop:ui:font",
+  quickChatToggle: "desktop:quickchat:toggle",
+  quickChatHide: "desktop:quickchat:hide",
+  quickChatScreenContext: "desktop:quickchat:screen-context",
+  quickChatSettings: "desktop:quickchat:settings",
+  setQuickChatSettings: "desktop:quickchat:set-settings",
   createTerminal: "desktop:terminal:create",
   writeTerminal: "desktop:terminal:write",
   resizeTerminal: "desktop:terminal:resize",
@@ -215,6 +221,39 @@ export type DesktopActiveView = "chat" | "runtime" | "extensions";
 export interface DesktopFontPreference {
   family: string;
   size: number;
+}
+/**
+ * 快速对话（QuickChat）偏好。走 DesktopStateStore 的逐字段直达通道，不进设置草稿事务：
+ * 这三项是纯 UI 行为开关，与共享 config 无关，保存时也不需要 CAS 保护。
+ */
+export interface DesktopQuickChatSettings {
+  /** 失焦时自动隐藏悬浮窗。 */
+  autoHideOnBlur: boolean;
+  /** 每条消息附带最新屏幕上下文（前台应用、浏览器 URL、最新 OCR、最近会话）。依赖活动记录器开启。 */
+  injectScreenContext: boolean;
+  /** 点击穿透：窗口可见但忽略鼠标事件，按快捷键唤醒后才可交互。 */
+  clickThrough: boolean;
+}
+
+/**
+ * QuickChat 注入用的实时屏幕上下文片段。只有文本，绝不携带截图字节——这是用户对
+ * 隐私策略的显式例外，但仍遵循「原文不出设备」的红线，只放行可注入到 prompt 的文本。
+ */
+export interface DesktopQuickChatScreenContext {
+  /** 活动记录器是否正在采集；false 时其余字段多为空，渲染层据此提示去开启。 */
+  recording: boolean;
+  /** 当前前台应用名。 */
+  frontmostApplication?: string;
+  /** 当前窗口标题。 */
+  windowTitle?: string;
+  /** 当前浏览器标签页 URL。 */
+  browserUrl?: string;
+  /** 最近一次 OCR 文本片段（已截断）。 */
+  ocrExcerpt?: string;
+  /** 最近分析出的会话标题，最近在前。 */
+  recentSessionTitles: string[];
+  /** 片段采集时间（ISO）；用于渲染层提示时效。 */
+  capturedAt?: string;
 }
 export type DesktopSessionStatus =
   | "idle"
@@ -1425,6 +1464,7 @@ export interface DesktopApi {
   settingsSnapshot(projectId: string, sessionId?: string): Promise<DesktopSettingsSnapshot>;
   saveSettings(projectId: string, input: DesktopSettingsSaveInput): Promise<DesktopSettingsSaveResult>;
   activitySnapshot(): Promise<ActivityRuntimeSnapshot>;
+  activitySettings(): Promise<DesktopActivitySettings>;
   requestActivityPermission(pane: DesktopSystemSettingsPane): Promise<void>;
   searchActivity(query: string, limit?: number): Promise<ActivitySearchResult[]>;
   /** 生成指定日期（today/yesterday/YYYY-MM-DD，默认 today）的 Activity 打工日记。 */
@@ -1464,6 +1504,14 @@ export interface DesktopApi {
   setFilePanelWidth(width: number): Promise<void>;
   setThemePreference(theme: DesktopThemePreference): Promise<DesktopThemePreference>;
   setFontPreference(font: DesktopFontPreference): Promise<DesktopFontPreference>;
+  /** QuickChat 悬浮窗的显隐切换；由设置页或调试入口触发，正常交互走全局快捷键。 */
+  toggleQuickChat(): Promise<void>;
+  hideQuickChat(): Promise<void>;
+  /** 读取当前 QuickChat 偏好（三处 checkbox 的即时状态）。 */
+  quickChatSettings(): Promise<DesktopQuickChatSettings>;
+  setQuickChatSettings(settings: DesktopQuickChatSettings): Promise<DesktopQuickChatSettings>;
+  /** 拉取最新屏幕上下文片段；仅文本，无截图字节。 */
+  quickChatScreenContext(): Promise<DesktopQuickChatScreenContext>;
   createTerminal(projectId: string, cols: number, rows: number): Promise<DesktopTerminalHandle>;
   writeTerminal(terminalId: string, data: string): void;
   resizeTerminal(terminalId: string, cols: number, rows: number): void;

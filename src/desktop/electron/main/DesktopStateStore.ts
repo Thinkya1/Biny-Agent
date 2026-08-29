@@ -10,7 +10,7 @@ import path from "node:path";
 import { clampStoredFilePanelWidth, DEFAULT_FILE_PANEL_WIDTH } from "../../filePanelSizing.js";
 import { DEFAULT_FONT_PREFERENCE, normalizeFontPreference } from "../../fontPreference.js";
 import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, normalizeSidebarWidth } from "../../sidebarSizing.js";
-import type { DesktopActiveView, DesktopFontPreference, DesktopProject, DesktopThemePreference } from "../../protocol.js";
+import type { DesktopActiveView, DesktopFontPreference, DesktopProject, DesktopQuickChatSettings, DesktopThemePreference } from "../../protocol.js";
 
 export interface DesktopWindowBounds {
   x?: number;
@@ -29,10 +29,18 @@ interface PersistedDesktopState {
   filePanelWidth: number;
   themePreference: DesktopThemePreference;
   fontPreference: DesktopFontPreference;
+  quickChat: DesktopQuickChatSettings;
   /** 只覆盖设置页偏好字段，供统一设置保存执行进程内 CAS。 */
   preferenceRevision: number;
   windowBounds?: DesktopWindowBounds;
 }
+
+/** 快速对话默认：注入屏幕上下文默认开，失焦自动隐藏与点击穿透默认关。 */
+const DEFAULT_QUICKCHAT_SETTINGS: DesktopQuickChatSettings = {
+  autoHideOnBlur: false,
+  injectScreenContext: true,
+  clickThrough: false
+};
 
 const defaultState: PersistedDesktopState = {
   version: 2,
@@ -44,6 +52,7 @@ const defaultState: PersistedDesktopState = {
   filePanelWidth: DEFAULT_FILE_PANEL_WIDTH,
   themePreference: "system",
   fontPreference: { ...DEFAULT_FONT_PREFERENCE },
+  quickChat: { ...DEFAULT_QUICKCHAT_SETTINGS },
   preferenceRevision: 0,
   windowBounds: undefined
 };
@@ -67,6 +76,7 @@ export class DesktopStateStore {
         filePanelWidth: typeof raw.filePanelWidth === "number" ? clampStoredFilePanelWidth(raw.filePanelWidth) : DEFAULT_FILE_PANEL_WIDTH,
         themePreference: validThemePreference(raw.themePreference) ? raw.themePreference : "system",
         fontPreference: normalizeFontPreference(raw.fontPreference),
+        quickChat: normalizeQuickChatSettings(raw.quickChat),
         preferenceRevision: validPreferenceRevision(raw.preferenceRevision) ? raw.preferenceRevision : 0,
         windowBounds: validWindowBounds(raw.windowBounds) ? raw.windowBounds : undefined
       };
@@ -208,6 +218,16 @@ export class DesktopStateStore {
     await this.applySettingsPreferences({ fontPreference: font }, this.state.preferenceRevision);
   }
 
+  quickChatSettings(): DesktopQuickChatSettings {
+    return { ...this.state.quickChat };
+  }
+
+  /** QuickChat 偏好是纯 UI 开关，逐字段直达落盘，不走设置事务的 CAS/revision。 */
+  async setQuickChatSettings(settings: DesktopQuickChatSettings): Promise<void> {
+    this.state.quickChat = normalizeQuickChatSettings(settings);
+    await this.save();
+  }
+
   settingsPreferences(): DesktopPreferenceSnapshot {
     return {
       revision: this.state.preferenceRevision,
@@ -313,6 +333,16 @@ function validPreferenceRevision(value: unknown): value is number {
 
 function sameFont(left: DesktopFontPreference, right: DesktopFontPreference): boolean {
   return left.family === right.family && left.size === right.size;
+}
+
+/** 逐字段归一化：任一字段缺失/类型不对都回退到该项默认，旧版本状态文件没有 quickChat 时整体回默认。 */
+function normalizeQuickChatSettings(value: unknown): DesktopQuickChatSettings {
+  if (!isRecord(value)) return { ...DEFAULT_QUICKCHAT_SETTINGS };
+  return {
+    autoHideOnBlur: typeof value.autoHideOnBlur === "boolean" ? value.autoHideOnBlur : DEFAULT_QUICKCHAT_SETTINGS.autoHideOnBlur,
+    injectScreenContext: typeof value.injectScreenContext === "boolean" ? value.injectScreenContext : DEFAULT_QUICKCHAT_SETTINGS.injectScreenContext,
+    clickThrough: typeof value.clickThrough === "boolean" ? value.clickThrough : DEFAULT_QUICKCHAT_SETTINGS.clickThrough
+  };
 }
 
 function validThemePreference(value: unknown): value is DesktopThemePreference {

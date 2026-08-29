@@ -7,7 +7,7 @@
  * 单实例锁：第二个实例直接退出，因为多个进程同时读写同一份桌面状态和 session 会互相覆盖。
  */
 import path from "node:path";
-import { app, BrowserWindow, dialog, nativeImage, net, Notification, shell } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, nativeImage, net, Notification, shell } from "electron";
 import type { DesktopBootstrap, DesktopSessionHandoff } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 import { DesktopAgentManager } from "./DesktopAgentManager.js";
@@ -25,6 +25,7 @@ import { DesktopUserDataStore } from "./DesktopUserDataStore.js";
 import { globalConfigDir } from "../../../config/paths.js";
 import { registerDesktopIpc } from "./ipc.js";
 import { installApplicationMenu } from "./menu.js";
+import { createQuickChatWindow, type QuickChatWindowController } from "./quickChatWindow.js";
 import { createDesktopWindow, type WindowCloseDecision } from "./window.js";
 
 app.setName("Biny");
@@ -68,6 +69,18 @@ async function startDesktopApplication(): Promise<void> {
   const skills = new DesktopSkillService(state, configStore, net.fetch.bind(net) as unknown as typeof globalThis.fetch);
   let mainWindow: BrowserWindow | undefined;
   let preparingQuit = false;
+  // QuickChat 悬浮窗按需创建（首次显示或注册快捷键时），避免为不用的功能常驻一个隐藏窗口。
+  let quickChatWindow: QuickChatWindowController | undefined;
+  const ensureQuickChatWindow = (): QuickChatWindowController => {
+    quickChatWindow ??= createQuickChatWindow(() => state.quickChatSettings());
+    return quickChatWindow;
+  };
+  /** 事件回流广播到所有活跃窗口：主窗口 + QuickChat（存在时）。主窗口行为不变，QuickChat 是新增订阅者。 */
+  const broadcastToWindows = (channel: string, payload: unknown): void => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+    // QuickChat 隐藏时渲染层不消费事件；窗口已创建则无论显隐都推，让它在下次唤醒前攒好状态。
+    quickChatWindow?.send(channel, payload);
+  };
   const activity = new ActivityRecorderService({
     configStore,
     sidecarPath: defaultActivitySidecarPath({
@@ -81,9 +94,7 @@ async function startDesktopApplication(): Promise<void> {
   });
   const settingsClose = new DesktopSettingsCloseCoordinator();
   const agents = new DesktopAgentManager(state, projects, configStore, (projectId, update, meta) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(desktopIpc.event, { projectId, ...update, ...meta });
-    }
+    broadcastToWindows(desktopIpc.event, { projectId, ...update, ...meta });
     const event = update.event;
     // 只有窗口不在前台时才发系统通知：界面上已经能看到权限询问就不用再打扰一次。
     if (event?.type === "permission.requested" && (!mainWindow || !mainWindow.isFocused() || !mainWindow.isVisible()) && Notification.isSupported()) {
@@ -218,12 +229,21 @@ async function startDesktopApplication(): Promise<void> {
     skills,
     mcp,
     getWindow: () => mainWindow,
+    ensureQuickChatWindow,
     bootstrap,
     updateSettingsDraftState: (draftState) => settingsClose.updateState(draftState),
     resolveSettingsCloseRequest: (requestId, response) => settingsClose.resolve(requestId, response)
   });
   installApplicationMenu(() => mainWindow);
   createWindow();
+
+  // 全局快捷键唤醒/收起 QuickChat。注册失败（被占用）时降级为静默无快捷键，设置页仍可从调试入口切换。
+  const quickChatShortcut = "Alt+Space";
+  try {
+    globalShortcut.register(quickChatShortcut, () => ensureQuickChatWindow().toggle());
+  } catch {
+    // 注册失败不阻断启动；只是这次没有快捷键。
+  }
 
   app.on("activate", () => {
     if (!mainWindow || mainWindow.isDestroyed()) createWindow();
@@ -267,6 +287,9 @@ async function startDesktopApplication(): Promise<void> {
         confirmed = true;
         if (hadRunningTasks) await agents.stopAllForExit();
         terminals.disposeAll();
+        // 全局快捷键与悬浮窗是真正的资源，退出前必须释放，避免占用快捷键或残留窗口。
+        globalShortcut.unregisterAll();
+        quickChatWindow?.destroy();
         await activity.stop();
         await browser.dispose();
         mainWindow?.destroy();

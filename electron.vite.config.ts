@@ -30,7 +30,10 @@ export default defineConfig({
     plugins: [react()],
     build: {
       rollupOptions: {
-        input: path.join(root, "src/desktop/renderer/index.html")
+        input: {
+          index: path.join(root, "src/desktop/renderer/index.html"),
+          quickchat: path.join(root, "src/desktop/renderer/quickchat.html")
+        }
       }
     }
   }
