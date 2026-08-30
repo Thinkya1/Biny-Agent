@@ -1708,6 +1708,38 @@
   opacity: 0.6;
 }
 
+/* Alma 式版本导航：箭头和「当前版本/总版本」始终贴在回复底栏，避免把重新生成误解成分支。 */
+.biny-chat-scroll .message-version-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: 2px;
+  color: var(--biny-text-tertiary);
+  font-size: calc(11px * var(--font-scale, 1));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.biny-chat-scroll .message-version-button {
+  font-size: 17px;
+  line-height: 1;
+}
+
+.biny-chat-scroll .message-version-button:hover:not(:disabled) {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-chat-scroll .message-version-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.biny-chat-scroll .message-version-count {
+  width: 40px;
+  text-align: center;
+}
+
 /* hover 揭示：用户消息整条操作行都藏；助手行只藏右侧图标按钮组。 */
 .biny-chat-scroll .user-message-actions,
 .biny-chat-scroll .assistant-actions-buttons {

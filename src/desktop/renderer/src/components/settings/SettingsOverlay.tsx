@@ -8,7 +8,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Dialog } from "@astryxdesign/core/Dialog";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
-import type { DesktopAlmaImportScan, DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopIdentityDocumentKind, DesktopIdentityOverview, DesktopIdentityReviewResult, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntriesPage, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryStats, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopIdentityOverview, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntriesPage, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryStats, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
   apiFormatForConnection,
   apiFormatOption,
@@ -35,13 +35,13 @@ import { SettingsCompaction } from "./SettingsCompaction.js";
 import { SettingsActivity } from "./SettingsActivity.js";
 import { SettingsCheckbox } from "./SettingsCheckbox.js";
 import { SettingsCloseGuard } from "./SettingsCloseGuard.js";
+import { ModelMultiSelect } from "./ModelMultiSelect.js";
 import { SettingsDetailLayer } from "./SettingsDetailLayer.js";
 import { useSettingsDraft } from "./SettingsDraftContext.js";
 import { SettingsDraftProvider } from "./SettingsDraftProvider.js";
 import { SettingsMemory } from "./SettingsMemory.js";
 import { SettingsQuickChat } from "./SettingsQuickChat.js";
 import { SettingsPageFooter } from "./SettingsPageFooter.js";
-import { SettingsPersonalizationDraft } from "./SettingsPersonalizationDraft.js";
 import { SettingsExtensionsView } from "./SettingsExtensionsView.js";
 import { searchSettings } from "./settingsSearch.js";
 
@@ -74,9 +74,6 @@ interface SettingsOverlayProps {
   onClearMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryStats>;
   onCompactMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
   onLoadIdentityOverview(): Promise<DesktopIdentityOverview>;
-  onImportAlmaIdentity(root?: string): Promise<DesktopAlmaImportScan>;
-  onSaveIdentityDocument(document: DesktopIdentityDocumentKind, content: string, expectedRevision: number, reason?: string): Promise<DesktopIdentityOverview>;
-  onReviewIdentityProposal(proposalId: string, action: "accept" | "reject", expectedRevision: number): Promise<DesktopIdentityReviewResult>;
   onLoadTelosOverview(): Promise<DesktopTelosOverview>;
   onSaveTelos(input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
   onReviewBehaviorPattern(patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
@@ -99,11 +96,10 @@ interface SettingsOverlayProps {
   onCancelModelLogin(provider: DesktopModelLoginProvider, authRequestId: string): Promise<void>;
 }
 
-export type SettingsTab = "外观" | "个性化" | "聊天" | "快速对话" | "模型" | "MCP 服务器" | "技能" | "插件" | "活动记录" | "记忆" | "联网搜索" | "关于";
+export type SettingsTab = "通用" | "聊天" | "快速对话" | "模型" | "MCP 服务器" | "技能" | "插件" | "活动记录" | "记忆" | "联网搜索" | "关于";
 
 const settingsNav: Array<{ badge?: string; icon: IconName; tab: SettingsTab; label: string }> = [
-  { icon: "sun", tab: "外观", label: "外观" },
-  { icon: "spark", tab: "个性化", label: "个性化" },
+  { icon: "sun", tab: "通用", label: "通用" },
   { icon: "message", tab: "聊天", label: "聊天" },
   { icon: "compose", tab: "快速对话", label: "快速对话" },
   { icon: "network", tab: "模型", label: "模型供应商" },
@@ -117,8 +113,7 @@ const settingsNav: Array<{ badge?: string; icon: IconName; tab: SettingsTab; lab
 ];
 
 const settingsTitles: Record<SettingsTab, string> = {
-  外观: "外观",
-  个性化: "个性化",
+  通用: "通用",
   聊天: "聊天",
   快速对话: "快速对话",
   模型: "模型供应商",
@@ -133,8 +128,7 @@ const settingsTitles: Record<SettingsTab, string> = {
 
 const settingsSubtitles: Record<SettingsTab, string> = {
   模型: "模型连接、API key 与默认模型管理。",
-  外观: "显示模式、界面字体和字号。",
-  个性化: "设置 Biny 的表达方式、长期偏好与当前聊天覆盖。",
+  通用: "主题、背景、界面字体和 Agent 身份资料。",
   "MCP 服务器": "管理可供 Agent 使用的 MCP 扩展服务。",
   技能: "管理本机可用的 Agent Skills，并按需查看技能内容。",
   插件: "管理当前项目的 Plugin，并从官方市场安装。",
@@ -199,9 +193,6 @@ function SettingsOverlayContent({
   onClearMemory,
   onCompactMemory,
   onLoadIdentityOverview,
-  onImportAlmaIdentity,
-  onSaveIdentityDocument,
-  onReviewIdentityProposal,
   onLoadTelosOverview,
   onSaveTelos,
   onReviewBehaviorPattern,
@@ -227,12 +218,13 @@ function SettingsOverlayContent({
 }: SettingsOverlayProps): React.JSX.Element | null {
   const settingsDraft = useSettingsDraft();
   const runtimeBusy = sessionRunning || settingsDraft.snapshot?.hasRunningTasks === true;
-  const [tab, setTab] = useState<SettingsTab>("外观");
+  const [tab, setTab] = useState<SettingsTab>("通用");
   const [memoryVisited, setMemoryVisited] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [message, setMessage] = useState<string>();
   const [dismissedLoadError, setDismissedLoadError] = useState<string>();
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
+  const [defaultModelSaving, setDefaultModelSaving] = useState(false);
   const activeTabRef = useRef<SettingsTab>(tab);
   const notifyForTab = (sourceTab: SettingsTab, nextMessage: string | undefined): void => {
     if (activeTabRef.current === sourceTab) setMessage(nextMessage);
@@ -348,6 +340,7 @@ function SettingsOverlayContent({
           </header>
           {tab === "模型" ? <SettingsModels
             active={open}
+            loading={!settingsDraft.snapshot && !settingsDraft.loadError}
             models={settingsModels}
             connections={settingsDraft.snapshot?.models.connections ?? workspace?.connections ?? []}
             defaultModelAlias={defaultModelAlias}
@@ -386,8 +379,22 @@ function SettingsOverlayContent({
             }}
             onCancelLogin={onCancelModelLogin}
             onChange={(alias, thinking) => {
-              settingsDraft.setDefaultModel(alias, thinking);
-              notifyForTab("模型", "默认模型已加入草稿");
+              // 「设为默认」即时落盘，不进跨页草稿；用当前 config revision 做乐观锁，
+              // 冲突时提示并重读，绝不覆盖别处已改的基线。
+              const projectId = workspace?.project.id;
+              const snapshot = settingsDraft.snapshot;
+              if (!projectId || !snapshot || defaultModelSaving) return;
+              setDefaultModelSaving(true);
+              notifyForTab("模型", undefined);
+              void window.biny.setDefaultModel(projectId, alias, thinking, snapshot.configRevision, snapshot.chat?.sessionId)
+                .then((next) => {
+                  settingsDraft.adoptExternalSnapshot(next);
+                  notifyForTab("模型", "默认模型已保存");
+                })
+                .catch((error: unknown) => {
+                  notifyForTab("模型", error instanceof Error ? error.message : String(error));
+                })
+                .finally(() => setDefaultModelSaving(false));
             }}
             onNotify={(nextMessage) => notifyForTab("模型", nextMessage)}
             onSave={async (configuration) => {
@@ -436,16 +443,18 @@ function SettingsOverlayContent({
               }
             }}
           /> : null}
-          {tab === "外观" ? <SettingsAppearance
+          {tab === "通用" ? <SettingsAppearance
             theme={settingsDraft.draft?.themePreference ?? themePreference}
             onThemeChange={settingsDraft.setThemePreference}
             font={settingsDraft.draft?.fontPreference ?? fontPreference}
             onFontChange={settingsDraft.setFontPreference}
+            projectId={workspace?.project.id}
+            onLoadIdentityOverview={onLoadIdentityOverview}
+            onNotify={(nextMessage) => notifyForTab("通用", nextMessage)}
           /> : null}
           {tab === "活动记录" ? <SettingsActivity /> : null}
           {tab === "聊天" ? (<><SettingsChatParams /><SettingsCompaction /></>) : null}
           {tab === "快速对话" ? <SettingsQuickChat /> : null}
-          {tab === "个性化" ? <SettingsPersonalizationDraft sessionRunning={runtimeBusy} /> : null}
           {memoryVisited ? <SettingsMemory
             models={settingsModels}
             projectId={workspace?.project.id}
@@ -459,10 +468,6 @@ function SettingsOverlayContent({
             onDeleteEntry={onDeleteMemoryEntry}
             onClear={onClearMemory}
             onCompact={onCompactMemory}
-            onLoadIdentityOverview={onLoadIdentityOverview}
-            onImportAlmaIdentity={onImportAlmaIdentity}
-            onSaveIdentityDocument={onSaveIdentityDocument}
-            onReviewIdentityProposal={onReviewIdentityProposal}
             onLoadTelosOverview={onLoadTelosOverview}
             onSaveTelos={onSaveTelos}
             onReviewBehaviorPattern={onReviewBehaviorPattern}
@@ -506,7 +511,7 @@ function SettingsOverlayContent({
         </div>
         <SettingsPageFooter
           dirtyCount={settingsDraft.dirtyCount}
-          disabled={settingsDraft.invalid || settingsDraft.draft === undefined || runtimeBusy}
+          disabled={settingsDraft.invalid || settingsDraft.draft === undefined || (runtimeBusy && !settingsDraft.preferencesOnly)}
           onCancel={requestCancel}
           onSave={() => { void settingsDraft.saveAll(); }}
           state={settingsDraft.saveState}
@@ -681,24 +686,15 @@ function credentialHint(connection: DesktopModelConnection | undefined): string 
   if (connection.credentialSource === "env") return `使用环境变量 ${connection.apiKeyEnv ?? ""} 中的密钥`;
   if (connection.credentialSource === "keychain") return "已保存在 macOS Keychain，粘贴新值可替换";
   if (connection.hasCredential) return "已设置，粘贴新值可替换";
-  return connection.requiresApiKey ? "尚未设置密钥，粘贴后点击“更新密钥”" : "该服务通常无需密钥";
+  return connection.requiresApiKey ? "尚未设置密钥，粘贴后点击“保存”" : "该服务通常无需密钥";
 }
 
-/** Arrow/Home/End traversal inside the enabled-model list (roving tabindex). */
-function moveModelRowFocus(event: React.KeyboardEvent<HTMLDivElement>): void {
-  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-  const rows = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-model-row]")].filter((row) => !row.disabled);
-  if (!rows.length) return;
-  const current = rows.findIndex((row) => row === document.activeElement);
-  const next = event.key === "Home"
-    ? 0
-    : event.key === "End"
-      ? rows.length - 1
-      : event.key === "ArrowDown"
-        ? Math.min(current + 1, rows.length - 1)
-        : Math.max(current - 1, 0);
-  event.preventDefault();
-  rows[next]?.focus();
+/** 凭据行折叠态的短值（maka 的 SettingsExpandableRow value 槽）：一行内说清状态，不展开细节。 */
+function credentialSummary(connection: DesktopModelConnection | undefined): string {
+  if (!connection) return "尚未设置密钥";
+  if (connection.credentialSource === "env") return `环境变量 ${connection.apiKeyEnv ?? ""}`.trim();
+  if (connection.hasCredential) return "已设置";
+  return connection.requiresApiKey ? "尚未设置密钥" : "无需密钥";
 }
 
 function oauthExpiryHint(expiresAt: number | undefined): string {
@@ -707,12 +703,6 @@ function oauthExpiryHint(expiresAt: number | undefined): string {
   if (remainingMinutes <= 0) return "访问令牌已过期，将在下次发送时自动刷新。";
   if (remainingMinutes < 60) return `已登录，访问令牌 ${String(remainingMinutes)} 分钟后自动刷新。`;
   return `已登录，访问令牌 ${String(Math.round(remainingMinutes / 60))} 小时后自动刷新。`;
-}
-
-function formatFetchedAt(timestamp: string): string {
-  const parsed = Date.parse(timestamp);
-  if (!Number.isFinite(parsed)) return "";
-  return new Date(parsed).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
 /**
@@ -724,8 +714,10 @@ function isManualEndpoint(provider: ProviderCatalogItem): boolean {
   return provider.id === "openai-compatible" || !provider.baseUrl.trim();
 }
 
-function SettingsModels({ active, models, connections: connectionInfos, defaultModelAlias, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onFetchCatalogCandidate, onStartLogin, onCompleteLogin, onCancelLogin }: {
+export function SettingsModels({ active, loading, models, connections: connectionInfos, defaultModelAlias, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onFetchCatalogCandidate, onStartLogin, onCompleteLogin, onCancelLogin }: {
   active: boolean;
+  /** 设置快照尚未返回时为 true：连接区显示骨架行而不是闪一下空状态。 */
+  loading?: boolean;
   models: ModelChoice[];
   connections: DesktopModelConnection[];
   defaultModelAlias?: string;
@@ -744,9 +736,10 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
   const connections = connectionLabel(models);
   const connectionInfoFor = (providerAlias: string): DesktopModelConnection | undefined =>
     connectionInfos.find((item) => item.providerAlias === providerAlias);
-  // 模型设置是三态视图：连接列表 / 新增连接 / 连接详情。用一个 view 变量而不是多个布尔量，
-  // 保证三者互斥。
-  const [view, setView] = useState<{ kind: "list" } | { kind: "connect"; provider: ProviderCatalogItem } | { kind: "detail"; provider: string }>({ kind: "list" });
+  // 模型设置是四级视图：连接列表 / 服务商目录 / 新增连接 / 连接详情。目录独立成一层
+  // （参考 maka 的 list → catalog → setup 路由），列表页只放已连接的连接，不再把几十个
+  // 服务商平铺在设置主页。用一个 view 变量而不是多个布尔量，保证它们互斥。
+  const [view, setView] = useState<{ kind: "list" } | { kind: "catalog" } | { kind: "connect"; provider: ProviderCatalogItem } | { kind: "detail"; provider: string }>({ kind: "list" });
   const [category, setCategory] = useState<ProviderCategory>("推荐");
   const [query, setQuery] = useState("");
   const [connectApiKey, setConnectApiKey] = useState("");
@@ -757,7 +750,6 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
   const [detailApiKey, setDetailApiKey] = useState("");
   const [detailBaseUrl, setDetailBaseUrl] = useState("");
   const [detailShowKey, setDetailShowKey] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   // 新增连接时用临时密钥拉到的模型候选，以及用户在勾选列表里的选择。
   const [connectModels, setConnectModels] = useState<CatalogModel[]>([]);
   const [connectSelected, setConnectSelected] = useState<string[]>([]);
@@ -821,6 +813,23 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     })
     .sort((left, right) => providerOrder.indexOf(left.id) - providerOrder.indexOf(right.id));
 
+  // 目录行上的「已连接」只代表已经保存且凭据可用的连接。模型分组可能包含设置草稿里的
+  // 暂存项，或包含凭据已失效的残留配置；这些情况保留详情入口，但不能显示绿色状态。
+  const catalogConnectionState = (provider: ProviderCatalogItem): { count: number; group?: (typeof connections)[number] } => {
+    if (isManualEndpoint(provider)) {
+      return {
+        count: connections.filter((item) => {
+          if (item.providerType !== provider.value) return false;
+          const connection = connectionInfoFor(item.provider);
+          return connection !== undefined && connectionStatus(connection) === null;
+        }).length
+      };
+    }
+    const group = connections.find((item) => item.provider === providerAliasFor(provider, provider.baseUrl));
+    const connection = group ? connectionInfoFor(group.provider) : undefined;
+    return { count: group && connection && connectionStatus(connection) === null ? 1 : 0, group };
+  };
+
   // 打开新增/详情视图时把表单状态全部复位：这些字段（尤其是 API key 和测试结果）不能跨
   // provider 残留。
   const openConnect = (provider: ProviderCatalogItem): void => {
@@ -854,7 +863,17 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     // base URL 覆盖成内置地址。
     setDetailBaseUrl(savedBaseUrl ?? catalog?.baseUrl ?? "");
     setDetailShowKey(false);
-    setAdvancedOpen(false);
+    setTestResult(undefined);
+    setView({ kind: "detail", provider: providerAlias });
+  };
+
+  // 连接建立后直接落在详情页（maka 的 create → detail 动线）：连完之后用户紧接着要做的
+  // 几乎总是测试连接、调整启用模型，回列表等于多一次点击。详情页的 group 等派生数据在
+  // 下一次渲染时从最新草稿自取，这里只需要把表单状态和路由摆对。
+  const openDetailFresh = (providerAlias: string, baseUrl: string): void => {
+    setDetailApiKey("");
+    setDetailBaseUrl(baseUrl);
+    setDetailShowKey(false);
     setTestResult(undefined);
     setView({ kind: "detail", provider: providerAlias });
   };
@@ -985,7 +1004,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     } finally {
       if (generation === connectGenerationRef.current) setConnectFetching(false);
     }
-  }, [connectApiFormat, onFetchCatalogCandidate, onNotify]);
+  }, [connectApiFormat, connectBaseUrl, onFetchCatalogCandidate, onNotify]);
 
   // 填完密钥（或服务商无需密钥）后自动加载模型列表；密钥变化时防抖重拉。
   useEffect(() => {
@@ -1049,10 +1068,12 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
         makeDefault = false;
       }
       setConnectApiKey("");
-      setView({ kind: "list" });
+      const providerAlias = providerAliasFor(provider, baseUrl);
+      openDetailFresh(providerAlias, baseUrl);
+      onNotify(`已连接 ${provider.label}`);
       // Pull the provider's real model list right away, so the connection detail
       // opens on the live catalog instead of the single built-in seed model.
-      void refreshCatalogQuietly(providerAliasFor(provider, baseUrl));
+      void refreshCatalogQuietly(providerAlias);
       return;
     }
     // 内置服务商：按勾选的模型逐个写入草稿，第一个成为默认模型。
@@ -1073,7 +1094,8 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
       makeDefault = false;
     }
     setConnectApiKey("");
-    setView({ kind: "list" });
+    openDetailFresh(providerAliasFor(provider, provider.baseUrl), provider.baseUrl);
+    onNotify(`已连接 ${provider.label}`);
     void refreshCatalogQuietly(providerAliasFor(provider, provider.baseUrl));
   };
 
@@ -1111,7 +1133,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
       loginProviderRef.current = undefined;
       setLoginRequest(undefined);
       setAuthorizationCode("");
-      setView({ kind: "list" });
+      openDetailFresh(providerAliasFor(provider, provider.baseUrl), provider.baseUrl);
     } catch (error) {
       if (generation !== loginGenerationRef.current) return;
       // Codex 回调授权是一次性请求，换 token 或读取模型失败后主进程会清理
@@ -1177,7 +1199,9 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     setLoginStage("idle");
     setLoginError(undefined);
     setAuthorizationCode("");
-    setView({ kind: "list" });
+    // 取消登录回到目录层而不是列表：用户是从目录里选中这个服务商的，
+    // 回去后还能直接换一家。
+    setView({ kind: "catalog" });
   };
 
   const testProvider = async (configuration: DesktopModelConfigurationInput | undefined): Promise<void> => {
@@ -1349,6 +1373,36 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
     }
   };
 
+  // 按手填 ID 直接启用：能力元数据全部留空，由 ProviderRuntime 按 provider 默认值补齐，
+  // 渲染层不替未知模型猜 reasoning 参数（与 buildProviderConfiguration 的手填路径一致）。
+  const enableManualModel = async (modelId: string): Promise<void> => {
+    if (!detailGroup || !detailCatalog) return;
+    const id = modelId.trim();
+    if (!id) return;
+    if (detailGroup.models.some((model) => model.model === id)) {
+      onNotify("该模型已在启用列表中");
+      return;
+    }
+    setSaving(true);
+    try {
+      await saveConfiguration({
+        alias: modelAliasFor(detailGroup.provider, id),
+        displayName: id,
+        providerAlias: detailGroup.provider,
+        providerType: detailCatalog.value,
+        protocol: detailConnection?.protocol ?? detailCatalog.protocol,
+        model: id,
+        baseUrl: detailBaseUrl.trim() || detailCatalog.baseUrl || undefined,
+        apiKey: undefined,
+        apiKeyEnv: undefined,
+        supportsTools: true
+      });
+      onNotify(`已添加 ${id}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const detailActive = detailGroup?.models.find((model) => model.alias === detailDefaultAlias) ?? detailGroup?.defaultModel ?? detailGroup?.models[0];
   // 连接级字段优先（新连接两处都写），老配置从当前模型的 apiBackend 折回。
   const detailApiFormat = apiFormatForConnection(
@@ -1401,17 +1455,34 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
       <section className="connection-section" id="models-connections" tabIndex={-1}>
         <div className="section-heading-row">
           <div>
-            <h3>已连接</h3>
+            <h3>连接</h3>
             <p>管理默认模型、凭据与需要处理的连接状态。</p>
           </div>
-          {connections.length ? <span className="section-count">{connections.length} 个连接</span> : null}
+          <div className="section-heading-actions">
+            {connections.length ? <span className="section-count">{connections.length} 个连接</span> : null}
+            <button className="settings-primary-button" onClick={() => setView({ kind: "catalog" })} type="button">添加连接</button>
+          </div>
         </div>
-        {connections.length ? (
+        {loading && !connections.length ? (
+          // 骨架按真实卡片形状占位（maka 的 Skeleton 同款思路），快照到达时列表不跳动。
+          <div aria-hidden="true" className="connection-list">
+            {[0, 1, 2].map((index) => (
+              <div className="connection-card connection-card-skeleton" key={index}>
+                <span className="provider-mark skeleton-pulse" />
+                <span className="connection-card-copy">
+                  <span className="skeleton-line skeleton-pulse is-wide" />
+                  <span className="skeleton-line skeleton-pulse" />
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : connections.length ? (
           <div className="connection-list">
             {connections.map((connection) => {
               const info = connectionInfoFor(connection.provider);
               const catalog = catalogForConnection(connection, info?.baseUrl) ?? customCatalogEntry(connection, info?.baseUrl);
-              const isDefault = connection.models.some((model) => model.alias === defaultModelAlias);
+              const defaultModel = connection.models.find((model) => model.alias === defaultModelAlias);
+              const isDefault = Boolean(defaultModel);
               const status = connectionStatus(info);
               return (
                 <button className={`connection-card${isDefault ? " is-default" : ""}`} key={connection.provider} onClick={() => openDetail(connection.provider)} type="button">
@@ -1421,7 +1492,9 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
                       {catalog.label}
                       {isDefault ? <span className="default-pill">默认</span> : null}
                     </strong>
-                    <small>已启用 {connection.models.length} 个模型</small>
+                    {/* 副标题把默认模型名露出来（maka 的 "Provider · 默认模型" 同款），
+                        一眼看到当前默认指向哪个模型，不用点进详情。 */}
+                    <small>{defaultModel ? `${connection.models.length} 个模型 · 默认 ${defaultModel.displayName}` : `已启用 ${connection.models.length} 个模型`}</small>
                   </span>
                   {status ? <span className={`status-pill is-${status.tone}`}>{status.label}</span> : null}
                   <Icon name="chevron" className="connection-chevron" size={14} />
@@ -1432,47 +1505,83 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
         ) : (
           <div className="connection-empty">
             <strong>还没有模型连接</strong>
-            <span>从下方选择一种连接方式开始。</span>
+            <span>添加一个连接，从这里开始。</span>
+            <div>
+              <button className="settings-primary-button" onClick={() => setView({ kind: "catalog" })} type="button">添加连接</button>
+            </div>
           </div>
         )}
       </section>
-
-      <section className="connection-section">
-        <div className="section-heading-row">
-          <div>
-            <h3>添加新连接</h3>
-            <p>选择账号登录、模型计划、API、聚合服务或本地运行时。</p>
-          </div>
-        </div>
-        <div className="provider-category-tabs">
-          {(["推荐", "账号", "模型计划", "API", "聚合服务", "本地"] as ProviderCategory[]).map((name) => (
-            <button className={category === name ? "is-selected" : ""} key={name} onClick={() => setCategory(name)} type="button">{name}</button>
-          ))}
-        </div>
-        <label className="provider-search">
-          <Icon name="search" size={14} />
-          <input onChange={(event) => setQuery(event.target.value)} placeholder="搜索服务商" value={query} />
-        </label>
-        <div className="provider-catalog-list">
-          {filteredProviders.map((provider) => (
-            <button className="provider-catalog-row" key={provider.id} onClick={() => openConnect(provider)} type="button">
-              <span className={`provider-mark is-${provider.iconTone}`}><ProviderBrandGlyph type={provider.iconTone} /></span>
-              <span className="provider-catalog-copy">
-                <strong>{provider.label}</strong>
-                <small>{provider.description}</small>
-              </span>
-              <span className="provider-badge">{provider.badge}</span>
-              <Icon name="chevron" className="connection-chevron" size={14} />
-            </button>
-          ))}
-          {!filteredProviders.length ? <div className="settings-empty">没有匹配的服务商</div> : null}
-        </div>
-      </section>
       </div>
+      {view.kind === "catalog" ? (
+        <SettingsDetailLayer onClose={() => setView({ kind: "list" })}>
+          <div className="connect-dialog catalog-dialog" role="dialog" aria-label="添加连接">
+            <header>
+              <div className="connection-detail-title">
+                <div>
+                  <strong>添加连接</strong>
+                  <small>选择账号登录、模型计划、API、聚合服务或本地运行时。</small>
+                </div>
+              </div>
+              <button aria-label="关闭服务商目录" className="icon-button" onClick={() => setView({ kind: "list" })} type="button"><Icon name="close" /></button>
+            </header>
+            {/* 搜索为主、分类收进下拉（maka 同款）：六个分类 tab 按钮排一行太吵，
+                而且换分类时搜索词应该保留。 */}
+            <div className="catalog-toolbar">
+              <label className="provider-search">
+                <Icon name="search" size={14} />
+                <input data-settings-detail-autofocus onChange={(event) => setQuery(event.target.value)} placeholder="搜索服务商" value={query} />
+              </label>
+              <select
+                aria-label="服务商分类"
+                className="connection-select catalog-category-select"
+                onChange={(event) => setCategory(event.target.value as ProviderCategory)}
+                value={category}
+              >
+                {(["推荐", "账号", "模型计划", "API", "聚合服务", "本地"] as ProviderCategory[]).map((name) => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="provider-catalog-list">
+              {filteredProviders.map((provider) => {
+                const connected = catalogConnectionState(provider);
+                return (
+                  <button
+                    className={`provider-catalog-row${connected.count ? " is-connected" : ""}`}
+                    key={provider.id}
+                    onClick={() => connected.group ? openDetail(connected.group.provider) : openConnect(provider)}
+                    type="button"
+                  >
+                    <span className={`provider-mark is-${provider.iconTone}`}><ProviderBrandGlyph type={provider.iconTone} /></span>
+                    <span className="provider-catalog-copy">
+                      <strong>{provider.label}</strong>
+                      <small>{connected.count && connected.group ? `${connected.group.models.length} 个模型已启用` : connected.count ? `已有 ${String(connected.count)} 个连接` : provider.description}</small>
+                    </span>
+                    {connected.count
+                      ? <span className="provider-badge is-connected"><Icon name="check" size={11} />已连接</span>
+                      : <span className="provider-badge">{provider.badge}</span>}
+                    <Icon name="chevron" className="connection-chevron" size={14} />
+                  </button>
+                );
+              })}
+              {!filteredProviders.length ? (
+                <div className="settings-empty">
+                  没有匹配的服务商
+                  {query ? (
+                    <button className="text-button" onClick={() => setQuery("")} type="button">清除搜索</button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </SettingsDetailLayer>
+      ) : null}
       {view.kind === "connect" ? (
+        // connect 层唯一的来路是 catalog，关掉就回目录（cancelLogin 内部同样回 catalog）。
         <SettingsDetailLayer onClose={() => {
           if (view.provider.connectionMode === "login") cancelLogin(view.provider);
-          else setView({ kind: "list" });
+          else setView({ kind: "catalog" });
         }}>
           {view.provider.connectionMode === "login" ? (
             <LoginProviderDialog
@@ -1508,7 +1617,7 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
               onLoadModels={() => void loadConnectModels(view.provider, connectApiKey, true)}
               onSelectAll={toggleAllConnectModels}
               onToggleModel={toggleConnectModel}
-              onCancel={() => setView({ kind: "list" })}
+              onCancel={() => setView({ kind: "catalog" })}
               onTest={() => {
                 const configuration = isManualEndpoint(view.provider)
                   ? buildProviderConfiguration(view.provider, {
@@ -1540,12 +1649,10 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
             catalog={detailCatalog}
             connection={detailConnection}
             availableModels={detailAvailableModels}
-            liveCatalog={detailLiveCatalog}
             defaultAlias={detailDefaultAlias}
             apiKey={detailApiKey}
             baseUrl={detailBaseUrl}
             showKey={detailShowKey}
-            advancedOpen={advancedOpen}
             saving={saving}
             testing={testing}
             fetchingCatalog={fetchingCatalog}
@@ -1554,15 +1661,15 @@ function SettingsModels({ active, models, connections: connectionInfos, defaultM
             onApiKey={(value) => { setDetailApiKey(value); setTestResult(undefined); }}
             onBaseUrl={(value) => { setDetailBaseUrl(value); setTestResult(undefined); }}
             onToggleKey={() => setDetailShowKey((value) => !value)}
-            onToggleAdvanced={() => setAdvancedOpen((value) => !value)}
             onClose={() => setView({ kind: "list" })}
             onTest={() => void testProvider(detailConfiguration)}
             onSaveKey={() => void saveKey()}
             onSaveBaseUrl={() => void saveBaseUrl()}
             apiFormat={detailApiFormat}
             onSaveApiFormat={(id) => void saveApiFormat(id)}
-            onEnableModel={(model) => void enableModel(model)}
-            onDisableModel={(alias) => void disableModel(alias)}
+            onEnableModel={(model) => enableModel(model)}
+            onEnableManualModel={enableManualModel}
+            onDisableModel={(alias) => disableModel(alias)}
             onDeleteConnection={() => void deleteConnection()}
             canDeleteConnection={models.length > detailGroup.models.length}
             onRefreshCatalog={() => void refreshCatalog(detailGroup.provider, true)}
@@ -1682,12 +1789,10 @@ function ConnectionDetailDialog({
   catalog,
   connection,
   availableModels,
-  liveCatalog,
   defaultAlias,
   apiKey,
   baseUrl,
   showKey,
-  advancedOpen,
   saving,
   testing,
   fetchingCatalog,
@@ -1696,7 +1801,6 @@ function ConnectionDetailDialog({
   onApiKey,
   onBaseUrl,
   onToggleKey,
-  onToggleAdvanced,
   onClose,
   onTest,
   onSaveKey,
@@ -1704,6 +1808,7 @@ function ConnectionDetailDialog({
   apiFormat,
   onSaveApiFormat,
   onEnableModel,
+  onEnableManualModel,
   onDisableModel,
   onDeleteConnection,
   canDeleteConnection,
@@ -1716,12 +1821,10 @@ function ConnectionDetailDialog({
   catalog: ProviderCatalogItem;
   connection?: DesktopModelConnection;
   availableModels: CatalogModel[];
-  liveCatalog?: LiveCatalogState;
   defaultAlias?: string;
   apiKey: string;
   baseUrl: string;
   showKey: boolean;
-  advancedOpen: boolean;
   saving: boolean;
   testing: boolean;
   fetchingCatalog: boolean;
@@ -1730,15 +1833,15 @@ function ConnectionDetailDialog({
   onApiKey(value: string): void;
   onBaseUrl(value: string): void;
   onToggleKey(): void;
-  onToggleAdvanced(): void;
   onClose(): void;
   onTest(): void;
   onSaveKey(): void;
   onSaveBaseUrl(): void;
   apiFormat: ApiFormatId;
   onSaveApiFormat(id: ApiFormatId): void;
-  onEnableModel(model: CatalogModel): void;
-  onDisableModel(alias: string): void;
+  onEnableModel(model: CatalogModel): Promise<void> | void;
+  onEnableManualModel(modelId: string): Promise<void>;
+  onDisableModel(alias: string): Promise<void> | void;
   onDeleteConnection(): void;
   canDeleteConnection: boolean;
   onRefreshCatalog(): void;
@@ -1746,15 +1849,30 @@ function ConnectionDetailDialog({
   onOpenExternal(url: string): Promise<void>;
   onChange(alias: string, thinking: ThinkingSelection): void;
 }): React.JSX.Element {
-  const [modelQuery, setModelQuery] = useState("");
-  // 格式选择是草稿制：select 立刻暂存整组模型的协议改写，但真正生效要等设置保存提交，
+  const [manualModelOpen, setManualModelOpen] = useState(false);
+  const [manualModelId, setManualModelId] = useState("");
+  // 凭据、服务地址与 API 格式采用「行式读取 + 点击展开编辑」（maka 的 SettingsExpandableRow
+  // 语言）：这些值设一次之后就是被读取的，常驻输入框等于一直让用户填一个已经填好的东西。
+  // 一次只展开一行；展开或取消时把各行输入灌回已保存值，未提交的编辑不跨行残留。
+  const [editingRow, setEditingRow] = useState<"key" | "endpoint" | "format" | null>(null);
+  // 格式选择是草稿制：行内保存才暂存整组模型的协议改写，但真正生效要等设置保存提交，
   // 所以本地留一份显示值，避免选择后被已保存的旧值弹回。
   const [formatDraft, setFormatDraft] = useState<ApiFormatId>(apiFormat);
-  const filteredModels = availableModels.filter((model) => !modelQuery.trim() || `${model.displayName} ${model.id}`.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()));
+  // 已保存的服务地址（不是输入框里的编辑值）：折叠行显示它，展开/取消时把输入框灌回它。
+  const savedBaseUrl = connection?.baseUrl ?? catalog.baseUrl ?? "";
+  const openRow = (row: "key" | "endpoint" | "format"): void => {
+    onApiKey("");
+    onBaseUrl(savedBaseUrl);
+    setFormatDraft(apiFormat);
+    setEditingRow(row);
+  };
+  const closeRow = (): void => {
+    onApiKey("");
+    onBaseUrl(savedBaseUrl);
+    setFormatDraft(apiFormat);
+    setEditingRow(null);
+  };
   const isDefaultConnection = group.models.some((model) => model.alias === defaultAlias);
-  // The list is one Tab stop, carried by the first row that can actually take
-  // focus — the default-model row is locked and therefore unfocusable.
-  const tabStopModelId = filteredModels.find((model) => group.models.find((configured) => configured.model === model.id)?.alias !== defaultAlias)?.id;
   const apiKeyUrl = catalog.apiKeyUrl;
   // OAuth-backed connections have no user-editable key: showing a password box
   // there just invites pasting something that can never work.
@@ -1762,7 +1880,7 @@ function ConnectionDetailDialog({
   const status = connectionStatus(connection);
   const busy = saving || testing || fetchingCatalog;
   return (
-    <section className={`connect-dialog connection-detail-dialog${advancedOpen ? " is-advanced" : ""}`} role="dialog" aria-label={`${catalog.label} 连接设置`}>
+    <section className="connect-dialog connection-detail-dialog" role="dialog" aria-label={`${catalog.label} 连接设置`}>
       <header>
         <div className="connection-detail-title">
           <span className={`provider-mark is-${catalog.iconTone}`}><ProviderBrandGlyph type={catalog.iconTone} /></span>
@@ -1771,6 +1889,19 @@ function ConnectionDetailDialog({
             <small>{isDefaultConnection ? "默认连接" : "已连接"} · {apiFormatOption(formatDraft).label}</small>
           </div>
         </div>
+        {!isDefaultConnection ? (
+          // maka 详情页 header 的 badge 槽：默认连接显示状态文本，非默认连接给出直达动作，
+          // 否则「已连接」是个没有出口的只读标签。连接级默认落到该连接的首选模型上。
+          <button
+            className="ghost-button connection-default-button"
+            disabled={busy}
+            onClick={() => {
+              const target = group.defaultModel ?? group.models[0];
+              if (target) onChange(target.alias, target.defaultThinking);
+            }}
+            type="button"
+          >设为默认</button>
+        ) : null}
         <button aria-label="关闭连接设置" className="icon-button" onClick={onClose} type="button"><Icon name="close" /></button>
       </header>
 
@@ -1787,144 +1918,185 @@ function ConnectionDetailDialog({
           </p>
           <button className="ghost-button" disabled={busy} onClick={onRelogin} type="button">重新登录</button>
         </div>
-      ) : (
-        <>
-          <div className="connection-field">
-            <div className="connection-field-label">
-              <span>模型密钥</span>
-              <small>{credentialHint(connection)}</small>
-            </div>
-            <div className="secret-input-row">
-              <input
-                autoComplete="off"
-                onChange={(event) => onApiKey(event.target.value)}
-                placeholder={connection?.hasCredential ? "••••••••" : "输入或粘贴 API Key"}
-                type={showKey ? "text" : "password"}
-                value={apiKey}
-              />
-              {/* The saved key never reaches the renderer (see credentialHint) —
-                  this box only ever holds a freshly typed replacement, so there
-                  is nothing to reveal until the user starts typing one. Toggling
-                  `type` on an empty input looks identical either way, which read
-                  as "the button does nothing". */}
-              <button aria-label={showKey ? "隐藏密钥" : "显示密钥"} className="icon-button" disabled={!apiKey} onClick={onToggleKey} type="button">
-                <Icon name={showKey ? "eye-off" : "eye"} size={14} />
-              </button>
-            </div>
-          </div>
-
-          <div className="connection-inline-row">
-            {apiKeyUrl ? <a className="settings-link" href={apiKeyUrl} onClick={(event) => { event.preventDefault(); void onOpenExternal(apiKeyUrl); }} rel="noreferrer">获取模型密钥</a> : <span className="settings-link is-disabled">请向服务商获取密钥</span>}
-            {/* Kept mounted and disabled instead of conditionally rendered, so the
-                row height does not jump the moment the user starts typing a key. */}
-            <button className="ghost-button" disabled={busy || !apiKey.trim()} onClick={onSaveKey} type="button">{saving ? "保存中…" : "更新密钥"}</button>
-          </div>
-        </>
-      )}
-      {testResult && !advancedOpen ? <ConnectionTestResult result={testResult} /> : null}
-
-      <button className="advanced-toggle" onClick={onToggleAdvanced} type="button">
-        <Icon name="chevron" size={12} style={{ transform: advancedOpen ? "rotate(0deg)" : "rotate(-90deg)" }} />
-        高级设置
-      </button>
-
-      {advancedOpen ? (
-        <div className="connection-advanced">
-          <div className="connection-field">
-            <div className="connection-field-label">
-              <span>启用模型 {group.models.length}</span>
-              <small>
-                {liveCatalog
-                  ? `共 ${String(availableModels.length)} 个候选 · 已于 ${formatFetchedAt(liveCatalog.fetchedAt)} 从服务商获取`
-                  : `共 ${String(availableModels.length)} 个候选 · 内置列表，可点击“更新模型目录”拉取实时列表`}
-              </small>
-            </div>
-            <label className="model-search-input">
-              <Icon name="search" size={13} />
-              <input onChange={(event) => setModelQuery(event.target.value)} placeholder="搜索模型" value={modelQuery} />
-            </label>
-            {/* Roving tabindex: the whole list is one Tab stop, so a provider
-                returning hundreds of models doesn't wall off the controls below
-                it for keyboard users. */}
-            <div className="enabled-model-list" onKeyDown={(event) => moveModelRowFocus(event)} role="group" aria-label="可启用的模型">
-              {filteredModels.map((catalogModel) => {
-                const configured = group.models.find((model) => model.model === catalogModel.id);
-                const isDefault = configured?.alias === defaultAlias;
-                const enabled = Boolean(configured);
-                const hint = modelCapabilityHint(catalogModel);
-                return (
-                  <div className={`enabled-model-row${enabled ? " is-enabled" : ""}${isDefault ? " is-default" : ""}`} key={catalogModel.id}>
-                    <button
-                      aria-checked={enabled}
-                      aria-label={enabled ? `取消启用 ${catalogModel.displayName}` : `启用 ${catalogModel.displayName}`}
-                      className="enabled-model-toggle"
-                      data-model-row=""
-                      // The default model must stay enabled — removing it would
-                      // leave the runtime pointing at a model that is gone.
-                      disabled={busy || isDefault}
-                      onClick={() => {
-                        if (configured) onDisableModel(configured.alias);
-                        else onEnableModel(catalogModel);
-                      }}
-                      role="checkbox"
-                      tabIndex={catalogModel.id === tabStopModelId ? 0 : -1}
-                      type="button"
-                    >
-                      <span className={`check-dot${enabled ? " is-on" : ""}`}><Icon name="check" size={11} /></span>
-                      <span className="enabled-model-name">{catalogModel.displayName}</span>
-                      {catalogModel.id !== catalogModel.displayName ? <span className="enabled-model-id">{catalogModel.id}</span> : null}
-                      {hint ? <span className="model-capability-hint">{hint}</span> : null}
-                    </button>
-                    {enabled && configured ? (
-                      isDefault
-                        ? <span className="default-pill">默认</span>
-                        : <button className="set-default-button" disabled={busy} onClick={() => onChange(configured.alias, configured.defaultThinking)} type="button">设为默认</button>
-                    ) : null}
-                  </div>
-                );
-              })}
-              {!filteredModels.length ? <div className="model-list-empty">{availableModels.length ? "没有匹配的模型" : "尚未获取到模型列表"}</div> : null}
-            </div>
-          </div>
-
-          <div className="connection-field">
-            <div className="connection-field-label"><span>服务地址</span></div>
-            <div className="secret-input-row">
-              <input onChange={(event) => onBaseUrl(event.target.value)} placeholder="https://api.example.com" value={baseUrl} />
-              <button className="ghost-button" disabled={busy || !baseUrl.trim()} onClick={onSaveBaseUrl} type="button">保存服务地址</button>
-            </div>
-          </div>
-
-          {!usesOAuth ? (
-            <div className="connection-field">
-              <div className="connection-field-label">
-                <span>API 格式</span>
-                <small>{apiFormatOption(formatDraft).description} · 切换后对该连接全部模型生效，保存后应用</small>
-              </div>
-              <select
-                className="connection-select"
-                disabled={busy}
-                onChange={(event) => {
-                  const id = event.target.value as ApiFormatId;
-                  setFormatDraft(id);
-                  onSaveApiFormat(id);
-                }}
-                value={formatDraft}
-              >
-                {apiFormatOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-              </select>
-            </div>
-          ) : null}
-          {testResult ? <ConnectionTestResult result={testResult} /> : null}
-          <div className="connection-detail-footer">
-            <div>
-              <button className="ghost-button" disabled={busy || !configuration} onClick={onTest} type="button">{testing ? "测试中…" : "测试连接"}</button>
-              <button className="text-button" disabled={busy} onClick={onRefreshCatalog} type="button">{fetchingCatalog ? "更新中…" : "更新模型目录"}</button>
-            </div>
-            <button className="danger-text-button" disabled={busy || !canDeleteConnection} onClick={onDeleteConnection} type="button">删除连接</button>
-          </div>
-        </div>
       ) : null}
+
+      {/* 凭据行组（maka 的 SettingsExpandableRow 语言）：密钥 / 服务地址 / API 格式常态只读
+          显示已保存的值，点「更改」才展开成编辑器。这些值设一次之后就是被读取的，常驻输入框
+          等于一直让用户填一个已经填好的东西。一次只展开一行。
+          折叠态是两行式：label 行在上、值行在下（supporting 小字），操作按钮贴右侧顶对齐；
+          横排一行会让「API 格式OpenAI Chat Completions」这种长值和 label 挤成一团。 */}
+      <section className="detail-section">
+        <div className="detail-section-head">
+          <h3>连接</h3>
+          <p>密钥只保存在本机。</p>
+        </div>
+      <div className="connection-rows">
+        {!usesOAuth ? (
+          <div className="connection-row-item">
+            {editingRow === "key" ? (
+              <div className="connection-row-editor">
+                <span className="connection-row-label">模型密钥</span>
+                <div className="secret-input-row">
+                  <input
+                    autoComplete="off"
+                    autoFocus
+                    onChange={(event) => onApiKey(event.target.value)}
+                    placeholder={connection?.hasCredential ? "粘贴新密钥以替换" : "输入或粘贴 API Key"}
+                    type={showKey ? "text" : "password"}
+                    value={apiKey}
+                  />
+                  {/* The saved key never reaches the renderer (see credentialHint) —
+                      this box only ever holds a freshly typed replacement, so there
+                      is nothing to reveal until the user starts typing one. */}
+                  <button aria-label={showKey ? "隐藏密钥" : "显示密钥"} className="icon-button" disabled={!apiKey} onClick={onToggleKey} type="button">
+                    <Icon name={showKey ? "eye-off" : "eye"} size={14} />
+                  </button>
+                </div>
+                <div className="connection-row-hint">{credentialHint(connection)}</div>
+                <div className="connection-row-actions">
+                  {apiKeyUrl ? <a className="settings-link" href={apiKeyUrl} onClick={(event) => { event.preventDefault(); void onOpenExternal(apiKeyUrl); }} rel="noreferrer">获取模型密钥</a> : null}
+                  <span className="connection-row-actions-spacer" />
+                  <button className="ghost-button" disabled={busy} onClick={closeRow} type="button">取消</button>
+                  <button className="settings-primary-button" disabled={busy || !apiKey.trim()} onClick={() => { void onSaveKey(); setEditingRow(null); }} type="button">{saving ? "保存中…" : "保存"}</button>
+                </div>
+              </div>
+            ) : (
+              <div className="connection-row">
+                <div className="connection-row-main">
+                  <span className="connection-row-label">模型密钥</span>
+                  <span className={`connection-row-value${connection?.requiresApiKey && !connection.hasCredential ? " is-warn" : ""}`}>{credentialSummary(connection)}</span>
+                </div>
+                <button className="ghost-button connection-row-action" disabled={busy} onClick={() => openRow("key")} type="button">{connection?.hasCredential ? "更改" : "设置"}</button>
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        <div className="connection-row-item">
+          {editingRow === "endpoint" ? (
+            <div className="connection-row-editor">
+              <span className="connection-row-label">服务地址</span>
+              <input autoFocus onChange={(event) => onBaseUrl(event.target.value)} placeholder="https://api.example.com" value={baseUrl} />
+              <div className="connection-row-hint">该连接的所有请求都发往这个地址。</div>
+              <div className="connection-row-actions">
+                <span className="connection-row-actions-spacer" />
+                <button className="ghost-button" disabled={busy} onClick={closeRow} type="button">取消</button>
+                <button className="settings-primary-button" disabled={busy || !baseUrl.trim() || baseUrl.trim() === savedBaseUrl} onClick={() => { void onSaveBaseUrl(); setEditingRow(null); }} type="button">{saving ? "保存中…" : "保存"}</button>
+              </div>
+            </div>
+          ) : (
+              <div className="connection-row">
+                <div className="connection-row-main">
+                  <span className="connection-row-label">服务地址</span>
+                  <span className="connection-row-value is-mono">{savedBaseUrl || (catalog.baseUrl ? "服务商默认地址" : "未设置")}</span>
+                </div>
+                <button className="ghost-button connection-row-action" disabled={busy} onClick={() => openRow("endpoint")} type="button">更改</button>
+              </div>
+          )}
+        </div>
+
+        {!usesOAuth ? (
+          <div className="connection-row-item">
+            {editingRow === "format" ? (
+              <div className="connection-row-editor">
+                <span className="connection-row-label">API 格式</span>
+                <select
+                  autoFocus
+                  className="connection-select"
+                  disabled={busy}
+                  onChange={(event) => setFormatDraft(event.target.value as ApiFormatId)}
+                  value={formatDraft}
+                >
+                  {apiFormatOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+                </select>
+                <div className="connection-row-hint">{apiFormatOption(formatDraft).description} · 切换后对该连接全部模型生效，保存后应用</div>
+                <div className="connection-row-actions">
+                  <span className="connection-row-actions-spacer" />
+                  <button className="ghost-button" disabled={busy} onClick={closeRow} type="button">取消</button>
+                  <button className="settings-primary-button" disabled={busy || formatDraft === apiFormat} onClick={() => { onSaveApiFormat(formatDraft); setEditingRow(null); }} type="button">{saving ? "保存中…" : "保存"}</button>
+                </div>
+              </div>
+            ) : (
+              <div className="connection-row">
+                <div className="connection-row-main">
+                  <span className="connection-row-label">API 格式</span>
+                  <span className="connection-row-value">{apiFormatOption(apiFormat).label}</span>
+                </div>
+                <button className="ghost-button connection-row-action" disabled={busy} onClick={() => openRow("format")} type="button">更改</button>
+              </div>
+            )}
+          </div>
+        ) : null}
+      </div>
+      </section>
+
+      {/* 模型管理是一级区块（maka 的 DetailSection 模型管理），不再折叠进「高级设置」：
+          连接建立后最常来的地方就是这里。选择器是 MultiSelector 形态：trigger 显示
+          已选模型标签，点开是搜索 + 全选 + 勾选列表，而不是常驻整面 checkbox 墙。 */}
+      <section className="detail-section">
+        <div className="detail-section-head">
+          <h3>模型</h3>
+          <p>这些模型会出现在任务的模型选择器里。</p>
+        </div>
+        <ModelMultiSelect
+          busy={busy}
+          provider={group.provider}
+          enabled={group.models}
+          models={availableModels}
+          onDisableModel={onDisableModel}
+          onEnableModel={onEnableModel}
+        />
+            {manualModelOpen ? (
+              <div className="manual-model-row">
+                <input
+                  autoFocus
+                  onChange={(event) => setManualModelId(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || !manualModelId.trim() || busy) return;
+                    event.preventDefault();
+                    void onEnableManualModel(manualModelId.trim());
+                    setManualModelId("");
+                    setManualModelOpen(false);
+                  }}
+                  placeholder="deepseek-v4-pro-beta"
+                  value={manualModelId}
+                />
+                <button
+                  className="ghost-button"
+                  disabled={busy || !manualModelId.trim()}
+                  onClick={() => {
+                    void onEnableManualModel(manualModelId.trim());
+                    setManualModelId("");
+                    setManualModelOpen(false);
+                  }}
+                  type="button"
+                >添加</button>
+                <button className="text-button" onClick={() => { setManualModelOpen(false); setManualModelId(""); }} type="button">取消</button>
+              </div>
+            ) : null}
+            {/* 模型区动作行（maka 的模型管理按钮行）：测试 secondary 在前，更新目录 /
+                添加模型 ghost 在后。中转站常先透传新模型、目录还没更新，手动添加是按 ID
+                直接启用的逃生通道。 */}
+            <div className="connection-model-actions">
+              <button className="settings-secondary-button" disabled={busy || !configuration} onClick={onTest} type="button">{testing ? "测试中…" : "测试连接"}</button>
+              <button className="ghost-button" disabled={busy} onClick={onRefreshCatalog} type="button">{fetchingCatalog ? "更新中…" : "更新模型目录"}</button>
+              {!manualModelOpen ? (
+                <button className="ghost-button" disabled={busy} onClick={() => setManualModelOpen(true)} type="button">添加模型</button>
+              ) : null}
+            </div>
+            {testResult ? <ConnectionTestResult result={testResult} /> : null}
+      </section>
+
+      {/* 危险区独立成段，段头已经说明行为，按钮上不再重复「连接」二字（maka 同例）。 */}
+      <section className="detail-section danger-zone">
+        <div className="detail-section-head">
+          <h3>删除连接</h3>
+          <p>此操作不可撤销。</p>
+        </div>
+        <div>
+          <button className="danger-button" disabled={busy || !canDeleteConnection} onClick={onDeleteConnection} type="button">删除</button>
+        </div>
+      </section>
     </section>
   );
 }

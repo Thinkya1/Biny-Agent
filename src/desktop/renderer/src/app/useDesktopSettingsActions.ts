@@ -13,7 +13,6 @@ import type {
   DesktopMemoryEntryPatch,
   DesktopMemoryOriginFilter,
   DesktopBehaviorPatternReviewAction,
-  DesktopIdentityDocumentKind,
   DesktopTelosDocumentInput,
   DesktopTelosDriftResolutionAction,
   DesktopModelConfigurationInput,
@@ -160,33 +159,6 @@ export function useDesktopSettingsActions({
     return await load(requireProject(projectIdRef.current));
   }, [projectIdRef]);
 
-  const importAlmaIdentity = useCallback(async (root?: string) => {
-    const importIdentity = window.biny.importAlmaIdentity;
-    if (typeof importIdentity !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await importIdentity(requireProject(projectIdRef.current), root);
-  }, [projectIdRef]);
-
-  const saveIdentityDocument = useCallback(async (
-    document: DesktopIdentityDocumentKind,
-    content: string,
-    expectedRevision: number,
-    reason?: string
-  ) => {
-    const save = window.biny.saveIdentityDocument;
-    if (typeof save !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await save(requireProject(projectIdRef.current), document, content, expectedRevision, reason);
-  }, [projectIdRef]);
-
-  const reviewIdentityProposal = useCallback(async (
-    proposalId: string,
-    action: "accept" | "reject",
-    expectedRevision: number
-  ) => {
-    const review = window.biny.reviewIdentityProposal;
-    if (typeof review !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await review(requireProject(projectIdRef.current), proposalId, action, expectedRevision);
-  }, [projectIdRef]);
-
   const searchMemory = useCallback(async (filter: DesktopMemoryOriginFilter, query: string) => {
     return await window.biny.searchMemory(requireProject(projectIdRef.current), filter, query);
   }, [projectIdRef]);
@@ -261,14 +233,11 @@ export function useDesktopSettingsActions({
     loadMemoryEntries,
     loadIdentityOverview,
     loadTelosOverview,
-    importAlmaIdentity,
     openBrowser,
     resolveTelosDrift,
     rebuildMemoryEmbeddingIndex,
     reviewBehaviorPattern,
     saveTelos,
-    saveIdentityDocument,
-    reviewIdentityProposal,
     searchMemory,
     snoozeTelosDrift,
     startModelLogin,

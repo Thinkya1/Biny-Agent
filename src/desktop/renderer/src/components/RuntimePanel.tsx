@@ -7,6 +7,7 @@
 import { useEffect, useState } from "react";
 import type { DesktopRuntimeMutation, DesktopRuntimeProjection } from "../../../protocol.js";
 import { useClosingPresence } from "../useClosingPresence.js";
+import { desktopWorktreeView } from "../worktreePresentation.js";
 import { Icon } from "./Icon.js";
 
 type RuntimeRecord = Record<string, unknown>;
@@ -15,12 +16,14 @@ interface RuntimePanelProps {
   open: boolean;
   onClose(): void;
   projection?: DesktopRuntimeProjection;
+  selectedSessionId?: string;
+  worktreeSession?: boolean;
   onError(error: unknown): void;
   onMutation(operation: DesktopRuntimeMutation, payload: Record<string, unknown>): Promise<void>;
   onRefresh(): Promise<void>;
 }
 
-export function RuntimePanel({ open, onClose, projection, onError, onMutation, onRefresh }: RuntimePanelProps): React.JSX.Element | null {
+export function RuntimePanel({ open, onClose, projection, selectedSessionId, worktreeSession = false, onError, onMutation, onRefresh }: RuntimePanelProps): React.JSX.Element | null {
   const [busyAction, setBusyAction] = useState<string>();
   const presence = useClosingPresence(open);
 
@@ -29,12 +32,17 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
     void onRefresh().catch(onError);
   }, [onError, onRefresh, open]);
 
-  const runAction = async (key: string, operation: DesktopRuntimeMutation, payload: Record<string, unknown>): Promise<void> => {
+  const runAction = async (
+    key: string,
+    operation: DesktopRuntimeMutation,
+    payload: Record<string, unknown>,
+    reportError: (error: unknown) => void = onError
+  ): Promise<void> => {
     setBusyAction(key);
     try {
       await onMutation(operation, payload);
     } catch (error) {
-      onError(error);
+      reportError(error);
     } finally {
       setBusyAction(undefined);
     }
@@ -44,6 +52,12 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
   const goals = records(projection?.goals);
   const graphs = records(projection?.graphs);
   const capabilities = records(projection?.capabilities);
+  const selectedWorktree = selectedSessionId === undefined
+    ? undefined
+    : projection?.worktrees.find((worktree) => worktree.sessionId === selectedSessionId);
+  const worktree = worktreeSession && selectedSessionId !== undefined
+    ? { sessionId: selectedSessionId, view: desktopWorktreeView(selectedWorktree) }
+    : undefined;
 
   if (!presence.present) return null;
 
@@ -68,6 +82,23 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
         <span>任务 {tasks.length}</span>
         <span>Graph {graphs.length}</span>
       </div>
+
+      {worktree ? (
+        <WorktreeSection
+          busyAction={busyAction}
+          sessionId={worktree.sessionId}
+          onAction={(operation, payload, key) => {
+            const message = operation === "worktree.merge"
+              ? "确认将当前隔离工作树合并到项目主分支吗？只有工作树和主工作区都干净时才会执行。"
+              : worktree.view.deleteBranchOnRemove
+                ? "确认清理已合并的隔离工作树和对应分支吗？"
+                : "确认移除当前隔离工作树吗？未提交改动会被拦截，Git 分支会保留。";
+            if (!window.confirm(message)) return;
+            void runAction(key, operation, payload, (error) => onError(formatWorktreeError(error)));
+          }}
+          view={worktree.view}
+        />
+      ) : null}
 
       <RuntimeSection title="任务" empty="暂无持久任务">
         {tasks.map((task) => {
@@ -128,6 +159,54 @@ export function RuntimePanel({ open, onClose, projection, onError, onMutation, o
   );
 }
 
+function WorktreeSection({
+  busyAction,
+  onAction,
+  sessionId,
+  view
+}: {
+  busyAction?: string;
+  onAction(operation: Extract<DesktopRuntimeMutation, "worktree.merge" | "worktree.remove">, payload: Record<string, unknown>, key: string): void;
+  sessionId: string;
+  view: ReturnType<typeof desktopWorktreeView>;
+}): React.JSX.Element {
+  const mergeKey = "worktree.merge";
+  const removeKey = "worktree.remove";
+  return (
+    <section className={`biny-runtime-section biny-runtime-worktree is-${view.tone}`}>
+      <h3>当前会话的隔离工作树</h3>
+      <div className="biny-runtime-worktree-status">
+        <div className="biny-runtime-row-copy">
+          <strong>{view.label}</strong>
+          <small>{view.detail}</small>
+        </div>
+        <div className="biny-runtime-row-actions">
+          {view.canMerge ? (
+            <button
+              className="biny-runtime-row-action"
+              disabled={busyAction !== undefined}
+              onClick={() => onAction("worktree.merge", { sessionId, strategy: "merge", deleteAfter: true }, mergeKey)}
+              type="button"
+            >
+              {busyAction === mergeKey ? "处理中…" : "合并到项目"}
+            </button>
+          ) : null}
+          {view.canRemove ? (
+            <button
+              className="biny-runtime-row-action"
+              disabled={busyAction !== undefined}
+              onClick={() => onAction("worktree.remove", { sessionId, deleteBranch: view.deleteBranchOnRemove }, removeKey)}
+              type="button"
+            >
+              {busyAction === removeKey ? "处理中…" : "清理隔离环境"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function RuntimeSection({ children, empty, title }: { children?: React.ReactNode; empty: string; title: string }): React.JSX.Element {
   const content = Array.isArray(children) ? children.filter(Boolean) : children;
   const isEmpty = Array.isArray(content) ? content.length === 0 : !content;
@@ -178,4 +257,15 @@ function recordId(record: RuntimeRecord, ...keys: string[]): string | undefined 
 function recordText(record: RuntimeRecord, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function formatWorktreeError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("uncommitted") || message.includes("未提交")) {
+    return new Error("隔离工作树有未提交改动，已保留；请先手动处理后再试。");
+  }
+  if (message.includes("merge") || message.includes("合并")) {
+    return new Error("隔离工作树合并未完成，工作树已保留；请手动处理冲突后再试。");
+  }
+  return new Error("隔离工作树操作未完成，已保留；请刷新状态后重试。");
 }

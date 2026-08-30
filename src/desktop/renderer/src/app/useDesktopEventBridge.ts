@@ -17,6 +17,15 @@ import type {
 import { liveTimelineEvents } from "../sessionTimeline.js";
 import { applyUpdatesToSidebarSessions, applyUpdatesToWorkspace, hasContextStatus } from "./desktopState.js";
 
+/** 聊天内技能草稿审核卡片的最小数据；从 `skill.draft_created` host event 提取。 */
+export interface SkillDraftNotice {
+  id: string;
+  name: string;
+  description: string;
+  toolCalls: number;
+  sessionId: string;
+}
+
 interface DesktopEventBridgeOptions {
   activeProjectIdRef: { current: string | undefined };
   selectedSessionIdRef: { current: string | undefined };
@@ -24,6 +33,8 @@ interface DesktopEventBridgeOptions {
   onError(error: unknown): void;
   setContextBudget: Dispatch<SetStateAction<ContextBudgetStatus | undefined>>;
   setDocument: Dispatch<SetStateAction<DesktopSessionDocument | undefined>>;
+  /** 收集当前选中会话的技能草稿通知；事件不进消息时间线，只驱动聊天内的审核卡片。 */
+  setSkillDraftNotices: Dispatch<SetStateAction<SkillDraftNotice[]>>;
   setWriterConflict: Dispatch<SetStateAction<DesktopSessionWriterConflict | undefined>>;
   setSidebarSessions: Dispatch<SetStateAction<DesktopSessionSummary[]>>;
   setWorkspace: Dispatch<SetStateAction<DesktopWorkspaceSnapshot | undefined>>;
@@ -36,6 +47,7 @@ export function useDesktopEventBridge({
   onError,
   setContextBudget,
   setDocument,
+  setSkillDraftNotices,
   setWriterConflict,
   setSidebarSessions,
   setWorkspace
@@ -82,7 +94,21 @@ export function useDesktopEventBridge({
           const currentEvents = projectBatch
             .map((envelope) => envelope.event)
             .filter((event): event is AgentHostEvent => event !== undefined && event.sessionId === currentSessionId);
-          const timelineEvents = liveTimelineEvents(currentEvents);
+          // skill.draft_created 是审核通知而非对话内容：不进消息时间线，单独收集成聊天内草稿卡。
+          const draftNotices = currentEvents.filter((event) => event.type === "skill.draft_created");
+          if (draftNotices.length) {
+            setSkillDraftNotices((current) => {
+              const seen = new Set(current.map((notice) => notice.id));
+              const fresh = draftNotices
+                .filter((event) => !seen.has(event.draft.id))
+                .map((event) => ({ ...event.draft, sessionId: currentSessionId }));
+              return fresh.length ? [...current, ...fresh] : current;
+            });
+          }
+          const timelineSource = draftNotices.length
+            ? currentEvents.filter((event) => event.type !== "skill.draft_created")
+            : currentEvents;
+          const timelineEvents = liveTimelineEvents(timelineSource);
           if (timelineEvents.length) {
             setDocument((current) => current?.session.id === currentSessionId
               ? { ...current, liveEvents: [...current.liveEvents, ...timelineEvents] }
@@ -113,5 +139,5 @@ export function useDesktopEventBridge({
       for (const timer of refreshTimers.values()) clearTimeout(timer);
       refreshTimers.clear();
     };
-  }, [activeProjectIdRef, mergeProjectSnapshot, onError, selectedSessionIdRef, setContextBudget, setDocument, setSidebarSessions, setWorkspace, setWriterConflict]);
+  }, [activeProjectIdRef, mergeProjectSnapshot, onError, selectedSessionIdRef, setContextBudget, setDocument, setSkillDraftNotices, setSidebarSessions, setWorkspace, setWriterConflict]);
 }

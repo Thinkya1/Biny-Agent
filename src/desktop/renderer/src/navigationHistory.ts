@@ -7,6 +7,11 @@
 export interface DesktopNavigationTarget {
   projectId: string;
   sessionId?: string;
+  /**
+   * 草稿（无会话）的呈现变体：项目行「新建任务」直达空白聊天，
+   * 缺省为首页欢迎态。随历史记录保存，后退/前进回到草稿时保持原样。
+   */
+  draftVariant?: "blank";
 }
 
 export interface DesktopNavigationState {
@@ -23,7 +28,7 @@ export function pushNavigation(state: DesktopNavigationState, target: DesktopNav
   if (sameTarget(state.entries[state.index], target)) return state;
   // 从历史中间跳转时，后面的前进记录作废。
   const entries = state.entries.slice(0, state.index + 1);
-  entries.push({ projectId: target.projectId, sessionId: target.sessionId });
+  entries.push({ projectId: target.projectId, sessionId: target.sessionId, ...(target.draftVariant ? { draftVariant: target.draftVariant } : {}) });
   return { entries, index: entries.length - 1 };
 }
 
@@ -31,7 +36,7 @@ export function pushNavigation(state: DesktopNavigationState, target: DesktopNav
 export function replaceNavigation(state: DesktopNavigationState, target: DesktopNavigationTarget): DesktopNavigationState {
   if (state.index < 0) return pushNavigation(state, target);
   const entries = [...state.entries];
-  entries[state.index] = { projectId: target.projectId, sessionId: target.sessionId };
+  entries[state.index] = { projectId: target.projectId, sessionId: target.sessionId, ...(target.draftVariant ? { draftVariant: target.draftVariant } : {}) };
   return { entries, index: state.index };
 }
 

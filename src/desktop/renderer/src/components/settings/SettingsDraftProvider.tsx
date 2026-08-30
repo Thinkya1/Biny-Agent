@@ -15,7 +15,6 @@ import type {
   DesktopIdentitySettings,
   DesktopMemorySettings,
   DesktopModelConfigurationInput,
-  DesktopPersonalizationSettings,
   DesktopSettingsSaveInput,
   DesktopSettingsSaveResult,
   DesktopSettingsSnapshot,
@@ -63,6 +62,20 @@ export function SettingsDraftProvider({
     onFontPreview(next.fontPreference);
   }, [onFontPreview, onThemePreview]);
 
+  /**
+   * 「设为默认」等即时动作落盘后，用返回的权威快照推进基线，但保留用户对其它字段的
+   * 未保存草稿（主题/字体/个性化等），避免一次即时保存吞掉未提交的编辑。models 草稿只
+   * 清掉已即时生效的 defaultModel 项，upserts/removes/凭据句柄照常保留。
+   */
+  const adoptExternalSnapshot = useCallback((next: DesktopSettingsSnapshot): void => {
+    setSnapshot(next);
+    setSaveState(next.pendingRecovery ? "recovery_required" : "clean");
+    setDraft((current) => current ? {
+      ...current,
+      models: { ...current.models, defaultModel: undefined }
+    } : current);
+  }, []);
+
   useEffect(() => {
     if (!active || !projectId) return;
     let cancelled = false;
@@ -88,9 +101,6 @@ export function SettingsDraftProvider({
     onFontPreview(value);
   }, [onFontPreview]);
 
-  const setPersonalization = useCallback((value: DesktopPersonalizationSettings): void => {
-    setDraft((current) => current ? { ...current, personalization: value } : current);
-  }, []);
 
   const setActivity = useCallback((value: DesktopActivitySettingsInput): void => {
     setDraft((current) => current ? { ...current, activity: value } : current);
@@ -198,12 +208,16 @@ export function SettingsDraftProvider({
   }, []);
 
   const dirtyCount = snapshot && draft ? countDirtyFields(snapshot, draft) : 0;
+  const nonPreferenceDirtyCount = snapshot && draft ? countNonPreferenceDirtyFields(snapshot, draft) : 0;
+  // 主题和字体只影响 DesktopStateStore，不会改变运行中的 Agent 配置。
+  const preferencesOnly = dirtyCount > 0 && nonPreferenceDirtyCount === 0;
   const invalid = draft ? !validDraft(draft) : false;
   const runtimeBusy = sessionRunning || snapshot?.hasRunningTasks === true;
+  const runtimeBlocked = runtimeBusy && !preferencesOnly;
   const canSave = active
     && dirtyCount > 0
     && draft !== undefined
-    && !runtimeBusy
+    && !runtimeBlocked
     && !invalid
     && saveState !== "saving"
     && saveState !== "rolling_back"
@@ -242,10 +256,16 @@ export function SettingsDraftProvider({
   }, [active, adoptSnapshot, releaseAllCredentials, snapshot]);
 
   const saveAll = useCallback(async (): Promise<DesktopSettingsSaveResult | undefined> => {
-    if (!snapshot || !draft || runtimeBusy || invalid || dirtyCount === 0 || saveState === "recovery_required") return undefined;
+    if (!snapshot || !draft || runtimeBlocked || invalid || dirtyCount === 0 || saveState === "recovery_required") return undefined;
     setSaveState("saving");
+    // 看门狗：保存走单互斥事务，前序操作若撞上 Keychain security 超时可能长时间占用；
+    // 超时不取消后端事务（它最终会自行落盘并清理），只把 UI 从「保存中」复位，避免死锁观感。
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const watchdogTrip = new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error("保存超时，可能仍在后台完成；如状态未更新请重试。")), 20_000);
+    });
     try {
-      const result = await window.biny.saveSettings(snapshot.projectId, saveInput(snapshot, draft));
+      const result = await Promise.race([window.biny.saveSettings(snapshot.projectId, saveInput(snapshot, draft)), watchdogTrip]);
       if (result.status === "committed") {
         credentialHandlesRef.current.clear();
         adoptSnapshot(result.snapshot);
@@ -270,19 +290,21 @@ export function SettingsDraftProvider({
       setSaveState("dirty");
       onNotify(error instanceof Error ? error.message : String(error));
       return undefined;
+    } finally {
+      if (watchdog !== undefined) clearTimeout(watchdog);
     }
-  }, [active, adoptSnapshot, dirtyCount, draft, invalid, onCommitted, onFontPreview, onNotify, onThemePreview, runtimeBusy, saveState, snapshot]);
+  }, [active, adoptSnapshot, dirtyCount, draft, invalid, onCommitted, onFontPreview, onNotify, onThemePreview, runtimeBlocked, saveState, snapshot]);
 
   const value = useMemo<SettingsDraftContextValue>(() => ({
     snapshot,
     draft,
     loadError,
     dirtyCount,
+    preferencesOnly,
     invalid,
     saveState,
     setThemePreference,
     setFontPreference,
-    setPersonalization,
     setActivity,
     setIdentity,
     setMemory,
@@ -298,9 +320,11 @@ export function SettingsDraftProvider({
     addOauthCredentialHandle,
     releaseCredential,
     discard,
-    saveAll
+    saveAll,
+    adoptExternalSnapshot
   }), [
     addOauthCredentialHandle,
+    adoptExternalSnapshot,
     dirtyCount,
     discard,
     draft,
@@ -310,13 +334,13 @@ export function SettingsDraftProvider({
     removeModel,
     saveAll,
     saveState,
+    preferencesOnly,
     setChat,
     setChatParams,
     setCompaction,
     setDefaultModel,
     setFontPreference,
     setMemory,
-    setPersonalization,
     setActivity,
     setIdentity,
     setThemePreference,
@@ -334,7 +358,6 @@ function draftFromSnapshot(snapshot: DesktopSettingsSnapshot): DesktopSettingsDr
   return {
     themePreference: snapshot.themePreference,
     fontPreference: { ...snapshot.fontPreference },
-    personalization: { ...snapshot.personalization },
     activity: activityInputFromSnapshot(snapshot.activity),
     identity: structuredClone(snapshot.identity),
     memory: structuredClone(snapshot.memory),
@@ -363,7 +386,11 @@ function countDirtyFields(snapshot: DesktopSettingsSnapshot, draft: DesktopSetti
   let count = 0;
   if (draft.themePreference !== snapshot.themePreference) count += 1;
   if (!sameJson(draft.fontPreference, snapshot.fontPreference)) count += 1;
-  if (!sameJson(draft.personalization, snapshot.personalization)) count += 1;
+  return count + countNonPreferenceDirtyFields(snapshot, draft);
+}
+
+function countNonPreferenceDirtyFields(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraft): number {
+  let count = 0;
   if (!sameJson(draft.activity, activityInputFromSnapshot(snapshot.activity))) count += 1;
   if (!sameJson(draft.identity, snapshot.identity)) count += 1;
   if (!sameJson(draft.memory, snapshot.memory)) count += 1;
@@ -377,7 +404,6 @@ function countDirtyFields(snapshot: DesktopSettingsSnapshot, draft: DesktopSetti
 }
 
 function validDraft(draft: DesktopSettingsDraft): boolean {
-  if (new TextEncoder().encode(draft.personalization.customInstructions).byteLength > 4_096) return false;
   const compaction = draft.compaction;
   if (compaction.triggerPercent !== undefined && (compaction.triggerPercent < 0.5 || compaction.triggerPercent > 0.95)) return false;
   if (compaction.keepRecentMessages !== undefined && (!Number.isInteger(compaction.keepRecentMessages) || compaction.keepRecentMessages < 1 || compaction.keepRecentMessages > 500)) return false;
@@ -407,7 +433,6 @@ function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraf
     expectedConfigRevision: snapshot.configRevision,
     themePreference: draft.themePreference === snapshot.themePreference ? undefined : draft.themePreference,
     fontPreference: sameJson(draft.fontPreference, snapshot.fontPreference) ? undefined : draft.fontPreference,
-    personalization: sameJson(draft.personalization, snapshot.personalization) ? undefined : draft.personalization,
     activity: sameJson(draft.activity, activityInputFromSnapshot(snapshot.activity)) ? undefined : draft.activity,
     identity: sameJson(draft.identity, snapshot.identity) ? undefined : draft.identity,
     memory: sameJson(draft.memory, snapshot.memory) ? undefined : draft.memory,

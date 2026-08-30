@@ -31,8 +31,7 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: path.join(root, "src/desktop/renderer/index.html"),
-          quickchat: path.join(root, "src/desktop/renderer/quickchat.html")
+          index: path.join(root, "src/desktop/renderer/index.html")
         }
       }
     }

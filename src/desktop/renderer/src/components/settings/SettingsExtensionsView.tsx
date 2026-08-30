@@ -96,6 +96,11 @@ export function SettingsExtensionsView({ kind, onError, projectId }: {
   }, [load]);
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
+  // 草稿区只显示仍可操作的草稿：rejected/approved 已收口，不再占位（审核动作也会直接移除）。
+  const visibleDrafts = useMemo(
+    () => drafts.filter((draft) => draft.status === "pending" || draft.status === "failed"),
+    [drafts]
+  );
   const visibleSkills = useMemo(() => snapshot.skills.filter((skill) => {
     if (!normalizedQuery) return true;
     return `${skill.name} ${skill.description} ${skill.absolutePath}`.toLocaleLowerCase().includes(normalizedQuery);
@@ -187,7 +192,11 @@ export function SettingsExtensionsView({ kind, onError, projectId }: {
         : action === "retry"
           ? await window.biny.retrySkillDraft(projectId, draft.id)
           : await window.biny.editSkillDraft(projectId, draft.id, content ?? draft.content);
-      setDrafts((current) => current.map((candidate) => candidate.id === next.id ? next : candidate));
+      // 批准/拒绝成功后草稿不再是「待审核」，直接从列表移除（rejected/approved 不再在此展示），
+      // 而不是 map 更新状态；retry/edit 仍保留在列表里，用返回的最新草稿做 map 更新。
+      setDrafts((current) => action === "approve" || action === "reject"
+        ? current.filter((candidate) => candidate.id !== next.id)
+        : current.map((candidate) => candidate.id === next.id ? next : candidate));
       if (action === "approve") await load();
     } catch (error) {
       onError(errorMessage(error));
@@ -273,7 +282,7 @@ export function SettingsExtensionsView({ kind, onError, projectId }: {
   return (
     <div className={`settings-extension-view is-${kind}`} id={`settings-extensions-${kind}`}>
       {kind === "skills" ? <SkillsSettingsContent
-        drafts={drafts}
+        drafts={visibleDrafts}
         extraction={settingsDraft.draft?.skills.extraction ?? { enabled: true, minToolCalls: 5 }}
         expandedSkillId={expandedSkillId}
         loading={loading}
@@ -464,12 +473,46 @@ const SkillSettingsCard = memo(function SkillSettingsCard({ activation, contentL
 
 const SkillDraftCard = memo(function SkillDraftCard({ draft, onApprove, onEdit, onReject, onRetry }: { draft: DesktopSkillDraft; onApprove(draft: DesktopSkillDraft): void; onEdit(draft: DesktopSkillDraft, content: string): void; onReject(draft: DesktopSkillDraft): void; onRetry(draft: DesktopSkillDraft): void }): React.JSX.Element {
   const [editing, setEditing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [content, setContent] = useState(draft.content);
   useEffect(() => {
     if (!editing) setContent(draft.content);
   }, [draft.content, editing]);
-  const canEdit = draft.status !== "approved";
-  return <article className="settings-skill-draft-card"><div><div className="settings-skill-card-heading"><h4>{draft.name}</h4><span>{draft.toolCalls} 次工具调用 · {draft.status}</span></div><p>{draft.description}</p>{editing ? <textarea aria-label={`${draft.name} 草稿正文`} className="settings-skill-draft-editor" onChange={(event) => setContent(event.target.value)} value={content} /> : <pre>{stripFrontmatter(draft.content)}</pre>}{draft.error ? <p className="settings-skill-draft-error">{draft.error}</p> : null}</div><div className="settings-skill-draft-actions">{canEdit ? editing ? <><button onClick={() => { onEdit(draft, content); setEditing(false); }} type="button">保存编辑</button><button onClick={() => { setContent(draft.content); setEditing(false); }} type="button">取消</button></> : <button onClick={() => setEditing(true)} type="button">编辑</button> : null}{draft.status === "pending" ? <><button onClick={() => onApprove(draft)} type="button">批准并安装</button><button onClick={() => onReject(draft)} type="button">拒绝</button></> : draft.status === "failed" ? <button onClick={() => onRetry(draft)} type="button">重试</button> : null}</div></article>;
+  const statusLabel = draft.status === "pending" ? "待审核" : draft.status === "failed" ? "提取失败" : draft.status === "approved" ? "已安装" : "已拒绝";
+  // 默认折叠：只露标题行 + 一行描述 + 操作按钮，全文「查看内容」按需展开，避免长草稿把技能列表挤没。
+  return (
+    <article className={`settings-skill-draft-card${expanded ? " is-expanded" : ""}`}>
+      <div>
+        <div className="settings-skill-card-heading"><h4>{draft.name}</h4><span>{draft.toolCalls} 次工具调用 · {statusLabel}</span></div>
+        <p>{draft.description}</p>
+        {draft.error ? <p className="settings-skill-draft-error">{draft.error}</p> : null}
+        {editing ? (
+          <textarea aria-label={`${draft.name} 草稿正文`} className="settings-skill-draft-editor" onChange={(event) => setContent(event.target.value)} value={content} />
+        ) : expanded ? (
+          <pre>{stripFrontmatter(draft.content)}</pre>
+        ) : null}
+      </div>
+      <div className="settings-skill-draft-actions">
+        {editing ? (
+          <>
+            <button onClick={() => { onEdit(draft, content); setEditing(false); }} type="button">保存编辑</button>
+            <button onClick={() => { setContent(draft.content); setEditing(false); }} type="button">取消</button>
+          </>
+        ) : (
+          <>
+            <button aria-expanded={expanded} className="settings-skill-content-toggle" onClick={() => setExpanded((value) => !value)} type="button"><Icon name="chevron" size={15} />{expanded ? "收起内容" : "查看内容"}</button>
+            {draft.status === "pending" ? <button onClick={() => setEditing(true)} type="button">编辑</button> : null}
+            {draft.status === "pending" ? (
+              <>
+                <button className="is-primary" onClick={() => onApprove(draft)} type="button">批准并安装</button>
+                <button onClick={() => onReject(draft)} type="button">拒绝</button>
+              </>
+            ) : draft.status === "failed" ? <button onClick={() => onRetry(draft)} type="button">重试</button> : null}
+          </>
+        )}
+      </div>
+    </article>
+  );
 });
 
 interface PluginsSettingsContentProps {

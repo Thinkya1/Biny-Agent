@@ -481,7 +481,8 @@ button:disabled { opacity: 0.42; }
 .quickchat-kbd { flex: 0 0 auto; padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-secondary); background: var(--surface-selected); font: 11px var(--font-mono); }
 .quickchat-toggle-list { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
 .quickchat-hint { margin: 6px 0 0; color: var(--text-tertiary); font-size: calc(11px * var(--font-scale)); line-height: 1.5; }
-.settings-empty { padding: 18px 0; color: var(--text-tertiary); font-size: calc(12px * var(--font-scale)); }
+
+.settings-empty { display: flex; align-items: center; gap: 10px; padding: 18px 0; color: var(--text-tertiary); font-size: calc(12px * var(--font-scale)); }
 .settings-button-row { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 17px; }
 .settings-content button.is-danger { color: var(--red); }
 
@@ -493,6 +494,7 @@ button:disabled { opacity: 0.42; }
 .connection-empty { display: flex; flex-direction: column; gap: 4px; padding: 18px 16px; border: 1px dashed var(--border-strong); border-radius: 12px; color: var(--text-tertiary); background: var(--surface-soft); }
 .connection-empty strong { color: var(--text); font-size: calc(13px * var(--font-scale)); font-weight: 600; }
 .connection-empty span { font-size: calc(12px * var(--font-scale)); }
+.connection-empty > div { margin-top: 10px; }
 .connection-list, .provider-catalog-list { display: flex; flex-direction: column; gap: 8px; }
 .connection-card, .provider-catalog-row {
   display: flex;
@@ -522,6 +524,108 @@ button:disabled { opacity: 0.42; }
 .status-pill.is-warn { color: var(--amber); background: var(--amber-bg); }
 .status-pill.is-error { color: var(--red); background: var(--red-bg); }
 .provider-badge { flex: 0 0 auto; color: var(--text-tertiary); font-size: calc(11px * var(--font-scale)); }
+/* 目录行上的已连接标记：绿色小勾 + 文案，和类目徽章同几何，避免两种徽章打架。 */
+.provider-badge.is-connected { display: inline-flex; align-items: center; gap: 3px; color: var(--green); font-weight: 560; }
+.provider-catalog-row.is-connected .provider-catalog-copy small { color: var(--text-secondary); }
+
+/* 模型连接加载骨架：形状对齐真实卡片（方块标 + 两行文本），快照到达时列表不跳动。 */
+.connection-card-skeleton { pointer-events: none; }
+.skeleton-pulse { animation: status-pulse 1.6s ease-in-out infinite; }
+.skeleton-line { display: block; width: 96px; height: 11px; border-radius: 5px; background: var(--surface-soft); box-shadow: inset 0 0 0 1px var(--biny-shadow-soft); }
+.skeleton-line.is-wide { width: 150px; height: 13px; }
+
+/* 详情 header 的「设为默认」出口（maka 的 badge 槽）：非默认连接才出现。 */
+.connection-default-button { margin-left: auto; flex: 0 0 auto; align-self: center; }
+.connect-dialog > header > .icon-button { margin-left: 8px; }
+
+/* 详情高级区里按 ID 手动启用模型的一行（中转站目录滞后时的逃生通道）。 */
+.manual-model-toggle { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; }
+.manual-model-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.manual-model-row input {
+  min-width: 0;
+  flex: 1;
+  height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: 0;
+  color: var(--text);
+  background: var(--surface);
+  font-size: calc(12px * var(--font-scale));
+}
+.manual-model-row input:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.manual-model-row .ghost-button { flex: 0 0 auto; }
+
+/* ===== 连接详情：maka DetailSection + SettingsExpandableRow 语言 ===== */
+/* 区块：标题 + supporting 说明 + hairline，区块间 32px（maka VStack gap=8）。 */
+.detail-section + .detail-section { margin-top: 32px; }
+.detail-section-head { padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.detail-section-head h3 { margin: 0; font-size: calc(13px * var(--font-scale)); font-weight: 600; }
+.detail-section-head p { margin: 2px 0 0; color: var(--text-secondary); font-size: calc(12px * var(--font-scale)); }
+
+/* 行组：无卡片，行间 hairline（maka rows.css 的 settingsRows）。 */
+.connection-rows { display: grid; grid-template-columns: minmax(0, 1fr); }
+.connection-rows > * + * { border-top: 1px solid var(--border); }
+
+/* 折叠行：label 上 value 下（两行式），右侧 ghost 按钮顶对齐，block padding 8px（Item density=balanced）。 */
+.connection-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 8px 0; }
+.connection-row-main { min-width: 0; display: grid; gap: 1px; }
+.connection-row-label { font-size: calc(13px * var(--font-scale)); }
+.connection-row-value { color: var(--text-secondary); font-size: calc(12px * var(--font-scale)); overflow-wrap: anywhere; }
+.connection-row-value.is-mono { font-family: var(--font-mono); }
+.connection-row-value.is-warn { color: var(--amber); }
+.connection-row-action { flex: 0 0 auto; margin-top: 1px; }
+
+/* 展开编辑器（maka settingsExpandableEditor）：粗体 label + 控件 + hint + 右下 保存/取消，grid gap 12px、block padding 12px。 */
+.connection-row-editor { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 12px 0; }
+.connection-row-editor > .connection-row-label { font-weight: 600; }
+.connection-row-editor input:not([type]),
+.connection-row-editor input[type="text"],
+.connection-row-editor input[type="password"] {
+  width: 100%;
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  outline: 0;
+  color: var(--text);
+  background: var(--surface-soft);
+  font-size: calc(12.5px * var(--font-scale));
+}
+.connection-row-editor input:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+.connection-row-hint { color: var(--text-tertiary); font-size: calc(11.5px * var(--font-scale)); }
+.connection-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.connection-row-actions .settings-link { margin-right: auto; }
+.connection-row-actions-spacer { flex: 1; }
+
+/* 模型区按钮行：测试连接 secondary 在前，更新目录 / 添加模型 ghost 在后，gap 8px（maka HStack gap=2）。 */
+.connection-model-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.settings-secondary-button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface-soft);
+  font-size: calc(12px * var(--font-scale));
+}
+.settings-secondary-button:hover:not(:disabled) { background: var(--surface-hover); }
+.settings-secondary-button:disabled { opacity: 0.45; }
+
+/* 危险区：独立成段，destructive 实体按钮；按钮文案只写「删除」（段头已说行为）。 */
+.danger-zone .detail-section-head { border-bottom-color: color-mix(in srgb, var(--red) 25%, var(--border)); }
+.danger-button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--red) 45%, transparent);
+  border-radius: 8px;
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  font-size: calc(12px * var(--font-scale));
+}
+.danger-button:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 22%, transparent); }
+.danger-button:disabled { opacity: 0.45; }
+
 .provider-mark {
   display: grid;
   width: 32px;
@@ -536,31 +640,35 @@ button:disabled { opacity: 0.42; }
 }
 .provider-logo { display: block; width: 20px; height: 20px; }
 .provider-logo-image { object-fit: contain; }
-.provider-category-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
-.provider-category-tabs button {
-  height: 36px;
-  padding: 0 12px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: var(--text-secondary);
-  background: var(--surface-soft);
-  font-size: calc(12px * var(--font-scale));
-  font-weight: 600;
-}
-.provider-category-tabs button:hover { color: var(--text); background: var(--surface-hover); }
-.provider-category-tabs button.is-selected { color: var(--text); border-color: var(--border-strong); background: var(--surface); box-shadow: none; }
 .provider-search {
   display: flex;
   height: 34px;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
   padding: 0 11px;
   border: 1px solid var(--border);
   border-radius: 10px;
   color: var(--text-tertiary);
   background: var(--surface-soft);
 }
+/* 目录弹层的工具行：搜索框占主宽，分类收进右侧下拉（六个 tab 按钮排一行太吵）。 */
+.catalog-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.catalog-toolbar .provider-search { flex: 1; min-width: 0; }
+/* 特异性必须压过下面 613 行的 .connection-select { width: 100% }（同优先级后定义的赢），
+   否则分类下拉会撑满整行、把搜索框挤成一条缝。 */
+.catalog-toolbar .catalog-category-select { flex: 0 0 auto; width: auto; height: 34px; }
+.catalog-dialog { width: min(560px, 100%); }
+.section-heading-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; }
+.settings-primary-button {
+  min-height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  color: var(--biny-selection-text);
+  background: var(--biny-focus);
+  font-size: calc(12px * var(--font-scale));
+}
+.settings-primary-button:hover:not(:disabled) { background: color-mix(in srgb, var(--biny-focus) 88%, var(--biny-text)); }
+.settings-primary-button:disabled { opacity: 0.45; }
 .provider-search:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--text-secondary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
 .provider-search input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--text); background: transparent; font-size: calc(12px * var(--font-scale)); }
 
@@ -940,6 +1048,16 @@ button:disabled { opacity: 0.42; }
   background: var(--color-overlay);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+}
+/* 二级弹层可能覆盖设置页顶部的窗口拖拽区；整个弹层及其控件都必须重新声明可交互。 */
+.model-dialog-backdrop,
+.model-dialog-backdrop button,
+.model-dialog-backdrop input,
+.model-dialog-backdrop textarea,
+.model-dialog-backdrop select,
+.model-dialog-backdrop a {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 .connect-dialog {
   width: min(420px, 100%);

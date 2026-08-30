@@ -8,11 +8,14 @@ import type { PermissionResult } from "../../../../permission/PermissionManager.
 import { useEffect, useRef, useState } from "react";
 import { ThinkingOrb } from "thinking-orbs";
 import type { DesktopProject, DesktopRuntimeMutation, DesktopRuntimeProjection, DesktopSessionLimits, DesktopSessionWriterConflict } from "../../../protocol.js";
+import type { SkillDraftNotice } from "../app/useDesktopEventBridge.js";
 import type { TimelineTurn } from "../sessionTimeline.js";
 import { pickThinkingMessage } from "../thinkingMessages.js";
+import { desktopWorktreeView } from "../worktreePresentation.js";
 import { Icon } from "./Icon.js";
 import { MessageTimeline } from "./MessageTimeline.js";
 import { RuntimePanel } from "./RuntimePanel.js";
+import { SkillDraftNoticeCard } from "./SkillDraftNoticeCard.js";
 import { WelcomeState } from "./WelcomeState.js";
 
 /** 首页提交过场信号：App 在「无会话的首页」发出首条消息时下发，text 用于渲染气泡预览。 */
@@ -26,6 +29,7 @@ interface WorkspaceProps {
   projectId?: string;
   sessionId?: string;
   sessionTitle?: string;
+  sessionIsolation?: "shared" | "worktree";
   turns: TimelineTurn[];
   loading: boolean;
   runtimeError?: string;
@@ -39,10 +43,17 @@ interface WorkspaceProps {
   thinking: boolean;
   running: boolean;
   thinkingStartedAt?: string;
+  /** 当前会话的技能草稿审核卡片；渲染在消息流末尾、运行状态行之前。 */
+  skillDraftNotices?: SkillDraftNotice[];
+  /** 卡片动画收起完成后把它从列表移除。 */
+  onDismissSkillDraftNotice?(id: string): void;
+  /** 打开设置 → 技能 tab。 */
+  onOpenSkillSettings?(): void;
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
   onResume(): Promise<void>;
-  onRetry(input: string, userMessageIndex: number, idempotencyKey: string): Promise<void>;
+  onRetry(targetMessageId: string, input: string, idempotencyKey: string): Promise<void>;
+  onSwitchVersion(messageId: string, direction: "prev" | "next"): Promise<void>;
   onRetryWriterConflict(): Promise<void>;
   writerConflict?: DesktopSessionWriterConflict;
   /** 会话体量接近持久化上限时的预警信息；未接近时缺省。 */
@@ -56,6 +67,8 @@ interface WorkspaceProps {
   onRuntimeRefresh(): Promise<void>;
   /** 建议 pill 点击即提交（Alma 行为），由 App 转发给 Composer 的统一提交路径。 */
   onSubmitPrompt(prompt: string): void;
+  /** 项目行「新建任务」直达的空白草稿：跳过欢迎态，直接渲染空白聊天 + 底部 Composer。 */
+  blankDraft?: boolean;
   /** 首页提交过场信号；发送失败时 App 会清空它触发回滚。 */
   homeFlight?: HomeFlightSignal;
   /** 过场动画落地完成（500ms）后回调，App 借此清掉信号。 */
@@ -71,6 +84,7 @@ export function Workspace({
   projectId,
   sessionId,
   sessionTitle,
+  sessionIsolation,
   turns,
   loading,
   runtimeError,
@@ -84,10 +98,14 @@ export function Workspace({
   thinking,
   running,
   thinkingStartedAt,
+  skillDraftNotices,
+  onDismissSkillDraftNotice,
+  onOpenSkillSettings,
   onOpenExternal,
   onResolvePermission,
   onResume,
   onRetry,
+  onSwitchVersion,
   onRetryWriterConflict,
   writerConflict,
   sessionLimits,
@@ -99,6 +117,7 @@ export function Workspace({
   onRuntimeMutation,
   onRuntimeRefresh,
   onSubmitPrompt,
+  blankDraft = false,
   homeFlight,
   onHomeFlightLanded,
   onOpenRuntime: _onOpenRuntime,
@@ -111,6 +130,10 @@ export function Workspace({
   // 上限预警按会话 dismiss：换会话要重新提示，同会话点掉后不再打扰。
   const [limitBannerDismissedFor, setLimitBannerDismissedFor] = useState<string>();
   const showLimitBanner = Boolean(sessionLimits?.nearSizeLimit && sessionId && limitBannerDismissedFor !== sessionId);
+  const selectedWorktree = sessionId === undefined
+    ? undefined
+    : runtimeProjection?.worktrees.find((worktree) => worktree.sessionId === sessionId);
+  const worktreeView = sessionIsolation === "worktree" ? desktopWorktreeView(selectedWorktree) : undefined;
 
   // —— 首页 → 聊天 过场（Alma 式 FLIP，0.5s cubic-bezier(.32,.72,0,1)）——
   // flying：保持首页布局、播动画；landed：落地完成、切聊天布局（此时 sessionId/消息通常已就位，
@@ -217,7 +240,8 @@ export function Workspace({
     };
   }, [flight]);
 
-  const renderWelcome = (showWelcome && !landed) || flight !== null;
+  // blankDraft（项目行新建）跳过欢迎态与过场：正文落空白聊天空态，Composer 直接停靠底部。
+  const renderWelcome = !blankDraft && ((showWelcome && !landed) || flight !== null);
 
   if (isHome) {
     return (
@@ -229,6 +253,8 @@ export function Workspace({
           onRefresh={onRuntimeRefresh}
           open={runtimePanelOpen && Boolean(projectId)}
           projection={runtimeProjection}
+          selectedSessionId={sessionId}
+          worktreeSession={sessionIsolation === "worktree"}
         />
         <div className="biny-chat-body is-welcome">
           <WelcomeState hasProject={false} onOpenProject={onOpenProject} onPickSuggestion={onSubmitPrompt}>
@@ -248,6 +274,19 @@ export function Workspace({
               <strong>{sessionTitle ?? project?.name ?? "Biny"}</strong>
               {project ? <span>{project.name}{project.branch ? ` · ${project.branch}` : ""}</span> : <span>打开一个本地项目开始</span>}
             </div>
+            {worktreeView ? (
+              <button
+                aria-label={`隔离工作树：${worktreeView.label}。${worktreeView.detail}`}
+                className={`biny-worktree-indicator is-${worktreeView.tone}`}
+                onClick={() => onRuntimePanelOpenChange(true)}
+                title={`${worktreeView.label}：${worktreeView.detail}`}
+                type="button"
+              >
+                <Icon name="folder-open" size={13} />
+                <span>隔离工作树</span>
+                <small>{worktreeView.label}</small>
+              </button>
+            ) : null}
           </div>
           <div className="biny-chat-actions">
             <button
@@ -270,6 +309,8 @@ export function Workspace({
           onRefresh={onRuntimeRefresh}
           open={runtimePanelOpen}
           projection={runtimeProjection}
+          selectedSessionId={sessionId}
+          worktreeSession={sessionIsolation === "worktree"}
         />
         <div className={`biny-chat-body${renderWelcome ? " is-welcome" : ""}`} ref={bodyRef}>
           {showLimitBanner && sessionLimits && sessionId ? (
@@ -300,10 +341,27 @@ export function Workspace({
                 onResume={onResume}
                 onRollbackFiles={onRollbackFiles}
                 onRetry={onRetry}
+                onSwitchVersion={onSwitchVersion}
+                thinking={thinking}
                 projectId={projectId}
                 sessionId={sessionId}
                 turns={turns}
               />
+              {/* 技能草稿审核卡：消息流末尾、运行状态行之前（Alma 式，回合成功后的审核入口）。 */}
+              {skillDraftNotices && skillDraftNotices.length > 0 && projectId ? (
+                <div className="biny-skill-draft-notices">
+                  {skillDraftNotices.map((notice) => (
+                    <SkillDraftNoticeCard
+                      key={notice.id}
+                      notice={notice}
+                      onDismiss={(id) => onDismissSkillDraftNotice?.(id)}
+                      onError={onRuntimeError}
+                      onOpenSkillSettings={() => onOpenSkillSettings?.()}
+                      projectId={projectId}
+                    />
+                  ))}
+                </div>
+              ) : null}
               {/* 运行状态行：消息流末尾，与 DSH 的 TurnStatus 同位置。 */}
               {thinking ? <ThinkingStatus key={thinkingStartedAt ?? "thinking"} startedAt={thinkingStartedAt} /> : null}
             </ChatScroll>

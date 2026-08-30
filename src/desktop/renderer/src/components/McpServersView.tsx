@@ -305,20 +305,30 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
   return (
     <div className="biny-mcp-page" id="mcp-servers" tabIndex={-1}>
 
-      <div className="biny-mcp-toolbar">
-        <div className="biny-mcp-tabs" role="tablist" aria-label="MCP 服务器列表">
-          <button aria-selected={tab === "market"} className={tab === "market" ? "is-active" : ""} onClick={() => setTab("market")} role="tab" type="button"><Icon name="site" size={15} />应用市场</button>
-          <button aria-selected={tab === "installed"} className={tab === "installed" ? "is-active" : ""} onClick={() => setTab("installed")} role="tab" type="button"><Icon name="server" size={15} />已安装 <span>{snapshot?.servers.length ?? 0}</span></button>
-        </div>
-        <label className="biny-mcp-search">
-          <Icon name="search" size={15} />
-          <input aria-label="搜索 MCP 服务器" onChange={(event) => setQuery(event.target.value)} placeholder="搜索 MCP 服务器…" value={query} />
-          {query ? <button aria-label="清空搜索" onClick={() => setQuery("")} type="button"><Icon name="close" size={13} /></button> : null}
-        </label>
-        {tab === "market" ? <label className="biny-mcp-category"><span className="sr-only">筛选分类</span><select aria-label="筛选分类" onChange={(event) => setCategory(event.target.value)} value={category}><option value="">所有分类</option>{catalog.categories.map((item) => <option key={item} value={item}>{item}</option>)}</select><Icon name="chevron" size={14} /></label> : null}
-        <button className="biny-mcp-add-button biny-mcp-toolbar-add-button" onClick={openNew} type="button"><Icon name="add" size={16} />添加服务器</button>
-        <button aria-label="刷新 MCP 列表" className="biny-mcp-icon-button" disabled={loading} onClick={() => void load(true)} title="刷新" type="button"><Icon name="refresh" size={16} /></button>
+      <div className="biny-mcp-tabs" role="tablist" aria-label="MCP 服务器列表">
+        <button aria-selected={tab === "market"} className={tab === "market" ? "is-active" : ""} onClick={() => setTab("market")} role="tab" type="button"><Icon name="site" size={15} />应用市场</button>
+        <button aria-selected={tab === "installed"} className={tab === "installed" ? "is-active" : ""} onClick={() => setTab("installed")} role="tab" type="button"><Icon name="server" size={15} />已安装 <span>{snapshot?.servers.length ?? 0}</span></button>
       </div>
+
+      {tab === "market" ? (
+        <div className="biny-mcp-toolbar">
+          <label className="biny-mcp-search">
+            <Icon name="search" size={15} />
+            <input aria-label="搜索 MCP 服务器" onChange={(event) => setQuery(event.target.value)} placeholder="搜索 MCP 服务器…" value={query} />
+            {query ? <button aria-label="清空搜索" onClick={() => setQuery("")} type="button"><Icon name="close" size={13} /></button> : null}
+          </label>
+          <label className="biny-mcp-category"><span className="sr-only">筛选分类</span><select aria-label="筛选分类" onChange={(event) => setCategory(event.target.value)} value={category}><option value="">所有分类</option>{catalog.categories.map((item) => <option key={item} value={item}>{item}</option>)}</select><Icon name="chevron" size={14} /></label>
+          <button aria-label="刷新 MCP 列表" className="biny-mcp-icon-button" disabled={loading} onClick={() => void load(true)} title="刷新" type="button"><Icon name="refresh" size={16} /></button>
+        </div>
+      ) : (
+        <div className="biny-mcp-toolbar">
+          <p className="biny-mcp-count">{(snapshot?.servers.length ?? 0) === 0 ? "未安装 MCP 服务器" : `已安装 ${snapshot?.servers.length} 个服务器`}</p>
+          <div className="biny-mcp-toolbar-actions">
+            <button className="biny-mcp-add-button" onClick={openNew} type="button"><Icon name="add" size={16} />添加服务器</button>
+            <button aria-label="刷新 MCP 列表" className="biny-mcp-icon-button" disabled={loading} onClick={() => void load(true)} title="刷新" type="button"><Icon name="refresh" size={16} /></button>
+          </div>
+        </div>
+      )}
 
       {catalogNotice && catalogNotice !== dismissedCatalogNotice ? (
         <TopToast icon="warning" key={catalogNotice} message={catalogNotice} onDismiss={() => setDismissedCatalogNotice(catalogNotice)} />
@@ -328,7 +338,7 @@ export function McpServersView({ projectId, onError, onSuccess }: McpServersView
           details={details}
           detailsLoading={detailsLoading}
           loading={loading}
-          servers={filterInstalled(snapshot?.servers ?? [], normalizedQuery)}
+          servers={filterInstalled(snapshot?.servers ?? [], "")}
           busyName={busyName}
           onDelete={setDeleteTarget}
           onDetails={(server) => void openDetails(server)}
@@ -410,20 +420,29 @@ const McpInstalledContent = memo(function McpInstalledContent({ servers, loading
 
 const McpInstalledCard = memo(function McpInstalledCard({ server, busy, onSetEnabled, onReconnect, onDetails, onEdit, onDelete }: { server: DesktopMcpServerSummary; busy: boolean; onSetEnabled(server: DesktopMcpServerSummary): void; onReconnect(server: DesktopMcpServerSummary): void; onDetails(server: DesktopMcpServerSummary): void; onEdit(server: DesktopMcpServerSummary): void; onDelete(name: string): void }): React.JSX.Element {
   const statusLabel = server.state === "connected" ? "已连接" : server.state === "disabled" ? "已禁用" : server.state === "not-started" ? "未启动" : "未连接";
+  const statusIcon = server.state === "connected" ? "check" : server.state === "disabled" ? "power" : "server";
   return (
     <article className={`biny-mcp-installed-card is-${server.state}`}>
       <div className="biny-mcp-installed-heading">
-        <span className="biny-mcp-card-icon"><Icon name={server.transport === "remote" ? "remote" : "terminal"} size={20} /></span>
-        <div className="biny-mcp-card-heading"><h2>{server.name}</h2><span>{server.transport === "remote" ? `Remote · ${server.remoteProtocol === "sse" ? "SSE" : "Streamable HTTP"}` : "Stdio"}</span></div>
-        <span className={`biny-mcp-status is-${server.state}`}><i />{statusLabel}</span>
+        <div className="biny-mcp-card-heading">
+          <h2>{server.name}<span className={`biny-mcp-status is-${server.state}`}><Icon name={statusIcon} size={11} />{statusLabel}</span></h2>
+          {server.description ? <p className="biny-mcp-card-desc">{server.description}</p> : null}
+        </div>
       </div>
-      <p className="biny-mcp-endpoint" title={server.commandOrUrl}>{server.commandOrUrl || "未配置启动命令"}{server.transport === "stdio" && server.args.length ? ` ${server.args.join(" ")}` : ""}</p>
-      <div className="biny-mcp-capabilities"><span><strong>{server.toolNames.length}</strong> 工具</span><span><strong>{server.promptNames.length}</strong> 提示</span><span><strong>{server.hasResources ? "有" : "无"}</strong> 资源</span>{server.environmentKeys.length ? <span><strong>{server.environmentKeys.length}</strong> 环境变量</span> : null}</div>
+      <div className="biny-mcp-card-main">
+        <code className="biny-mcp-cmd" title={server.commandOrUrl}>
+          <span className="biny-mcp-cmd-line">{server.commandOrUrl || "未配置启动命令"}</span>
+          {server.transport === "stdio" && server.args.length ? <span className="biny-mcp-cmd-line is-args">{server.args.join(" ")}</span> : null}
+        </code>
+        <div className="biny-mcp-row-actions">
+          <button aria-label={server.enabled ? `禁用 ${server.name}` : `启用 ${server.name}`} className={server.enabled ? undefined : "is-off"} disabled={busy} onClick={() => onSetEnabled(server)} title={server.enabled ? "禁用" : "启用"} type="button"><Icon name="power" size={14} /></button>
+          {server.state !== "connected" && server.state !== "disabled" ? <button aria-label={`连接 ${server.name}`} disabled={busy} onClick={() => onReconnect(server)} title="连接" type="button"><Icon name="plug" size={14} /></button> : null}
+          <button aria-label={`查看 ${server.name} 详情`} disabled={busy} onClick={() => onDetails(server)} title="详情" type="button"><Icon name="database" size={14} /></button>
+          <button aria-label={`编辑 ${server.name}`} disabled={busy} onClick={() => onEdit(server)} title="编辑" type="button"><Icon name="settings" size={14} /></button>
+          <button aria-label={`删除 ${server.name}`} className="is-danger" disabled={busy} onClick={() => onDelete(server.name)} title="删除" type="button"><Icon name="trash" size={14} /></button>
+        </div>
+      </div>
       {server.lastError ? <p className="biny-mcp-card-error"><Icon name="warning" size={13} />{server.lastError}</p> : null}
-      <div className="biny-mcp-installed-footer">
-        <button aria-pressed={server.enabled} className={`biny-mcp-toggle${server.enabled ? " is-on" : ""}`} disabled={busy} onClick={() => onSetEnabled(server)} role="switch" type="button"><span />{server.enabled ? "已启用" : "已禁用"}</button>
-        <div className="biny-mcp-row-actions"><button disabled={busy || server.state === "disabled"} onClick={() => onReconnect(server)} type="button"><Icon name="refresh" size={14} />重连</button><button disabled={busy} onClick={() => onDetails(server)} type="button"><Icon name="database" size={14} />详情</button><button disabled={busy} onClick={() => onEdit(server)} type="button"><Icon name="edit" size={14} />编辑</button><button aria-label={`删除 ${server.name}`} className="is-danger" disabled={busy} onClick={() => onDelete(server.name)} title="删除" type="button"><Icon name="trash" size={14} /></button></div>
-      </div>
     </article>
   );
 });
@@ -528,7 +547,7 @@ const McpDeleteDialog = memo(function McpDeleteDialog({ name, onCancel, onConfir
 });
 
 function McpEmpty({ icon, title, detail }: { icon: "refresh" | "search" | "server"; title: string; detail: string }): React.JSX.Element {
-  return <div className="biny-mcp-empty"><span><Icon name={icon} size={24} /></span><h2>{title}</h2><p>{detail}</p></div>;
+  return <div className="biny-mcp-empty"><span><Icon name={icon} size={36} /></span><h2>{title}</h2><p>{detail}</p></div>;
 }
 
 function filterInstalled(servers: DesktopMcpServerSummary[], query: string): DesktopMcpServerSummary[] {

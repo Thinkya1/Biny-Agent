@@ -1781,8 +1781,7 @@ select {
 }
 
 .identity-section > .section-heading-row p,
-.identity-source-card small,
-.identity-editor-card small,
+.identity-preview-card small,
 .identity-proposals p {
   display: block;
   margin: 4px 0 0;
@@ -1791,8 +1790,7 @@ select {
   line-height: 1.5;
 }
 
-.identity-source-card,
-.identity-editor-card,
+.identity-preview-card,
 .identity-proposal-card {
   margin-top: 14px;
   padding: 14px;
@@ -1801,35 +1799,9 @@ select {
   background: var(--surface-soft);
 }
 
-.identity-source-card .section-heading-row,
-.identity-editor-card .section-heading-row,
+.identity-preview-card .section-heading-row,
 .identity-proposal-card .section-heading-row {
   align-items: flex-start;
-}
-
-.identity-source-path {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 12px;
-  color: var(--text-secondary);
-  font-size: calc(11px * var(--font-scale));
-}
-
-.identity-source-path input,
-.identity-editor {
-  width: 100%;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  color: var(--text);
-  background: var(--surface);
-  font: inherit;
-}
-
-.identity-source-path input {
-  min-height: 32px;
-  padding: 0 9px;
-  font-size: calc(11px * var(--font-scale));
 }
 
 .identity-document-tabs {
@@ -1868,22 +1840,12 @@ select {
   white-space: nowrap;
 }
 
-.identity-editor-card {
+.identity-preview-card {
   background: var(--surface);
 }
 
-.identity-editor-card > .section-heading-row {
+.identity-preview-card > .section-heading-row {
   margin-bottom: 10px;
-}
-
-.identity-editor {
-  display: block;
-  min-height: 250px;
-  padding: 12px;
-  resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: calc(12px * var(--font-scale));
-  line-height: 1.55;
 }
 
 .identity-markdown-preview {
@@ -1899,12 +1861,6 @@ select {
   margin-top: 0;
 }
 
-.identity-editor-actions {
-  align-items: center;
-  justify-content: space-between;
-}
-
-.identity-editor-actions small,
 .identity-evidence {
   color: var(--text-tertiary);
   font-size: calc(10.5px * var(--font-scale));

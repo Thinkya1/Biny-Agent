@@ -2917,8 +2917,8 @@
 }
 
 .biny-send-button.is-stop {
-  background: var(--biny-surface-hover);
-  color: var(--biny-text);
+  background: var(--biny-danger-bg);
+  color: var(--biny-danger);
 }
 
 .biny-send-button:not(:disabled):hover {
@@ -2930,7 +2930,7 @@
 }
 
 .biny-send-button.is-stop:not(:disabled):hover {
-  background: var(--biny-surface-selected);
+  background: color-mix(in srgb, var(--biny-danger) 20%, var(--biny-danger-bg));
 }
 
 .biny-send-button:disabled {
@@ -3380,8 +3380,8 @@
   position: absolute;
   width: 12px;
   height: 12px;
-  border: 1.5px solid color-mix(in srgb, var(--biny-send-icon) 35%, transparent);
-  border-top-color: var(--biny-send-icon);
+  border: 1.5px solid color-mix(in srgb, var(--biny-danger) 35%, transparent);
+  border-top-color: var(--biny-danger);
   border-radius: 50%;
   content: "";
   pointer-events: none;
@@ -3637,6 +3637,56 @@
 .biny-chat-title span {
   color: var(--biny-text-secondary);
   font-size: 12px;
+}
+
+.biny-worktree-indicator {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(260px, 30vw);
+  align-items: center;
+  gap: 5px;
+  margin-left: 4px;
+  padding: 4px 7px;
+  overflow: hidden;
+  border: 1px solid var(--biny-border);
+  border-radius: 8px;
+  background: var(--biny-surface-soft);
+  color: var(--biny-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.biny-worktree-indicator:hover {
+  background: var(--biny-surface-hover);
+  color: var(--biny-text);
+}
+
+.biny-worktree-indicator > span,
+.biny-worktree-indicator > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-worktree-indicator > small {
+  color: currentColor;
+  font-size: 10px;
+}
+
+.biny-worktree-indicator.is-positive {
+  color: var(--biny-success);
+}
+
+.biny-worktree-indicator.is-warning {
+  color: var(--biny-warning);
+}
+
+.biny-worktree-indicator.is-danger {
+  color: var(--biny-danger);
 }
 
 .biny-chat-actions {
@@ -3897,6 +3947,37 @@
   color: var(--biny-text-secondary);
   font-size: 11px;
   font-weight: 600;
+}
+
+.biny-runtime-worktree-status {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0 2px;
+}
+
+.biny-runtime-worktree-status strong {
+  color: var(--biny-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.biny-runtime-worktree-status small {
+  max-width: 230px;
+  line-height: 1.4;
+}
+
+.biny-runtime-worktree.is-positive .biny-runtime-worktree-status strong {
+  color: var(--biny-success);
+}
+
+.biny-runtime-worktree.is-warning .biny-runtime-worktree-status strong {
+  color: var(--biny-warning);
+}
+
+.biny-runtime-worktree.is-danger .biny-runtime-worktree-status strong {
+  color: var(--biny-danger);
 }
 
 .biny-runtime-empty {
@@ -6321,6 +6402,8 @@
   height: 36px;
   padding: 0 14px;
   flex: 0 0 auto;
+  border: 0;
+  border-radius: 12px;
 }
 
 .biny-mcp-add-button:hover,
@@ -6331,26 +6414,32 @@
 
 .biny-mcp-toolbar {
   display: flex;
-  min-height: 42px;
+  min-height: 38px;
   align-items: center;
   gap: 10px;
-  padding: 0 0 16px;
-  border-bottom: 1px solid var(--biny-border);
+  padding: 12px 2px 14px;
   background: transparent;
 }
 
-.biny-mcp-toolbar-add-button {
-  height: 34px;
+.biny-mcp-count {
+  margin: 0;
+  color: var(--biny-text-tertiary);
+  font-size: calc(12px * var(--font-scale));
+}
+
+.biny-mcp-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-left: auto;
-  padding-inline: 11px;
 }
 
 .biny-mcp-tabs {
-  display: flex;
-  min-height: 36px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   align-items: stretch;
-  padding: 3px;
-  border-radius: 9px;
+  padding: 4px;
+  border-radius: 10px;
   background: var(--biny-surface-soft);
 }
 
@@ -6371,21 +6460,21 @@
 }
 
 .biny-mcp-tabs button {
-  min-width: 112px;
-  height: 30px;
+  min-width: 0;
+  height: 32px;
   gap: 7px;
   padding: 0 12px;
-  border-radius: 7px;
-  font-size: 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
 }
 
-.biny-mcp-tabs button:hover,
+.biny-mcp-tabs button:hover {
+  color: var(--biny-text);
+}
+
 .biny-mcp-tabs button.is-active {
   color: var(--biny-text);
-  background: var(--biny-surface-hover);
-}
-
-.biny-mcp-tabs button.is-active {
+  background: var(--biny-surface);
   font-weight: 650;
   box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
 }
@@ -6468,8 +6557,7 @@
 .biny-mcp-row-actions button:disabled,
 .biny-mcp-secondary-button:disabled,
 .biny-mcp-primary-button:disabled,
-.biny-mcp-danger-button:disabled,
-.biny-mcp-toggle:disabled {
+.biny-mcp-danger-button:disabled {
   cursor: wait;
   opacity: 0.5;
 }
@@ -6508,7 +6596,10 @@
   position: fixed;
   top: 14px;
   left: 50%;
-  z-index: 150;
+  /* 必须压过设置页详情层（.model-dialog-backdrop 是 z-index 220）：
+     连接详情/新增连接层打开时 toast 若沉在底下，不仅看不到，× 按钮还会点穿到
+     遮罩上把详情层误关掉。 */
+  z-index: 260;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -6611,6 +6702,12 @@
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
 }
 
+.biny-mcp-installed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .biny-mcp-market-card,
 .biny-mcp-installed-card,
 .biny-mcp-details {
@@ -6646,11 +6743,13 @@
 }
 
 .biny-mcp-card-heading h2 {
+  display: flex;
   overflow: hidden;
   margin: 0;
+  align-items: center;
+  gap: 8px;
   font-size: calc(14px * var(--font-scale));
   font-weight: 650;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -6666,7 +6765,6 @@
 
 .biny-mcp-card-badges,
 .biny-mcp-tags,
-.biny-mcp-capabilities,
 .biny-mcp-detail-summary {
   display: flex;
   flex-wrap: wrap;
@@ -6803,126 +6901,135 @@
 
 .biny-mcp-installed-card {
   min-height: 0;
-  gap: 10px;
+  gap: 8px;
+  padding: 13px 20px;
 }
 
+/* Alma 版头部：只有 名称+徽章 / 描述 两行，右侧无控件 */
 .biny-mcp-installed-heading {
-  align-items: flex-start;
+  display: block;
+}
+
+.biny-mcp-card-desc {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 3px 0 0;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--biny-text-tertiary);
+  font-size: calc(11.5px * var(--font-scale));
+  line-height: 1.5;
 }
 
 .biny-mcp-status {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
+  padding: 2px 10px;
+  border: 1px solid var(--biny-border);
+  border-radius: 999px;
   color: var(--biny-text-tertiary);
-  font-size: 10px;
-}
-
-.biny-mcp-status i {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
+  font-size: calc(11px * var(--font-scale));
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .biny-mcp-status.is-connected {
+  border-color: color-mix(in srgb, var(--biny-success) 32%, transparent);
   color: var(--biny-success);
 }
 
 .biny-mcp-status.is-disconnected {
+  border-color: color-mix(in srgb, var(--biny-warning) 32%, transparent);
   color: var(--biny-warning);
 }
 
-.biny-mcp-status.is-disabled {
+.biny-mcp-status.is-disabled,
+.biny-mcp-status.is-not-started {
+  border-color: var(--biny-border);
   color: var(--biny-text-tertiary);
 }
 
-.biny-mcp-endpoint {
-  overflow: hidden;
-  margin: 1px 0 2px;
-  color: var(--biny-text-secondary);
+.biny-mcp-card-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.biny-mcp-cmd {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--biny-text) 6%, transparent);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.biny-mcp-cmd-line {
+  overflow: hidden;
+  color: var(--biny-text-secondary);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.biny-mcp-capabilities {
+.biny-mcp-cmd-line.is-args {
   color: var(--biny-text-tertiary);
-  font-size: 10px;
-}
-
-.biny-mcp-capabilities span {
-  padding-right: 8px;
-  border-right: 1px solid var(--biny-border);
-}
-
-.biny-mcp-capabilities span:last-child {
-  border-right: 0;
-}
-
-.biny-mcp-capabilities strong {
-  color: var(--biny-text-secondary);
-  font-weight: 600;
 }
 
 .biny-mcp-card-error {
   display: flex;
   align-items: flex-start;
-  gap: 5px;
-  margin: 0;
-  color: var(--biny-warning);
-  font-size: 10px;
-  line-height: 1.4;
-}
-
-.biny-mcp-installed-footer {
-  margin-top: 5px;
-  padding-top: 10px;
-  border-top: 1px solid var(--biny-border);
-}
-
-.biny-mcp-toggle {
-  display: inline-flex;
-  height: 26px;
-  align-items: center;
   gap: 6px;
-  padding: 0 8px 0 4px;
-  border: 1px solid var(--biny-border);
-  border-radius: 999px;
-  color: var(--biny-text-tertiary);
-  background: var(--biny-surface-soft);
-  font-size: 10px;
-  cursor: pointer;
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--biny-danger) 22%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--biny-danger) 10%, transparent);
+  color: var(--biny-danger);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.45;
+  word-break: break-all;
 }
 
-.biny-mcp-toggle span {
-  width: 17px;
-  height: 17px;
-  border-radius: 50%;
-  background: var(--biny-text-tertiary);
-  transition: transform 120ms ease, background 120ms ease;
+.biny-mcp-card-error svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
-.biny-mcp-toggle.is-on {
-  color: var(--biny-success);
-}
-
-.biny-mcp-toggle.is-on span {
-  background: var(--biny-success);
-  transform: translateX(1px);
+.biny-mcp-row-actions {
+  flex: 0 0 auto;
+  gap: 2px;
 }
 
 .biny-mcp-row-actions button {
-  min-height: 27px;
-  padding: 0 7px;
+  width: 30px;
+  height: 30px;
+  min-height: 0;
+  padding: 0;
   border-radius: 6px;
-  font-size: 10px;
+  color: var(--biny-text-tertiary);
 }
 
-.biny-mcp-row-actions button.is-danger {
+.biny-mcp-row-actions button.is-off {
+  opacity: 0.5;
+}
+
+.biny-mcp-row-actions button:hover:not(:disabled) {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+  opacity: 1;
+}
+
+.biny-mcp-row-actions button.is-danger:hover:not(:disabled) {
   color: var(--biny-danger);
 }
 
@@ -7024,23 +7131,25 @@
 
 .biny-mcp-empty {
   display: flex;
-  min-height: 320px;
+  min-height: 240px;
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  padding: 48px 0;
   color: var(--biny-text-secondary);
   text-align: center;
 }
 
 .biny-mcp-empty > span {
   display: inline-flex;
-  width: 24px;
-  height: 24px;
+  width: 40px;
+  height: 40px;
   align-items: center;
   justify-content: center;
-  color: var(--biny-text-secondary);
+  color: var(--biny-text-tertiary);
   background: transparent;
+  opacity: 0.5;
 }
 
 .biny-mcp-empty h2 {
@@ -7854,7 +7963,8 @@
 }
 
 .settings-extension-scroll {
-  min-height: 0;
+  /* 兜底：即便草稿区/工具条占高，技能列表也永远保留可滚的可见高度，不被挤成一条缝。 */
+  min-height: 160px;
   flex: 1 1 auto;
   overflow: auto;
   padding: 18px 0 12px;
@@ -8287,6 +8397,16 @@
   background: var(--biny-surface-soft);
 }
 
+/* 折叠态是默认形态：全文 pre 只在显式展开后才渲染，卡片高度由标题行 + 描述行决定，
+   不再被长正文撑高把下方技能列表挤没。 */
+.settings-skill-draft-card pre {
+  display: none;
+}
+
+.settings-skill-draft-card.is-expanded pre {
+  display: block;
+}
+
 .settings-skill-draft-card > div:first-child {
   min-width: 0;
   flex: 1 1 auto;
@@ -8306,6 +8426,37 @@
   color: var(--biny-text-tertiary);
   font-family: var(--font-mono);
   white-space: pre-wrap;
+}
+
+.settings-skill-draft-actions {
+  align-items: center;
+}
+
+.settings-skill-draft-actions .settings-skill-content-toggle {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-elevated);
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-skill-draft-actions .settings-skill-content-toggle svg {
+  transition: transform 160ms ease;
+}
+
+.settings-skill-draft-card.is-expanded .settings-skill-draft-actions .settings-skill-content-toggle svg {
+  transform: rotate(180deg);
+}
+
+/* 折叠态主要操作明确为主按钮，避免一排相同弱样式按钮分不清主次。 */
+.settings-skill-draft-actions button.is-primary {
+  color: var(--biny-selection-text);
+  border-color: var(--biny-focus);
+  background: var(--biny-focus);
 }
 
 .settings-skill-draft-editor {
@@ -8792,3 +8943,207 @@
 .chat-temperature-scale i { font-style: normal; color: var(--muted-foreground); font-size: 11px; }
 .chat-temperature-reset { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); cursor: pointer; font-size: inherit; }
 .chat-temperature-reset:hover { text-decoration: underline; }
+
+/* ===== 聊天内技能草稿审核卡（参考 Alma SkillExtractionCard） =====
+   回合成功后的审核入口：圆角卡片 + 左图标盒 + 标题/名称/描述 + 操作行。
+   高度动画用 grid 0fr↔1fr 技巧，颜色全部走 var(--biny-*) token。 */
+.biny-skill-draft-notices {
+  display: flex;
+  flex-direction: column;
+  padding: 0 4px;
+  margin: 8px 0 2px;
+}
+
+.biny-skill-draft-notice {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    grid-template-rows 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: biny-skill-draft-notice-in 350ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.biny-skill-draft-notice.is-collapsing {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.biny-skill-draft-notice-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.biny-skill-draft-notice-card {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--biny-border);
+  border-radius: 12px;
+  background: var(--biny-surface-soft);
+  transition: border-color 500ms, background-color 500ms;
+}
+
+.biny-skill-draft-notice-card.is-installed {
+  border-color: var(--biny-border);
+  background: var(--biny-surface-elevated);
+}
+
+.biny-skill-draft-notice-icon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-selected);
+  transition: color 400ms ease-out, background-color 400ms ease-out;
+}
+
+.biny-skill-draft-notice-icon.is-installed {
+  color: var(--biny-selection-text);
+  background: var(--biny-focus);
+}
+
+/* 未安装态 wand 轻摇摆；安装态 check 弹入（带回弹）。 */
+.biny-skill-draft-notice-icon:not(.is-installed) .biny-skill-draft-notice-icon-glyph {
+  animation: biny-skill-draft-notice-wand 2.5s ease-in-out infinite;
+}
+
+.biny-skill-draft-notice-icon.is-installed .biny-skill-draft-notice-icon-glyph {
+  animation: biny-skill-draft-notice-check 420ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.biny-skill-draft-notice-body {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.biny-skill-draft-notice-title {
+  color: var(--biny-text-tertiary);
+  font-size: calc(11px * var(--font-scale));
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.biny-skill-draft-notice-name {
+  color: var(--biny-text);
+  font-size: calc(14px * var(--font-scale));
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.biny-skill-draft-notice-description {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--biny-text-secondary);
+  font-size: calc(12px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.biny-skill-draft-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.biny-skill-draft-notice-actions button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--biny-border-strong);
+  border-radius: 7px;
+  color: var(--biny-text-secondary);
+  background: var(--biny-surface-elevated);
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.biny-skill-draft-notice-actions button:hover:not(:disabled) {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-skill-draft-notice-actions button.is-primary {
+  color: var(--biny-selection-text);
+  border-color: var(--biny-focus);
+  background: var(--biny-focus);
+}
+
+.biny-skill-draft-notice-actions button.is-primary:hover:not(:disabled) {
+  color: var(--biny-selection-text);
+  background: var(--biny-focus);
+}
+
+.biny-skill-draft-notice-actions button.is-link {
+  border-color: transparent;
+  background: transparent;
+}
+
+.biny-skill-draft-notice-actions button.is-link:hover:not(:disabled) {
+  color: var(--biny-text);
+  background: var(--biny-surface-hover);
+}
+
+.biny-skill-draft-notice-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+@keyframes biny-skill-draft-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes biny-skill-draft-notice-wand {
+  0%, 100% { transform: rotate(0deg); }
+  20% { transform: rotate(-6deg); }
+  40% { transform: rotate(6deg); }
+  60% { transform: rotate(-3deg); }
+  80% { transform: rotate(3deg); }
+}
+
+@keyframes biny-skill-draft-notice-check {
+  from {
+    opacity: 0;
+    transform: scale(0) rotate(-45deg);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .biny-skill-draft-notice {
+    animation: none;
+    transition: opacity 160ms ease;
+  }
+  .biny-skill-draft-notice-icon .biny-skill-draft-notice-icon-glyph,
+  .biny-skill-draft-notice-icon.is-installed .biny-skill-draft-notice-icon-glyph {
+    animation: none;
+  }
+}

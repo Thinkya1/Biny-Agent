@@ -6,6 +6,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { ThinkingOrb } from "thinking-orbs";
 import { ChatMessage, ChatMessageBubble } from "@astryxdesign/core/Chat";
 import type { PermissionResult } from "../../../../permission/PermissionManager.js";
 import type { SessionUsage } from "../../../../session/metadata.js";
@@ -26,6 +27,7 @@ import { RunErrorCard } from "./chat/RunErrorCard.js";
 import { MessageClock } from "./chat/MessageClock.js";
 import { ThinkingBlock } from "./chat/ThinkingBlock.js";
 import { ExecutionGroup, type ExecutionGroupStep } from "./chat/ExecutionGroup.js";
+import { pickThinkingMessage } from "../thinkingMessages.js";
 
 interface MessageTimelineProps {
   projectId: string;
@@ -35,15 +37,30 @@ interface MessageTimelineProps {
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
   onResume(): Promise<void>;
-  onRetry(input: string, userMessageIndex: number, idempotencyKey: string): Promise<void>;
+  thinking: boolean;
+  onRetry(targetMessageId: string, input: string, idempotencyKey: string): Promise<void>;
+  onSwitchVersion(messageId: string, direction: "prev" | "next"): Promise<void>;
   onEditUserMessage(input: string, userMessageIndex: number, idempotencyKey: string): Promise<void>;
   onCreateBranch(): void;
   onRollbackFiles(turn: TimelineTurn): void;
   onDeleteUserMessage(turnId: string): void;
 }
 
-export const MessageTimeline = memo(function MessageTimeline({ projectId, sessionId, turns, onPreviewFile, onOpenExternal, onResolvePermission, onResume, onRetry, onEditUserMessage, onCreateBranch, onRollbackFiles, onDeleteUserMessage }: MessageTimelineProps): React.JSX.Element {
+interface OptimisticRewrite {
+  turnId: string;
+  user: string;
+  userMessageIndex?: number;
+  assistantMessageId?: string;
+  mode: "retry" | "edit";
+  settled: boolean;
+}
+
+export const MessageTimeline = memo(function MessageTimeline({ projectId, sessionId, turns, onPreviewFile, onOpenExternal, onResolvePermission, onResume, thinking, onRetry, onSwitchVersion, onEditUserMessage, onCreateBranch, onRollbackFiles, onDeleteUserMessage }: MessageTimelineProps): React.JSX.Element {
   const [editing, setEditing] = useState<{ turnId: string; value: string; userMessageIndex: number }>();
+  // Alma 的重试/重写会先把目标之后的消息从视图中撤掉，再等待新回合流入；这里保留同样的
+  // 乐观投影。持久化仍由 App/Runtime 负责，组件只在请求尚未完成时负责视觉上的覆盖。
+  const [optimisticRewrite, setOptimisticRewrite] = useState<OptimisticRewrite>();
+  const [rewriteThinkingMessage] = useState(() => pickThinkingMessage());
   // 供稳定回调读取最新编辑状态：submitEditing 若直接依赖 editing，每次击键都会得到新引用，
   // 进而让所有 Turn 的 memo 失效。用 ref 读取后，回调引用在整个编辑过程保持稳定。
   const editingRef = useRef(editing);
@@ -59,19 +76,75 @@ export const MessageTimeline = memo(function MessageTimeline({ projectId, sessio
     setEditing({ turnId: turn.id, value: splitAttachmentReferences(turn.user).text, userMessageIndex: turn.userMessageIndex });
   }, []);
 
-  const cancelEditing = useCallback((): void => setEditing(undefined), []);
+  const cancelEditing = useCallback((): void => {
+    setEditing(undefined);
+    setOptimisticRewrite(undefined);
+  }, []);
 
   const changeEditing = useCallback((value: string): void => {
     // 只有正在被编辑的那一轮会渲染输入框并触发 onChange，无需再按 turnId 过滤。
     setEditing((current) => current ? { ...current, value } : current);
   }, []);
 
+  const startOptimisticRewrite = useCallback((turn: TimelineTurn, mode: OptimisticRewrite["mode"], user = turn.user): void => {
+    setOptimisticRewrite({
+      turnId: turn.id,
+      user,
+      userMessageIndex: turn.userMessageIndex,
+      assistantMessageId: turn.assistantMessageId,
+      mode,
+      settled: false
+    });
+  }, []);
+
+  const settleOptimisticRewrite = useCallback((turnId: string, succeeded: boolean): void => {
+    setOptimisticRewrite((current) => {
+      if (!current || current.turnId !== turnId) return current;
+      return succeeded ? { ...current, settled: true } : undefined;
+    });
+  }, []);
+
   const submitEditing = useCallback(async (): Promise<void> => {
     const current = editingRef.current;
     if (!current || !sessionId) return;
-    await onEditUserMessage(current.value, current.userMessageIndex, globalThis.crypto.randomUUID());
-    setEditing(undefined);
-  }, [onEditUserMessage, sessionId]);
+    startOptimisticRewrite({
+      id: current.turnId,
+      user: current.value,
+      assistant: "",
+      reasoning: "",
+      skills: [],
+      status: "running",
+      tools: [],
+      steps: [],
+      userMessageIndex: current.userMessageIndex
+    }, "edit", current.value);
+    try {
+      await onEditUserMessage(current.value, current.userMessageIndex, globalThis.crypto.randomUUID());
+      settleOptimisticRewrite(current.turnId, true);
+      setEditing(undefined);
+    } catch (error) {
+      settleOptimisticRewrite(current.turnId, false);
+      throw error;
+    }
+  }, [onEditUserMessage, sessionId, settleOptimisticRewrite, startOptimisticRewrite]);
+
+  useEffect(() => {
+    const pending = optimisticRewrite;
+    if (!pending?.settled) return;
+    const target = turns.find((turn) => turn.id === pending.turnId);
+    const hasRetryReplacement = pending.mode === "retry"
+      && target !== undefined
+      && (target.retryOfMessageId !== undefined
+        || target.assistantMessageId !== pending.assistantMessageId);
+    const hasEditReplacement = pending.mode === "edit"
+      && pending.userMessageIndex !== undefined
+      && turns.some((turn) => turn.id !== pending.turnId
+        && turn.userMessageIndex === pending.userMessageIndex
+        && turn.user === pending.user);
+    if (hasRetryReplacement || hasEditReplacement) {
+      setOptimisticRewrite((current) => current?.turnId === pending.turnId ? undefined : current);
+    }
+  }, [optimisticRewrite, turns]);
 
   // 错误卡按「一个错误只打扰一次」展示：每个会话各记一份当前未读错误清单，切走（或组件
   // 卸载）的一瞬整份标成已看过——用户点进失败的会话第一眼能看到，错过或划走就不再提。
@@ -114,9 +187,57 @@ export const MessageTimeline = memo(function MessageTimeline({ projectId, sessio
     roundFingerprintsRef.current = { sessionKey, fingerprints };
   }, [projectId, sessionId, turns]);
 
+  const displayedTurns = useMemo(() => {
+    const pending = optimisticRewrite;
+    if (!pending) return turns;
+    const targetIndex = turns.findIndex((turn) => turn.id === pending.turnId);
+    const replacementIndex = targetIndex >= 0
+      ? targetIndex
+      : pending.userMessageIndex === undefined
+        ? -1
+        : turns.findIndex((turn) => turn.userMessageIndex === pending.userMessageIndex && turn.user === pending.user);
+    if (replacementIndex >= 0) {
+      const target = turns[replacementIndex];
+      if (!target) return turns;
+      return [...turns.slice(0, replacementIndex), optimisticRewriteTurn(target, pending.user)];
+    }
+    return [...turns, optimisticRewriteTurn({
+      id: pending.turnId,
+      user: pending.user,
+      userMessageIndex: pending.userMessageIndex,
+      userMessageId: undefined,
+      assistant: "",
+      assistantMessageId: undefined,
+      versionSlotId: undefined,
+      versionIndex: undefined,
+      versionCount: undefined,
+      retryOfMessageId: undefined,
+      reasoning: "",
+      reasoningStatus: undefined,
+      reasoningDurationMs: undefined,
+      reasoningStartedAt: undefined,
+      skills: [],
+      status: "running",
+      model: undefined,
+      tools: [],
+      steps: [],
+      error: undefined,
+      durationMs: undefined,
+      usage: undefined,
+      timestamp: undefined,
+      resumable: undefined,
+      firstTokenAt: undefined,
+      startedAt: undefined,
+      ttftMs: undefined,
+      decodeMs: undefined,
+      decodeTokens: undefined,
+      finishReason: undefined
+    }, pending.user)];
+  }, [optimisticRewrite, turns]);
+
   return (
     <div className="message-timeline">
-      {turns.map((turn) => (
+      {displayedTurns.map((turn) => (
         <Turn
           key={turn.id}
           onCreateBranch={onCreateBranch}
@@ -132,14 +253,50 @@ export const MessageTimeline = memo(function MessageTimeline({ projectId, sessio
           onResume={onResume}
           onRollbackFiles={onRollbackFiles}
           onRetry={onRetry}
+          onRetryStart={startOptimisticRewrite}
+          onRetrySettled={settleOptimisticRewrite}
+          onSwitchVersion={onSwitchVersion}
           projectId={projectId}
           sessionId={sessionId}
           turn={turn}
         />
       ))}
+      {optimisticRewrite && !thinking ? (
+        <div className="biny-thinking-status" role="status">
+          <ThinkingOrb aria-label={rewriteThinkingMessage} className="biny-thinking-status-orb" size={20} state="connecting" theme="auto" />
+          <span className="biny-thinking-status-label chat-shimmer-text">{rewriteThinkingMessage}…</span>
+        </div>
+      ) : null}
     </div>
   );
 });
+
+function optimisticRewriteTurn(turn: TimelineTurn, user: string): TimelineTurn {
+  return {
+    ...turn,
+    user,
+    assistant: "",
+    memoryCitations: undefined,
+    reasoning: "",
+    reasoningStatus: undefined,
+    reasoningDurationMs: undefined,
+    reasoningStartedAt: undefined,
+    skills: [],
+    status: "running",
+    model: undefined,
+    tools: [],
+    steps: [],
+    error: undefined,
+    durationMs: undefined,
+    usage: undefined,
+    firstTokenAt: undefined,
+    startedAt: undefined,
+    ttftMs: undefined,
+    decodeMs: undefined,
+    decodeTokens: undefined,
+    finishReason: undefined
+  };
+}
 
 /**
  * 「已看过」的轮次错误登记处，身份由 runErrorSeenKey 给出（project + session + 轮次终态时间戳）。
@@ -231,6 +388,9 @@ const Turn = memo(function Turn({
   onResolvePermission,
   onResume,
   onRetry,
+  onRetryStart,
+  onRetrySettled,
+  onSwitchVersion,
   onCancelEdit,
   onChangeEdit,
   onStartEdit,
@@ -247,7 +407,10 @@ const Turn = memo(function Turn({
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
   onResume(): Promise<void>;
-  onRetry(input: string, userMessageIndex: number, idempotencyKey: string): Promise<void>;
+  onRetry(targetMessageId: string, input: string, idempotencyKey: string): Promise<void>;
+  onRetryStart(turn: TimelineTurn, mode: "retry" | "edit", user?: string): void;
+  onRetrySettled(turnId: string, succeeded: boolean): void;
+  onSwitchVersion(messageId: string, direction: "prev" | "next"): Promise<void>;
   onCancelEdit(): void;
   onChangeEdit(value: string): void;
   onStartEdit(turn: TimelineTurn): void;
@@ -266,22 +429,30 @@ const Turn = memo(function Turn({
     setErrorDismissed(true);
   }, [dismissedKey]);
   const retry = useCallback((): Promise<void> => {
-    const userMessageIndex = turn.userMessageIndex;
-    if (!turn.user || userMessageIndex === undefined) return Promise.resolve();
+    const targetMessageId = turn.assistantMessageId ?? turn.userMessageId;
+    if (!turn.user || !targetMessageId) return Promise.resolve();
     const existing = retryPromiseRef.current;
     if (existing) return existing;
-    const pending = Promise.resolve().then(() => onRetry(turn.user, userMessageIndex, globalThis.crypto.randomUUID()));
+    onRetryStart(turn, "retry");
+    const pending = Promise.resolve().then(() => onRetry(targetMessageId, turn.user, globalThis.crypto.randomUUID()));
     retryPromiseRef.current = pending;
     void pending.then(
       () => {
         if (retryPromiseRef.current === pending) retryPromiseRef.current = undefined;
+        onRetrySettled(turn.id, true);
       },
       () => {
         if (retryPromiseRef.current === pending) retryPromiseRef.current = undefined;
+        onRetrySettled(turn.id, false);
       }
     );
     return pending;
-  }, [onRetry, turn.user, turn.userMessageIndex]);
+  }, [onRetry, onRetrySettled, onRetryStart, turn]);
+  const switchVersion = useCallback((direction: "prev" | "next"): Promise<void> => {
+    if (!turn.assistantMessageId) return Promise.resolve();
+    return onSwitchVersion(turn.assistantMessageId, direction);
+  }, [onSwitchVersion, turn.assistantMessageId]);
+  const canRetry = Boolean(turn.user && (turn.assistantMessageId ?? turn.userMessageId));
   const executionSteps = turn.steps.length ? turn.steps : fallbackExecutionSteps(turn);
   return (
     <section className={`timeline-turn is-${turn.status}`}>
@@ -297,7 +468,7 @@ const Turn = memo(function Turn({
           onEdit={() => onStartEdit(turn)}
           onOpenExternal={onOpenExternal}
           onPreviewFile={onPreviewFile}
-          onRegenerate={turn.userMessageIndex === undefined ? undefined : retry}
+          onRegenerate={canRetry ? retry : undefined}
           onRollbackFiles={() => onRollbackFiles(turn)}
           onSubmitEdit={onSubmitEdit}
           projectId={projectId}
@@ -332,10 +503,13 @@ const Turn = memo(function Turn({
             finishReason={turn.finishReason}
             metrics={turnMetrics(turn)}
             onCreateBranch={onCreateBranch}
-            onRegenerate={turn.userMessageIndex === undefined ? undefined : retry}
+            onRegenerate={canRetry ? retry : undefined}
+            onSwitchVersion={turn.versionCount && turn.versionCount > 1 ? switchVersion : undefined}
             runMs={turn.durationMs}
             timestamp={turn.timestamp}
             usage={turn.usage}
+            versionCount={turn.versionCount}
+            versionIndex={turn.versionIndex}
           />
         ) : null}
 
@@ -346,7 +520,7 @@ const Turn = memo(function Turn({
             message={turn.error}
             onDismiss={dismissError}
             onResume={() => void onResume()}
-            onRetry={turn.userMessageIndex === undefined ? undefined : retry}
+            onRetry={canRetry ? retry : undefined}
             resumable={turn.resumable}
             status={turn.status}
           />
@@ -706,7 +880,7 @@ function plainTextFromMarkdown(content: string): string {
  *  （LLM 用时 / 首 token / 解码吞吐）常显。更多菜单与用量悬浮卡都走 portal
  *  fixed 定位：用量项悬停出详情卡（80ms 悬停意图防抖），结束原因带语义色点，
  *  复制成功后图标变勾并延迟收菜单。 */
-function AssistantActions({ content, timestamp, metrics, runMs, usage, finishReason, onCreateBranch, onRegenerate }: {
+function AssistantActions({ content, timestamp, metrics, runMs, usage, finishReason, onCreateBranch, onRegenerate, onSwitchVersion, versionIndex, versionCount }: {
   content: string;
   timestamp?: string;
   metrics?: TurnMetrics;
@@ -715,6 +889,9 @@ function AssistantActions({ content, timestamp, metrics, runMs, usage, finishRea
   finishReason?: string;
   onCreateBranch(): void;
   onRegenerate?(): Promise<void>;
+  onSwitchVersion?(direction: "prev" | "next"): Promise<void>;
+  versionIndex?: number;
+  versionCount?: number;
 }): React.JSX.Element {
   const [speaking, setSpeaking] = useState(false);
   const stopSpeechRef = useRef<() => void>(undefined);
@@ -867,6 +1044,13 @@ function AssistantActions({ content, timestamp, metrics, runMs, usage, finishRea
         {onRegenerate ? (
           <button aria-label="重新生成" className="assistant-action" onClick={() => { void onRegenerate(); }} title="重新生成" type="button"><Icon name="refresh" size={16} /></button>
         ) : null}
+        {onSwitchVersion && versionCount !== undefined && versionCount > 1 && versionIndex !== undefined ? (
+          <VersionSwitcher
+            onSwitchVersion={onSwitchVersion}
+            versionCount={versionCount}
+            versionIndex={versionIndex}
+          />
+        ) : null}
         <button aria-expanded={menuOpen} aria-haspopup="menu" aria-label="更多回复操作" className="assistant-action" onClick={toggleMenu} ref={moreButtonRef} title="更多" type="button"><Icon name="more" size={16} /></button>
       </div>
       {menuOpen && menuPosition ? createPortal(
@@ -935,6 +1119,45 @@ function AssistantActions({ content, timestamp, metrics, runMs, usage, finishRea
         </div>,
         document.body
       ) : null}
+    </div>
+  );
+}
+
+/** 与 Alma 相同的消息版本控件：箭头、当前版本/总版本，跟随回复操作条显示。 */
+function VersionSwitcher({ onSwitchVersion, versionIndex, versionCount }: {
+  onSwitchVersion(direction: "prev" | "next"): Promise<void>;
+  versionIndex: number;
+  versionCount: number;
+}): React.JSX.Element {
+  const [pending, setPending] = useState<"prev" | "next">();
+  const switchVersion = async (direction: "prev" | "next"): Promise<void> => {
+    if (pending) return;
+    setPending(direction);
+    try {
+      await onSwitchVersion(direction);
+    } finally {
+      setPending(undefined);
+    }
+  };
+  return (
+    <div aria-label="回复版本" className="message-version-switcher">
+      <button
+        aria-label="上一版本"
+        className="assistant-action message-version-button"
+        disabled={pending !== undefined}
+        onClick={() => { void switchVersion("prev"); }}
+        title="上一版本"
+        type="button"
+      >‹</button>
+      <span className="message-version-count">{versionIndex + 1} / {versionCount}</span>
+      <button
+        aria-label="下一版本"
+        className="assistant-action message-version-button"
+        disabled={pending !== undefined}
+        onClick={() => { void switchVersion("next"); }}
+        title="下一版本"
+        type="button"
+      >›</button>
     </div>
   );
 }

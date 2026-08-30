@@ -48,7 +48,8 @@ interface SidebarProps {
   onRevealProject(projectId: string): void;
   onOpenTerminalProject(projectId: string): void;
   onRenameProject(projectId: string): void;
-  onNewTask(projectId: string): void;
+  /** variant=welcome：顶部入口，首页欢迎态；variant=blank：项目行入口，直达空白聊天。 */
+  onNewTask(projectId: string, variant: "welcome" | "blank"): void;
   onImportSession(projectId: string): void;
   onRemoveProject(projectId: string): void;
   onSearch(): void;
@@ -233,7 +234,7 @@ export const Sidebar = memo(function Sidebar({
   };
 
   const createTask = (): void => {
-    if (activeProjectId) onNewTask(activeProjectId);
+    if (activeProjectId) onNewTask(activeProjectId, "welcome");
     else onOpenProject();
   };
 
@@ -308,7 +309,7 @@ export const Sidebar = memo(function Sidebar({
             setProjectCreateMenuOpen(false);
             setProjectMenuOpen((current) => current === `${section}:${project.id}` ? undefined : `${section}:${project.id}`);
           }}
-          onNewTask={() => { setProjectMenuOpen(undefined); onNewTask(project.id); }}
+          onNewTask={() => { setProjectMenuOpen(undefined); onNewTask(project.id, "blank"); }}
           onImportSession={() => { setProjectMenuOpen(undefined); onImportSession(project.id); }}
           onOpenTerminal={() => { setProjectMenuOpen(undefined); onOpenTerminalProject(project.id); }}
           onPin={() => { setProjectMenuOpen(undefined); onProjectPinned(project.id, !project.pinned); }}
@@ -618,8 +619,12 @@ function SessionList({ flat = false, projectId, sessions, selectedSessionId, onS
     const title = session.title || session.firstUserMessage || "新对话";
     const meta = sidebarSessionMeta(session, running);
     const metaTitle = meta ? sidebarSessionUpdatedAt(session.updatedAt) : undefined;
+    const worktree = session.isolation === "worktree";
+    const accessibleLabel = worktree
+      ? [title, "Git 工作树", metaTitle].filter((value): value is string => Boolean(value)).join(" · ")
+      : undefined;
     return [
-      <div className={`biny-sidebar-session-tree-row${session.id === selectedSessionId ? " is-selected" : ""}`} key={`${session.projectId}:${session.id}`}>
+      <div className={`biny-sidebar-session-tree-row${session.id === selectedSessionId ? " is-selected" : ""}`} data-worktree={worktree ? "true" : undefined} key={`${session.projectId}:${session.id}`}>
         <button
           aria-expanded={expandable ? expanded : undefined}
           aria-label={expandable ? (expanded ? "收起子会话" : "展开子会话") : undefined}
@@ -634,6 +639,7 @@ function SessionList({ flat = false, projectId, sessions, selectedSessionId, onS
         <div className={`biny-sidebar-session-entry${session.id === selectedSessionId ? " is-selected" : ""}${session.archived ? " is-archived" : ""}${running ? " is-running" : ""}`}>
           <button
             aria-current={session.id === selectedSessionId ? "page" : undefined}
+            aria-label={accessibleLabel}
             className="biny-sidebar-session-item"
             onClick={() => onSelectSession(projectId ?? session.projectId, session.id)}
             onContextMenu={(event) => {

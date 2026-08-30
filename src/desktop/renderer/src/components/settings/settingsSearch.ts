@@ -15,10 +15,9 @@ export interface SettingsSearchResult {
 }
 
 export const settingsSearchIndex: SettingsSearchResult[] = [
-  { tab: "外观", sectionId: "appearance-theme", title: "显示模式", description: "浅色、深色与跟随系统", keywords: ["主题", "theme", "dark", "light"] },
-  { tab: "外观", sectionId: "appearance-font", title: "界面字体", description: "字体与字号", keywords: ["字体", "字号", "font", "size"] },
-  { tab: "个性化", sectionId: "personalization-global", title: "全局个性化", description: "人格与自定义指令", keywords: ["人格", "指令", "personality", "instructions"] },
-  { tab: "个性化", sectionId: "personalization-chat", title: "当前聊天", description: "聊天级覆盖", keywords: ["聊天", "覆盖", "inherit"] },
+  { tab: "通用", sectionId: "appearance-theme", title: "显示模式", description: "浅色、深色与跟随系统", keywords: ["主题", "背景", "theme", "dark", "light"] },
+  { tab: "通用", sectionId: "appearance-font", title: "界面字体", description: "字体与字号", keywords: ["字体", "字号", "font", "size"] },
+  { tab: "通用", sectionId: "identity", title: "Agent 灵魂", description: "身份资料只读预览与提案审核", keywords: ["灵魂", "身份", "soul", "identity", "style", "user"] },
   { tab: "模型", sectionId: "models-connections", title: "模型连接", description: "供应商、服务地址与默认模型", keywords: ["模型", "供应商", "连接", "默认模型", "provider"] },
   { tab: "MCP 服务器", sectionId: "mcp-servers", title: "MCP 服务器", description: "市场、已安装服务与自定义连接", keywords: ["mcp", "服务器", "stdio", "remote", "sse", "http"] },
   { tab: "技能", sectionId: "settings-extensions-skills", title: "技能", description: "本机 Skill 列表与内容预览", keywords: ["skill", "技能", "agent", "自动提取"] },

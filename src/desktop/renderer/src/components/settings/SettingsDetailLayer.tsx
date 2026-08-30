@@ -64,7 +64,7 @@ export function SettingsDetailLayer({ children, onClose }: {
   return (
     <div
       className="model-dialog-backdrop settings-detail-layer"
-      onClick={(event) => { if (event.target === event.currentTarget) onCloseRef.current(); }}
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onCloseRef.current(); }}
       ref={backdropRef}
     >
       {children}

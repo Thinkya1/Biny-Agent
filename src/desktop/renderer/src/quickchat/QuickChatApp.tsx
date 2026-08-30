@@ -1,25 +1,35 @@
 /**
- * QuickChat 悬浮窗的极简聊天界面。
+ * QuickChat 主页面路由。
  *
- * 与主窗口的完整 desktopState 投影彻底解耦：这里只维护自己的一个小消息列表 + 一个精简
- * reducer，从共享的 agent 事件流里只挑当前 QuickChat session 的事件做流式渲染。发消息复用
- * 现成的 sendPrompt（sessionId 传 undefined 即懒建会话），屏幕上下文走 quickChatScreenContext
- * IPC 取纯文本片段拼进 prompt，绝不搬截图字节。
+ * 这是一个轻量的聊天壳，但仍然复用 Desktop 的模型选择、Markdown 和 agent 事件协议。
+ * 屏幕上下文只作为本轮 promptContext 传给 Runtime，用户气泡始终显示用户原文。
  */
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import type { DesktopQuickChatScreenContext } from "../../../protocol.js";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import type { Dispatch } from "react";
 import type { AgentHostEvent } from "../../../../runtime/agentEvents.js";
 import { isTerminalRunEvent } from "../../../../runtime/agentEvents.js";
+import { modelThinkingSelections, type ThinkingSelection } from "../../../../llm/modelThinking.js";
+import type {
+  DesktopBootstrap,
+  DesktopQuickChatScreenContext,
+  DesktopQuickChatSettings
+} from "../../../protocol.js";
+import { DEFAULT_FONT_PREFERENCE, SYSTEM_FONT_FAMILY } from "../../../fontPreference.js";
+import { Icon } from "../components/Icon.js";
+import { MarkdownContent } from "../components/MarkdownContent.js";
+import { ModelPickerMenu } from "../components/composer/ModelPickerMenu.js";
+import "./quickchat.css";
 
-/** 输入框草稿上限：悬浮窗定位是短问答，过长内容应回主窗口。 */
 const MAX_INPUT_LENGTH = 4_000;
 
 interface QuickChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  reasoning: string;
+  reasoningStreaming: boolean;
+  activity?: string;
   streaming: boolean;
-  /** 用户消息附带的小标记：是否注入了屏幕上下文。 */
   withScreenContext?: boolean;
 }
 
@@ -28,86 +38,155 @@ interface QuickChatState {
 }
 
 type QuickChatAction =
-  | { type: "append"; message: QuickChatMessage }
-  | { type: "set-assistant"; runId: string; content: string; streaming: boolean }
-  | { type: "finish-run"; runId: string };
+  | { type: "reset" }
+  | { type: "append-user"; message: QuickChatMessage }
+  | { type: "ensure-assistant"; runId: string }
+  | { type: "assistant-delta"; runId: string; content: string }
+  | { type: "assistant-completed"; runId: string; content: string }
+  | { type: "reasoning-started"; runId: string }
+  | { type: "reasoning-delta"; runId: string; content: string }
+  | { type: "reasoning-completed"; runId: string }
+  | { type: "tool-started"; runId: string; tool: string }
+  | { type: "finish-run"; runId: string; fallback?: string };
 
 let messageCounter = 0;
-const nextMessageId = (prefix: string): string => `${prefix}-${++messageCounter}`;
 
-/**
- * 精简流式归约：assistant.delta 与 assistant.completed 的 content 都是累计全文（不是增量），
- * 所以同一 run 内直接替换；不同 run 各开一条气泡。与主窗口 sessionTimeline 的语义保持一致。
- */
-function reduceQuickChat(state: QuickChatState, action: QuickChatAction): QuickChatState {
-  switch (action.type) {
-    case "append":
-      return { messages: [...state.messages, action.message] };
-    case "set-assistant": {
-      const index = state.messages.findIndex((message) => message.id === action.runId);
-      if (index === -1) {
-        return {
-          messages: [
-            ...state.messages,
-            { id: action.runId, role: "assistant", content: action.content, streaming: action.streaming }
-          ]
-        };
-      }
-      const messages = state.messages.slice();
-      const existing = messages[index];
-      if (!existing) return state;
-      messages[index] = { ...existing, content: action.content, streaming: action.streaming };
-      return { messages };
-    }
-    case "finish-run": {
-      const index = state.messages.findIndex((message) => message.id === action.runId);
-      if (index === -1) return state;
-      const messages = state.messages.slice();
-      const existing = messages[index];
-      if (!existing) return state;
-      messages[index] = { ...existing, streaming: false };
-      return { messages };
-    }
-  }
+function nextMessageId(prefix: string): string {
+  messageCounter += 1;
+  return prefix + "-" + String(messageCounter);
 }
 
-/** 把屏幕上下文片段格式化成注入 prompt 的文本块；空上下文返回原文。 */
-function formatPromptWithContext(input: string, context: DesktopQuickChatScreenContext): string {
-  if (!context.recording) return input;
-  const lines: string[] = [];
-  if (context.frontmostApplication) lines.push(`前台应用：${context.frontmostApplication}`);
-  if (context.windowTitle) lines.push(`当前窗口：${context.windowTitle}`);
-  if (context.browserUrl) lines.push(`浏览器 URL：${context.browserUrl}`);
-  if (context.ocrExcerpt) lines.push(`屏幕文字片段：${context.ocrExcerpt}`);
-  if (context.recentSessionTitles.length) lines.push(`最近分析的活动：${context.recentSessionTitles.join("；")}`);
-  if (!lines.length) return input;
-  const stamp = context.capturedAt ? `（采集于 ${context.capturedAt}）` : "";
-  return `[实时屏幕上下文${stamp}，仅供你参考，不要逐字复述]\n${lines.join("\n")}\n\n[我的问题]\n${input}`;
+function emptyAssistant(runId: string): QuickChatMessage {
+  return {
+    id: runId,
+    role: "assistant",
+    content: "",
+    reasoning: "",
+    reasoningStreaming: false,
+    streaming: true
+  };
+}
+
+function reduceQuickChat(state: QuickChatState, action: QuickChatAction): QuickChatState {
+  if (action.type === "reset") return { messages: [] };
+  if (action.type === "append-user") return { messages: [...state.messages, action.message] };
+
+  const existingIndex = state.messages.findIndex((message) => message.id === action.runId);
+  const withAssistant = existingIndex === -1
+    ? [...state.messages, emptyAssistant(action.runId)]
+    : state.messages.slice();
+  const index = existingIndex === -1 ? withAssistant.length - 1 : existingIndex;
+  const existing = withAssistant[index];
+  if (!existing) return state;
+
+  switch (action.type) {
+    case "ensure-assistant":
+      return { messages: withAssistant };
+    case "assistant-delta":
+      withAssistant[index] = { ...existing, content: existing.content + action.content, streaming: true };
+      return { messages: withAssistant };
+    case "assistant-completed":
+      withAssistant[index] = { ...existing, content: action.content, streaming: false };
+      return { messages: withAssistant };
+    case "reasoning-started":
+      withAssistant[index] = { ...existing, reasoningStreaming: true, streaming: true };
+      return { messages: withAssistant };
+    case "reasoning-delta":
+      withAssistant[index] = {
+        ...existing,
+        reasoning: existing.reasoning + action.content,
+        reasoningStreaming: true,
+        streaming: true
+      };
+      return { messages: withAssistant };
+    case "reasoning-completed":
+      withAssistant[index] = { ...existing, reasoningStreaming: false };
+      return { messages: withAssistant };
+    case "tool-started":
+      withAssistant[index] = { ...existing, activity: "正在调用 " + action.tool, streaming: true };
+      return { messages: withAssistant };
+    case "finish-run":
+      withAssistant[index] = {
+        ...existing,
+        content: existing.content || action.fallback || "",
+        activity: undefined,
+        reasoningStreaming: false,
+        streaming: false
+      };
+      return { messages: withAssistant };
+  }
 }
 
 export function QuickChatApp(): React.JSX.Element {
   const [state, dispatch] = useReducer(reduceQuickChat, { messages: [] });
   const [input, setInput] = useState("");
+  const [bootstrap, setBootstrap] = useState<DesktopBootstrap>();
+  const [settings, setSettings] = useState<DesktopQuickChatSettings>();
+  const [context, setContext] = useState<DesktopQuickChatScreenContext>({});
+  const [clickThrough, setClickThrough] = useState(false);
+  const [projectId, setProjectId] = useState<string | undefined>(undefined);
+  const [modelAlias, setModelAlias] = useState<string | undefined>(undefined);
+  const [thinking, setThinking] = useState<ThinkingSelection>("off");
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [injectScreenContext, setInjectScreenContext] = useState(false);
-  const [noProject, setNoProject] = useState(false);
-  /** 本悬浮窗专属会话：首发时懒建，之后整个窗口生命周期内复用。 */
-  const sessionIdRef = useRef<string | undefined>(undefined);
-  const projectIdRef = useRef<string | undefined>(undefined);
+  const [error, setError] = useState<string | undefined>(undefined);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const modelAnchorRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const projectIdRef = useRef<string | undefined>(undefined);
+  const sessionIdRef = useRef<string | undefined>(undefined);
+  const activeRunIdRef = useRef<string | undefined>(undefined);
+  const [activeRunId, setActiveRunId] = useState<string | undefined>(undefined);
+  const pendingSendRef = useRef<{ input: string } | undefined>(undefined);
+  const runtimeModelAliasRef = useRef<string | undefined>(undefined);
+  const runtimeThinkingRef = useRef<ThinkingSelection>("off");
+  const settingsRef = useRef<DesktopQuickChatSettings | undefined>(undefined);
 
-  // 启动时读一次偏好与活动项目；注入开关若开着，发送时再实时取屏幕上下文。
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    if (!bootstrap) return;
+    document.documentElement.dataset.theme = bootstrap.themePreference ?? "system";
+    const font = bootstrap.fontPreference ?? DEFAULT_FONT_PREFERENCE;
+    const style = document.documentElement.style;
+    style.setProperty("--app-font-size", String(font.size));
+    if (font.family === SYSTEM_FONT_FAMILY) style.removeProperty("--font-sans");
+    else style.setProperty("--font-sans", `"${font.family.replaceAll('"', "")}", var(--font-sans-stack)`);
+  }, [bootstrap]);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const [settings, boot] = await Promise.all([window.biny.quickChatSettings(), window.biny.bootstrap()]);
+        const [nextSettings, nextBootstrap, cachedContext, nextClickThrough] = await Promise.all([
+          window.biny.quickChatSettings(),
+          window.biny.bootstrap(),
+          window.biny.quickChatScreenContext(),
+          window.biny.getQuickChatClickThrough()
+        ]);
         if (cancelled) return;
-        setInjectScreenContext(settings.injectScreenContext);
-        projectIdRef.current = boot.activeProjectId ?? boot.projects.at(0)?.id;
-        setNoProject(projectIdRef.current === undefined);
-      } catch {
-        // 读取失败时降级为不注入，发送仍可用。
+        setSettings(nextSettings);
+        settingsRef.current = nextSettings;
+        setBootstrap(nextBootstrap);
+        setContext(cachedContext);
+        setClickThrough(nextClickThrough);
+        const projectId = nextBootstrap.activeProjectId ?? nextBootstrap.projects.at(0)?.id;
+        projectIdRef.current = projectId;
+        setProjectId(projectId);
+        const runtimeInfo = nextBootstrap.workspace?.runtime?.info;
+        const initialModel = runtimeInfo?.modelAlias
+          ? nextBootstrap.workspace?.pickerModels.find((model) => model.alias === runtimeInfo.modelAlias)
+          : nextBootstrap.workspace?.pickerModels.at(0);
+        const initialAlias = runtimeInfo?.modelAlias ?? initialModel?.alias;
+        const initialThinking = runtimeInfo?.thinking ?? initialModel?.defaultThinking ?? "off";
+        setModelAlias(initialAlias);
+        setThinking(initialThinking);
+        runtimeModelAliasRef.current = initialAlias;
+        runtimeThinkingRef.current = initialThinking;
+      } catch (nextError) {
+        if (!cancelled) setError(errorText(nextError));
       }
     })();
     return () => {
@@ -115,158 +194,417 @@ export function QuickChatApp(): React.JSX.Element {
     };
   }, []);
 
-  // 订阅共享 agent 事件流，只挑当前 QuickChat session 的事件做流式渲染。
+  useEffect(() => window.biny.onQuickChatContext(setContext), []);
+
+  useEffect(() => {
+    const unsubscribe = window.biny.onQuickChatFocusInput(() => inputRef.current?.focus());
+    inputRef.current?.focus();
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => window.biny.onQuickChatClickThroughChanged(setClickThrough), []);
+
   useEffect(() => {
     const unsubscribe = window.biny.onAgentEvent((envelope) => {
       const event = envelope.event;
+      const projectId = projectIdRef.current;
+      if (!event || !projectId || envelope.projectId !== projectId) return;
+
       const sessionId = sessionIdRef.current;
-      if (!event || sessionId === undefined || event.sessionId !== sessionId) return;
-      handleStreamEvent(event, dispatch);
+      if (!sessionId) {
+        const pending = pendingSendRef.current;
+        if (!pending || event.type !== "run.started" || event.input !== pending.input) return;
+        sessionIdRef.current = event.sessionId;
+        activeRunIdRef.current = event.runId;
+        setActiveRunId(event.runId);
+        pendingSendRef.current = undefined;
+      }
+      if (event.sessionId !== sessionIdRef.current) return;
+      if (activeRunIdRef.current && event.runId !== activeRunIdRef.current) return;
+      handleQuickChatEvent(event, dispatch, setBusy, activeRunIdRef, setActiveRunId);
     });
     return unsubscribe;
   }, []);
 
-  // 新消息/流式更新时滚到底部。
+  useEffect(() => {
+    const node = inputRef.current;
+    if (!node) return;
+    node.style.height = "auto";
+    node.style.height = String(Math.min(node.scrollHeight, 132)) + "px";
+  }, [input]);
+
   useEffect(() => {
     const node = scrollRef.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, [state.messages]);
 
+  const models = useMemo(() => bootstrap?.workspace?.pickerModels ?? [], [bootstrap]);
+  const selectedModel = useMemo(
+    () => models.find((model) => model.alias === modelAlias) ?? models.at(0),
+    [modelAlias, models]
+  );
+  const selectedAlias = selectedModel?.alias;
+  const thinkingLevels = useMemo(
+    () => selectedModel ? modelThinkingSelections(selectedModel) : [],
+    [selectedModel]
+  );
+  const currentThinking = selectedModel?.efforts.length ? thinking : "off";
+  const hasModel = selectedAlias !== undefined && models.length > 0;
+  const noProject = projectId === undefined;
+  const includeContext = settings?.injectScreenContext ?? true;
+  const contextAttached = includeContext && Boolean(context.promptContext);
+  const windowTitle = context.frontApp?.url
+    ? safeUrlHost(context.frontApp.url) ?? context.frontApp.windowTitle
+    : context.frontApp?.windowTitle;
+
   const send = useCallback(async (): Promise<void> => {
     const text = input.trim();
-    const projectId = projectIdRef.current;
-    if (!text || busy) return;
-    if (!projectId) {
-      setNoProject(true);
-      return;
-    }
+    const currentProjectId = projectIdRef.current;
+    if (!text || busy || !currentProjectId || !hasModel) return;
     setBusy(true);
-    let withScreenContext = false;
+    setError(undefined);
+    pendingSendRef.current = { input: text };
     try {
-      let prompt = text;
-      if (injectScreenContext) {
-        try {
-          const context = await window.biny.quickChatScreenContext();
-          const formatted = formatPromptWithContext(text, context);
-          if (formatted !== text) {
-            prompt = formatted;
-            withScreenContext = true;
-          }
-        } catch {
-          // 取上下文失败不阻塞发送：按纯文本发。
-        }
+      const nextThinking = selectedModel?.efforts.length ? thinking : "off";
+      if (runtimeModelAliasRef.current !== selectedAlias || runtimeThinkingRef.current !== nextThinking) {
+        const info = await window.biny.switchModel(currentProjectId, selectedAlias!, nextThinking);
+        runtimeModelAliasRef.current = info.modelAlias;
+        runtimeThinkingRef.current = info.thinking;
       }
       dispatch({
-        type: "append",
-        message: { id: nextMessageId("user"), role: "user", content: text, streaming: false, withScreenContext }
-      });
-      setInput("");
-      // sessionId 传 undefined → 主进程懒建一个新会话并把 id 放进回执，后续轮次复用它。
-      const receipt = await window.biny.sendPrompt(projectId, sessionIdRef.current, prompt, "chat", []);
-      sessionIdRef.current = receipt.sessionId;
-      // 占位一条空的流式气泡，等待第一个 delta。
-      dispatch({ type: "set-assistant", runId: receipt.runId, content: "", streaming: true });
-    } catch (error) {
-      dispatch({
-        type: "append",
+        type: "append-user",
         message: {
-          id: nextMessageId("error"),
-          role: "assistant",
-          content: error instanceof Error ? error.message : String(error),
-          streaming: false
+          id: nextMessageId("user"),
+          role: "user",
+          content: text,
+          reasoning: "",
+          reasoningStreaming: false,
+          streaming: false,
+          withScreenContext: contextAttached
         }
       });
-    } finally {
+      setInput("");
+      const receipt = await window.biny.sendPrompt(
+        currentProjectId,
+        sessionIdRef.current,
+        text,
+        "chat",
+        [],
+        undefined,
+        undefined,
+        undefined,
+        contextAttached ? context.promptContext : undefined
+      );
+      sessionIdRef.current = receipt.sessionId;
+      activeRunIdRef.current = receipt.runId;
+      setActiveRunId(receipt.runId);
+      pendingSendRef.current = undefined;
+      dispatch({ type: "ensure-assistant", runId: receipt.runId });
+    } catch (sendError) {
+      pendingSendRef.current = undefined;
+      activeRunIdRef.current = undefined;
+      setActiveRunId(undefined);
       setBusy(false);
+      setError(errorText(sendError));
     }
-  }, [busy, injectScreenContext, input]);
+  }, [busy, context.promptContext, contextAttached, hasModel, input, selectedAlias, selectedModel, thinking]);
+
+  const chooseModel = useCallback((alias: string): void => {
+    const next = models.find((model) => model.alias === alias);
+    if (!next) return;
+    setModelAlias(alias);
+    setThinking(next.efforts.length ? next.defaultThinking : "off");
+    setModelMenuOpen(false);
+  }, [models]);
+
+  const chooseThinking = useCallback((next: ThinkingSelection): void => {
+    setThinking(next);
+    setModelMenuOpen(false);
+  }, []);
+
+  const updateIncludeContext = useCallback(async (enabled: boolean): Promise<void> => {
+    const current = settingsRef.current;
+    if (!current) return;
+    const next = { ...current, injectScreenContext: enabled };
+    setSettings(next);
+    settingsRef.current = next;
+    try {
+      await window.biny.setQuickChatSettings(next);
+    } catch (settingsError) {
+      setSettings(current);
+      settingsRef.current = current;
+      setError(errorText(settingsError));
+    }
+  }, []);
+
+  const loadTraversal = useCallback(async (): Promise<void> => {
+    const pid = context.frontApp?.pid;
+    if (!pid) return;
+    try {
+      setContext(await window.biny.traverseQuickChatApp(pid));
+    } catch (traversalError) {
+      setError(errorText(traversalError));
+    }
+  }, [context.frontApp?.pid]);
+
+  const setRuntimeClickThrough = useCallback(async (): Promise<void> => {
+    try {
+      setClickThrough(await window.biny.setQuickChatClickThrough(!clickThrough));
+    } catch (clickThroughError) {
+      setError(errorText(clickThroughError));
+    }
+  }, [clickThrough]);
+
+  const stop = useCallback(async (): Promise<void> => {
+    const currentProjectId = projectIdRef.current;
+    const runId = activeRunIdRef.current;
+    if (!currentProjectId || !runId) return;
+    try {
+      await window.biny.cancelRun(currentProjectId, runId);
+    } catch (stopError) {
+      setError(errorText(stopError));
+    }
+  }, []);
+
+  const startNewChat = useCallback((): void => {
+    if (busy) return;
+    sessionIdRef.current = undefined;
+    activeRunIdRef.current = undefined;
+    setActiveRunId(undefined);
+    pendingSendRef.current = undefined;
+    dispatch({ type: "reset" });
+    setError(undefined);
+  }, [busy]);
 
   return (
     <div className="quickchat-root">
-      <div className="quickchat-titlebar">
-        <span className="quickchat-titlebar-title">快速对话</span>
-        <button
-          aria-label="关闭"
-          className="quickchat-icon-button"
-          onClick={() => void window.biny.hideQuickChat()}
-          title="关闭（⌥Space 重新唤醒）"
-          type="button"
-        >
-          ×
-        </button>
-      </div>
+      <header className="quickchat-titlebar">
+        <div className="quickchat-title" aria-label="Quick Chat">
+          <span className="quickchat-title-mark"><Icon name="spark" size={14} /></span>
+          <span>快速对话{clickThrough ? " · ambient（按快捷键唤醒）" : ""}</span>
+        </div>
+        <div className="quickchat-title-actions">
+          <div className="quickchat-model-anchor" ref={modelAnchorRef}>
+            <button
+              aria-expanded={modelMenuOpen}
+              aria-haspopup="menu"
+              className="quickchat-model-button"
+              disabled={!hasModel || busy}
+              onClick={() => setModelMenuOpen((open) => !open)}
+              type="button"
+            >
+              <span>{selectedModel?.displayName ?? "无可用模型"}</span>
+              {selectedModel?.efforts.length ? <small>{currentThinking}</small> : null}
+              <Icon name="chevron" size={11} />
+            </button>
+            <ModelPickerMenu
+              anchorRef={modelAnchorRef}
+              currentAlias={selectedAlias}
+              currentModelName={selectedModel?.displayName ?? "无可用模型"}
+              currentThinking={currentThinking}
+              models={models}
+              onClose={() => setModelMenuOpen(false)}
+              onSelectModel={chooseModel}
+              onSelectThinking={chooseThinking}
+              open={modelMenuOpen}
+              thinkingLevels={thinkingLevels}
+            />
+          </div>
+          <button
+            aria-label={clickThrough ? "关闭点击穿透" : "开启点击穿透"}
+            className="quickchat-icon-button"
+            onClick={() => void setRuntimeClickThrough()}
+            title={clickThrough ? "关闭点击穿透" : "开启点击穿透"}
+            type="button"
+          >
+            <Icon name={clickThrough ? "eye-off" : "eye"} size={15} />
+          </button>
+          <button aria-label="新建快速对话" className="quickchat-icon-button" onClick={startNewChat} title="新建对话" type="button">
+            <Icon name="add" size={16} />
+          </button>
+          <button aria-label="关闭快速对话" className="quickchat-icon-button" onClick={() => void window.biny.closeQuickChat()} title="关闭窗口" type="button">
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+      </header>
 
-      <div className="quickchat-messages" ref={scrollRef}>
+      {context.frontApp ? (
+        <section className="quickchat-context-chip" aria-label="当前前台应用上下文">
+          {context.appIconDataUrl ? <img alt="" className="quickchat-context-icon" src={context.appIconDataUrl} /> : <span className="quickchat-context-icon quickchat-context-icon-placeholder"><Icon name="display" size={15} /></span>}
+          <div className="quickchat-context-copy">
+            <strong>{context.frontApp.appName || "前台应用"}</strong>
+            <span>{windowTitle || "当前窗口"}</span>
+          </div>
+          <div className="quickchat-context-actions">
+            {context.traversal?.source === "ax" ? <span className="quickchat-context-status" title="已读取窗口文本">·✓</span> : null}
+            {!context.traversal?.content && !context.frontApp.permissionDenied ? (
+              <button className="quickchat-context-read" onClick={() => void loadTraversal()} type="button">读取内容</button>
+            ) : null}
+            {context.frontApp.permissionDenied ? (
+              <button className="quickchat-context-read" onClick={() => void window.biny.openSystemSettings("accessibility")} type="button">授权辅助功能</button>
+            ) : null}
+            <button
+              aria-label={includeContext ? "不附带前台上下文" : "附带前台上下文"}
+              className="quickchat-context-toggle"
+              onClick={() => void updateIncludeContext(!includeContext)}
+              title={includeContext ? "本轮会附带前台应用上下文" : "本轮不附带前台应用上下文"}
+              type="button"
+            >
+              <Icon name={includeContext ? "eye" : "eye-off"} size={14} />
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      <main className="quickchat-messages" ref={scrollRef}>
         {state.messages.length === 0 ? (
           <div className="quickchat-empty">
-            问点什么…{injectScreenContext ? "\n会自动带上当前屏幕的文本上下文。" : ""}
+            <strong>{noProject ? "先在主窗口打开一个项目" : !hasModel ? "先配置一个可用模型" : "问点什么…"}</strong>
+            <span>{context.frontApp ? "已识别 " + context.frontApp.appName + "，可选择是否附带当前窗口上下文。" : "按 Command+Shift+Space 可再次唤起并刷新上下文。"}</span>
           </div>
         ) : (
           state.messages.map((message) => (
-            <div className={`quickchat-message ${message.role}`} key={message.id}>
-              {message.withScreenContext ? <span className="quickchat-context-flag">已附屏幕上下文</span> : null}
-              {message.content}
-              {message.streaming && message.content === "" ? (
-                <span className="quickchat-typing" aria-label="正在生成">
-                  <i /><i /><i />
-                </span>
-              ) : null}
-            </div>
+            <article className={["quickchat-message", "quickchat-message-" + message.role].join(" ")} key={message.id}>
+              {message.role === "user" ? (
+                <>
+                  {message.withScreenContext ? <span className="quickchat-message-context">已附带前台上下文</span> : null}
+                  <div className="quickchat-user-text">{message.content}</div>
+                </>
+              ) : (
+                <>
+                  {message.reasoning ? (
+                    <details className="quickchat-reasoning" open={message.reasoningStreaming}>
+                      <summary>{message.reasoningStreaming ? "正在思考" : "思考过程"}</summary>
+                      <div>{message.reasoning}</div>
+                    </details>
+                  ) : null}
+                  {message.activity ? <div className="quickchat-activity">{message.activity}</div> : null}
+                  {message.content ? (
+                    <MarkdownContent
+                      content={message.content}
+                      onOpenExternal={(url) => { void window.biny.openExternal(url); }}
+                      onPreviewFile={(path) => { if (projectId) void window.biny.openWorkspaceFile(projectId, path); }}
+                      projectId={projectId ?? ""}
+                    />
+                  ) : message.streaming ? (
+                    <span className="quickchat-typing" aria-label="正在生成"><i /><i /><i /></span>
+                  ) : null}
+                </>
+              )}
+            </article>
           ))
         )}
-      </div>
+      </main>
 
-      {noProject ? <div className="quickchat-banner">还没有可用项目。请先在主窗口打开一个项目。</div> : null}
+      {error ? <div className="quickchat-error" role="alert">{error}</div> : null}
+      {noProject ? <div className="quickchat-banner">还没有可用项目，请先在主窗口打开一个项目。</div> : null}
+      {!noProject && !hasModel ? <div className="quickchat-banner">当前项目没有可用模型，请先在主窗口配置连接。</div> : null}
 
-      <div className="quickchat-composer">
+      <footer className="quickchat-composer">
         <textarea
+          aria-label="快速对话输入"
           autoFocus
           className="quickchat-input"
-          disabled={noProject}
+          disabled={noProject || !hasModel}
           maxLength={MAX_INPUT_LENGTH}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
               event.preventDefault();
-              void window.biny.hideQuickChat();
+              void window.biny.closeQuickChat();
               return;
             }
-            if (event.key === "Enter" && !event.shiftKey) {
+            if (event.key === " " && (event.metaKey || event.ctrlKey) && event.shiftKey) {
+              event.preventDefault();
+              void window.biny.closeQuickChat();
+              return;
+            }
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               void send();
             }
           }}
-          placeholder="发消息…（Enter 发送，Shift+Enter 换行）"
+          placeholder={context.frontApp ? "和 " + context.frontApp.appName + " 对话…" : "发消息…（Enter 发送，Shift+Enter 换行）"}
+          ref={inputRef}
           rows={1}
           value={input}
         />
-        <button
-          aria-label="发送"
-          className="quickchat-send"
-          disabled={busy || !input.trim() || noProject}
-          onClick={() => void send()}
-          type="button"
-        >
-          ➤
-        </button>
-      </div>
+        <div className="quickchat-composer-footer">
+          <span className="quickchat-composer-hint">{includeContext ? "当前窗口上下文已开启" : "仅发送输入内容"}</span>
+          <button
+            aria-label={busy ? "停止生成" : "发送"}
+            className="quickchat-send"
+            disabled={busy ? activeRunId === undefined : !input.trim() || noProject || !hasModel}
+            onClick={() => void (busy ? stop() : send())}
+            type="button"
+          >
+            <Icon name={busy ? "stop" : "arrow-up"} size={15} />
+          </button>
+        </div>
+      </footer>
     </div>
   );
 }
 
-/** 把当前 session 的流事件折进气泡列表；终态事件统一收尾。 */
-function handleStreamEvent(event: AgentHostEvent, dispatch: React.Dispatch<QuickChatAction>): void {
-  if (event.type === "assistant.delta" || event.type === "assistant.completed") {
-    dispatch({ type: "set-assistant", runId: event.runId, content: event.content, streaming: event.type === "assistant.delta" });
+function handleQuickChatEvent(
+  event: AgentHostEvent,
+  dispatch: Dispatch<QuickChatAction>,
+  setBusy: (busy: boolean) => void,
+  activeRunIdRef: { current: string | undefined },
+  setActiveRunId: (runId: string | undefined) => void
+): void {
+  if (event.type === "run.started") {
+    activeRunIdRef.current = event.runId;
+    setActiveRunId(event.runId);
+    dispatch({ type: "ensure-assistant", runId: event.runId });
     return;
   }
-  if (isTerminalRunEvent(event)) {
-    // 失败/中止且本轮还没任何文本时，补一条说明，避免气泡停在「正在生成」。
-    if ((event.type === "run.failed" || event.type === "run.aborted") ) {
-      const reason = event.type === "run.failed" ? event.error : event.reason;
-      dispatch({ type: "set-assistant", runId: event.runId, content: reason || "本轮未产出内容。", streaming: false });
-    } else {
-      dispatch({ type: "finish-run", runId: event.runId });
-    }
+  if (event.type === "assistant.delta") {
+    dispatch({ type: "assistant-delta", runId: event.runId, content: event.content });
+    return;
   }
+  if (event.type === "assistant.completed") {
+    dispatch({ type: "assistant-completed", runId: event.runId, content: event.content });
+    return;
+  }
+  if (event.type === "reasoning.started") {
+    dispatch({ type: "reasoning-started", runId: event.runId });
+    return;
+  }
+  if (event.type === "reasoning.delta") {
+    dispatch({ type: "reasoning-delta", runId: event.runId, content: event.content });
+    return;
+  }
+  if (event.type === "reasoning.completed") {
+    dispatch({ type: "reasoning-completed", runId: event.runId });
+    return;
+  }
+  if (event.type === "tool.started") {
+    dispatch({ type: "tool-started", runId: event.runId, tool: event.tool });
+    return;
+  }
+  if (!isTerminalRunEvent(event)) return;
+  const fallback = event.type === "run.failed"
+    ? event.error
+    : event.type === "run.blocked"
+      ? event.summary
+      : event.type === "run.incomplete" || event.type === "run.cancelled" || event.type === "run.aborted"
+        ? event.reason
+        : undefined;
+  dispatch({ type: "finish-run", runId: event.runId, fallback });
+  setBusy(false);
+  activeRunIdRef.current = undefined;
+  setActiveRunId(undefined);
+}
+
+function safeUrlHost(value: string): string | undefined {
+  try {
+    return new URL(value).host || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function errorText(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
 }

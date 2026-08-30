@@ -10,7 +10,6 @@ import type {
   DesktopIdentitySettings,
   DesktopMemorySettings,
   DesktopModelConfigurationInput,
-  DesktopPersonalizationSettings,
   DesktopSettingsSaveResult,
   DesktopSettingsSnapshot,
   DesktopSettingsCredentialScope,
@@ -32,7 +31,6 @@ export interface SettingsModelDraft {
 export interface DesktopSettingsDraft {
   themePreference: DesktopThemePreference;
   fontPreference: DesktopFontPreference;
-  personalization: DesktopPersonalizationSettings;
   activity: DesktopActivitySettingsInput;
   identity: DesktopIdentitySettings;
   memory: DesktopMemorySettings;
@@ -49,11 +47,11 @@ export interface SettingsDraftContextValue {
   draft?: DesktopSettingsDraft;
   loadError?: string;
   dirtyCount: number;
+  preferencesOnly: boolean;
   invalid: boolean;
   saveState: SettingsSaveState;
   setThemePreference(value: DesktopThemePreference): void;
   setFontPreference(value: DesktopFontPreference): void;
-  setPersonalization(value: DesktopPersonalizationSettings): void;
   setActivity(value: DesktopActivitySettingsInput): void;
   setIdentity(value: DesktopIdentitySettings): void;
   setMemory(value: DesktopMemorySettings): void;
@@ -70,6 +68,8 @@ export interface SettingsDraftContextValue {
   releaseCredential(handle: string): Promise<void>;
   discard(): Promise<void>;
   saveAll(): Promise<DesktopSettingsSaveResult | undefined>;
+  /** 即时动作（如设为默认）落盘后，用权威快照推进基线但保留其它未保存草稿。 */
+  adoptExternalSnapshot(snapshot: DesktopSettingsSnapshot): void;
 }
 
 export const SettingsDraftContext = createContext<SettingsDraftContextValue | undefined>(undefined);

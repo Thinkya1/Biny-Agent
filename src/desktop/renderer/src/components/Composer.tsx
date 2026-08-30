@@ -581,9 +581,7 @@ export const Composer = memo(function Composer({
           </div>
         )}
         isDisabled={inputDisabled}
-        isStopShown={running}
         onChange={handleInputChange}
-        onStop={() => void requestStop()}
         onSubmit={(value) => void submit(undefined, value)}
         placeholder={typedPlaceholder}
         status={running && input.trim()
@@ -602,7 +600,7 @@ export const Composer = memo(function Composer({
                 label={memoryEnabled ? "关闭当前聊天记忆" : "开启当前聊天记忆"}
                 loading={memoryToggleBusy}
                 onClick={() => { void onToggleMemory(); }}
-                tooltip={memoryEnabled ? "隐身模式已关闭 - 点击禁用记忆功能" : "隐身模式已开启 - 点击启用记忆功能"}
+                tooltip={memoryEnabled ? "当前聊天会使用记忆 - 点击关闭" : "当前聊天未使用记忆 - 点击开启"}
               >
                 <Icon name={memoryEnabled ? "brain-spark" : "brain-off"} size={20} />
               </ComposerActionButton>

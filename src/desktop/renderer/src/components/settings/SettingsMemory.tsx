@@ -9,7 +9,6 @@ import type { ModelChoice } from "../../../../../llm/ModelManager.js";
 import type { EmbeddingModelRef, LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
 import type {
   DesktopEmbeddingModelDescriptor,
-  DesktopAlmaImportScan,
   DesktopMemoryCompactionResult,
   DesktopMemoryEmbeddingCancellationResult,
   DesktopMemoryEmbeddingDeleteResult,
@@ -22,9 +21,6 @@ import type {
   DesktopMemoryEntriesPage,
   DesktopMemoryStats,
   DesktopMemorySearchMatch,
-  DesktopIdentityDocumentKind,
-  DesktopIdentityOverview,
-  DesktopIdentityReviewResult,
   DesktopModelConfigurationInput,
   DesktopModelConnectionTestResult,
   DesktopBehaviorPatternReviewAction,
@@ -40,7 +36,6 @@ import { SettingsCheckbox } from "./SettingsCheckbox.js";
 import { SettingsDetailLayer } from "./SettingsDetailLayer.js";
 import { useSettingsDraft } from "./SettingsDraftContext.js";
 import { MemoryEvolutionSection } from "./MemoryEvolutionSection.js";
-import { IdentitySection } from "./IdentitySection.js";
 
 const memoryKindOptions: Array<{ value: DesktopMemoryKind; label: string }> = [
   { value: "preference", label: "偏好" },
@@ -76,10 +71,6 @@ interface SettingsMemoryProps {
   onDeleteEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryStats>;
   onClear(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryStats>;
   onCompact(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
-  onLoadIdentityOverview(): Promise<DesktopIdentityOverview>;
-  onImportAlmaIdentity(root?: string): Promise<DesktopAlmaImportScan>;
-  onSaveIdentityDocument(document: DesktopIdentityDocumentKind, content: string, expectedRevision: number, reason?: string): Promise<DesktopIdentityOverview>;
-  onReviewIdentityProposal(proposalId: string, action: "accept" | "reject", expectedRevision: number): Promise<DesktopIdentityReviewResult>;
   onLoadTelosOverview(): Promise<DesktopTelosOverview>;
   onSaveTelos(input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
   onReviewBehaviorPattern(patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
@@ -111,10 +102,6 @@ export function SettingsMemory({
   onDeleteEntry,
   onClear,
   onCompact,
-  onLoadIdentityOverview,
-  onImportAlmaIdentity,
-  onSaveIdentityDocument,
-  onReviewIdentityProposal,
   onLoadTelosOverview,
   onSaveTelos,
   onReviewBehaviorPattern,
@@ -446,45 +433,39 @@ export function SettingsMemory({
 
   return (
     <div className="settings-sections memory-settings-v3" hidden={hidden}>
-      <IdentitySection
-        active={!hidden}
-        hidden={hidden}
-        onImport={onImportAlmaIdentity}
-        onLoad={onLoadIdentityOverview}
-        onNotify={onNotify}
-        onReview={onReviewIdentityProposal}
-        onSave={onSaveIdentityDocument}
-        projectId={projectId}
-      />
       <section id="memory-overview" tabIndex={-1}>
         <h3>记忆功能</h3>
-        <SettingsCheckbox checked={policy.enabled} detail="关闭后保留已有记忆，但暂停检索和自动生成" label="启用记忆" onChange={(enabled) => changePolicy({ enabled })} />
+        <SettingsCheckbox checked={policy.enabled} detail="开启后自动检索和生成记忆；关闭后暂停整个自动记忆功能，但保留已有条目" label="启用记忆" onChange={(enabled) => changePolicy({ enabled })} />
       </section>
 
-<section id="memory-retrieval" tabIndex={-1}>
-        <h3>记忆检索</h3>
-        <SettingsCheckbox checked={policy.useMemories} detail="每个新回合注入记忆概览并自动语义召回相关条目；回答末尾会标注引用以便统计使用情况" disabled={!policy.enabled} label="启用记忆召回" onChange={(useMemories) => changePolicy({ useMemories })} />
-        <SettingsCheckbox checked={policy.queryRewrite} detail="用记忆处理模型生成更适合检索的查询；3 秒失败后使用原问题" disabled={!policy.enabled || !policy.useMemories} label="查询重写" onChange={(queryRewrite) => changePolicy({ queryRewrite })} />
-        <label className="memory-slider-field">
-          <span><strong>最大召回数：{policy.maxRecalled}</strong><small>去重后仍受 12,000 字符整条注入预算限制</small></span>
-          <input aria-label="最大召回记忆数" max={20} min={1} onChange={(event) => changePolicy({ maxRecalled: Number(event.target.value) })} type="range" value={policy.maxRecalled} />
-        </label>
-        {activeEmbedding && activeThresholds ? (
-          <div className="memory-threshold-grid">
-            <ThresholdControl label="当前项目阈值" onChange={(value) => updateThreshold("currentWorkspace", value)} value={activeThresholds.currentWorkspace} />
-            <ThresholdControl label="跨项目阈值" onChange={(value) => updateThreshold("crossWorkspace", value)} value={activeThresholds.crossWorkspace} />
-            <button className="ghost-button" onClick={() => changePolicy({ similarityThresholds: { ...policy.similarityThresholds, [activeEmbedding.fingerprint]: activeEmbedding.recommendedThresholds } })} type="button">恢复该模型推荐值</button>
-          </div>
-        ) : <p className="memory-empty-hint">未选择可用 Embedding 时使用词法检索，自动召回不会注入其他项目内容。</p>}
-      </section>
+      {policy.enabled ? (
+        <>
+          <section id="memory-retrieval" tabIndex={-1}>
+            <h3>记忆检索</h3>
+            <SettingsCheckbox checked={policy.useMemories} detail="每个新回合自动检索并注入相关记忆；回答末尾会标注引用以便统计使用情况" label="自动检索记忆" onChange={(useMemories) => changePolicy({ useMemories })} />
+            <SettingsCheckbox checked={policy.queryRewrite} detail="用记忆处理模型生成更适合检索的查询；3 秒失败后使用原问题" disabled={!policy.useMemories} label="查询重写" onChange={(queryRewrite) => changePolicy({ queryRewrite })} />
+            <label className="memory-slider-field">
+              <span><strong>最大召回数：{policy.maxRecalled}</strong><small>去重后仍受 12,000 字符整条注入预算限制</small></span>
+              <input aria-label="最大召回记忆数" max={20} min={1} onChange={(event) => changePolicy({ maxRecalled: Number(event.target.value) })} type="range" value={policy.maxRecalled} />
+            </label>
+            {activeEmbedding && activeThresholds ? (
+              <div className="memory-threshold-grid">
+                <ThresholdControl label="当前项目阈值" onChange={(value) => updateThreshold("currentWorkspace", value)} value={activeThresholds.currentWorkspace} />
+                <ThresholdControl label="跨项目阈值" onChange={(value) => updateThreshold("crossWorkspace", value)} value={activeThresholds.crossWorkspace} />
+                <button className="ghost-button" onClick={() => changePolicy({ similarityThresholds: { ...policy.similarityThresholds, [activeEmbedding.fingerprint]: activeEmbedding.recommendedThresholds } })} type="button">恢复该模型推荐值</button>
+              </div>
+            ) : <p className="memory-empty-hint">未选择可用 Embedding 时使用词法检索，自动召回不会注入其他项目内容。</p>}
+          </section>
 
-      <section id="memory-features" tabIndex={-1}>
-        <h3>记忆生成</h3>
-        <SettingsCheckbox checked={policy.generateMemories} detail="从已完成的回合中提取可复用信息" disabled={!policy.enabled} label="自动生成记忆" onChange={(generateMemories) => changePolicy({ generateMemories })} />
-        <div className="memory-mode-nested">
-          <SettingsCheckbox checked={policy.excludeExternalContext} detail="网页、附件、MCP、插件和子代理内容不自动沉淀" disabled={!policy.enabled} label="排除外部上下文" onChange={(excludeExternalContext) => changePolicy({ excludeExternalContext })} />
-        </div>
-      </section>
+          <section id="memory-features" tabIndex={-1}>
+            <h3>记忆生成</h3>
+            <SettingsCheckbox checked={policy.generateMemories} detail="从已完成的回合中提取可复用信息" label="自动生成记忆" onChange={(generateMemories) => changePolicy({ generateMemories })} />
+            <div className="memory-mode-nested">
+              <SettingsCheckbox checked={policy.excludeExternalContext} detail="网页、附件、MCP、插件和子代理内容不自动沉淀" label="排除外部上下文" onChange={(excludeExternalContext) => changePolicy({ excludeExternalContext })} />
+            </div>
+          </section>
+        </>
+      ) : null}
 
       <section id="memory-sleep" tabIndex={-1}>
         <div className="section-heading-row">
@@ -497,29 +478,31 @@ export function SettingsMemory({
         </div>
       </section>
 
-      <section id="memory-strategy" tabIndex={-1}>
-        <div className="section-heading-row">
-          <div><h3>记忆进化</h3><p>这里管理长期目标、原则和行为模式；行为模式始终标记为推断，不能自动改写你的长期策略。</p></div>
-        </div>
-        <SettingsCheckbox checked={telos.enabled} detail="允许在对话中使用已确认的目标与原则指导；不影响事实记忆开关" label="使用长期策略" onChange={(enabled) => changeTelos({ enabled })} />
-        <div className="memory-mode-nested">
-          <SettingsCheckbox checked={telos.autoObserve} detail="仅从成功完成且排除外部上下文的回合生成脱敏观察；默认不追溯历史" disabled={!telos.enabled} label="自动观察行为模式" onChange={(autoObserve) => changeTelos({ autoObserve })} />
-          <SettingsCheckbox checked={telos.driftDetection} detail="行为模式确认后，满足 3 次观察、7 天跨度和置信度阈值才生成偏差提案" disabled={!telos.enabled} label="检测策略偏差" onChange={(driftDetection) => changeTelos({ driftDetection })} />
-          <SettingsCheckbox checked={telos.proactivePrompts} detail="只在 Runtime idle 且任务结束后显示一条待处理偏差；任务运行中不会打断" disabled={!telos.enabled || !telos.driftDetection} label="主动提醒策略偏差" onChange={(proactivePrompts) => changeTelos({ proactivePrompts })} />
-        </div>
-        <MemoryEvolutionSection
-          active={!hidden}
-          disabled={sessionRunning}
-          onLoad={onLoadTelosOverview}
-          onNotify={onNotify}
-          onOpenChatDraft={onOpenChatDraft}
-          onResolveDrift={onResolveTelosDrift}
-          onReviewPattern={onReviewBehaviorPattern}
-          onSave={onSaveTelos}
-          onSnoozeDrift={onSnoozeTelosDrift}
-          projectId={projectId}
-        />
-      </section>
+      {policy.enabled ? (
+        <section id="memory-strategy" tabIndex={-1}>
+          <div className="section-heading-row">
+            <div><h3>记忆进化</h3><p>这里管理长期目标、原则和行为模式；行为模式始终标记为推断，不能自动改写你的长期策略。</p></div>
+          </div>
+          <SettingsCheckbox checked={telos.enabled} detail="依赖上面的记忆总开关；关闭记忆时不会注入长期策略或自动观察" label="使用长期策略" onChange={(enabled) => changeTelos({ enabled })} />
+          <div className="memory-mode-nested">
+            <SettingsCheckbox checked={telos.autoObserve} detail="仅从成功完成且排除外部上下文的回合生成脱敏观察；默认不追溯历史" disabled={!telos.enabled} label="自动观察行为模式" onChange={(autoObserve) => changeTelos({ autoObserve })} />
+            <SettingsCheckbox checked={telos.driftDetection} detail="行为模式确认后，满足 3 次观察、7 天跨度和置信度阈值才生成偏差提案" disabled={!telos.enabled} label="检测策略偏差" onChange={(driftDetection) => changeTelos({ driftDetection })} />
+            <SettingsCheckbox checked={telos.proactivePrompts} detail="只在 Runtime idle 且任务结束后显示一条待处理偏差；任务运行中不会打断" disabled={!telos.enabled || !telos.driftDetection} label="主动提醒策略偏差" onChange={(proactivePrompts) => changeTelos({ proactivePrompts })} />
+          </div>
+          <MemoryEvolutionSection
+            active={!hidden}
+            disabled={sessionRunning}
+            onLoad={onLoadTelosOverview}
+            onNotify={onNotify}
+            onOpenChatDraft={onOpenChatDraft}
+            onResolveDrift={onResolveTelosDrift}
+            onReviewPattern={onReviewBehaviorPattern}
+            onSave={onSaveTelos}
+            onSnoozeDrift={onSnoozeTelosDrift}
+            projectId={projectId}
+          />
+        </section>
+      ) : null}
 
       <section id="memory-models" tabIndex={-1}>
         <div className="section-heading-row"><div><h3>记忆处理模型</h3><p>默认由一个主模型处理查询重写、提取和整理。</p></div></div>

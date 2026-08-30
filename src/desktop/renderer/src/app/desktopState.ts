@@ -27,9 +27,27 @@ export function applyUpdatesToWorkspace(
   // 各会话的运行态按信封上的 sessionId 存进 sessionRuntimes。
   const runtime = projectUpdates.filter((update) => update.primary !== false).at(-1)?.snapshot ?? workspace.runtime;
   let sessionRuntimes = workspace.sessionRuntimes;
+  let previousPrimarySnapshot = workspace.runtime;
   for (const update of projectUpdates) {
-    if (!update.sessionId || !update.snapshot) continue;
-    sessionRuntimes = { ...sessionRuntimes, [update.sessionId]: update.snapshot };
+    const snapshot = update.snapshot;
+    if (!snapshot) continue;
+    // resume/startDraft 会先以旧 session 发布 maintenance，再以新 session 发布 idle。
+    // 这是同一个主 runtime 的换绑过程，旧条目不能继续被全局忙碌判断计入；只在
+    // maintenance → 新 session idle 的闭合转换时清理，避免误删并行 Host 中仍在运行的会话。
+    if (
+      update.primary !== false
+      && snapshot.state.kind === "idle"
+      && previousPrimarySnapshot?.state.kind === "maintenance"
+      && previousPrimarySnapshot.info.sessionId !== snapshot.info.sessionId
+      && sessionRuntimes?.[previousPrimarySnapshot.info.sessionId] === previousPrimarySnapshot
+    ) {
+      const nextSessionRuntimes = { ...sessionRuntimes };
+      delete nextSessionRuntimes[previousPrimarySnapshot.info.sessionId];
+      sessionRuntimes = nextSessionRuntimes;
+    }
+    const sessionId = update.sessionId ?? snapshot.info.sessionId;
+    if (sessionId) sessionRuntimes = { ...sessionRuntimes, [sessionId]: snapshot };
+    if (update.primary !== false) previousPrimarySnapshot = snapshot;
   }
   return {
     ...workspace,
@@ -220,7 +238,8 @@ export function lastReportedInputTokens(document?: DesktopSessionDocument): numb
   let latest: number | undefined;
   for (const event of document.events) {
     if (event.type !== "assistant_message" || event.auditOnly) continue;
-    if (event.usage?.inputTokens !== undefined) latest = event.usage.inputTokens;
+    const inputTokens = event.usage?.latestRequestInputTokens ?? event.usage?.inputTokens;
+    if (inputTokens !== undefined) latest = inputTokens;
   }
   return latest;
 }
@@ -318,8 +337,19 @@ export function applyProjectOrder(projects: DesktopProject[], projectIds: string
 export function eventsBeforeUserMessage(events: SessionEvent[], userMessageIndex: number): SessionEvent[] {
   let seen = 0;
   for (const [index, event] of events.entries()) {
-    if (event.type !== "user_message") continue;
+    if (event.type !== "user_message" || event.auditOnly) continue;
     if (seen === userMessageIndex) return events.slice(0, index);
+    seen += 1;
+  }
+  return events;
+}
+
+/** 保留目标用户消息本身，立即投影「从这条消息开始重写」的时间线前缀。 */
+export function eventsThroughUserMessage(events: SessionEvent[], userMessageIndex: number): SessionEvent[] {
+  let seen = 0;
+  for (const [index, event] of events.entries()) {
+    if (event.type !== "user_message" || event.auditOnly) continue;
+    if (seen === userMessageIndex) return events.slice(0, index + 1);
     seen += 1;
   }
   return events;
