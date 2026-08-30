@@ -36,7 +36,9 @@ const startsWork: Record<DesktopRuntimeMutation, boolean> = {
   "capability.result": true,
   "capability.chunk": true,
   "capability.fail": false,
-  "capability.cancel": false
+  "capability.cancel": false,
+  "worktree.merge": false,
+  "worktree.remove": false
 };
 
 export function runtimeMutationStartsWork(operation: DesktopRuntimeMutation): boolean {

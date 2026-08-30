@@ -9,6 +9,7 @@ import type { AgentSessionEvent } from "../src/agent/types.js";
 import type { ContextStatus } from "../src/agent/context/types.js";
 import type { CommandRuntime } from "../src/runtime/CommandRuntime.js";
 import { createInteractiveAgentHost, InteractiveAgentRuntime } from "../src/runtime/InteractiveAgentRuntime.js";
+import { RuntimeEventAuthority } from "../src/runtime/RuntimeAuthority.js";
 import { startRuntimeHost } from "../src/runtime/RuntimeHost.js";
 import { executeRuntimeCommand } from "../src/runtime/commands.js";
 import { SessionLeaseStore } from "../src/runtime/SessionLease.js";
@@ -16,11 +17,14 @@ import { isTerminalRunEvent, pendingPermission, type AgentHostEvent } from "../s
 import type { CredentialStore } from "../src/config/credentials.js";
 import { BINY_AGENT_DIR_ENV } from "../src/config/paths.js";
 import { createFileConfigStore } from "../src/config/store.js";
+import { ConfigRevisionConflictError } from "../src/config/versioned.js";
 import { defaultConfig } from "../src/config/schema.js";
 import type { ModelCatalogEntry } from "../src/ai/types.js";
 import { openAiCodexCatalogModels } from "../src/ai/codexModels.js";
 import { DesktopAgentManager } from "../src/desktop/electron/main/DesktopAgentManager.js";
+import { ActivityRecorderService } from "../src/desktop/electron/main/ActivityRecorderService.js";
 import { DesktopConfigStore } from "../src/desktop/electron/main/DesktopConfigStore.js";
+import { DesktopSafeStorageCredentialStore, type SafeStorageCipher } from "../src/desktop/electron/main/DesktopSafeStorageCredentialStore.js";
 import { DesktopModelLoginService } from "../src/desktop/electron/main/DesktopModelLoginService.js";
 import { DesktopProjectService } from "../src/desktop/electron/main/DesktopProjectService.js";
 import { DesktopStateStore } from "../src/desktop/electron/main/DesktopStateStore.js";
@@ -32,6 +36,7 @@ import { adjustSidebarWithKeyboard, commitSidebarResize, normalizeSidebarExpande
 import type {
   DesktopAgentEventEnvelope,
   DesktopProject,
+  DesktopSessionDocument,
   DesktopSessionSummary,
   DesktopSettingsSaveInput,
   DesktopSettingsSnapshot,
@@ -42,6 +47,7 @@ import {
   applyProjectOrder,
   applyUpdatesToSidebarSessions,
   applyUpdatesToWorkspace,
+  lastReportedInputTokens,
   replaceProjectSessionRoots,
   replaceProjectSessions,
   updateRuntimeInfo
@@ -79,6 +85,7 @@ import { TurnStore } from "../src/session/turnStore.js";
 const execFileAsync = promisify(execFile);
 
 await testInteractiveRuntimeProtocol();
+await testInteractiveRuntimePublishesRunStartedBeforeSkillRefresh();
 await testInteractiveRuntimePublishesStatusSnapshot();
 await testInteractiveRuntimeRedactsToolEvents();
 await testInteractiveRuntimeRedactsRunText();
@@ -87,11 +94,13 @@ await testPermissionRequiredToolResultIsFailed();
 await testInteractiveRuntimeAbort();
 await testInteractiveRuntimeTerminalStatuses();
 await testDraftSessionsDoNotReachTheSessionList();
+await testDesktopSafeStorageCredentialStore();
 await testDesktopRestoresPersistedTerminalStatus();
 await testDesktopPinAfterOpeningSessionUsesFreshRevision();
 await testDesktopOpenSessionSkipsGlobalSessionScan();
 await testDesktopOpenSessionReturnsWriterConflictReadOnlyDocument();
 await testDesktopOpenSessionReturnsConsistentMetadataSnapshot();
+await testDesktopRuntimeInitializationIsShared();
 await testDesktopMessageEditFork();
 await testDesktopPromptIdempotency();
 await testWorkspaceFilePreview();
@@ -113,12 +122,14 @@ await testDesktopThemePreference();
 await testDesktopActiveViewPersistence();
 await testDesktopMemoryV3CasAndOriginFilters();
 await testDesktopSettingsTransaction();
+await testDesktopSetDefaultModelImmediate();
 await testDesktopGlobalWriteGateAndRuntimeRefresh();
 await testDesktopSettingsSaveReturnsBeforeRuntimeRefresh();
 await testDesktopGlobalPersonalizationRefreshesInBackground();
 await testDesktopSettingsCredentialLifecycle();
 await testDesktopModelConfiguration();
 await testDesktopModelSwitchDoesNotResumeInterruptedTurn();
+await testDesktopModelSwitchDoesNotStartDetachedHost();
 await testDesktopSubagentSlashCommands();
 await testDesktopDoesNotResumePersistedIdleSession();
 await testDesktopPermissionModePersistsInIdleSnapshot();
@@ -141,6 +152,7 @@ testComposerThinkingLabels();
 testModelChoicesDeduplicateEquivalentAliases();
 testHistoricalAbortProjection();
 testHistoricalUsageProjection();
+testMessageVersionTimelineProjection();
 testDesktopUsagePresentation();
 testHistoricalToolProjection();
 testWebSearchProjection();
@@ -198,6 +210,29 @@ async function testInteractiveRuntimeProtocol(): Promise<void> {
     "run.completed"
   ]);
   assert.ok(events.every((event) => event.sessionId === "session-1" && event.runId && event.timestamp));
+  await runtime.close();
+}
+
+async function testInteractiveRuntimePublishesRunStartedBeforeSkillRefresh(): Promise<void> {
+  let releaseRefresh!: () => void;
+  const refresh = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  const commandRuntime = fakeCommandRuntime();
+  commandRuntime.refreshSkills = async (): Promise<void> => await refresh;
+  const runtime = new InteractiveAgentRuntime(commandRuntime);
+  let notifyStarted!: () => void;
+  const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+  const events: AgentHostEvent[] = [];
+  const unsubscribe = subscribeHostEvents(runtime, (event) => {
+    events.push(event);
+    if (event.type === "run.started") notifyStarted();
+  });
+
+  const submitted = runtime.submitPrompt("status-snapshot");
+  await started;
+  assert.equal(events.some((event) => event.type === "run.started"), true);
+  releaseRefresh();
+  await submitted.completion;
+  unsubscribe();
   await runtime.close();
 }
 
@@ -290,6 +325,33 @@ function testDesktopRendererStateProjection(): void {
     }]
   );
   assert.equal(staleRuntime.permissionMode, "full-access");
+  const previousSessionInfo = { sessionId: "session-previous" } as DesktopAgentEventEnvelope["snapshot"]["info"];
+  const targetSessionInfo = { sessionId: "session-target" } as DesktopAgentEventEnvelope["snapshot"]["info"];
+  const rebindingMaintenance = {
+    ...runningSnapshot,
+    info: previousSessionInfo,
+    state: { kind: "maintenance", operation: "resume" as const }
+  };
+  const rebindingIdle = {
+    ...rebindingMaintenance,
+    revision: 3,
+    info: targetSessionInfo,
+    state: { kind: "idle" as const }
+  };
+  const rebound = applyUpdatesToWorkspace(
+    {
+      ...workspace,
+      runtime: rebindingMaintenance,
+      sessionRuntimes: { [previousSessionInfo.sessionId]: rebindingMaintenance }
+    },
+    [
+      { projectId: project.id, sessionId: previousSessionInfo.sessionId, primary: true, snapshot: rebindingMaintenance },
+      { projectId: project.id, sessionId: targetSessionInfo.sessionId, primary: true, snapshot: rebindingIdle }
+    ]
+  );
+  assert.equal(rebound.sessionRuntimes?.[previousSessionInfo.sessionId], undefined);
+  assert.equal(rebound.sessionRuntimes?.[targetSessionInfo.sessionId]?.state.kind, "idle");
+  assert.equal(Object.values(rebound.sessionRuntimes ?? {}).some((snapshot) => snapshot.state.kind !== "idle"), false);
   const switched = updateRuntimeInfo(projected, {
     modelAlias: "deepseek-v4-flash",
     provider: "deepseek",
@@ -615,6 +677,36 @@ async function testDraftSessionsDoNotReachTheSessionList(): Promise<void> {
   }
 }
 
+async function testDesktopSafeStorageCredentialStore(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "biny-safestorage-"));
+  try {
+    // 注入一个内存 cipher：模拟 safeStorage 的 encrypt/decrypt（反转字符串做可逆伪加密），
+    // 验证存储的往返、持久化文件与跨实例读取，而不依赖真实 Keychain。
+    const cipher: SafeStorageCipher = {
+      isAvailable: () => true,
+      encrypt: (plain) => Buffer.from(plain.split("").reverse().join(""), "utf8"),
+      decrypt: (payload) => payload.toString("utf8").split("").reverse().join("")
+    };
+    const store = new DesktopSafeStorageCredentialStore(root, () => cipher);
+    assert.equal(await store.get("provider:deepseek:apiKey"), undefined);
+    await store.set("provider:deepseek:apiKey", "sk-live-secret");
+    assert.equal(await store.get("provider:deepseek:apiKey"), "sk-live-secret");
+    // 落盘的是密文，不是明文。
+    const onDisk = await readFile(path.join(root, "credentials.enc"), "utf8");
+    assert.ok(!onDisk.includes("sk-live-secret"), "凭据文件不得包含明文密钥");
+    // 新实例（模拟重启）能从加密文件读回，证明持久化有效。
+    const reopened = new DesktopSafeStorageCredentialStore(root, () => cipher);
+    assert.equal(await reopened.get("provider:deepseek:apiKey"), "sk-live-secret");
+    await reopened.delete("provider:deepseek:apiKey");
+    assert.equal(await reopened.get("provider:deepseek:apiKey"), undefined);
+    // 加密不可用时要明确报错，而不是静默失败。
+    const unavailable = new DesktopSafeStorageCredentialStore(root, () => ({ ...cipher, isAvailable: () => false }));
+    await assert.rejects(unavailable.set("provider:x:apiKey", "v"), /加密存储不可用/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 async function testDesktopRestoresPersistedTerminalStatus(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-terminal-status-workspace-"));
   const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-terminal-status-data-"));
@@ -677,16 +769,27 @@ async function testDesktopMessageEditFork(): Promise<void> {
     const dataRoot = await projects.dataRoot(project);
     await ensureAgentDirs(dataRoot);
     const source = new SessionRecorder(dataRoot, "source-session");
-    source.record({ type: "user_message", content: "第一条" });
+    const first = source.record({ type: "user_message", content: "第一条" });
     source.record({ type: "assistant_message", content: "第一条回复" });
     source.record({ type: "user_message", content: "旧的第二条" });
     source.record({ type: "assistant_message", content: "旧的第二条回复" });
     await source.close();
 
+    const seededAuthority = await RuntimeEventAuthority.open(dataRoot);
+    seededAuthority.close();
+
+    const duplicatedSessionId = await projects.duplicateSession(project, "source-session");
+    const duplicated = await readStoredSessionEvents(dataRoot, duplicatedSessionId);
+    assert.notEqual(duplicated.events[0]?.runtime?.eventId, first.runtime?.eventId);
+
+    const reopenedAuthority = await RuntimeEventAuthority.open(dataRoot);
+    reopenedAuthority.close();
+
     const forkedSessionId = await projects.forkSessionAtUserMessage(project, "source-session", 1);
     const forked = await readStoredSessionEvents(dataRoot, forkedSessionId);
     assert.deepEqual(forked.events.map((event) => event.type), ["user_message", "assistant_message"]);
     assert.equal(forked.events[0]?.type === "user_message" ? forked.events[0].content : undefined, "第一条");
+    assert.notEqual(forked.events[0]?.runtime?.eventId, first.runtime?.eventId);
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(desktopRoot, { recursive: true, force: true });
@@ -871,6 +974,32 @@ async function testDesktopOpenSessionReturnsConsistentMetadataSnapshot(): Promis
     assert.deepEqual(current.labels, ["新标签"]);
     await agents.closeAll();
   } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDesktopRuntimeInitializationIsShared(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-runtime-initialization-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-runtime-initialization-data-"));
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    configStore.supportsDetachedRuntimeHost = false;
+    const project = await projects.createProject(workspaceRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const internals = agents as unknown as {
+      runtimes: Map<string, unknown>;
+      ensureRuntime(projectId: string): Promise<unknown>;
+    };
+    const [first, second] = await Promise.all([
+      internals.ensureRuntime(project.id),
+      internals.ensureRuntime(project.id)
+    ]);
+    assert.equal(first, second, "concurrent Desktop requests must share one Host client initialization");
+    assert.equal(internals.runtimes.size, 1);
+  } finally {
+    await agents?.closeAll();
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(desktopRoot, { recursive: true, force: true });
   }
@@ -1409,7 +1538,7 @@ async function testDesktopSettingsTransaction(): Promise<void> {
       expectedPreferenceRevision: initial.preferenceRevision,
       expectedConfigRevision: initial.configRevision,
       themePreference: "dark",
-      personalization: { ...initial.personalization, personality: "friendly" }
+      memory: { ...initial.memory }
     });
     assert.equal(configFailure.status, "rolled_back");
     assert.equal(state.themePreference(), "system", "config failure must compensate preferences");
@@ -1422,13 +1551,11 @@ async function testDesktopSettingsTransaction(): Promise<void> {
       expectedPreferenceRevision: beforeChatFailure.preferenceRevision,
       expectedConfigRevision: beforeChatFailure.configRevision,
       themePreference: "dark",
-      personalization: { ...beforeChatFailure.personalization, personality: "pragmatic" },
+      memory: { ...beforeChatFailure.memory },
       chat: {
         sessionId: "settings-draft",
         expectedMetadataRevision: "missing",
         personalization: {
-          personality: "friendly",
-          customInstructions: { mode: "inherit", value: undefined },
           useMemories: "inherit",
           contributeMemories: "inherit"
         }
@@ -1436,7 +1563,6 @@ async function testDesktopSettingsTransaction(): Promise<void> {
     });
     assert.equal(chatFailure.status, "rolled_back");
     assert.equal(state.themePreference(), "system", "chat failure must compensate preferences");
-    assert.equal((await settings.snapshot(project.id)).personalization.personality, "none", "chat failure must compensate config");
     agents.commitSettingsChat = originalCommitChat;
 
     const recoveryBase = await settings.snapshot(project.id);
@@ -1447,7 +1573,7 @@ async function testDesktopSettingsTransaction(): Promise<void> {
       expectedPreferenceRevision: recoveryBase.preferenceRevision,
       expectedConfigRevision: recoveryBase.configRevision,
       themePreference: "dark",
-      personalization: { ...recoveryBase.personalization, personality: "friendly" }
+      memory: { ...recoveryBase.memory }
     });
     assert.equal(recovery.status, "recovery_required");
     if (recovery.status !== "recovery_required") throw new Error("expected recovery_required");
@@ -1493,6 +1619,52 @@ async function testDesktopSettingsTransaction(): Promise<void> {
   }
 }
 
+async function testDesktopSetDefaultModelImmediate(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-set-default-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-set-default-data-"));
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    const project = await projects.createProject(workspaceRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    // 加一个可切换的第二模型。
+    const base = await configStore.load(workspaceRoot);
+    await configStore.save({
+      ...base,
+      models: {
+        ...base.models,
+        "alt-model": { provider: "active", model: "alt-model" }
+      }
+    }, workspaceRoot);
+
+    const snapshot = await agents.settingsConfigSnapshot(project.id);
+    assert.equal(snapshot.models.defaultModel, "test-model");
+
+    // revision 不匹配时按乐观锁拒绝，不落盘。
+    await assert.rejects(
+      agents.setDefaultModelImmediate(project.id, "alt-model", "off", "sha256:stale"),
+      ConfigRevisionConflictError
+    );
+
+    const nextRevision = await agents.setDefaultModelImmediate(project.id, "alt-model", "high", snapshot.revision);
+    assert.notEqual(nextRevision, snapshot.revision);
+    const persisted = await configStore.load(workspaceRoot);
+    assert.equal(persisted.defaultModel, "alt-model");
+    assert.equal(persisted.thinking.enabled, true);
+    assert.equal(persisted.thinking.effort, "high");
+
+    // 未知模型别名必须报错。
+    await assert.rejects(
+      agents.setDefaultModelImmediate(project.id, "no-such-model", "off", nextRevision),
+      /未知模型/u
+    );
+  } finally {
+    await agents?.closeAll();
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
 async function testDesktopGlobalWriteGateAndRuntimeRefresh(): Promise<void> {
   const firstRoot = await mkdtemp(path.join(os.tmpdir(), "biny-global-gate-first-"));
   const secondRoot = await mkdtemp(path.join(os.tmpdir(), "biny-global-gate-second-"));
@@ -1521,7 +1693,9 @@ async function testDesktopGlobalWriteGateAndRuntimeRefresh(): Promise<void> {
     const prepared = await agents.prepareSettingsConfig(first.id, {
       expectedPreferenceRevision: state.settingsPreferences().revision,
       expectedConfigRevision: before.revision,
-      personalization: { ...before.personalization, personality: "friendly" }
+      // 翻转一个布尔让 config 内容真正变化：revision 是内容哈希，settingsCommitted 仅在
+      // before/target revision 不同时才触发派生 Runtime 重建。
+      memory: { ...before.memory, useMemories: !before.memory.useMemories }
     });
     const transactionId = "global-runtime-refresh";
     await agents.commitSettingsConfig(prepared, transactionId);
@@ -1544,7 +1718,7 @@ async function testDesktopGlobalWriteGateAndRuntimeRefresh(): Promise<void> {
       agents.prepareSettingsConfig(first.id, {
         expectedPreferenceRevision: state.settingsPreferences().revision,
         expectedConfigRevision: current.revision,
-        personalization: { ...current.personalization, personality: "pragmatic" }
+        memory: { ...current.memory }
       }),
       /任务运行期间/u
     );
@@ -1569,6 +1743,16 @@ async function testDesktopGlobalWriteGateAndRuntimeRefresh(): Promise<void> {
       }),
       /任务运行期间/u
     );
+    const settings = new DesktopSettingsTransaction(state, agents);
+    const preferenceSnapshot = await settings.snapshot(first.id);
+    const preferenceResult = await settings.save(first.id, {
+      expectedPreferenceRevision: preferenceSnapshot.preferenceRevision,
+      expectedConfigRevision: preferenceSnapshot.configRevision,
+      themePreference: "dark"
+    });
+    assert.equal(preferenceResult.status, "committed", JSON.stringify(preferenceResult));
+    assert.deepEqual(preferenceResult.appliedFields, ["themePreference"]);
+    assert.equal(state.themePreference(), "dark", "主题偏好不应被运行中的任务阻止保存");
     agents.hasRunningTasks = originalHasRunningTasks;
   } finally {
     await agents?.closeAll();
@@ -1615,9 +1799,11 @@ async function testDesktopSettingsSaveReturnsBeforeRuntimeRefresh(): Promise<voi
     const result = await settings.save(first.id, {
       expectedPreferenceRevision: initial.preferenceRevision,
       expectedConfigRevision: initial.configRevision,
-      personalization: {
-        ...initial.personalization,
-        personality: initial.personalization.personality === "friendly" ? "pragmatic" : "friendly"
+      // 翻转一个布尔让 config 内容真正变化：只有 before/target revision 不同，
+      // settingsCommitted 才会触发后台 Runtime 重建（本测试正是要观察那次重建）。
+      memory: {
+        ...initial.memory,
+        useMemories: !initial.memory.useMemories
       }
     });
     assert.equal(result.status, "committed", JSON.stringify(result));
@@ -2006,6 +2192,44 @@ async function testDesktopModelSwitchDoesNotResumeInterruptedTurn(): Promise<voi
   }
 }
 
+async function testDesktopModelSwitchDoesNotStartDetachedHost(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-model-switch-control-plane-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-model-switch-control-plane-data-"));
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const storage = new DesktopUserDataStore(desktopRoot);
+    await storage.initialize();
+    const state = new DesktopStateStore(path.join(desktopRoot, "desktop-state.json"));
+    await state.load();
+    const configStore = new DesktopConfigStore(desktopRoot, memoryCredentialStore());
+    await configStore.save({
+      ...defaultConfig,
+      defaultModel: "test-model",
+      providers: { active: { type: "openai", apiKey: "test-key", baseUrl: "https://api.openai.com/v1" } },
+      models: { "test-model": { provider: "active", model: "test-model" } },
+      thinking: { ...defaultConfig.thinking, enabled: false }
+    });
+    const projects = new DesktopProjectService(state, storage, configStore);
+    const project = await projects.createProject(workspaceRoot);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+
+    // 全局活动设置不依赖项目；这个读取路径不能再借用 settingsSnapshot("")。
+    const activity = new ActivityRecorderService({ configStore, sidecarPath: undefined });
+    assert.deepEqual(await activity.settingsSnapshot(), (await configStore.load()).activity);
+
+    const switched = await agents.switchModel(project.id, "test-model", "off");
+    assert.equal(switched.modelAlias, "test-model");
+    const snapshot = await agents.workspaceSnapshot(project.id);
+    assert.equal(snapshot.runtime, undefined, "control-plane model selection must not start a detached host");
+    assert.equal(snapshot.runtimeError, undefined);
+    assert.equal(configStore.supportsDetachedRuntimeHost, false);
+  } finally {
+    await agents?.closeAll();
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true });
+  }
+}
+
 async function testDesktopSubagentSlashCommands(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-subagent-"));
   const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-desktop-subagent-data-"));
@@ -2248,8 +2472,6 @@ async function testDesktopMemoryChangesKeepPermissionMode(): Promise<void> {
       project.id,
       recorder.sessionId,
       {
-        personality: "inherit",
-        customInstructions: { mode: "inherit", value: undefined },
         useMemories: initial.memory.useMemories,
         contributeMemories: initial.memory.useMemories
       },
@@ -2394,25 +2616,18 @@ async function testDesktopPersonalizationCasAndChatOverride(): Promise<void> {
     assert.match(initial.configRevision, /^sha256:/u);
     assert.equal(initial.chat, undefined);
 
-    const saved = await agents.savePersonalizationSettings(project.id, {
+    const saved = await agents.saveMemorySettings(project.id, {
       expectedRevision: initial.configRevision,
-      settings: {
-        enabled: true,
-        personality: "friendly",
-        customInstructions: "先给结论，再说明关键依据。"
-      },
-      memory: { ...initial.memory, useMemories: true, generateMemories: false }
+      settings: { ...initial.memory, useMemories: true, generateMemories: false }
     });
     assert.notEqual(saved.configRevision, initial.configRevision);
-    assert.equal(saved.settings.personality, "friendly");
-    assert.equal(saved.memory.useMemories, true);
-    assert.equal(saved.memory.generateMemories, false);
-    assert.equal(saved.memory.maxRecalled, initial.memory.maxRecalled);
+    assert.equal(saved.settings.useMemories, true);
+    assert.equal(saved.settings.generateMemories, false);
+    assert.equal(saved.settings.maxRecalled, initial.memory.maxRecalled);
     await assert.rejects(
-      agents.savePersonalizationSettings(project.id, {
+      agents.saveMemorySettings(project.id, {
         expectedRevision: initial.configRevision,
-        settings: { enabled: true, personality: "pragmatic", customInstructions: "stale" },
-        memory: { ...initial.memory, useMemories: false, generateMemories: false }
+        settings: { ...initial.memory, useMemories: false, generateMemories: false }
       }),
       /Global config revision conflict/u
     );
@@ -2422,8 +2637,7 @@ async function testDesktopPersonalizationCasAndChatOverride(): Promise<void> {
     const markedSummary = markedWorkspace.sessions.find((session) => session.id === recorder.sessionId);
     assert.ok(markedSummary?.metadataRevision);
     const override = {
-      personality: "pragmatic" as const,
-      customInstructions: { mode: "replace" as const, value: "本聊天只列出可执行步骤。" },
+
       useMemories: false,
       contributeMemories: "inherit" as const
     };
@@ -2439,7 +2653,6 @@ async function testDesktopPersonalizationCasAndChatOverride(): Promise<void> {
 
     const current = await agents.personalizationOverview(project.id, recorder.sessionId);
     assert.deepEqual(current.chat?.override, override);
-    assert.equal(current.chat?.effective.personality, "pragmatic");
     assert.equal(current.chat?.effective.useMemories, false);
     assert.equal(current.chat?.effective.contributeMemories, false);
     await assert.rejects(
@@ -2627,10 +2840,12 @@ async function testDesktopMemoryV3CasAndOriginFilters(): Promise<void> {
 async function testDesktopRequiresModelConfiguration(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-model-setup-workspace-"));
   const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-model-setup-data-"));
+  let agents: DesktopAgentManager | undefined;
   try {
     const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    configStore.supportsDetachedRuntimeHost = false;
     const project = await projects.createProject(workspaceRoot);
-    const agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
     const unconfigured = structuredClone(defaultConfig);
     unconfigured.defaultModel = "setup-model";
     unconfigured.providers = { setup: { type: "openai-compatible", baseUrl: "https://example.com/v1" } };
@@ -2671,6 +2886,7 @@ async function testDesktopRequiresModelConfiguration(): Promise<void> {
     assert.equal(switched.modelAlias, "fallback-model", "a usable fallback can be selected before the invalid default runtime initializes");
     assert.equal((await configStore.load()).defaultModel, "fallback-model");
   } finally {
+    await agents?.closeAll();
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(desktopRoot, { recursive: true, force: true });
   }
@@ -2729,7 +2945,10 @@ async function testDesktopConnectionMetadata(): Promise<void> {
       /无法从服务商获取模型列表/u
     );
     assert.deepEqual((await modelsStore.read("deepseek"))?.models.map((model) => model.id), ["cached-deepseek-model"]);
-    await assert.rejects(agents.fetchModelCatalog(project.id, "missing-provider"), /missing-provider/);
+    // 未知/自定义 provider 没有实时目录可言：返回静态空目录而非抛错，详情层静默预取不应刷错误。
+    const missing = await agents.fetchModelCatalog(project.id, "missing-provider");
+    assert.equal(missing.source, "static");
+    assert.deepEqual(missing.models, []);
     // 尚未保存的候选配置遵循同一语义：Renderer 可以显示静态候选，但后端不会返回
     // 一个假的成功目录。
     await assert.rejects(
@@ -3222,6 +3441,95 @@ function testHistoricalUsageProjection(): void {
   assert.equal(timeline[0]?.model?.alias, "primary");
   assert.equal(timeline[0]?.model?.label, "openai/gpt-test");
   assert.equal(timeline[0]?.usage?.totalTokens, 42);
+
+  const document: DesktopSessionDocument = {
+    session: {} as DesktopSessionSummary,
+    events: [{
+      type: "assistant_message",
+      content: "hi",
+      usage: {
+        operation: "agent",
+        modelAlias: "primary",
+        provider: "openai",
+        model: "gpt-test",
+        inputTokens: 978_146,
+        latestRequestInputTokens: 18_061,
+        totalTokens: 982_201,
+        pricingKnown: false
+      }
+    }],
+    liveEvents: []
+  };
+  assert.equal(lastReportedInputTokens(document), 18_061);
+}
+
+/** 时间线只展示活动回答，但保留 Alma 式的版本计数与切换锚点。 */
+function testMessageVersionTimelineProjection(): void {
+  const assistant = (messageId: string, text: string): Extract<SessionEvent, { type: "agent_message" }> => ({
+    type: "agent_message",
+    message: { role: "assistant", content: [{ type: "text", text }] },
+    messageId,
+    parentMessageId: "user-1",
+    slotId: "slot-1"
+  });
+  const flat = (messageId: string, content: string, retryOfMessageId?: string): Extract<SessionEvent, { type: "assistant_message" }> => ({
+    type: "assistant_message",
+    content,
+    messageId,
+    parentMessageId: "user-1",
+    slotId: "slot-1",
+    replyToMessageId: "user-1",
+    retryOfMessageId
+  });
+  const events: SessionEvent[] = [
+    { type: "user_message", content: "same prompt", messageId: "user-1", slotId: "user-1" },
+    assistant("assistant-1", "first answer"),
+    flat("assistant-1", "first answer"),
+    assistant("assistant-2", "second answer"),
+    flat("assistant-2", "second answer", "assistant-1")
+  ];
+  const latest = buildSessionTimeline(events, [])[0];
+  assert.equal(latest?.user, "same prompt");
+  assert.equal(latest?.assistant, "second answer");
+  assert.equal(latest?.assistantMessageId, "assistant-2");
+  assert.equal(latest?.versionIndex, 1);
+  assert.equal(latest?.versionCount, 2);
+
+  const previous = buildSessionTimeline([
+    ...events,
+    { type: "message_version_selected", messageId: "assistant-1", slotId: "slot-1" }
+  ], [])[0];
+  assert.equal(previous?.assistant, "first answer");
+  assert.equal(previous?.assistantMessageId, "assistant-1");
+  assert.equal(previous?.versionIndex, 0);
+  assert.equal(previous?.versionCount, 2);
+
+  const edited = buildSessionTimeline([
+    ...events,
+    { type: "user_message", content: "edited prompt", messageId: "user-2", slotId: "user-1" },
+    {
+      type: "agent_message",
+      message: { role: "assistant", content: [{ type: "text", text: "edited answer" }] },
+      messageId: "assistant-3",
+      parentMessageId: "user-2",
+      slotId: "slot-1"
+    },
+    {
+      type: "assistant_message",
+      content: "edited answer",
+      messageId: "assistant-3",
+      parentMessageId: "user-2",
+      slotId: "slot-1",
+      replyToMessageId: "user-2",
+      retryOfMessageId: "user-1"
+    },
+    { type: "message_version_selected", messageId: "assistant-3", slotId: "slot-1" }
+  ], [])[0];
+  assert.equal(edited?.user, "edited prompt");
+  assert.equal(edited?.assistant, "edited answer");
+  assert.equal(edited?.assistantMessageId, "assistant-3");
+  assert.equal(edited?.versionIndex, 2);
+  assert.equal(edited?.versionCount, 3);
 }
 
 function testDesktopUsagePresentation(): void {

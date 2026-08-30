@@ -59,17 +59,11 @@ const webSearchSettingsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(60_000),
   maxResults: z.number().int().min(1).max(10)
 });
-const personalitySchema = z.enum(["none", "friendly", "pragmatic", "buddy"]);
-const customInstructionsSchema = z.string().refine(
-  (value) => Buffer.byteLength(value, "utf8") <= 4_096,
-  "Custom instructions must not exceed 4 KiB."
-);
+/**
+ * 按聊天的记忆开关覆盖。人格/指令字段已下线（改由 SOUL/USER 承载），这里只保留 use/contribute
+ * 两个记忆开关。渲染层只发送这两个键；读取历史 catalog 的宽松兼容在上游 schema 处理。
+ */
 export const chatPersonalizationSchema = z.object({
-  personality: z.union([z.literal("inherit"), personalitySchema]),
-  customInstructions: z.object({
-    mode: z.enum(["inherit", "replace", "disabled"]),
-    value: customInstructionsSchema.optional()
-  }).strict(),
   useMemories: z.union([z.literal("inherit"), z.boolean()]),
   contributeMemories: z.union([z.literal("inherit"), z.boolean()])
 }).strict();
@@ -77,15 +71,6 @@ export const memorySettingsSchema = memoryPolicySchema;
 export const identitySettingsSchema = z.object({
   enabled: z.boolean(),
   userEnabled: z.boolean()
-}).strict();
-export const personalizationSettingsSchema = z.object({
-  expectedRevision: configRevisionSchema,
-  settings: z.object({
-    enabled: z.boolean(),
-    personality: personalitySchema,
-    customInstructions: customInstructionsSchema
-  }).strict(),
-  memory: memorySettingsSchema
 }).strict();
 export const themePreferenceSchema = z.enum(["system", "light", "dark"]);
 export const fontPreferenceSchema = z.object({
@@ -97,7 +82,6 @@ export const settingsSaveInputSchema = z.object({
   expectedConfigRevision: configRevisionSchema,
   themePreference: themePreferenceSchema.optional(),
   fontPreference: fontPreferenceSchema.optional(),
-  personalization: personalizationSettingsSchema.shape.settings.optional(),
   activity: activitySettingsInputSchema.optional(),
   identity: identitySettingsSchema.optional(),
   memory: memorySettingsSchema.optional(),

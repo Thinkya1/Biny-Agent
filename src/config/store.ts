@@ -34,6 +34,8 @@ const configUpdateMaxAttempts = 3;
 export interface AgentConfigStore {
   load(workspaceRoot?: string): Promise<AgentConfig>;
   save(config: AgentConfig, workspaceRoot?: string): Promise<void>;
+  /** 凭据是否能被独立 Runtime Host 进程读取；Desktop safeStorage 只在主进程可用。 */
+  supportsDetachedRuntimeHost?: boolean;
   /** 当前进程内成功写入配置的版本号；runtime 用它避免每次 prompt 都重新读盘。 */
   revision?(): number;
   /** 跨进程配置 CAS；个性化和记忆策略的 UI/RPC 写入必须使用这组接口。 */
@@ -161,6 +163,7 @@ export function createFileConfigStore(workspaceRoot: string, options: FileConfig
     revision += 1;
   };
   return {
+    supportsDetachedRuntimeHost: true,
     load,
     save: async (config, requestedWorkspaceRoot) => {
       const run = writeTail.then(async () => await withGlobalConfigWriteLock(
@@ -179,8 +182,9 @@ export function createFileConfigStore(workspaceRoot: string, options: FileConfig
       const run = writeTail.then(async () => await withGlobalConfigWriteLock(configRoot, async () => {
         assertConfigRevision(expectedRevision, await loadUnlocked(requestedWorkspaceRoot));
         await saveUnlocked(config, requestedWorkspaceRoot);
-        const saved = await loadUnlocked(requestedWorkspaceRoot);
-        return { config: saved, revision: configDocumentRevision(saved) };
+        // revision 只覆盖非凭据文档；刚写入的就是 `config`，直接算哈希即可，省掉一次
+        // 完整读盘 + 凭据水合（保存路径的第三次 loadUnlocked 是切换模型卡顿的来源之一）。
+        return { config, revision: configDocumentRevision(config) };
       }));
       writeTail = run.then(() => undefined, () => undefined);
       return await run;
@@ -189,8 +193,7 @@ export function createFileConfigStore(workspaceRoot: string, options: FileConfig
       const run = writeTail.then(async () => await withGlobalConfigWriteLock(configRoot, async () => {
         assertConfigRevision(expectedRevision, await loadUnlocked(requestedWorkspaceRoot));
         await saveUnlocked(config, requestedWorkspaceRoot, deferredFor);
-        const saved = await loadUnlocked(requestedWorkspaceRoot);
-        return { config: saved, revision: configDocumentRevision(saved) };
+        return { config, revision: configDocumentRevision(config) };
       }));
       writeTail = run.then(() => undefined, () => undefined);
       return await run;

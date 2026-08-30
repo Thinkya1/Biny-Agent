@@ -25,6 +25,7 @@ import { DesktopUserDataStore } from "./DesktopUserDataStore.js";
 import { globalConfigDir } from "../../../config/paths.js";
 import { registerDesktopIpc } from "./ipc.js";
 import { installApplicationMenu } from "./menu.js";
+import { QuickChatContextService } from "./QuickChatContextService.js";
 import { createQuickChatWindow, type QuickChatWindowController } from "./quickChatWindow.js";
 import { createDesktopWindow, type WindowCloseDecision } from "./window.js";
 
@@ -50,7 +51,7 @@ if (!app.requestSingleInstanceLock()) {
 
 async function startDesktopApplication(): Promise<void> {
   await app.whenReady();
-  // Electron 主进程不是 Runtime owner；给可独立启动的 Node Host 一个稳定入口。
+  // Desktop 默认在主进程内运行 Agent；CLI/TUI 等可独立启动的入口仍复用这个 Node Host 入口。
   process.env.BINY_RUNTIME_HOST_ENTRY ??= path.join(
     app.getAppPath(),
     app.isPackaged ? "dist/runtime/hostProcess.js" : "src/runtime/hostProcess.ts"
@@ -63,17 +64,41 @@ async function startDesktopApplication(): Promise<void> {
   await storage.ensureGlobalData();
   const state = new DesktopStateStore(path.join(desktopRoot, "desktop-state.json"));
   await state.load();
-  // 模型配置与 CLI/TUI 共用全局目录；凭据由 config/credentials.ts 统一接入 macOS Keychain。
+  // 模型配置与 CLI/TUI 共用全局目录；桌面端凭据由 DesktopSafeStorageCredentialStore 接管
+  // （safeStorage 加密落自管文件），不走 `security` CLI，避免保存时授权卡死。
   const configStore = new DesktopConfigStore(globalConfigDir());
   const projects = new DesktopProjectService(state, storage, configStore);
   const skills = new DesktopSkillService(state, configStore, net.fetch.bind(net) as unknown as typeof globalThis.fetch);
   let mainWindow: BrowserWindow | undefined;
   let preparingQuit = false;
-  // QuickChat 悬浮窗按需创建（首次显示或注册快捷键时），避免为不用的功能常驻一个隐藏窗口。
   let quickChatWindow: QuickChatWindowController | undefined;
+  const quickChatContext = new QuickChatContextService({
+    cacheDirectory: path.join(userDataRoot, "cache", "quick-chat"),
+    onContext: (context) => quickChatWindow?.send(desktopIpc.quickChatContext, context)
+  });
+  // QuickChat 悬浮窗按需创建；窗口本身只负责生命周期，上下文读取由 QuickChatContextService 负责。
   const ensureQuickChatWindow = (): QuickChatWindowController => {
-    quickChatWindow ??= createQuickChatWindow(() => state.quickChatSettings());
+    quickChatWindow ??= createQuickChatWindow(() => state.quickChatSettings(), {
+      getBounds: () => state.quickChatBounds(),
+      saveBounds: (bounds) => void state.setQuickChatBounds(bounds),
+      onClosed: () => { quickChatWindow = undefined; }
+    });
     return quickChatWindow;
+  };
+  const toggleQuickChat = async (): Promise<void> => {
+    const window = ensureQuickChatWindow();
+    if (window.isVisible()) {
+      if (window.isClickThrough()) {
+        window.setClickThrough(false);
+        window.focus();
+        window.focusInput();
+      } else {
+        window.hide();
+      }
+      return;
+    }
+    await quickChatContext.recapture();
+    window.show();
   };
   /** 事件回流广播到所有活跃窗口：主窗口 + QuickChat（存在时）。主窗口行为不变，QuickChat 是新增订阅者。 */
   const broadcastToWindows = (channel: string, payload: unknown): void => {
@@ -230,6 +255,9 @@ async function startDesktopApplication(): Promise<void> {
     mcp,
     getWindow: () => mainWindow,
     ensureQuickChatWindow,
+    getQuickChatWindow: () => quickChatWindow,
+    quickChatContext,
+    toggleQuickChat,
     bootstrap,
     updateSettingsDraftState: (draftState) => settingsClose.updateState(draftState),
     resolveSettingsCloseRequest: (requestId, response) => settingsClose.resolve(requestId, response)
@@ -237,10 +265,11 @@ async function startDesktopApplication(): Promise<void> {
   installApplicationMenu(() => mainWindow);
   createWindow();
 
-  // 全局快捷键唤醒/收起 QuickChat。注册失败（被占用）时降级为静默无快捷键，设置页仍可从调试入口切换。
-  const quickChatShortcut = "Alt+Space";
+  // Alma 的平台约定：macOS 使用 Command+Shift+Space，其它平台使用 Ctrl+Shift+Space。
+  // 注册失败（被占用）时降级为静默无快捷键，设置页仍可从调试入口切换。
+  const quickChatShortcut = process.platform === "darwin" ? "Command+Shift+Space" : "Ctrl+Shift+Space";
   try {
-    globalShortcut.register(quickChatShortcut, () => ensureQuickChatWindow().toggle());
+    globalShortcut.register(quickChatShortcut, () => { void toggleQuickChat(); });
   } catch {
     // 注册失败不阻断启动；只是这次没有快捷键。
   }

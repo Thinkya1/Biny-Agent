@@ -1,67 +1,71 @@
 /**
- * QuickChat 悬浮窗。
+ * QuickChat 原生窗口生命周期。
  *
- * 一个全局快捷键唤醒的极简对话小窗：frameless、置顶、不占任务栏、默认隐藏。它和主窗口
- * 完全解耦——主窗口关掉（macOS 上只剩它）时进程照常退出，所以它绝不能触发任何退出逻辑，
- * 「关闭」永远翻译成「隐藏」。
- *
- * 三种用户可控行为（设置见 SettingsQuickChat）：
- * - 失焦自动隐藏：blur 时收起，保持后台常驻；
- * - 点击穿透：窗口可见但忽略鼠标事件，悬浮在工作上方不抢焦点，按快捷键临时接管交互；
- * - 屏幕上下文注入：发消息时附带最新屏幕文本片段（由 ActivityRecorderService 提供）。
- *
- * 安全约束与主窗口一致：contextIsolation + sandbox 开、nodeIntegration 关、禁用新窗口、
- * 禁止导航到本地页面之外的地址。preload 复用同一份 index.cjs。
+ * Alma 的 Quick Chat 不是第二个 renderer 入口，而是主页面的 `#/quick-chat` 路由。这里
+ * 只负责窗口几何、显隐、快捷键唤醒后的焦点和点击穿透；上下文读取与聊天状态分别由独立
+ * 服务和 renderer 组件处理，避免窗口控制器继续承载业务逻辑。
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { BrowserWindow, nativeTheme, screen } from "electron";
+import { BrowserWindow, screen } from "electron";
 import type { DesktopQuickChatSettings } from "../../protocol.js";
+import type { DesktopWindowBounds } from "./DesktopStateStore.js";
 
-const QUICKCHAT_WIDTH = 400;
-const QUICKCHAT_HEIGHT = 560;
-/** 顶部留约 20% 屏高，靠近视线又不顶到菜单栏/Dock。 */
-const QUICKCHAT_TOP_RATIO = 0.2;
+const DEFAULT_WIDTH = 600;
+const DEFAULT_HEIGHT = 400;
+const MIN_WIDTH = 360;
+const MIN_HEIGHT = 260;
+const BOTTOM_GAP = 50;
+
+export interface QuickChatWindowOptions {
+  getBounds(): DesktopWindowBounds | undefined;
+  saveBounds(bounds: DesktopWindowBounds): void | Promise<void>;
+  onClosed?(): void;
+}
 
 export interface QuickChatWindowController {
-  /** 当前悬浮窗是否可见。 */
   isVisible(): boolean;
+  isClickThrough(): boolean;
   show(): void;
   hide(): void;
   toggle(): void;
-  /** 向 QuickChat 渲染层推一个事件通道消息；窗口已销毁时为空操作。 */
+  focus(): void;
+  focusInput(): void;
+  close(): void;
+  setClickThrough(enabled: boolean): void;
   send(channel: string, payload: unknown): void;
-  /** 应用最新设置（失焦隐藏 / 点击穿透），立即对现存窗口生效。 */
   applySettings(settings: DesktopQuickChatSettings): void;
-  /** 真正销毁窗口（仅在 before-quit 清理链里调用）。 */
   destroy(): void;
 }
 
 export function createQuickChatWindow(
-  getSettings: () => DesktopQuickChatSettings
+  getSettings: () => DesktopQuickChatSettings,
+  options: QuickChatWindowOptions
 ): QuickChatWindowController {
   const settings = getSettings();
-  nativeTheme.themeSource = "dark";
+  const storedBounds = options.getBounds();
   const window = new BrowserWindow({
-    width: QUICKCHAT_WIDTH,
-    height: QUICKCHAT_HEIGHT,
-    minWidth: 320,
-    minHeight: 360,
-    resizable: false,
-    frame: false,
-    show: false,
-    skipTaskbar: true,
-    alwaysOnTop: true,
-    // 悬浮小窗不应进入全屏/最大化语义，也不该被窗口管理器当作主窗口。
-    fullscreenable: false,
-    maximizable: false,
+    width: clampDimension(storedBounds?.width ?? DEFAULT_WIDTH, MIN_WIDTH),
+    height: clampDimension(storedBounds?.height ?? DEFAULT_HEIGHT, MIN_HEIGHT),
+    minWidth: MIN_WIDTH,
+    minHeight: MIN_HEIGHT,
+    resizable: true,
+    movable: true,
     minimizable: false,
-    // 置顶层级选 floating + 相对层 1，盖住普通窗口但不压过系统级弹层。
-    backgroundColor: "#00000000",
-    title: "Biny 快速对话",
-    // macOS 透明 + 圆角交给渲染层 CSS（body 圆角 + 背景），窗口本体透明。
+    maximizable: false,
+    closable: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    frame: false,
     transparent: process.platform === "darwin",
+    backgroundColor: process.platform === "darwin" ? "#00000000" : "#1a1a2e",
     hasShadow: true,
+    roundedCorners: true,
+    fullscreenable: false,
+    focusable: true,
+    ...(process.platform === "darwin" ? { type: "panel" as const } : {}),
+    show: false,
+    title: "Biny Quick Chat",
     webPreferences: {
       preload: path.join(fileURLToPath(new URL(".", import.meta.url)), "../preload/index.cjs"),
       contextIsolation: true,
@@ -70,42 +74,51 @@ export function createQuickChatWindow(
       spellcheck: true
     }
   });
-  window.setAlwaysOnTop(true, "floating", 1);
+  window.setAlwaysOnTop(true, "floating");
 
-  /** 点击穿透当前态：跟随设置，但按快捷键唤醒期间会临时关闭让用户交互。 */
-  let clickThroughActive = settings.clickThrough;
   let settingsSnapshot = settings;
+  let clickThroughActive = settings.clickThrough;
+  let ready = false;
+  let requestedVisible = false;
   let destroyed = false;
 
-  const applyClickThrough = (active: boolean): void => {
+  const applyClickThrough = (enabled: boolean): void => {
     if (destroyed || window.isDestroyed()) return;
-    window.setIgnoreMouseEvents(active, { forward: true });
+    window.setIgnoreMouseEvents(enabled, { forward: true });
   };
 
-  const positionTopCenter = (): void => {
-    // 用「指针所在屏」而不是主屏居中：多屏用户在大副屏上按快捷键，窗口应出现在眼前那块屏。
-    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const positionAtBottomCenter = (): void => {
+    const display = screen.getPrimaryDisplay();
     const { x, y, width, height } = display.workArea;
-    const targetX = Math.round(x + (width - QUICKCHAT_WIDTH) / 2);
-    const targetY = Math.round(y + height * QUICKCHAT_TOP_RATIO);
+    const [windowWidth = DEFAULT_WIDTH, windowHeight = DEFAULT_HEIGHT] = window.getSize();
+    const targetX = Math.round(x + (width - windowWidth) / 2);
+    const targetY = Math.round(y + height - windowHeight - BOTTOM_GAP);
     if (!destroyed && !window.isDestroyed()) window.setPosition(targetX, targetY);
   };
 
-  const show = (): void => {
+  const focusInput = (): void => {
     if (destroyed || window.isDestroyed()) return;
-    positionTopCenter();
-    // 唤醒时临时接管鼠标：点击穿透模式下用户需要能点到输入框。
-    if (settingsSnapshot.clickThrough) {
-      clickThroughActive = false;
-      applyClickThrough(false);
-    }
+    window.webContents.send("desktop:quickchat:focus-input");
+  };
+
+  const present = (): void => {
+    if (destroyed || window.isDestroyed() || !ready) return;
+    positionAtBottomCenter();
+    clickThroughActive = false;
+    applyClickThrough(false);
     window.show();
     window.focus();
+    focusInput();
+  };
+
+  const show = (): void => {
+    requestedVisible = true;
+    present();
   };
 
   const hide = (): void => {
+    requestedVisible = false;
     if (destroyed || window.isDestroyed()) return;
-    // 收起时恢复穿透态，让窗口即便残留显示也不挡鼠标。
     if (settingsSnapshot.clickThrough) {
       clickThroughActive = true;
       applyClickThrough(true);
@@ -114,67 +127,96 @@ export function createQuickChatWindow(
   };
 
   const toggle = (): void => {
-    if (window.isDestroyed() || destroyed) return;
-    if (window.isVisible() && window.isFocused()) hide();
-    else show();
+    if (destroyed || window.isDestroyed()) return;
+    if (window.isVisible()) {
+      if (clickThroughActive) {
+        present();
+      } else {
+        hide();
+      }
+      return;
+    }
+    show();
   };
 
-  // 点击穿透开启但窗口仍可见时，鼠标会穿过它点到下面的应用——这正是该模式想要的行为；
-  // 一旦用户按快捷键 show()，穿透被临时关闭，blur 又可能触发自动隐藏，二者不冲突：
-  // show 期间窗口有焦点，blur（点开别处）才会收起。
+  window.once("ready-to-show", () => {
+    ready = true;
+    if (requestedVisible) present();
+  });
+
+  window.on("resize", () => {
+    if (destroyed || window.isDestroyed()) return;
+    const [width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT] = window.getSize();
+    options.saveBounds({ width, height });
+  });
+
   window.on("blur", () => {
     if (destroyed || window.isDestroyed()) return;
     if (settingsSnapshot.autoHideOnBlur && window.isVisible() && !window.webContents.isDevToolsOpened()) hide();
   });
 
-  // 关键：拦截 close 转 hide。macOS 上若让悬浮窗真正关闭，且它是最后一个窗口，进程会随之退出。
-  window.on("close", (event) => {
-    if (destroyed) return;
-    event.preventDefault();
-    hide();
-  });
-
   window.on("closed", () => {
     destroyed = true;
+    requestedVisible = false;
+    options.onClosed?.();
   });
 
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event, url) => {
     const developmentUrl = process.env.ELECTRON_RENDERER_URL;
-    if (url.startsWith("file://") || (developmentUrl && url.startsWith(developmentUrl))) return;
+    if (url.startsWith("file://") || (developmentUrl !== undefined && url.startsWith(developmentUrl))) return;
     event.preventDefault();
   });
 
   const developmentUrl = process.env.ELECTRON_RENDERER_URL;
   if (developmentUrl) {
-    void window.loadURL(`${developmentUrl}/quickchat.html`);
+    void window.loadURL(`${developmentUrl}#/quick-chat`);
   } else {
-    void window.loadFile(path.join(fileURLToPath(new URL(".", import.meta.url)), "../renderer/quickchat.html"));
+    void window.loadFile(path.join(fileURLToPath(new URL(".", import.meta.url)), "../renderer/index.html"), {
+      hash: "#/quick-chat"
+    });
   }
 
-  // 初始穿透态（窗口此刻隐藏，但状态要先就位，首次 show/hide 才不跳变）。
-  if (clickThroughActive) applyClickThrough(true);
+  applyClickThrough(clickThroughActive);
 
   return {
     isVisible: () => !destroyed && !window.isDestroyed() && window.isVisible(),
+    isClickThrough: () => clickThroughActive,
     show,
     hide,
     toggle,
+    focus: () => {
+      if (destroyed || window.isDestroyed()) return;
+      window.show();
+      window.focus();
+    },
+    focusInput,
+    close: () => {
+      if (destroyed || window.isDestroyed()) return;
+      const [width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT] = window.getSize();
+      options.saveBounds({ width, height });
+      requestedVisible = false;
+      window.close();
+    },
+    setClickThrough: (enabled) => {
+      clickThroughActive = enabled;
+      applyClickThrough(enabled);
+    },
     send: (channel, payload) => {
       if (destroyed || window.isDestroyed()) return;
       window.webContents.send(channel, payload);
     },
     applySettings: (next) => {
       settingsSnapshot = next;
-      // 穿透只对可见窗口立刻生效；自动隐藏等下次 blur 自然生效，不主动收起用户正在用的窗口。
-      if (next.clickThrough && !window.isVisible()) {
-        clickThroughActive = true;
-      } else if (next.clickThrough && window.isVisible() && !window.isFocused()) {
-        clickThroughActive = true;
-        applyClickThrough(true);
-      } else if (!next.clickThrough) {
+      if (!next.clickThrough) {
         clickThroughActive = false;
         applyClickThrough(false);
+      } else if (!window.isVisible()) {
+        clickThroughActive = true;
+        applyClickThrough(true);
+      } else if (!window.isFocused()) {
+        clickThroughActive = true;
+        applyClickThrough(true);
       }
     },
     destroy: () => {
@@ -183,4 +225,8 @@ export function createQuickChatWindow(
       if (!window.isDestroyed()) window.destroy();
     }
   };
+}
+
+function clampDimension(value: number, minimum: number): number {
+  return Number.isFinite(value) ? Math.max(minimum, Math.round(value)) : minimum;
 }

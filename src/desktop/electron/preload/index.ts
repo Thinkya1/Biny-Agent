@@ -9,7 +9,7 @@
  */
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { ActivityRuntimeSnapshot } from "../../../activity/types.js";
-import type { DesktopAgentEventEnvelope, DesktopApi, DesktopMenuAction, DesktopSessionHandoff, DesktopSettingsCloseRequest, DesktopTerminalEvent } from "../../protocol.js";
+import type { DesktopAgentEventEnvelope, DesktopApi, DesktopMenuAction, DesktopQuickChatScreenContext, DesktopSessionHandoff, DesktopSettingsCloseRequest, DesktopTerminalEvent } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 
 const api: DesktopApi = {
@@ -41,7 +41,7 @@ const api: DesktopApi = {
   exportSession: async (projectId, sessionId, format) => await ipcRenderer.invoke(desktopIpc.exportSession, projectId, sessionId, format),
   importSession: async (projectId) => await ipcRenderer.invoke(desktopIpc.importSession, projectId),
   showSessionMenu: async (projectId, sessionId, pinned, archived) => await ipcRenderer.invoke(desktopIpc.sessionMenu, projectId, sessionId, pinned, archived),
-  sendPrompt: async (projectId, sessionId, input, mode, attachments, delivery, personalization, idempotencyKey) => await ipcRenderer.invoke(
+  sendPrompt: async (projectId, sessionId, input, mode, attachments, delivery, personalization, idempotencyKey, promptContext) => await ipcRenderer.invoke(
     desktopIpc.sendPrompt,
     projectId,
     sessionId,
@@ -50,16 +50,20 @@ const api: DesktopApi = {
     attachments,
     delivery,
     personalization,
-    idempotencyKey
+    idempotencyKey,
+    promptContext
   ),
   resumeInterruptedTurn: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.resumeInterruptedTurn, projectId, sessionId),
   editPrompt: async (projectId, sessionId, userMessageIndex, input, mode, attachments, idempotencyKey) => await ipcRenderer.invoke(desktopIpc.editPrompt, projectId, sessionId, userMessageIndex, input, mode, attachments, idempotencyKey),
+  retryPrompt: async (projectId, sessionId, targetMessageId, input, mode, attachments, idempotencyKey) => await ipcRenderer.invoke(desktopIpc.retryPrompt, projectId, sessionId, targetMessageId, input, mode, attachments, idempotencyKey),
+  switchMessageVersion: async (projectId, sessionId, messageId, direction) => await ipcRenderer.invoke(desktopIpc.switchMessageVersion, projectId, sessionId, messageId, direction),
   cancelRun: async (projectId, runId) => await ipcRenderer.invoke(desktopIpc.cancelRun, projectId, runId),
   runSlashCommand: async (projectId, sessionId, command) => await ipcRenderer.invoke(desktopIpc.runSlashCommand, projectId, sessionId, command),
   expandSkillCommand: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.skillExpand, projectId, input),
   resolvePermission: async (projectId, requestId, result) => await ipcRenderer.invoke(desktopIpc.resolvePermission, projectId, requestId, result),
   setPermissionMode: async (projectId, mode) => await ipcRenderer.invoke(desktopIpc.setPermissionMode, projectId, mode),
   switchModel: async (projectId, alias, thinking) => await ipcRenderer.invoke(desktopIpc.switchModel, projectId, alias, thinking),
+  setDefaultModel: async (projectId, alias, thinking, expectedConfigRevision, sessionId) => await ipcRenderer.invoke(desktopIpc.setDefaultModel, projectId, alias, thinking, expectedConfigRevision, sessionId),
   testModelConfiguration: async (projectId, configuration) => await ipcRenderer.invoke(desktopIpc.testModelConfiguration, projectId, configuration),
   fetchModelCatalog: async (projectId, providerAlias, force) => await ipcRenderer.invoke(desktopIpc.fetchModelCatalog, projectId, providerAlias, force),
   fetchModelCatalogCandidate: async (projectId, configuration) => await ipcRenderer.invoke(desktopIpc.fetchModelCatalogCandidate, projectId, configuration),
@@ -75,14 +79,12 @@ const api: DesktopApi = {
   importCookies: async () => await ipcRenderer.invoke(desktopIpc.importCookies),
   clearCookies: async () => await ipcRenderer.invoke(desktopIpc.clearCookies),
   personalizationOverview: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.personalizationOverview, projectId, sessionId),
-  savePersonalizationSettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.savePersonalizationSettings, projectId, input),
   saveChatPersonalization: async (projectId, sessionId, input, expectedRevision) => await ipcRenderer.invoke(desktopIpc.saveChatPersonalization, projectId, sessionId, input, expectedRevision),
   memoryOverview: async (projectId, filter) => await ipcRenderer.invoke(desktopIpc.memoryOverview, projectId, filter),
   memoryStats: async (projectId, filter) => await ipcRenderer.invoke(desktopIpc.memoryStats, projectId, filter),
   memoryEntries: async (projectId, filter, offset, limit) => await ipcRenderer.invoke(desktopIpc.memoryEntries, projectId, filter, offset, limit),
   saveMemorySettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.saveMemorySettings, projectId, input),
   identityOverview: async (projectId) => await ipcRenderer.invoke(desktopIpc.identityOverview, projectId),
-  importAlmaIdentity: async (projectId, root) => await ipcRenderer.invoke(desktopIpc.importAlmaIdentity, projectId, root),
   saveIdentityDocument: async (projectId, document, content, expectedRevision, reason) => await ipcRenderer.invoke(
     desktopIpc.saveIdentityDocument,
     projectId,
@@ -90,13 +92,6 @@ const api: DesktopApi = {
     content,
     expectedRevision,
     reason
-  ),
-  reviewIdentityProposal: async (projectId, proposalId, action, expectedRevision) => await ipcRenderer.invoke(
-    desktopIpc.reviewIdentityProposal,
-    projectId,
-    proposalId,
-    action,
-    expectedRevision
   ),
   settingsSnapshot: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.settingsSnapshot, projectId, sessionId),
   saveSettings: async (projectId, input) => await ipcRenderer.invoke(desktopIpc.saveSettings, projectId, input),
@@ -203,9 +198,14 @@ const api: DesktopApi = {
   setFontPreference: async (font) => await ipcRenderer.invoke(desktopIpc.setFontPreference, font),
   toggleQuickChat: async () => await ipcRenderer.invoke(desktopIpc.quickChatToggle),
   hideQuickChat: async () => await ipcRenderer.invoke(desktopIpc.quickChatHide),
+  closeQuickChat: async () => await ipcRenderer.invoke(desktopIpc.quickChatClose),
   quickChatSettings: async () => await ipcRenderer.invoke(desktopIpc.quickChatSettings),
   setQuickChatSettings: async (settings) => await ipcRenderer.invoke(desktopIpc.setQuickChatSettings, settings),
   quickChatScreenContext: async () => await ipcRenderer.invoke(desktopIpc.quickChatScreenContext),
+  recaptureQuickChatContext: async () => await ipcRenderer.invoke(desktopIpc.quickChatRecaptureContext),
+  traverseQuickChatApp: async (pid) => await ipcRenderer.invoke(desktopIpc.quickChatTraverseApp, pid),
+  getQuickChatClickThrough: async () => await ipcRenderer.invoke(desktopIpc.quickChatGetClickThrough),
+  setQuickChatClickThrough: async (enabled) => await ipcRenderer.invoke(desktopIpc.quickChatSetClickThrough, enabled),
   createTerminal: async (projectId, cols, rows) => await ipcRenderer.invoke(desktopIpc.createTerminal, projectId, cols, rows),
   // 输入与尺寸是高频小消息，用 send 避免 invoke 的往返开销。
   writeTerminal: (terminalId, data) => { ipcRenderer.send(desktopIpc.writeTerminal, terminalId, data); },
@@ -220,6 +220,21 @@ const api: DesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, envelope: DesktopAgentEventEnvelope): void => listener(envelope);
     ipcRenderer.on(desktopIpc.event, handler);
     return () => ipcRenderer.removeListener(desktopIpc.event, handler);
+  },
+  onQuickChatContext(listener: (context: DesktopQuickChatScreenContext) => void) {
+    const handler = (_event: Electron.IpcRendererEvent, context: DesktopQuickChatScreenContext): void => listener(context);
+    ipcRenderer.on(desktopIpc.quickChatContext, handler);
+    return () => ipcRenderer.removeListener(desktopIpc.quickChatContext, handler);
+  },
+  onQuickChatFocusInput(listener: () => void) {
+    const handler = (_event: Electron.IpcRendererEvent): void => listener();
+    ipcRenderer.on(desktopIpc.quickChatFocusInput, handler);
+    return () => ipcRenderer.removeListener(desktopIpc.quickChatFocusInput, handler);
+  },
+  onQuickChatClickThroughChanged(listener: (enabled: boolean) => void) {
+    const handler = (_event: Electron.IpcRendererEvent, enabled: boolean): void => listener(enabled);
+    ipcRenderer.on(desktopIpc.quickChatClickThroughChanged, handler);
+    return () => ipcRenderer.removeListener(desktopIpc.quickChatClickThroughChanged, handler);
   },
   onSessionHandoff(listener) {
     const handler = (_event: Electron.IpcRendererEvent, target: DesktopSessionHandoff): void => listener(target);

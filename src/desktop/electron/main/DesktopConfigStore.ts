@@ -1,15 +1,15 @@
 /**
  * 桌面端全局配置存储。
  *
- * 生产环境直接复用 CLI 的全局配置路径和 macOS Keychain。测试通过标准 CredentialStore 注入
- * 内存实现，不再让生产类携带旧 credentials.json 格式。
+ * 生产环境直接复用 CLI 的全局配置路径；凭据用 `DesktopSafeStorageCredentialStore`
+ * （Electron safeStorage 加密落自管文件），不走 `security` CLI，避免 ACL 授权卡死。
+ * 测试通过标准 CredentialStore 注入内存实现。
  */
 import path from "node:path";
 import { loadConfig, saveConfig } from "../../../config/loader.js";
 import {
   applyStoredCredentials,
   CREDENTIAL_TRANSACTION_JOURNAL,
-  createCredentialStore,
   deferredCredentialTransactionStatus,
   finalizeDeferredCredentialTransaction,
   hasPendingCredentialTransaction,
@@ -19,6 +19,7 @@ import {
   type DeferredCredentialTransactionStatus,
   type CredentialStore
 } from "../../../config/credentials.js";
+import { DesktopSafeStorageCredentialStore } from "./DesktopSafeStorageCredentialStore.js";
 import type { AgentConfig } from "../../../config/schema.js";
 import type { AgentConfigStore } from "../../../config/store.js";
 import {
@@ -29,12 +30,16 @@ import {
 } from "../../../config/versioned.js";
 
 export class DesktopConfigStore implements AgentConfigStore {
+  /** safeStorage 解密只在 Electron 主进程可用，不能把这份 store 交给 detached Host。 */
+  readonly supportsDetachedRuntimeHost = false;
   private writeTail = Promise.resolve();
   private currentRevision = 0;
 
   constructor(
     private readonly root: string,
-    private readonly credentials: CredentialStore = createCredentialStore()
+    // 桌面端默认用 safeStorage 凭据存储（系统 Keychain Services 派生密钥、加密落自管文件），
+    // 避免 `security` CLI 的 ACL 授权卡死；测试仍可注入内存实现。
+    private readonly credentials: CredentialStore = new DesktopSafeStorageCredentialStore(root)
   ) {}
 
   async load(workspaceRoot = this.root): Promise<AgentConfig> {

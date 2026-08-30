@@ -707,7 +707,6 @@ export class DesktopSettingsTransaction {
       configRevision: config.revision,
       themePreference: preferences.themePreference,
       fontPreference: preferences.fontPreference,
-      personalization: config.personalization,
       activity: structuredClone(config.activity),
       identity: structuredClone(config.identity),
       memory: config.memory,
@@ -871,14 +870,14 @@ function createJournal(
     ? preferences.fontPreference
     : normalizeFontPreference(input.fontPreference);
   const preferencesIncluded = input.themePreference !== undefined || input.fontPreference !== undefined;
-  const configIncluded = input.personalization !== undefined
-    || input.activity !== undefined
+  const configIncluded = input.activity !== undefined
     || input.identity !== undefined
     || input.memory !== undefined
     || input.compaction !== undefined
     || input.chatParams !== undefined
     || input.webSearch !== undefined
-    || input.models !== undefined;
+    || input.models !== undefined
+    || input.skills !== undefined;
   return {
     version: journalVersion,
     id: randomUUID(),
@@ -1181,7 +1180,6 @@ function listAppliedFields(input: DesktopSettingsSaveInput): string[] {
   const fields: string[] = [];
   if (input.themePreference !== undefined) fields.push("themePreference");
   if (input.fontPreference !== undefined) fields.push("fontPreference");
-  if (input.personalization !== undefined) fields.push("personalization");
   if (input.activity !== undefined) fields.push("activity");
   if (input.identity !== undefined) fields.push("identity");
   if (input.memory !== undefined) fields.push("memory");

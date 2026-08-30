@@ -10,7 +10,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import type { AgentConfigStore } from "../../../config/store.js";
 import type { ActivitySettings } from "../../../activity/settings.js";
-import { ActivityStore, type ActivityRecentSessionRow, type ActivitySearchResult } from "../../../activity/store.js";
+import { ActivityStore, type ActivitySearchResult } from "../../../activity/store.js";
 import { ActivityPrivacyPolicy } from "../../../activity/privacyPolicy.js";
 import {
   analyzePendingActivitySessions,
@@ -20,12 +20,7 @@ import {
 import { resolveActivityAnalysisModel } from "../../../activity/analysisModel.js";
 import { ActivityAnalysisScheduler } from "../../../activity/analysisScheduler.js";
 import type { ActivityRuntimeSnapshot, ActivityServiceState } from "../../../activity/types.js";
-import type { DesktopQuickChatScreenContext, DesktopSystemSettingsPane } from "../../protocol.js";
-
-/** QuickChat 注入用：OCR 文本片段的最大长度，避免把整屏文字塞进 prompt。 */
-const SCREEN_CONTEXT_OCR_LIMIT = 400;
-/** 屏幕上下文里保留的最近会话标题条数。 */
-const SCREEN_CONTEXT_SESSION_LIMIT = 5;
+import type { DesktopSystemSettingsPane } from "../../protocol.js";
 
 interface SidecarEventMessage {
   type: "event";
@@ -96,11 +91,6 @@ export class ActivityRecorderService {
   private readonly emit: ((snapshot: ActivityRuntimeSnapshot) => void) | undefined;
   private child?: ChildProcessWithoutNullStreams;
   private output?: Interface;
-  /** QuickChat 屏幕上下文的小型内存缓存：只存文本片段，从 sidecar 事件流滚动更新，不落盘。 */
-  private lastWindowTitle?: string;
-  private lastBrowserUrl?: string;
-  private lastOcrExcerpt?: string;
-  private lastContextAt?: string;
   private sessionId?: string;
   private sessionIdleTimer?: ReturnType<typeof setTimeout>;
   private lastActivityAt?: number;
@@ -114,7 +104,6 @@ export class ActivityRecorderService {
   private axAvailable = false;
   private fallbackAvailable = false;
   private operationTail = Promise.resolve();
-  private snapshotCache: ActivityRuntimeSnapshot = this.createSnapshot();
   /** 退出时中止在途的一轮分析，避免 quit 被未完成的模型请求拖住。 */
   private readonly analysisAbort = new AbortController();
   private readonly analysisScheduler: ActivityAnalysisScheduler;
@@ -153,8 +142,7 @@ export class ActivityRecorderService {
   }
 
   snapshot(): ActivityRuntimeSnapshot {
-    this.snapshotCache = this.createSnapshot();
-    return structuredClone(this.snapshotCache);
+    return structuredClone(this.createSnapshot());
   }
 
   /** 读取全局活动设置；QuickChat 不应借用需要 projectId 的设置事务快照。 */
@@ -162,44 +150,8 @@ export class ActivityRecorderService {
     return structuredClone((await this.configStore.load()).activity);
   }
 
-  /**
-   * QuickChat 注入用的实时屏幕上下文。只回文本片段（前台应用、窗口标题、URL、OCR 截取、
-   * 最近会话标题），绝不携带截图字节——这是用户对「原文不出设备」策略的显式例外，但仍只放行文本。
-   * 数据来自 sidecar 事件流滚动更新的内存缓存，不查库、不触发新的采集。
-   */
-  screenContextSnapshot(): DesktopQuickChatScreenContext {
-    const recording = this.state === "running";
-    return {
-      recording,
-      frontmostApplication: this.currentApplication,
-      windowTitle: this.lastWindowTitle,
-      browserUrl: this.lastBrowserUrl,
-      ocrExcerpt: this.lastOcrExcerpt,
-      recentSessionTitles: this.recentSessionTitles(),
-      capturedAt: this.lastContextAt
-    };
-  }
-
   async search(query: string, limit = 20): Promise<ActivitySearchResult[]> {
     return await this.enqueue(async () => this.store.search(query, limit));
-  }
-
-  /**
-   * 最近分析出的会话标题（取分析摘要首行，截断）。同步直读采集 store，只命中
-   * activity_session_analysis 的 summary 文本列——不读事件原文、不碰截图，符合隐私红线。
-   * store 未打开（首次启动前）或查询失败时静默回空，宁缺毋滥。
-   */
-  private recentSessionTitles(): string[] {
-    try {
-      const sinceIso = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-      return this.store
-        .listRecentSessionsWithAnalysis(sinceIso, 30)
-        .map((row: ActivityRecentSessionRow) => firstLine(row.analysis?.summary, 80))
-        .filter((title): title is string => title !== undefined)
-        .slice(0, SCREEN_CONTEXT_SESSION_LIMIT);
-    } catch {
-      return [];
-    }
   }
 
   /**
@@ -396,12 +348,6 @@ export class ActivityRecorderService {
       });
       this.axAvailable = message.axAvailable ?? this.axAvailable;
       this.currentApplication = message.application ?? this.currentApplication;
-      // 事件是高频流，OCR 只认 capture；这里滚动记下窗口标题与浏览器 URL 供 QuickChat 注入。
-      this.updateScreenContextCache({
-        occurredAt: message.occurredAt,
-        windowTitle: message.tabTitle ?? message.windowTitle,
-        url: message.url
-      });
       this.publish();
     } catch (error) {
       this.setState("error", safeError(error));
@@ -430,30 +376,10 @@ export class ActivityRecorderService {
         jpeg
       }, this.settings.maxStorageMb);
       this.currentApplication = message.application ?? this.currentApplication;
-      // 视觉 fallback 携带 OCR 文本；截断到注入上限后滚动缓存，截图字节绝不进缓存。
-      this.updateScreenContextCache({
-        occurredAt: message.occurredAt,
-        windowTitle: message.windowTitle,
-        ocrText: message.ocrText
-      });
       this.publish();
     } catch (error) {
       this.setState("error", safeError(error));
     }
-  }
-
-  /**
-   * 滚动更新 QuickChat 注入用的屏幕文本缓存。只有非空文本才覆盖对应槽位，避免心跳事件
-   * 把刚采集到的内容冲掉；OCR 截断到注入上限。全程只碰文本，不接触截图字节。
-   */
-  private updateScreenContextCache(update: { occurredAt?: string; windowTitle?: string; url?: string; ocrText?: string }): void {
-    const windowTitle = update.windowTitle?.trim();
-    if (windowTitle) this.lastWindowTitle = windowTitle;
-    const url = update.url?.trim();
-    if (url) this.lastBrowserUrl = url;
-    const ocr = update.ocrText?.trim();
-    if (ocr) this.lastOcrExcerpt = ocr.slice(0, SCREEN_CONTEXT_OCR_LIMIT);
-    if (update.occurredAt) this.lastContextAt = update.occurredAt;
   }
 
   private ensureSession(occurredAt: string): string {
@@ -513,8 +439,7 @@ export class ActivityRecorderService {
   }
 
   private publish(): void {
-    this.snapshotCache = this.createSnapshot();
-    this.emit?.(structuredClone(this.snapshotCache));
+    this.emit?.(structuredClone(this.createSnapshot()));
   }
 
   private createSnapshot(): ActivityRuntimeSnapshot {
@@ -571,11 +496,4 @@ function toIso(value: number): string {
 
 function safeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/** 取一段文本的首个非空行并截断；空输入返回 undefined（供过滤掉无标题的分析行）。 */
-function firstLine(text: string | undefined, maxLength: number): string | undefined {
-  const line = text?.split("\n").map((part) => part.trim()).find((part) => part.length > 0);
-  if (!line) return undefined;
-  return line.length > maxLength ? `${line.slice(0, maxLength)}…` : line;
 }

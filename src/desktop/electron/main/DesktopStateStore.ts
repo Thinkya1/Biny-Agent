@@ -30,6 +30,7 @@ interface PersistedDesktopState {
   themePreference: DesktopThemePreference;
   fontPreference: DesktopFontPreference;
   quickChat: DesktopQuickChatSettings;
+  quickChatBounds?: DesktopWindowBounds;
   /** 只覆盖设置页偏好字段，供统一设置保存执行进程内 CAS。 */
   preferenceRevision: number;
   windowBounds?: DesktopWindowBounds;
@@ -53,6 +54,7 @@ const defaultState: PersistedDesktopState = {
   themePreference: "system",
   fontPreference: { ...DEFAULT_FONT_PREFERENCE },
   quickChat: { ...DEFAULT_QUICKCHAT_SETTINGS },
+  quickChatBounds: undefined,
   preferenceRevision: 0,
   windowBounds: undefined
 };
@@ -77,6 +79,7 @@ export class DesktopStateStore {
         themePreference: validThemePreference(raw.themePreference) ? raw.themePreference : "system",
         fontPreference: normalizeFontPreference(raw.fontPreference),
         quickChat: normalizeQuickChatSettings(raw.quickChat),
+        quickChatBounds: validWindowBounds(raw.quickChatBounds) ? raw.quickChatBounds : undefined,
         preferenceRevision: validPreferenceRevision(raw.preferenceRevision) ? raw.preferenceRevision : 0,
         windowBounds: validWindowBounds(raw.windowBounds) ? raw.windowBounds : undefined
       };
@@ -225,6 +228,15 @@ export class DesktopStateStore {
   /** QuickChat 偏好是纯 UI 开关，逐字段直达落盘，不走设置事务的 CAS/revision。 */
   async setQuickChatSettings(settings: DesktopQuickChatSettings): Promise<void> {
     this.state.quickChat = normalizeQuickChatSettings(settings);
+    await this.save();
+  }
+
+  quickChatBounds(): DesktopWindowBounds | undefined {
+    return this.state.quickChatBounds ? { ...this.state.quickChatBounds } : undefined;
+  }
+
+  async setQuickChatBounds(bounds: DesktopWindowBounds): Promise<void> {
+    this.state.quickChatBounds = { ...bounds };
     await this.save();
   }
 

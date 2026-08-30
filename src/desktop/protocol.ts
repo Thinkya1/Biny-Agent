@@ -19,19 +19,16 @@ import type { LocalEmbeddingModelId } from "../llm/embedding/types.js";
 import type { MemoryEmbeddingRuntimeStatus } from "../agent/context/MemoryEmbeddingService.js";
 import type { MemoryMaintenanceStatus } from "../agent/context/memoryTypes.js";
 import type {
-  IdentityDocumentKind,
-  IdentityOverview,
-  IdentityProposal,
-  IdentityReviewResult
+  IdentityDocumentKind
 } from "../agent/context/identityTypes.js";
-import type { AlmaImportScanResult } from "../agent/context/almaImport.js";
+import type { IdentityOverview } from "../agent/context/identityStorage.js";
 import type { IdentityPolicy } from "../config/schema.js";
 import type { ModelChoice, ModelRuntimeInfo, ThinkingSelection } from "../llm/ModelManager.js";
 import type { MemoryPolicy } from "../personalization/index.js";
 import type { PermissionMode, PermissionResult } from "../permission/PermissionManager.js";
 import type { AgentHostEvent, AgentRuntimeUpdate, InteractiveRuntimeSnapshot } from "../runtime/agentEvents.js";
 import { slashCommandsForSurface, type SlashCommandDefinition } from "../runtime/commandRegistry.js";
-import type { SessionBranchPoint } from "../session/catalog.js";
+import type { SessionBranchPoint, SessionIsolation } from "../session/catalog.js";
 import type { SessionEvent } from "../session/recorder.js";
 import type { SessionRunStatus } from "../session/runLedger.js";
 import type {
@@ -51,9 +48,6 @@ export type DesktopActivitySettingsInput = ActivitySettingsInput;
 export type DesktopIdentitySettings = IdentityPolicy;
 export type DesktopIdentityDocumentKind = IdentityDocumentKind;
 export type DesktopIdentityOverview = IdentityOverview;
-export type DesktopAlmaImportScan = AlmaImportScanResult;
-export type DesktopIdentityProposal = IdentityProposal;
-export type DesktopIdentityReviewResult = IdentityReviewResult;
 
 /** 指定日期的 Activity 打工日记；markdown 可直接渲染，blocked/message 说明补分析为何被跳过。 */
 export type DesktopActivityReport = ActivityReportResult;
@@ -91,11 +85,14 @@ export const desktopIpc = {
   sendPrompt: "desktop:agent:send",
   resumeInterruptedTurn: "desktop:agent:resume-interrupted",
   editPrompt: "desktop:agent:edit",
+  retryPrompt: "desktop:agent:retry",
+  switchMessageVersion: "desktop:agent:message-version",
   cancelRun: "desktop:agent:cancel",
   runSlashCommand: "desktop:agent:slash",
   resolvePermission: "desktop:permission:resolve",
   setPermissionMode: "desktop:permission:mode",
   switchModel: "desktop:model:switch",
+  setDefaultModel: "desktop:model:set-default",
   testModelConfiguration: "desktop:model:test-configuration",
   fetchModelCatalog: "desktop:model:fetch-catalog",
   fetchModelCatalogCandidate: "desktop:model:fetch-catalog-candidate",
@@ -111,16 +108,13 @@ export const desktopIpc = {
   importCookies: "desktop:browser:cookies:import",
   clearCookies: "desktop:browser:cookies:clear",
   personalizationOverview: "desktop:personalization:overview",
-  savePersonalizationSettings: "desktop:personalization:save",
   saveChatPersonalization: "desktop:personalization:save-chat",
   memoryOverview: "desktop:memory:overview",
   memoryStats: "desktop:memory:stats",
   memoryEntries: "desktop:memory:entries",
   saveMemorySettings: "desktop:memory:save-settings",
   identityOverview: "desktop:identity:overview",
-  importAlmaIdentity: "desktop:identity:import-alma",
   saveIdentityDocument: "desktop:identity:save-document",
-  reviewIdentityProposal: "desktop:identity:review-proposal",
   settingsSnapshot: "desktop:settings:snapshot",
   saveSettings: "desktop:settings:save",
   stageSettingsCredential: "desktop:settings:credential:stage",
@@ -167,7 +161,15 @@ export const desktopIpc = {
   setFontPreference: "desktop:ui:font",
   quickChatToggle: "desktop:quickchat:toggle",
   quickChatHide: "desktop:quickchat:hide",
+  quickChatClose: "desktop:quickchat:close",
   quickChatScreenContext: "desktop:quickchat:screen-context",
+  quickChatRecaptureContext: "desktop:quickchat:recapture-context",
+  quickChatTraverseApp: "desktop:quickchat:traverse-app",
+  quickChatGetClickThrough: "desktop:quickchat:get-clickthrough",
+  quickChatSetClickThrough: "desktop:quickchat:set-clickthrough",
+  quickChatContext: "desktop:quickchat:context",
+  quickChatFocusInput: "desktop:quickchat:focus-input",
+  quickChatClickThroughChanged: "desktop:quickchat:clickthrough-changed",
   quickChatSettings: "desktop:quickchat:settings",
   setQuickChatSettings: "desktop:quickchat:set-settings",
   createTerminal: "desktop:terminal:create",
@@ -222,6 +224,7 @@ export interface DesktopFontPreference {
   family: string;
   size: number;
 }
+
 /**
  * 快速对话（QuickChat）偏好。走 DesktopStateStore 的逐字段直达通道，不进设置草稿事务：
  * 这三项是纯 UI 行为开关，与共享 config 无关，保存时也不需要 CAS 保护。
@@ -229,31 +232,48 @@ export interface DesktopFontPreference {
 export interface DesktopQuickChatSettings {
   /** 失焦时自动隐藏悬浮窗。 */
   autoHideOnBlur: boolean;
-  /** 每条消息附带最新屏幕上下文（前台应用、浏览器 URL、最新 OCR、最近会话）。依赖活动记录器开启。 */
+  /** 每条消息按需附带当前前台应用上下文；不依赖活动记录器，也不读取活动记录缓存。 */
   injectScreenContext: boolean;
   /** 点击穿透：窗口可见但忽略鼠标事件，按快捷键唤醒后才可交互。 */
   clickThrough: boolean;
 }
 
+/** QuickChat 当前前台应用快照；只保留用于展示和生成上下文的文本。 */
+export interface DesktopQuickChatFrontAppContext {
+  pid: number;
+  appName: string;
+  bundleId: string;
+  appPath: string;
+  windowTitle?: string;
+  url?: string;
+  focusedElement?: {
+    value?: string;
+    textSelection?: string;
+  };
+  permissionDenied: boolean;
+  durationMs: number;
+}
+
+/** QuickChat 按需读取的前台应用 AX 内容；内容有硬上限，避免把整棵 AX 树送进模型。 */
+export interface DesktopQuickChatTraversal {
+  pid: number;
+  windowTitle?: string;
+  content: string;
+  truncated: boolean;
+  source: "ax" | "empty";
+  durationMs: number;
+}
+
 /**
- * QuickChat 注入用的实时屏幕上下文片段。只有文本，绝不携带截图字节——这是用户对
- * 隐私策略的显式例外，但仍遵循「原文不出设备」的红线，只放行可注入到 prompt 的文本。
+ * QuickChat 的上下文缓存。它和 Activity 记录器完全分离：前台快照由显式 recapture 触发，
+ * traversal 只在用户打开上下文时读取；`promptContext` 是已经限流/转义的临时系统上下文，
+ * 不会替换或改写用户消息。
  */
 export interface DesktopQuickChatScreenContext {
-  /** 活动记录器是否正在采集；false 时其余字段多为空，渲染层据此提示去开启。 */
-  recording: boolean;
-  /** 当前前台应用名。 */
-  frontmostApplication?: string;
-  /** 当前窗口标题。 */
-  windowTitle?: string;
-  /** 当前浏览器标签页 URL。 */
-  browserUrl?: string;
-  /** 最近一次 OCR 文本片段（已截断）。 */
-  ocrExcerpt?: string;
-  /** 最近分析出的会话标题，最近在前。 */
-  recentSessionTitles: string[];
-  /** 片段采集时间（ISO）；用于渲染层提示时效。 */
-  capturedAt?: string;
+  frontApp?: DesktopQuickChatFrontAppContext;
+  traversal?: DesktopQuickChatTraversal;
+  appIconDataUrl?: string;
+  promptContext?: string;
 }
 export type DesktopSessionStatus =
   | "idle"
@@ -305,6 +325,8 @@ export interface DesktopSessionSummary {
   archived?: boolean;
   unread?: boolean;
   labels?: string[];
+  /** 会话是否绑定隔离工作树；列表只用它做轻量标记，不展示工作树内部路径。 */
+  isolation?: SessionIsolation;
   metadataRevision?: string;
   personalization?: DesktopChatPersonalizationOverride;
   hasChildren?: boolean;
@@ -837,8 +859,8 @@ export interface DesktopModelConnection {
 
 export interface DesktopModelCatalogResult {
   providerAlias: string;
-  /** 只有服务商成功返回并通过校验的非空目录才会产生结果。 */
-  source: "fetched";
+  /** `fetched` 表示服务商实时返回的目录；`static` 表示该连接无实时目录（如自定义/聚合端点），回退到本地静态候选。 */
+  source: "fetched" | "static";
   fetchedAt: string;
   models: ModelCatalogEntry[];
 }
@@ -925,31 +947,19 @@ export interface DesktopCookieJarStatus {
   updatedAt?: string;
 }
 
-export type DesktopPersonality = "none" | "friendly" | "pragmatic" | "buddy";
-
-/** 全局个性化设置；Desktop 只接触无凭据的运行时投影。 */
-export interface DesktopPersonalizationSettings {
-  enabled: boolean;
-  personality: DesktopPersonality;
-  customInstructions: string;
-}
-
 export type DesktopChatInheritance = "inherit";
 
+/**
+ * 按聊天的记忆开关覆盖。人格预设与自定义指令已下线（改由 SOUL/IDENTITY/STYLE 与 USER.md 承载），
+ * 这里只保留记忆开关；读旧 catalog 记录时上游 schema 会丢弃废弃字段。
+ */
 export interface DesktopChatPersonalizationOverride {
-  personality: DesktopChatInheritance | DesktopPersonality;
-  customInstructions: {
-    mode: "inherit" | "replace" | "disabled";
-    value?: string;
-  };
   useMemories: DesktopChatInheritance | boolean;
   contributeMemories: DesktopChatInheritance | boolean;
 }
 
+/** 当前聊天生效的记忆开关；只保留渲染层真正读取的字段。 */
 export interface DesktopResolvedPersonalization {
-  enabled: boolean;
-  personality: DesktopPersonality;
-  customInstructions: string;
   useMemories: boolean;
   contributeMemories: boolean;
 }
@@ -957,7 +967,6 @@ export interface DesktopResolvedPersonalization {
 export interface DesktopPersonalizationOverview {
   /** 全局 config 的 CAS revision；保存时必须原样带回。 */
   configRevision: string;
-  settings: DesktopPersonalizationSettings;
   /** UI 只直接编辑 use/generate，但保存时带回完整策略，避免覆盖其它记忆字段。 */
   memory: DesktopMemorySettings;
   chat?: {
@@ -966,12 +975,6 @@ export interface DesktopPersonalizationOverview {
     effective: DesktopResolvedPersonalization;
     metadataRevision: string;
   };
-}
-
-export interface DesktopPersonalizationSettingsInput {
-  expectedRevision: string;
-  settings: DesktopPersonalizationSettings;
-  memory: DesktopMemorySettings;
 }
 
 export type DesktopMemoryAudience = "workspace" | "universal";
@@ -1187,16 +1190,15 @@ export interface DesktopSettingsCloseRequest {
 
 export type DesktopSettingsCloseResponse = "saved" | "discarded" | "cancelled";
 
-/** 设置页一次读取的脱敏快照；两个 revision 分别保护 Desktop 偏好和全局 config。 */
+/** 设置页一次读取的脱敏快照；主题/字体偏好可独立保存，其余 revision 保护共享设置。 */
 export interface DesktopSettingsSnapshot {
   projectId: string;
-  /** 任一驻留项目存在运行中任务时，全局设置和即时共享动作都只读。 */
+  /** 任一驻留项目存在运行中任务时，共享设置和即时共享动作只读；主题/字体偏好仍可保存。 */
   hasRunningTasks: boolean;
   preferenceRevision: number;
   configRevision: string;
   themePreference: DesktopThemePreference;
   fontPreference: DesktopFontPreference;
-  personalization: DesktopPersonalizationSettings;
   activity: ActivitySettings;
   identity: DesktopIdentitySettings;
   memory: DesktopMemorySettings;
@@ -1231,7 +1233,6 @@ export interface DesktopSettingsSaveInput {
   expectedConfigRevision: string;
   themePreference?: DesktopThemePreference;
   fontPreference?: DesktopFontPreference;
-  personalization?: DesktopPersonalizationSettings;
   /** 外发策略不属于 renderer 可写入的输入；主进程会保留当前策略并仅更新采集参数。 */
   activity?: ActivitySettingsInput;
   identity?: DesktopIdentitySettings;
@@ -1325,6 +1326,18 @@ export interface DesktopRuntimeProjection {
   goals: unknown;
   graphs: unknown;
   capabilities: unknown;
+  /** 只返回渲染层需要的工作树状态，不把路径、分支和 base commit 暴露给普通 UI。 */
+  worktrees: DesktopWorktreeStatus[];
+}
+
+export type DesktopWorktreeLifecycleStatus = "active" | "merged" | "conflicted" | "orphaned" | "kept";
+
+export interface DesktopWorktreeStatus {
+  sessionId: string;
+  status: DesktopWorktreeLifecycleStatus;
+  exists: boolean;
+  dirty: boolean;
+  mergedIntoBase: boolean;
 }
 
 export type DesktopRuntimeMutation =
@@ -1359,7 +1372,9 @@ export type DesktopRuntimeMutation =
   | "capability.result"
   | "capability.chunk"
   | "capability.fail"
-  | "capability.cancel";
+  | "capability.cancel"
+  | "worktree.merge"
+  | "worktree.remove";
 
 export type DesktopMenuAction = "new-task" | "open-project" | "search" | "settings" | "toggle-sidebar" | "focus-composer";
 export type DesktopSessionMenuAction = "rename" | "pin" | "unpin" | "archive" | "unarchive" | "duplicate" | "export-bundle" | "export-claude" | "delete";
@@ -1419,10 +1434,13 @@ export interface DesktopApi {
     attachments: DesktopAttachment[],
     delivery?: "steer" | "followUp",
     personalization?: DesktopChatPersonalizationOverride,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    promptContext?: string
   ): Promise<DesktopRunReceipt>;
   resumeInterruptedTurn(projectId: string, sessionId: string): Promise<DesktopRunReceipt | undefined>;
   editPrompt(projectId: string, sessionId: string, userMessageIndex: number, input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], idempotencyKey?: string): Promise<DesktopRunReceipt>;
+  retryPrompt(projectId: string, sessionId: string, targetMessageId: string, input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], idempotencyKey?: string): Promise<DesktopRunReceipt>;
+  switchMessageVersion(projectId: string, sessionId: string, messageId: string, direction: "prev" | "next"): Promise<DesktopSessionDocument>;
   cancelRun(projectId: string, runId: string): Promise<void>;
   runSlashCommand(projectId: string, sessionId: string | undefined, command: string): Promise<DesktopSlashResult>;
   expandSkillCommand(projectId: string, input: string): Promise<string>;
@@ -1449,7 +1467,6 @@ export interface DesktopApi {
   importCookies(): Promise<DesktopCookieJarStatus>;
   clearCookies(): Promise<DesktopCookieJarStatus>;
   personalizationOverview(projectId: string, sessionId?: string): Promise<DesktopPersonalizationOverview>;
-  savePersonalizationSettings(projectId: string, input: DesktopPersonalizationSettingsInput): Promise<DesktopPersonalizationOverview>;
   saveChatPersonalization(projectId: string, sessionId: string, input: DesktopChatPersonalizationOverride, expectedRevision: string): Promise<DesktopWorkspaceSnapshot>;
   memoryOverview(projectId: string, filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryOverview>;
   /** 记忆库统计（不含条目内容）；条目增删后用于刷新头部与翻页控件。 */
@@ -1458,11 +1475,15 @@ export interface DesktopApi {
   memoryEntries(projectId: string, filter: DesktopMemoryOriginFilter, offset: number, limit: number): Promise<DesktopMemoryEntriesPage>;
   saveMemorySettings(projectId: string, input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot>;
   identityOverview(projectId: string): Promise<DesktopIdentityOverview>;
-  importAlmaIdentity(projectId: string, root?: string): Promise<DesktopAlmaImportScan>;
   saveIdentityDocument(projectId: string, document: DesktopIdentityDocumentKind, content: string, expectedRevision: number, reason?: string): Promise<DesktopIdentityOverview>;
-  reviewIdentityProposal(projectId: string, proposalId: string, action: "accept" | "reject", expectedRevision: number): Promise<DesktopIdentityReviewResult>;
   settingsSnapshot(projectId: string, sessionId?: string): Promise<DesktopSettingsSnapshot>;
   saveSettings(projectId: string, input: DesktopSettingsSaveInput): Promise<DesktopSettingsSaveResult>;
+  /**
+   * 设置页「设为默认」的即时持久化通道：绕开跨页草稿事务，直接对全局 config 做
+   * CAS 更新默认模型。`expectedConfigRevision` 是乐观锁，不匹配时抛冲突让前端重读。
+   * 返回最新设置快照供前端整体同步草稿基线。
+   */
+  setDefaultModel(projectId: string, alias: string, thinking: ThinkingSelection, expectedConfigRevision: string, sessionId?: string): Promise<DesktopSettingsSnapshot>;
   activitySnapshot(): Promise<ActivityRuntimeSnapshot>;
   activitySettings(): Promise<DesktopActivitySettings>;
   requestActivityPermission(pane: DesktopSystemSettingsPane): Promise<void>;
@@ -1507,11 +1528,21 @@ export interface DesktopApi {
   /** QuickChat 悬浮窗的显隐切换；由设置页或调试入口触发，正常交互走全局快捷键。 */
   toggleQuickChat(): Promise<void>;
   hideQuickChat(): Promise<void>;
+  closeQuickChat(): Promise<void>;
   /** 读取当前 QuickChat 偏好（三处 checkbox 的即时状态）。 */
   quickChatSettings(): Promise<DesktopQuickChatSettings>;
   setQuickChatSettings(settings: DesktopQuickChatSettings): Promise<DesktopQuickChatSettings>;
-  /** 拉取最新屏幕上下文片段；仅文本，无截图字节。 */
+  /** 读取当前 QuickChat 缓存；不触发系统采集。 */
   quickChatScreenContext(): Promise<DesktopQuickChatScreenContext>;
+  /** 在唤起 QuickChat 前按需读取前台应用，并异步刷新 AX 内容。 */
+  recaptureQuickChatContext(): Promise<DesktopQuickChatScreenContext>;
+  /** 按 PID 读取前台应用 AX 树的文本摘要。 */
+  traverseQuickChatApp(pid: number): Promise<DesktopQuickChatScreenContext>;
+  getQuickChatClickThrough(): Promise<boolean>;
+  setQuickChatClickThrough(enabled: boolean): Promise<boolean>;
+  onQuickChatContext(listener: (context: DesktopQuickChatScreenContext) => void): () => void;
+  onQuickChatFocusInput(listener: () => void): () => void;
+  onQuickChatClickThroughChanged(listener: (enabled: boolean) => void): () => void;
   createTerminal(projectId: string, cols: number, rows: number): Promise<DesktopTerminalHandle>;
   writeTerminal(terminalId: string, data: string): void;
   resizeTerminal(terminalId: string, cols: number, rows: number): void;

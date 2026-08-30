@@ -37,9 +37,10 @@ import {
   type SessionCatalogRecord
 } from "../../../session/catalog.js";
 import { deleteSessionArtifacts } from "../../../session/cleanup.js";
+import { rebaseForkedSessionEvents } from "../../../session/fork.js";
 import { createSessionId, type SessionTurnStatus } from "../../../session/recorder.js";
 import { SessionRunLedger, type SessionRunRecord } from "../../../session/runLedger.js";
-import { createSessionFile, duplicateSessionFile, ensureAgentDirs } from "../../../session/store.js";
+import { createSessionFile, ensureAgentDirs } from "../../../session/store.js";
 import {
   exportSessionBundle,
   exportSessionClaudeCode,
@@ -461,7 +462,14 @@ export class DesktopProjectService {
   async duplicateSession(project: DesktopProject, sessionId: string): Promise<string> {
     const targetSessionId = createSessionId();
     const dataRoot = await this.storage.ensureProjectData(project);
-    await duplicateSessionFile(dataRoot, sessionId, targetSessionId);
+    const source = await readStoredSessionEvents(dataRoot, sessionId);
+    if (source.truncated) {
+      throw new Error("会话超过大小限制，无法安全复制；请先分叉或继续使用原会话。");
+    }
+    const sourceEvents = source.events;
+    const duplicatedEvents = rebaseForkedSessionEvents(sourceEvents);
+    const content = duplicatedEvents.length ? `${duplicatedEvents.map((event) => JSON.stringify(event)).join("\n")}\n` : "";
+    await createSessionFile(dataRoot, targetSessionId, Buffer.from(content, "utf8"));
     const sourceCatalog = (await listSessionCatalog(dataRoot)).find((item) => item.id === sessionId);
     await registerSessionBranch(dataRoot, {
       sessionId: targetSessionId,
@@ -470,6 +478,22 @@ export class DesktopProjectService {
     });
     await this.copyCatalogMetadata(dataRoot, sourceCatalog, targetSessionId);
     return targetSessionId;
+  }
+
+  /** 按时间线中的用户消息序号解析 canonical ID，编辑和重试都以 ID 而不是事件下标定位。 */
+  async sessionUserMessageIdAtIndex(project: DesktopProject, sessionId: string, userMessageIndex: number): Promise<string> {
+    const dataRoot = await this.storage.ensureProjectData(project);
+    const stored = await readStoredSessionEvents(dataRoot, sessionId);
+    let seen = 0;
+    for (const event of stored.events) {
+      if (event.type !== "user_message" || event.auditOnly) continue;
+      if (seen === userMessageIndex) {
+        if (event.messageId === undefined) throw new Error("这条历史消息缺少版本 ID，无法在原会话中编辑。");
+        return event.messageId;
+      }
+      seen += 1;
+    }
+    throw new Error("要编辑的消息已不在当前会话中。");
   }
 
   /**
@@ -484,7 +508,7 @@ export class DesktopProjectService {
     const targetEventIndex = userEventIndices[userMessageIndex];
     if (targetEventIndex === undefined) throw new Error("要编辑的消息已不在当前会话中。");
     const targetSessionId = createSessionId();
-    const prefix = events.slice(0, targetEventIndex);
+    const prefix = rebaseForkedSessionEvents(events.slice(0, targetEventIndex));
     const content = prefix.length ? `${prefix.map((event) => JSON.stringify(event)).join("\n")}\n` : "";
     await createSessionFile(dataRoot, targetSessionId, Buffer.from(content, "utf8"));
     const targetEvent = events[targetEventIndex];
@@ -705,6 +729,7 @@ function desktopSessionSummary(
     archived: item.archived ?? false,
     unread: item.unread ?? false,
     labels: item.labels,
+    isolation: item.isolation,
     metadataRevision: item.metadataRevision,
     personalization: item.personalization,
     hasChildren,

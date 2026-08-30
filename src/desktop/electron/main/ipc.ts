@@ -27,13 +27,12 @@ import {
   idSchema,
   memorySettingsSchema,
   modelConfigurationSchema,
-  personalizationSettingsSchema,
   settingsSaveInputSchema,
   themePreferenceSchema,
   thinkingSchema
 } from "./settingsSaveInputSchema.js";
 import { clampFontSize } from "../../fontPreference.js";
-import type { DesktopActiveView, DesktopBootstrap, DesktopQuickChatSettings, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopSystemSettingsPane, DesktopThemePreference } from "../../protocol.js";
+import type { DesktopActiveView, DesktopBootstrap, DesktopQuickChatSettings, DesktopSessionMenuAction, DesktopSettingsCloseResponse, DesktopSettingsDraftState, DesktopSettingsSaveInput, DesktopSystemSettingsPane, DesktopThemePreference } from "../../protocol.js";
 import { desktopIpc } from "../../protocol.js";
 import { DesktopAgentManager } from "./DesktopAgentManager.js";
 import { ActivityRecorderService } from "./ActivityRecorderService.js";
@@ -44,6 +43,7 @@ import { DesktopSkillService } from "./DesktopSkillService.js";
 import { DesktopStateStore } from "./DesktopStateStore.js";
 import { DesktopSettingsTransaction } from "./DesktopSettingsTransaction.js";
 import { DesktopTerminalManager } from "./DesktopTerminalManager.js";
+import { QuickChatContextService } from "./QuickChatContextService.js";
 import type { QuickChatWindowController } from "./quickChatWindow.js";
 import { runtimeMutationStartsWork } from "./settingsRuntimeGate.js";
 import { exportSessionBundle, exportSessionClaudeCode } from "../../../session/transfer.js";
@@ -61,6 +61,10 @@ interface IpcContext {
   getWindow(): BrowserWindow | undefined;
   /** 惰性创建/返回 QuickChat 悬浮窗控制器；toggle/hide/applySettings 经它落到窗口。 */
   ensureQuickChatWindow(): QuickChatWindowController;
+  /** 只读取已创建的 QuickChat 窗口，设置读取/隐藏不应无故创建窗口。 */
+  getQuickChatWindow(): QuickChatWindowController | undefined;
+  quickChatContext: QuickChatContextService;
+  toggleQuickChat(): Promise<void>;
   bootstrap(): Promise<DesktopBootstrap>;
   updateSettingsDraftState(state: DesktopSettingsDraftState): void;
   resolveSettingsCloseRequest(requestId: string, response: DesktopSettingsCloseResponse): boolean;
@@ -69,13 +73,12 @@ interface IpcContext {
 // 以下 schema 是渲染层参数的唯一入口校验，上限值都刻意给得比正常用法宽松，
 // 只用于挡住异常大的输入，不承担业务规则校验。
 const promptSchema = z.string().min(1).max(1_000_000);
+const promptContextSchema = z.string().max(30_000).optional();
 const userMessageIndexSchema = z.number().int().nonnegative();
 const titleSchema = z.string().trim().min(1).max(120);
-const identityDocumentSchema = z.enum(["soul", "identity", "style", "user"]);
+const identityDocumentSchema = z.enum(["soul", "user"]);
 const identityContentSchema = z.string().max(64 * 1024);
-const identityRootSchema = z.string().trim().min(1).max(4_096).optional();
 const identityReasonSchema = z.string().max(1_000).optional();
-const identityReviewActionSchema = z.enum(["accept", "reject"]);
 const branchNameSchema = z.string().trim().min(1).max(255);
 const revisionSchema = z.string().max(200).optional();
 const idempotencyKeySchema = z.string().trim().min(1).max(240).optional();
@@ -189,7 +192,8 @@ const runtimeMutationSchema = z.enum([
   "goal.create", "goal.pause", "goal.resume", "goal.cancel",
   "graph.create", "graph.start", "graph.pause", "graph.resume", "graph.cancel",
   "capability.register", "capability.replace", "capability.admit", "capability.reject", "capability.release",
-  "capability.invoke", "capability.accept", "capability.start", "capability.result", "capability.chunk", "capability.fail", "capability.cancel"
+  "capability.invoke", "capability.accept", "capability.start", "capability.result", "capability.chunk", "capability.fail", "capability.cancel",
+  "worktree.merge", "worktree.remove"
 ]);
 const runtimePayloadSchema = z.record(z.unknown()).optional();
 const settingsDraftStateSchema = z.object({
@@ -254,6 +258,18 @@ const mcpDraftSchema = z.object({
   env: z.array(mcpFieldMutationSchema).max(256),
   headers: z.array(mcpFieldMutationSchema).max(256)
 }).strict();
+
+function settingsSaveRequiresIdleRuntime(input: DesktopSettingsSaveInput): boolean {
+  return input.activity !== undefined
+    || input.identity !== undefined
+    || input.memory !== undefined
+    || input.compaction !== undefined
+    || input.chatParams !== undefined
+    || input.webSearch !== undefined
+    || input.models !== undefined
+    || input.skills !== undefined
+    || input.chat !== undefined;
+}
 
 export function registerDesktopIpc(context: IpcContext): void {
   const settings = context.settings;
@@ -494,7 +510,7 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.importSession(parsedProjectId, sourcePath);
   });
 
-  handleRecoveryGated(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown, personalization: unknown, idempotencyKey: unknown) => {
+  handleRecoveryGated(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown, personalization: unknown, idempotencyKey: unknown, promptContext: unknown) => {
     return await context.agents.sendPrompt(
       idSchema.parse(projectId),
       sessionId === undefined ? undefined : idSchema.parse(sessionId),
@@ -503,7 +519,8 @@ export function registerDesktopIpc(context: IpcContext): void {
       z.array(attachmentSchema).max(20).parse(attachments),
       z.enum(["steer", "followUp"]).optional().parse(delivery),
       chatPersonalizationSchema.optional().parse(personalization),
-      idempotencyKeySchema.parse(idempotencyKey)
+      idempotencyKeySchema.parse(idempotencyKey),
+      promptContextSchema.parse(promptContext)
     );
   });
 
@@ -520,6 +537,27 @@ export function registerDesktopIpc(context: IpcContext): void {
       runModeSchema.parse(mode),
       z.array(attachmentSchema).max(20).parse(attachments),
       idempotencyKeySchema.parse(idempotencyKey)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.retryPrompt, async (_event, projectId: unknown, sessionId: unknown, targetMessageId: unknown, input: unknown, mode: unknown, attachments: unknown, idempotencyKey: unknown) => {
+    return await context.agents.retryPrompt(
+      idSchema.parse(projectId),
+      idSchema.parse(sessionId),
+      idSchema.parse(targetMessageId),
+      promptSchema.parse(input),
+      runModeSchema.parse(mode),
+      z.array(attachmentSchema).max(20).parse(attachments),
+      idempotencyKeySchema.parse(idempotencyKey)
+    );
+  });
+
+  handleRecoveryGated(desktopIpc.switchMessageVersion, async (_event, projectId: unknown, sessionId: unknown, messageId: unknown, direction: unknown) => {
+    return await context.agents.switchMessageVersion(
+      idSchema.parse(projectId),
+      idSchema.parse(sessionId),
+      idSchema.parse(messageId),
+      z.enum(["prev", "next"]).parse(direction)
     );
   });
 
@@ -550,6 +588,18 @@ export function registerDesktopIpc(context: IpcContext): void {
 
   handleRecoveryGated(desktopIpc.switchModel, async (_event, projectId: unknown, alias: unknown, thinking: unknown) => {
     return await context.agents.switchModel(idSchema.parse(projectId), idSchema.parse(alias), thinkingSchema.parse(thinking));
+  });
+
+  // 「设为默认」走即时 CAS 写，不进跨页草稿事务；写完复读一次权威快照返回给渲染层同步基线。
+  handleRecoveryGated(desktopIpc.setDefaultModel, async (_event, projectId: unknown, alias: unknown, thinking: unknown, expectedConfigRevision: unknown, sessionId: unknown) => {
+    const parsedProjectId = idSchema.parse(projectId);
+    await context.agents.setDefaultModelImmediate(
+      parsedProjectId,
+      idSchema.parse(alias),
+      thinkingSchema.parse(thinking),
+      z.string().parse(expectedConfigRevision)
+    );
+    return await settings.snapshot(parsedProjectId, sessionId === undefined ? undefined : idSchema.parse(sessionId));
   });
 
   handleRecoveryGated(desktopIpc.testModelConfiguration, async (_event, projectId: unknown, configuration: unknown) => {
@@ -640,13 +690,6 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handleRecoveryGated(desktopIpc.savePersonalizationSettings, async (_event, projectId: unknown, input: unknown) => {
-    return await context.agents.savePersonalizationSettings(
-      idSchema.parse(projectId),
-      personalizationSettingsSchema.parse(input)
-    );
-  });
-
   handleRecoveryGated(desktopIpc.saveChatPersonalization, async (_event, projectId: unknown, sessionId: unknown, input: unknown, expectedRevision: unknown) => {
     return await context.agents.saveChatPersonalization(
       idSchema.parse(projectId),
@@ -687,13 +730,6 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.identityOverview(idSchema.parse(projectId));
   });
 
-  handleRecoveryGated(desktopIpc.importAlmaIdentity, async (_event, projectId: unknown, root: unknown) => {
-    return await context.agents.importAlmaIdentity(
-      idSchema.parse(projectId),
-      identityRootSchema.parse(root)
-    );
-  });
-
   handleRecoveryGated(desktopIpc.saveIdentityDocument, async (
     _event,
     projectId: unknown,
@@ -711,21 +747,6 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handleRecoveryGated(desktopIpc.reviewIdentityProposal, async (
-    _event,
-    projectId: unknown,
-    proposalId: unknown,
-    action: unknown,
-    expectedRevision: unknown
-  ) => {
-    return await context.agents.reviewIdentityProposal(
-      idSchema.parse(projectId),
-      idSchema.parse(proposalId),
-      identityReviewActionSchema.parse(action),
-      z.number().int().nonnegative().parse(expectedRevision)
-    );
-  });
-
   handle(desktopIpc.settingsSnapshot, async (_event, projectId: unknown, sessionId: unknown) => {
     return await settings.snapshot(
       idSchema.parse(projectId),
@@ -736,6 +757,7 @@ export function registerDesktopIpc(context: IpcContext): void {
   handle(desktopIpc.activitySnapshot, async () => context.activity.snapshot());
 
   handle(desktopIpc.activitySettings, async () => context.activity.settingsSnapshot());
+
   handle(desktopIpc.activityRequestPermission, async (_event, pane: unknown) => {
     await context.activity.requestPermission(systemSettingsPaneSchema.parse(pane) as DesktopSystemSettingsPane);
   });
@@ -754,8 +776,11 @@ export function registerDesktopIpc(context: IpcContext): void {
   });
 
   handle(desktopIpc.saveSettings, async (_event, projectId: unknown, input: unknown) => {
-    context.agents.assertNoRunningTasks("任务运行期间不能保存设置。");
-    const result = await settings.save(idSchema.parse(projectId), settingsSaveInputSchema.parse(input));
+    const parsedInput = settingsSaveInputSchema.parse(input);
+    if (settingsSaveRequiresIdleRuntime(parsedInput)) {
+      context.agents.assertNoRunningTasks("任务运行期间不能保存设置。");
+    }
+    const result = await settings.save(idSchema.parse(projectId), parsedInput);
     if (result.status === "committed" && result.appliedFields.includes("activity")) {
       // 配置已经完成事务提交；Activity sidecar 的停启是派生刷新，不应阻塞保存响应。
       void context.activity.refresh().catch(() => undefined);
@@ -1124,7 +1149,6 @@ export function registerDesktopIpc(context: IpcContext): void {
   });
 
   handleRecoveryGated(desktopIpc.setThemePreference, async (_event, theme: unknown) => {
-    context.agents.assertNoRunningTasks("任务运行期间不能保存外观设置。");
     const preference = themePreferenceSchema.parse(theme);
     await context.state.setThemePreference(preference);
     applyNativeThemePreference(preference);
@@ -1136,21 +1160,22 @@ export function registerDesktopIpc(context: IpcContext): void {
   });
 
   handleRecoveryGated(desktopIpc.setFontPreference, async (_event, font: unknown) => {
-    context.agents.assertNoRunningTasks("任务运行期间不能保存外观设置。");
     const parsed = fontPreferenceSchema.parse(font);
     const preference = { family: parsed.family, size: clampFontSize(parsed.size) };
     await context.state.setFontPreference(preference);
     return preference;
   });
 
-  // —— QuickChat 悬浮窗：显隐切换、三开关偏好、屏幕上下文 ——
-  // toggle/hide 是窗口控制，不走 recovery gate（设置恢复待处理时也应能收起小窗）。
-  handle(desktopIpc.quickChatToggle, async () => {
-    context.ensureQuickChatWindow().toggle();
-  });
+  // —— QuickChat 悬浮窗：显隐切换、前台上下文、点击穿透和偏好 ——
+  // 窗口控制不走 recovery gate（设置恢复待处理时也应能收起小窗）。
+  handle(desktopIpc.quickChatToggle, async () => await context.toggleQuickChat());
 
   handle(desktopIpc.quickChatHide, async () => {
-    context.ensureQuickChatWindow().hide();
+    context.getQuickChatWindow()?.hide();
+  });
+
+  handle(desktopIpc.quickChatClose, async () => {
+    context.getQuickChatWindow()?.close();
   });
 
   handle(desktopIpc.quickChatSettings, async () => context.state.quickChatSettings());
@@ -1159,12 +1184,25 @@ export function registerDesktopIpc(context: IpcContext): void {
     const settings: DesktopQuickChatSettings = quickChatSettingsSchema.parse(value);
     await context.state.setQuickChatSettings(settings);
     // 立即对现存窗口应用穿透/失焦隐藏；窗口未创建时下次创建读最新设置。
-    context.ensureQuickChatWindow().applySettings(settings);
+    context.getQuickChatWindow()?.applySettings(settings);
     return settings;
   });
 
-  // 屏幕上下文是只读快照，纯文本、不触发采集，不需要 recovery gate。
-  handle(desktopIpc.quickChatScreenContext, async () => context.activity.screenContextSnapshot());
+  // 屏幕上下文是独立的按需查询链路，不读取 Activity 缓存、不触发截图采集。
+  handle(desktopIpc.quickChatScreenContext, async () => context.quickChatContext.cachedContext());
+  handle(desktopIpc.quickChatRecaptureContext, async () => await context.quickChatContext.recapture());
+  handle(desktopIpc.quickChatTraverseApp, async (_event, pid: unknown) => {
+    const parsedPid = z.number().int().positive().max(10_000_000).parse(pid);
+    return await context.quickChatContext.traverseApp(parsedPid);
+  });
+  handle(desktopIpc.quickChatGetClickThrough, async () => context.getQuickChatWindow()?.isClickThrough() ?? context.state.quickChatSettings().clickThrough);
+  handle(desktopIpc.quickChatSetClickThrough, async (_event, enabled: unknown) => {
+    const parsed = z.boolean().parse(enabled);
+    const window = context.ensureQuickChatWindow();
+    window.setClickThrough(parsed);
+    window.send(desktopIpc.quickChatClickThroughChanged, parsed);
+    return parsed;
+  });
 }
 
 function applyNativeThemePreference(preference: DesktopThemePreference): void {

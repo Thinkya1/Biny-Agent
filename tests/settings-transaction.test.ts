@@ -68,7 +68,6 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
     if (this.badConfigReadbacks > 0) this.badConfigReadbacks -= 1;
     return {
       revision,
-      personalization: structuredClone(this.config.personalization),
       activity: structuredClone(this.config.activity),
       memory: structuredClone(this.config.context.memory),
       compaction: structuredClone(this.config.context.compaction),
@@ -108,7 +107,6 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
     if (this.failure === "prepare_config") throw new Error("injected config prepare failure");
     const before = structuredClone(this.config);
     const after = structuredClone(this.config);
-    if (input.personalization !== undefined) after.personalization = structuredClone(input.personalization);
     if (input.activity !== undefined) after.activity = { ...after.activity, ...structuredClone(input.activity) };
     if (input.memory !== undefined) after.context.memory = structuredClone(input.memory);
     if (input.compaction !== undefined) after.context.compaction = structuredClone(input.compaction);
@@ -123,12 +121,20 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
         maxResults: input.webSearch.maxResults
       };
     }
-    const included = input.personalization !== undefined
-      || input.activity !== undefined
+    if (input.skills !== undefined) {
+      after.extensions.skillDefaults = structuredClone(input.skills.globalDefaults);
+      after.extensions.skillProjectOverrides = {
+        ...after.extensions.skillProjectOverrides,
+        "fake-project": structuredClone(input.skills.projectOverrides)
+      };
+      after.extensions.skillExtraction = structuredClone(input.skills.extraction);
+    }
+    const included = input.activity !== undefined
       || input.memory !== undefined
       || input.compaction !== undefined
       || input.chatParams !== undefined
       || input.webSearch !== undefined
+      || input.skills !== undefined
       || input.models !== undefined;
     const credentialHandles = [
       input.webSearch?.apiKeyHandle,
@@ -324,6 +330,7 @@ class FailPreferenceRollbackEvidenceTransaction extends DesktopSettingsTransacti
 await testCommitAndJournalRedaction();
 await testActivitySettingsUseConfigCas();
 await testChatParamsOnlySaveCommits();
+await testSkillSettingsOnlySaveCommits();
 await testPostCommitHookCannotRollbackSettings();
 await testPreflightConflictsAreZeroWrite();
 await testSegmentFailureCompensation();
@@ -375,6 +382,27 @@ async function testChatParamsOnlySaveCommits(): Promise<void> {
   });
 }
 
+async function testSkillSettingsOnlySaveCommits(): Promise<void> {
+  await withFixture(async ({ state, agents }) => {
+    const transaction = new DesktopSettingsTransaction(state, agents);
+    const initial = await transaction.snapshot("project");
+    const result = await transaction.save("project", {
+      expectedPreferenceRevision: initial.preferenceRevision,
+      expectedConfigRevision: initial.configRevision,
+      skills: {
+        globalDefaults: { "demo-skill": false },
+        projectOverrides: { "demo-skill": true },
+        extraction: { enabled: false, minToolCalls: 7 }
+      }
+    });
+    assert.equal(result.status, "committed", JSON.stringify(result));
+    assert.deepEqual(result.appliedFields, ["skills"]);
+    assert.deepEqual(agents.config.extensions.skillDefaults, { "demo-skill": false });
+    assert.deepEqual(agents.config.extensions.skillProjectOverrides["fake-project"], { "demo-skill": true });
+    assert.deepEqual(agents.config.extensions.skillExtraction, { enabled: false, minToolCalls: 7 });
+  });
+}
+
 function testSettingsSaveInputAcceptsCompactionAndChatParams(): void {
   // 渲染层 saveInput 每次都会带上 compaction/chatParams 键（未修改时值为 undefined 但键名
   // 保留）；strict schema 缺这两个字段时会把所有设置保存拒之门外。
@@ -383,7 +411,6 @@ function testSettingsSaveInputAcceptsCompactionAndChatParams(): void {
     expectedConfigRevision: "config:0",
     themePreference: undefined,
     fontPreference: undefined,
-    personalization: undefined,
     activity: undefined,
     memory: undefined,
     compaction: undefined,
@@ -416,7 +443,6 @@ async function testCommitAndJournalRedaction(): Promise<void> {
       expectedPreferenceRevision: initial.preferenceRevision,
       expectedConfigRevision: initial.configRevision,
       themePreference: "dark",
-      personalization: { ...initial.personalization, personality: "friendly" },
       webSearch: {
         enabled: true,
         provider: "brave",
@@ -430,8 +456,6 @@ async function testCommitAndJournalRedaction(): Promise<void> {
     });
     assert.equal(result.status, "committed", JSON.stringify(result));
     assert.equal(state.themePreference(), "dark");
-    assert.equal(agents.config.personalization.personality, "friendly");
-    assert.equal(agents.chatRecord?.personalization?.personality, "friendly");
     assert.deepEqual(agents.consumedCredentialHandles, ["credential-handle"]);
     assert.equal(agents.settingsCommitNotifications, 1);
     const journal = await fs.readFile(state.settingsTransactionJournalPath(), "utf8");
@@ -467,7 +491,6 @@ async function testPreflightConflictsAreZeroWrite(): Promise<void> {
       expectedPreferenceRevision: 99,
       expectedConfigRevision: "config:stale",
       themePreference: "dark",
-      personalization: { ...defaultConfig.personalization, personality: "friendly" },
       chat: chatInput("chat:stale")
     });
     assert.equal(result.status, "rolled_back");
@@ -498,7 +521,10 @@ async function testSegmentFailureCompensation(): Promise<void> {
         expectedPreferenceRevision: initial.preferenceRevision,
         expectedConfigRevision: initial.configRevision,
         themePreference: "dark",
-        personalization: { ...initial.personalization, personality: "friendly" },
+        memory: {
+          ...initial.memory,
+          useMemories: !initial.memory.useMemories
+        },
         chat: chatInput("missing")
       });
       assert.equal(result.status, "rolled_back", failure);
@@ -545,7 +571,10 @@ async function testCommitPointCasDoesNotOverwriteExternalState(): Promise<void> 
       expectedPreferenceRevision: initial.preferenceRevision,
       expectedConfigRevision: initial.configRevision,
       themePreference: "dark",
-      personalization: { ...initial.personalization, personality: "friendly" }
+      memory: {
+        ...initial.memory,
+        useMemories: !initial.memory.useMemories
+      },
     });
     assert.equal(result.status, "rolled_back");
     if (result.status !== "rolled_back") throw new Error("expected rolled_back");
@@ -563,7 +592,10 @@ async function testCommitPointCasDoesNotOverwriteExternalState(): Promise<void> 
       expectedPreferenceRevision: initial.preferenceRevision,
       expectedConfigRevision: initial.configRevision,
       themePreference: "dark",
-      personalization: { ...initial.personalization, personality: "friendly" },
+      memory: {
+        ...initial.memory,
+        useMemories: !initial.memory.useMemories
+      },
       chat: chatInput("missing")
     });
     assert.equal(result.status, "rolled_back");
@@ -585,7 +617,10 @@ async function testReadbackFailureRollsBack(): Promise<void> {
       expectedPreferenceRevision: initial.preferenceRevision,
       expectedConfigRevision: initial.configRevision,
       themePreference: "dark",
-      personalization: { ...initial.personalization, personality: "friendly" }
+      memory: {
+        ...initial.memory,
+        useMemories: !initial.memory.useMemories
+      },
     });
     assert.equal(result.status, "rolled_back");
     assert.equal(agents.configRevision, "config:0");
@@ -618,7 +653,10 @@ async function testRecoveryRequiredAndRestartRecovery(): Promise<void> {
       expectedPreferenceRevision: initial.preferenceRevision,
       expectedConfigRevision: initial.configRevision,
       themePreference: "dark",
-      personalization: { ...initial.personalization, personality: "friendly" }
+      memory: {
+        ...initial.memory,
+        useMemories: !initial.memory.useMemories
+      },
     });
     assert.equal(failed.status, "recovery_required");
     assert.equal((await transaction.snapshot("project")).pendingRecovery?.journalId, failed.journalId);
@@ -641,7 +679,6 @@ async function testRecoveryRequiredAndRestartRecovery(): Promise<void> {
       expectedPreferenceRevision: initial.preferenceRevision,
       expectedConfigRevision: initial.configRevision,
       themePreference: "dark",
-      personalization: { ...initial.personalization, personality: "friendly" }
     });
     assert.equal(failed.status, "recovery_required");
     assert.equal(state.themePreference(), "dark", "verified commit must not be rolled back only because cleanup failed");
@@ -660,11 +697,6 @@ async function testCrashAfterConfigBeforeChatIsCompensatedOnRestart(): Promise<v
       expectedPreferenceRevision: initial.preferenceRevision,
       expectedConfigRevision: initial.configRevision,
       themePreference: "dark",
-      personalization: {
-        ...initial.personalization,
-        personality: "friendly",
-        customInstructions: "允许进入受限临时版本的恢复指令"
-      },
       webSearch: {
         enabled: true,
         provider: "brave",
@@ -956,8 +988,6 @@ function chatInput(expectedMetadataRevision: string): NonNullable<DesktopSetting
     sessionId: "session",
     expectedMetadataRevision,
     personalization: {
-      personality: "friendly",
-      customInstructions: { mode: "inherit", value: undefined },
       useMemories: "inherit",
       contributeMemories: "inherit"
     }
