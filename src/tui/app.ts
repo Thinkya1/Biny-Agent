@@ -30,9 +30,11 @@ import {
 import type { CommandRuntime } from "../runtime/CommandRuntime.js";
 import {
   connectOrSpawnRuntimeHost,
+  connectRuntimeHost,
   startRuntimeHost,
   RuntimeHostClient,
   type RuntimeHostFactory,
+  type RuntimeHostFactoryOptions,
   type RuntimeHostServer
 } from "../runtime/RuntimeHost.js";
 import {
@@ -65,11 +67,18 @@ import { formatSessionAge } from "./transcriptText.js";
 import type { PermissionChoice, TuiLaunchMode, TuiState, TuiStatus } from "./types.js";
 import type { AgentAttachment, AgentRunMode } from "../agent/AgentSession.js";
 import type { SkillDefinition } from "../extensions/skills.js";
+import type { WorktreeStatusView } from "../runtime/host/worktree.js";
 import type {
   AgentPersonalizationState,
-  ChatPersonalizationOverridePatch,
-  PersonalityPreset
+  ChatPersonalizationOverridePatch
 } from "../personalization/index.js";
+import {
+  formatTuiWorktreeError,
+  tuiWorktreeActionDescription,
+  tuiWorktreeActionLabel,
+  tuiWorktreeView,
+  type TuiWorktreeAction
+} from "./worktreePresentation.js";
 
 export interface TuiExitSummary {
   sessionId: string;
@@ -86,14 +95,6 @@ interface ModelPresentation {
   reasoningLabel: string;
   thinking: ThinkingSelection;
 }
-
-export const personalitySelectOptions = [
-  { value: "inherit", label: "Inherit", description: "Use the global personality for this chat." },
-  { value: "none", label: "None", description: "Use no additional response-style preset." },
-  { value: "friendly", label: "Friendly", description: "Use a warm, approachable and collaborative tone." },
-  { value: "pragmatic", label: "Pragmatic", description: "Use a direct, concise and action-oriented tone." },
-  { value: "buddy", label: "Buddy 搭子", description: "Talk like a friend texting: opinionated, no filler, no pleasantries." }
-] as const;
 
 export const memoryPolicySelectOptions = [
   { value: "inherit", label: "Inherit", description: "Use the global memory defaults for this chat." },
@@ -208,6 +209,13 @@ export class BinyTui {
         this.ui.requestRender();
         return { consume: true };
       }
+      // 自动补全弹出且输入仅为 "/" 时，按 Enter 应弹出命令选择器（SelectDialog），
+      // 而不是让 Editor 自动补全选中第一个命令并执行。
+      if (this.editor.isShowingAutocomplete() && matchesKey(data, "enter") && this.editor.getText().trim() === "/") {
+        this.dismissAutocomplete();
+        this.ui.requestRender();
+        return undefined;
+      }
       if (this.editor.isShowingAutocomplete() && matchesKey(data, "escape")) {
         // 忙碌时 Escape 默认会取消 Agent；补全弹层打开时应先关闭弹层，不能误取消当前任务。
         this.dismissAutocomplete();
@@ -249,9 +257,13 @@ export class BinyTui {
       if (attached) {
         runtime = attached;
       } else {
-        const createLocalRuntime: RuntimeHostFactory = async (sessionId?: string) => {
-          const local = await createInteractiveAgentHost(this.workspaceRoot);
-          if (sessionId !== undefined) await local.runtime.resumeSession(sessionId);
+        const createLocalRuntime: RuntimeHostFactory = async (sessionId?: string, factoryOptions?: RuntimeHostFactoryOptions) => {
+          const fresh = factoryOptions?.fresh === true;
+          const local = await createInteractiveAgentHost(factoryOptions?.workspaceRoot ?? this.workspaceRoot, {
+            persistenceRoot: this.workspaceRoot,
+            sessionId: fresh ? sessionId : undefined
+          });
+          if (sessionId !== undefined && !fresh) await local.runtime.resumeSession(sessionId);
           return local;
         };
         // 显式 session 在 Host/界面完成 attach 后再恢复；这样 writer conflict 可以
@@ -265,6 +277,16 @@ export class BinyTui {
             resumeInterrupted: false,
             configDir: globalConfigDir()
           });
+          // TUI owner 也通过 socket client 使用同一条 Host 路径，这样 owner 自己和
+          // attach 进来的 Desktop/CLI 看到的 session 注册表与事件扇出完全一致。
+          const ownerClient = await connectRuntimeHost(this.workspaceRoot, {
+            clientId: `tui-${process.pid}`,
+            surface: "tui"
+          }).catch(() => undefined);
+          if (ownerClient) {
+            runtime = ownerClient;
+            commands = undefined;
+          }
         } catch (error) {
           await runtime.close();
           const retry = await connectOrSpawnRuntimeHost(this.workspaceRoot, {
@@ -282,6 +304,17 @@ export class BinyTui {
       }
       this.runtime = runtime;
       this.commands = commands;
+      // 补全器要的是不带斜杠的命令名，它自己会补上 `/`；带斜杠会补出 `//resume`。
+      // 提前设置 autocomplete：即使模型未配置或 skills 加载失败，slash 命令补全也必须可用。
+      try {
+        const skills = commands
+          ? commands.listSkills()
+          : await requireRemoteRuntime(runtime).listSkills().catch(() => [] as SkillDefinition[]);
+        this.setAutocompleteProvider(skills, this.workspaceRoot);
+      } catch {
+        this.setAutocompleteProvider([], this.workspaceRoot);
+      }
+
       // 普通进入 TUI 等价于 Codex 的新交互会话：已有 Host 空闲时只重建空白
       // AgentSession，不读取旧 transcript，也不续跑 checkpoint。运行中的 Host
       // 则必须保留，避免打开第二个 owner 或打断用户正在观察的任务。
@@ -297,11 +330,6 @@ export class BinyTui {
       this.permissionMode = permissionMode;
       this.thinking = info.thinking;
       this.confirmedModel = modelPresentationFromInfo(info);
-      // 补全器要的是不带斜杠的命令名，它自己会补上 `/`；带斜杠会补出 `//resume`。
-      const skills = commands
-        ? commands.listSkills()
-        : await requireRemoteRuntime(runtime).listSkills();
-      this.setAutocompleteProvider(skills, info.workspaceRoot);
       this.editor.borderColor = theme.thinkingBorder(this.thinking);
 
       void readGitBranch(info.workspaceRoot).then((branch) => {
@@ -331,6 +359,9 @@ export class BinyTui {
       void this.refreshContextUsage();
       void this.refreshUsage();
     } catch (error) {
+      // Runtime 启动失败（例如模型 provider 缺 API Key）时，slash 补全和命令选择器
+      // 仍应可用，否则用户连命令列表和 /exit 都打不开。skills 拿不到就退化为纯命令集。
+      this.setAutocompleteProvider([], this.workspaceRoot);
       this.notify(`TUI startup failed: ${describeError(error)}`);
     }
   }
@@ -353,12 +384,14 @@ export class BinyTui {
   private async restartRuntimeForNewChat(): Promise<void> {
     const runtime = this.runtime;
     if (!runtime) throw new Error("TUI runtime is not ready.");
-    if (runtimeIsBusy(runtime.getSnapshot())) {
+    if (!(runtime instanceof RuntimeHostClient) && runtimeIsBusy(runtime.getSnapshot())) {
       throw new Error("当前任务仍在运行，请先取消后再创建新聊天。");
     }
 
     if (runtime instanceof RuntimeHostClient) {
-      await runtime.restartRuntime();
+      // Host 多 session 下，新聊天是新 registry entry；restart 只用于刷新同一
+      // session 的 runtime 资源，不能用它把旧会话从注册表里替换掉。
+      await runtime.startDraft();
       this.runtimeSnapshot = runtime.getSnapshot();
       return;
     }
@@ -367,7 +400,7 @@ export class BinyTui {
     if (!host) throw new Error("新聊天需要可重建的 Runtime Host。");
     this.unsubscribe?.();
     this.unsubscribe = undefined;
-    await host.restartRuntime();
+    await host.startDraftRuntime();
     this.runtime = host.getCurrentRuntime();
     this.commands = host.getCurrentCommands();
     this.runtimeSnapshot = this.runtime.getSnapshot();
@@ -514,9 +547,20 @@ export class BinyTui {
     if (!value && !this.pendingAttachments.length) return;
     const runtime = this.runtime;
     const commands = this.commands;
-    // TUI 在 runtime 启动完成前已经可以接收键盘输入；不能因为 Editor 已清空而丢掉这条消息。
+    // TUI 在 runtime 启动完成前（或启动失败时）已经可以接收键盘输入；
+    // slash 命令里有一部分（命令选择器、/clear、/exit）不依赖 runtime，照常路由过去，
+    // 避免「runtime 没起来 → 连 /exit 都打不出来」。普通消息仍保留在编辑器里等 runtime。
     if (!runtime) {
+      if (value.startsWith("/")) {
+        try {
+          await this.handleSlashCommand(value);
+        } catch (error) {
+          this.showTextViewer("Command Error", describeError(error));
+        }
+        return;
+      }
       this.setEditorText(text);
+      this.notify("Runtime 尚未就绪，无法发送消息。请检查模型配置（API Key）后重启 TUI。");
       this.ui.requestRender();
       return;
     }
@@ -547,6 +591,7 @@ export class BinyTui {
           ? await commands.expandSkillCommand(value)
           : await requireRemoteRuntime(runtime).expandSkillCommand(value);
         const input = withAttachmentReferences(expandedPrompt, attachments);
+        await this.ensureFocusedSessionWriteAccess();
         if (runtimeIsBusy(this.runtimeSnapshot)) {
           runtime.followUp(input, attachments);
           this.notify("Skill 消息已加入 follow-up 队列，将在当前任务准备结束时继续处理。");
@@ -554,6 +599,10 @@ export class BinyTui {
         }
         await runtime.submitPrompt(input, this.mode, attachments).completion;
       } catch (error) {
+        if (isSessionWriterConflictError(error)) {
+          await this.showSessionWriterConflict(error.sessionId, error.ownerSurface);
+          return;
+        }
         this.setPendingAttachments([...attachments, ...this.pendingAttachments]);
         this.setEditorText(prompt);
         this.dispatch({ type: "error.message", message: describeError(error) });
@@ -575,6 +624,7 @@ export class BinyTui {
     }
 
     try {
+      await this.ensureFocusedSessionWriteAccess();
       if (runtimeIsBusy(this.runtimeSnapshot)) {
         runtime.followUp(withAttachmentReferences(prompt, attachments), attachments);
         this.notify("消息已加入 follow-up 队列，将在当前任务准备结束时继续处理。");
@@ -582,6 +632,10 @@ export class BinyTui {
       }
       await runtime.submitPrompt(withAttachmentReferences(prompt, attachments), this.mode, attachments).completion;
     } catch (error) {
+      if (isSessionWriterConflictError(error)) {
+        await this.showSessionWriterConflict(error.sessionId, error.ownerSurface);
+        return;
+      }
       this.setPendingAttachments([...attachments, ...this.pendingAttachments]);
       this.setEditorText(prompt);
       this.dispatch({ type: "error.message", message: describeError(error) });
@@ -676,6 +730,7 @@ export class BinyTui {
           ? await commands.expandSkillCommand(value)
           : await requireRemoteRuntime(runtime).expandSkillCommand(value)
         : prompt;
+      await this.ensureFocusedSessionWriteAccess();
       runtime.steer(withAttachmentReferences(expandedPrompt, attachments), attachments);
       this.setPendingAttachments([]);
       this.setEditorText("");
@@ -684,8 +739,21 @@ export class BinyTui {
         .catch((error) => this.notify(`写入输入历史失败：${describeError(error)}`));
       this.notify("消息已加入 steer 队列，将在当前模型步骤和工具批次结束后处理。");
     } catch (error) {
+      if (isSessionWriterConflictError(error)) {
+        await this.showSessionWriterConflict(error.sessionId, error.ownerSurface);
+        return;
+      }
       this.dispatch({ type: "error.message", message: describeError(error) });
     }
+  }
+
+  /** Remote Host 的写入口先取得当前 session 的长期 claim，避免 TUI 只靠瞬时执行 lease。 */
+  private async ensureFocusedSessionWriteAccess(): Promise<void> {
+    const runtime = this.runtime;
+    if (!(runtime instanceof RuntimeHostClient)) return;
+    const sessionId = runtime.getFocusedSessionId() ?? runtime.getSnapshot().info.sessionId;
+    await runtime.ensureSession({ sessionId, writeIntent: true });
+    this.runtimeSnapshot = runtime.getSnapshot();
   }
 
   private async pasteClipboard(): Promise<void> {
@@ -839,10 +907,11 @@ export class BinyTui {
   private async handleSlashCommand(value: string): Promise<void> {
     const runtime = this.runtime;
     const commands = this.commands;
-    if (!runtime) return;
     // 容忍多打的斜杠：`//resume` 只可能是想写 `/resume`。
     const [command = "", ...args] = value.trim().replace(/^\/+/, "/").split(/\s+/);
 
+    // 命令选择器、/exit、/clear 不依赖 runtime；runtime 启动失败（例如缺模型 API Key）
+    // 时也必须可用，否则用户在坏配置下连退出和命令列表都打不开。
     if (command === "/") {
       this.showSelect({
         title: "Commands",
@@ -872,6 +941,11 @@ export class BinyTui {
       return;
     }
 
+    if (!runtime) {
+      this.notify(`Runtime 尚未就绪，${command} 暂不可用。请检查模型配置（API Key）后重启 TUI。`);
+      return;
+    }
+
     if (command === "/new") {
       await this.startNewChat();
       return;
@@ -887,13 +961,18 @@ export class BinyTui {
       return;
     }
 
-    if (command === "/personality") {
-      await this.handlePersonalityCommand(args);
+    if (command === "/memories") {
+      await this.handleMemoriesCommand(args);
       return;
     }
 
-    if (command === "/memories") {
-      await this.handleMemoriesCommand(args);
+    if (command === "/sessions") {
+      await this.showRuntimeSessionPicker();
+      return;
+    }
+
+    if (command === "/worktree") {
+      await this.handleWorktreeCommand(args);
       return;
     }
 
@@ -1031,95 +1110,6 @@ export class BinyTui {
     });
   }
 
-  private async handlePersonalityCommand(args: string[]): Promise<void> {
-    const action = args[0]?.toLowerCase();
-    if (action === "instructions") {
-      await this.handleChatInstructionsCommand(args.slice(1));
-      return;
-    }
-    if (action !== undefined) {
-      if (!personalitySelectOptions.some((option) => option.value === action)) {
-        this.showTextViewer("Personality", "Usage: /personality [inherit|none|friendly|pragmatic|buddy] | instructions [set <text>|inherit|off]");
-        return;
-      }
-      await this.applyChatPersonalization({ personality: action as "inherit" | PersonalityPreset });
-      return;
-    }
-
-    const state = await this.readPersonalizationState();
-    this.showSelect({
-      title: "Chat personality",
-      hint: "↑↓ navigate · enter select · esc cancel",
-      selectedIndex: Math.max(0, personalitySelectOptions.findIndex((option) => option.value === state.override.personality)),
-      items: personalitySelectOptions.map((option) => ({
-        ...option,
-        label: option.value === state.override.personality ? `${option.label} ← current` : option.label
-      })),
-      onSelect: (item) => {
-        void this.applyChatPersonalization({ personality: item.value as "inherit" | PersonalityPreset });
-      }
-    });
-  }
-
-  private async handleChatInstructionsCommand(args: string[]): Promise<void> {
-    const action = args[0]?.toLowerCase();
-    if (!action) {
-      const state = await this.readPersonalizationState();
-      const current = state.override.customInstructions.mode;
-      this.showSelect({
-        title: "Chat instructions",
-        hint: "↑↓ navigate · enter select · esc cancel",
-        selectedIndex: current === "inherit" ? 0 : current === "disabled" ? 1 : 2,
-        items: [
-          {
-            value: "inherit",
-            label: current === "inherit" ? "Inherit global ← current" : "Inherit global",
-            description: "Use global custom instructions for this chat."
-          },
-          {
-            value: "off",
-            label: current === "disabled" ? "Disable ← current" : "Disable",
-            description: "Ignore global custom instructions in this chat."
-          },
-          {
-            value: "set",
-            label: current === "replace" ? "Replace text ← current" : "Replace text",
-            description: "Insert a command for entering chat-specific instructions."
-          }
-        ],
-        onSelect: (item) => {
-          if (item.value === "set") {
-            this.setEditorText("/personality instructions set ");
-            this.ui.requestRender();
-            return;
-          }
-          void this.applyChatPersonalization({
-            customInstructions: item.value === "inherit" ? { mode: "inherit" } : { mode: "disabled" }
-          });
-        }
-      });
-      return;
-    }
-    if (action === "set") {
-      const value = args.slice(1).join(" ").trim();
-      if (!value) {
-        this.showTextViewer("Personality", "Usage: /personality instructions set <text>");
-        return;
-      }
-      await this.applyChatPersonalization({ customInstructions: { mode: "replace", value } });
-      return;
-    }
-    if (action === "inherit") {
-      await this.applyChatPersonalization({ customInstructions: { mode: "inherit" } });
-      return;
-    }
-    if (action === "off" || action === "disabled" || action === "clear") {
-      await this.applyChatPersonalization({ customInstructions: { mode: "disabled" } });
-      return;
-    }
-    this.showTextViewer("Personality", "Usage: /personality instructions [set <text>|inherit|off]");
-  }
-
   private async handleMemoriesCommand(args: string[]): Promise<void> {
     const action = args[0]?.toLowerCase();
     if (action !== undefined) {
@@ -1182,7 +1172,7 @@ export class BinyTui {
         )
         : await requireRemoteRuntime(runtime).updateChatPersonalization(patch, state.catalogRevision);
       const memory = memoryPolicyOptionForOverride(updated);
-      this.notify(`Chat settings saved (${updated.override.personality}; memory ${memory}). They apply from the next root turn.`);
+      this.notify(`Chat settings saved (memory ${memory}). They apply from the next root turn.`);
     } catch (error) {
       this.showTextViewer("Personalization", describeError(error));
     }
@@ -1341,6 +1331,218 @@ export class BinyTui {
     });
   }
 
+  /** 展示 Host 注册表中的驻留 session；历史会话选择仍由 /resume 负责。 */
+  private async showRuntimeSessionPicker(): Promise<void> {
+    const runtime = this.runtime;
+    if (!(runtime instanceof RuntimeHostClient)) {
+      this.showTextViewer("Runtime sessions", "当前 TUI 没有连接到 Runtime Host，只有当前会话可用。请先在 Unix 环境启用 Runtime Host。");
+      return;
+    }
+    const summaries = await runtime.listRuntimeSessions();
+    if (!summaries.length) {
+      this.showTextViewer("Runtime sessions", "No active Runtime Host sessions.");
+      return;
+    }
+    let worktreeSessionIds: Set<string>;
+    try {
+      worktreeSessionIds = new Set((await runtime.worktreeList()).map((record) => record.sessionId));
+    } catch (error) {
+      this.showTextViewer("Runtime sessions", formatTuiWorktreeError(error));
+      return;
+    }
+    const focusedSessionId = runtime.getFocusedSessionId();
+    this.showSelect({
+      title: "Runtime sessions",
+      hint: "↑↓ navigate · enter focus · esc cancel",
+      selectedIndex: Math.max(0, summaries.findIndex((summary) => summary.sessionId === focusedSessionId)),
+      items: summaries.map((summary) => ({
+        value: summary.sessionId,
+        label: runtimeSessionLabel(summary, worktreeSessionIds.has(summary.sessionId)),
+        // session 文件路径属于诊断信息；普通 session 列表只展示状态和可写姿态，避免把
+        // 本机目录结构暴露到交互层。需要路径时仍由退出摘要和诊断命令提供。
+        description: summary.snapshot.permissionMode === "read-only" ? "read-only session" : "writable session"
+      })),
+      onSelect: (item) => {
+        void this.focusRuntimeSession(item.value)
+          .catch((error: unknown) => this.notify(`切换 session 失败：${describeError(error)}`));
+      }
+    });
+  }
+
+  private async handleWorktreeCommand(args: string[]): Promise<void> {
+    const runtime = this.runtime;
+    if (!(runtime instanceof RuntimeHostClient)) {
+      this.showTextViewer("Worktrees", "当前 TUI 没有连接到 Runtime Host，无法管理隔离工作树。");
+      return;
+    }
+    const action = args[0]?.toLowerCase();
+    if (action !== undefined && action !== "list" && action !== "status" && action !== "merge" && action !== "remove") {
+      this.showTextViewer("Worktrees", "Usage: /worktree [list|status|merge <session>|remove <session>]");
+      return;
+    }
+    if (action === "merge" || action === "remove") {
+      const requestedSession = args[1];
+      if (!requestedSession) {
+        this.showTextViewer("Worktrees", `Usage: /worktree ${action} <session>`);
+        return;
+      }
+      let statuses: WorktreeStatusView[];
+      try {
+        statuses = await runtime.worktreeStatus();
+      } catch (error) {
+        this.showTextViewer("Worktrees", formatTuiWorktreeError(error));
+        return;
+      }
+      const status = resolveWorktreeStatus(statuses, requestedSession);
+      if (!status) {
+        this.showTextViewer("Worktrees", `No unique worktree matches session ${requestedSession}.`);
+        return;
+      }
+      await this.runWorktreeAction(status, action === "merge" ? "merge" : removeActionForStatus(status));
+      return;
+    }
+    await this.showWorktreePicker();
+  }
+
+  /** 只展示生命周期和安全提示；路径、分支、base commit 仍留在诊断层。 */
+  private async showWorktreePicker(): Promise<void> {
+    const runtime = this.runtime;
+    if (!(runtime instanceof RuntimeHostClient)) return;
+    let statuses: WorktreeStatusView[];
+    try {
+      statuses = await runtime.worktreeStatus();
+    } catch (error) {
+      this.showTextViewer("Worktrees", formatTuiWorktreeError(error));
+      return;
+    }
+    if (!statuses.length) {
+      this.showTextViewer("Worktrees", "No isolated worktrees.");
+      return;
+    }
+    this.showSelect({
+      title: "Isolated worktrees",
+      hint: "↑↓ navigate · enter inspect · esc cancel",
+      items: statuses.map((status) => {
+        const view = tuiWorktreeView(status);
+        return {
+          value: status.sessionId,
+          label: `${status.sessionId.slice(0, 8)} · ${view.label}`,
+          description: view.detail
+        };
+      }),
+      onSelect: (item) => {
+        const status = statuses.find((candidate) => candidate.sessionId === item.value);
+        if (!status) return;
+        void this.showWorktreeActions(status)
+          .catch((error: unknown) => this.notify(formatTuiWorktreeError(error)));
+      }
+    });
+  }
+
+  private async showWorktreeActions(status: WorktreeStatusView): Promise<void> {
+    const view = tuiWorktreeView(status);
+    if (!view.actions.length) {
+      this.showTextViewer(`Worktree ${status.sessionId.slice(0, 8)}`, `${view.label}\n${view.detail}`);
+      return;
+    }
+    this.showSelect({
+      title: `Worktree ${status.sessionId.slice(0, 8)}`,
+      hint: "↑↓ navigate · enter confirm · esc back",
+      items: view.actions.map((action) => ({
+        value: action,
+        label: tuiWorktreeActionLabel(action),
+        description: tuiWorktreeActionDescription(action)
+      })),
+      onSelect: (item) => {
+        void this.runWorktreeAction(status, item.value as TuiWorktreeAction)
+          .catch((error: unknown) => this.notify(formatTuiWorktreeError(error)));
+      }
+    });
+  }
+
+  private async runWorktreeAction(status: WorktreeStatusView, action: TuiWorktreeAction): Promise<void> {
+    const runtime = this.runtime;
+    if (!(runtime instanceof RuntimeHostClient)) return;
+    const view = tuiWorktreeView(status);
+    if (!view.actions.includes(action)) {
+      this.showTextViewer("Worktrees", `${view.label}\n${view.detail}`);
+      return;
+    }
+    try {
+      if (action === "merge") {
+        await runtime.worktreeMerge(status.sessionId, { strategy: "merge", deleteAfter: true });
+        this.notify(`Worktree ${status.sessionId.slice(0, 8)} merged and cleaned.`);
+      } else {
+        await runtime.worktreeRemove(status.sessionId, action === "remove-branch");
+        this.notify(`Worktree ${status.sessionId.slice(0, 8)} cleaned.`);
+      }
+    } catch (error) {
+      this.showTextViewer("Worktrees", formatTuiWorktreeError(error));
+      return;
+    }
+    const focusedSessionId = runtime.getFocusedSessionId();
+    if (focusedSessionId !== undefined && focusedSessionId !== this.state.sessionId) {
+      await this.focusRuntimeSession(focusedSessionId);
+      return;
+    }
+    this.runtimeSnapshot = runtime.getSnapshot();
+    this.refreshChrome();
+  }
+
+  private async focusRuntimeSession(sessionId: string): Promise<void> {
+    const runtime = this.runtime;
+    if (!(runtime instanceof RuntimeHostClient)) return;
+    let snapshot: InteractiveRuntimeSnapshot;
+    try {
+      snapshot = await runtime.focusSession(sessionId);
+    } catch (error) {
+      if (!isSessionWriterConflictError(error)) throw error;
+      await this.showSessionWriterConflict(sessionId, error.ownerSurface);
+      return;
+    }
+    const { info } = snapshot;
+    this.runtimeSnapshot = snapshot;
+    this.permissionMode = snapshot.permissionMode;
+    this.thinking = info.thinking;
+    this.confirmedModel = modelPresentationFromInfo(info);
+    this.clearSessionWriterConflict();
+    this.chatContainer.reset();
+    this.dispatch({
+      type: "session.started",
+      sessionId: info.sessionId,
+      sessionFile: info.sessionFile,
+      cwd: info.workspaceRoot,
+      provider: info.provider,
+      modelLabel: info.modelLabel,
+      reasoningLabel: info.reasoningLabel
+    });
+    const stored = await readStoredSessionEvents(runtime.persistenceRoot, sessionId);
+    this.dispatch({
+      type: "transcript.replaced",
+      viewingSessionId: sessionId,
+      items: sessionEventsToTranscript(stored.events)
+    });
+    if (snapshot.state.kind === "idle") {
+      try {
+        // 切换到空闲 session 时提前取得长期 claim，避免用户看到可写编辑器后才发现
+        // 另一个 surface 已经占用同一会话；运行中的 session 继续保持只观察/排队语义。
+        await runtime.claimSession(sessionId);
+      } catch (error) {
+        if (!isSessionWriterConflictError(error)) throw error;
+        await this.showSessionWriterConflict(sessionId, error.ownerSurface);
+        return;
+      }
+    }
+    this.mode = "chat";
+    void readGitBranch(info.workspaceRoot).then((branch) => {
+      this.gitBranch = branch;
+      this.refreshChrome();
+    });
+    await this.refreshContextUsage();
+    await this.refreshUsage();
+    this.notify(`已切换到 session ${sessionId.slice(0, 8)}。`);
+  }
+
   private async resumeSession(session: string): Promise<void> {
     const runtime = this.runtime;
     if (!runtime || !session) return;
@@ -1496,6 +1698,32 @@ async function drainRuntimeBeforeExit(runtime: InteractiveRuntimeHandle): Promis
 
 function sessionLabel(summary: SessionSummary, nowMs: number): string {
   return `${summary.fileName.replace(/\.jsonl$/, "")} · ${formatSessionAge(summary.updatedAt, nowMs)}`;
+}
+
+function runtimeSessionLabel(summary: {
+  sessionId: string;
+  primary: boolean;
+  snapshot: InteractiveRuntimeSnapshot;
+}, isolated: boolean): string {
+  const state = summary.snapshot.state.kind === "idle"
+    ? "idle"
+    : summary.snapshot.state.kind === "maintenance"
+      ? "maintenance"
+      : summary.snapshot.state.pendingPermission
+        ? "permission"
+        : "running";
+  return `${summary.primary ? "●" : "○"} ${summary.sessionId.slice(0, 8)} · ${state}${isolated ? " · worktree" : ""}`;
+}
+
+function resolveWorktreeStatus(statuses: readonly WorktreeStatusView[], requestedSession: string): WorktreeStatusView | undefined {
+  const exact = statuses.find((status) => status.sessionId === requestedSession);
+  if (exact) return exact;
+  const matches = statuses.filter((status) => status.sessionId.startsWith(requestedSession));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function removeActionForStatus(status: WorktreeStatusView): TuiWorktreeAction {
+  return status.status === "merged" || status.mergedIntoBase ? "remove-branch" : "remove-worktree";
 }
 
 function modelPresentationFromInfo(info: { provider: string; modelLabel: string; reasoningLabel: string; thinking: ThinkingSelection }): ModelPresentation {

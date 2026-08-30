@@ -11,7 +11,7 @@ import type { PermissionMode } from "../../permission/PermissionManager.js";
 import { createCommandRuntime, type CommandRuntime } from "../../runtime/CommandRuntime.js";
 import { ExecutionService } from "../../runtime/ExecutionService.js";
 import { SessionLeaseStore, type SessionLease } from "../../runtime/SessionLease.js";
-import { connectRuntimeHost, RuntimeHostClient } from "../../runtime/RuntimeHost.js";
+import { connectOrSpawnRuntimeHost, connectRuntimeHost, RuntimeHostClient } from "../../runtime/RuntimeHost.js";
 import { runtimeIsBusy } from "../../runtime/agentEvents.js";
 import type { UsageSummary } from "../../session/metadata.js";
 import type { ModelRequestSummary } from "../../observability/modelRequests.js";
@@ -30,6 +30,8 @@ export interface RunCommandOptions {
   headless?: boolean;
   /** 只输出一行 JSON，并允许非 completed 的 agent 终态交给外部 verifier 判定。 */
   json?: boolean;
+  /** 在 Runtime Host 中创建独立 worktree session。 */
+  isolated?: boolean;
 }
 
 export interface RunCommandResult {
@@ -48,9 +50,19 @@ export interface RunCommandResult {
 
 export async function runCommand(workspaceRoot: string, input: string, options: RunCommandOptions = {}): Promise<RunCommandResult> {
   validateRunOptions(options);
-  const attached = canAttachRun(options)
-    ? await connectRuntimeHost(workspaceRoot, { surface: "cli", clientId: `run-${process.pid}` })
-    : undefined;
+  const attached = options.isolated
+    ? await connectOrSpawnRuntimeHost(workspaceRoot, {
+      workspaceRoot,
+      resumeInterrupted: false,
+      surface: "cli",
+      clientId: `run-${process.pid}`
+    })
+    : canAttachRun(options)
+      ? await connectRuntimeHost(workspaceRoot, { surface: "cli", clientId: `run-${process.pid}` })
+      : undefined;
+  if (options.isolated && !attached) {
+    throw new Error("--isolated requires a Unix Runtime Host; no Host could be attached or started.");
+  }
   if (attached) return await runAttachedCommand(attached, input, options);
   let runtime: CommandRuntime | undefined;
   let leases: SessionLeaseStore | undefined;
@@ -111,11 +123,18 @@ async function runAttachedCommand(
   options: RunCommandOptions
 ): Promise<RunCommandResult> {
   try {
-    if (runtimeIsBusy(runtime.getSnapshot())) throw new Error("Runtime Host is already running another task.");
-    const submitted = runtime.submitPrompt(input, "chat");
+    let sessionId = runtime.getFocusedSessionId();
+    if (options.isolated || runtimeIsBusy(runtime.getSnapshot())) {
+      const ensured = await runtime.ensureSession({
+        isolation: options.isolated ? "worktree" : undefined,
+        writeIntent: true
+      });
+      sessionId = ensured.sessionId;
+    }
+    const submitted = runtime.submitPromptForSession(sessionId, input, "chat");
     const turn = await withCliAbortSignal(async (signal) => {
       const onAbort = (): void => {
-        runtime.cancelRun(submitted.runId);
+        void runtime.cancelRunRequest(submitted.runId, sessionId);
       };
       signal.addEventListener("abort", onAbort, { once: true });
       try {
@@ -241,6 +260,15 @@ export function validateRunOptions(options: RunCommandOptions): void {
   }
   if (options.permissionMode !== undefined && !["ask", "read-only", "auto", "full-access"].includes(options.permissionMode)) {
     throw new Error("permissionMode must be one of ask, read-only, auto, full-access.");
+  }
+  if (options.isolated && (
+    options.model !== undefined
+    || options.maxSteps !== undefined
+    || options.softSteps !== undefined
+    || options.permissionMode !== undefined
+    || options.headless === true
+  )) {
+    throw new Error("--isolated uses the Runtime Host configuration and cannot be combined with --model, --max-steps, --soft-steps, --permission-mode, or --headless.");
   }
 }
 

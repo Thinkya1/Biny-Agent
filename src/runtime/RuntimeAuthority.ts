@@ -76,6 +76,8 @@ export interface RuntimeRunStartInput {
   turnId: string;
   parentRunId?: string;
   continuationSource?: string;
+  /** 重新生成的目标消息 identity；存在时表示本次运行是同一消息槽的版本重试。 */
+  retryOfMessageId?: string;
   payload?: unknown;
   createdAt?: string;
 }

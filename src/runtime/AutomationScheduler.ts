@@ -68,6 +68,16 @@ export interface AutomationCreateInput {
   expiresAt?: string;
 }
 
+/** Host 已经找到目标 session，但它正在运行；调度器应延后 fire，而不是把它记成失败。 */
+export class AutomationTargetBusyError extends Error {
+  readonly code = "automation_target_busy";
+
+  constructor(readonly sessionId: string) {
+    super(`Automation target session ${sessionId} is busy.`);
+    this.name = "AutomationTargetBusyError";
+  }
+}
+
 interface AutomationRow {
   automation_id: unknown;
   workspace_id: unknown;
@@ -412,8 +422,10 @@ export interface AutomationSchedulerOptions {
   /** 重建 runtime 后数据库连接会替换；scheduler 必须取当前 authority projection。 */
   getStore?: () => AutomationStore;
   store?: AutomationStore;
-  createFreshRuntime?: () => Promise<InteractiveRuntimeHandle>;
+  /** 为某个 fire 取得专属 session runtime；不传目标时创建新的自动化 session。 */
+  createFreshRuntime?: (sessionId?: string) => Promise<InteractiveRuntimeHandle>;
   onRuntimeReplaced?: (runtime: InteractiveRuntimeHandle) => void;
+  canStartRun?: () => boolean;
   tickMs?: number;
 }
 
@@ -460,22 +472,40 @@ export class AutomationScheduler {
     if (!claimed) return;
     const automation = store.get(claimed.automationId);
     if (!automation) return;
+    const targetSessionId = automation.executionTemplate.sessionId;
+    const usesDedicatedRuntime = this.options.createFreshRuntime !== undefined
+      && (automation.triggerType !== "heartbeat" || targetSessionId !== undefined);
+    if (this.options.canStartRun && !this.options.canStartRun()) {
+      store.deferFire(claimed.fireId, new Date(Date.now() + deferDelay(automation)), "Runtime Host reached its concurrent run limit; fire deferred.");
+      return;
+    }
     const current = this.options.getRuntime();
-    if (current.getSnapshot().state.kind !== "idle") {
+    // 非 heartbeat fire 会创建独立 runtime；primary 忙不应挡住它，否则自动化仍会
+    // 退化成“所有任务都排在交互 session 后面”的单 runtime 语义。
+    if (!usesDedicatedRuntime && current.getSnapshot().state.kind !== "idle") {
       store.deferFire(claimed.fireId, new Date(Date.now() + deferDelay(automation)), "Runtime Host is busy; fire deferred.");
       return;
     }
     try {
       let target = current;
-      if (automation.triggerType !== "heartbeat" && this.options.createFreshRuntime) {
-        target = await this.options.createFreshRuntime();
+      if (usesDedicatedRuntime && this.options.createFreshRuntime) {
+        // 目标 session 由模板决定；没有目标的非 heartbeat fire 使用独立的新 session，
+        // 绝不能复用当前 UI session。heartbeat 沿用 primary，避免每次心跳都创建新会话。
+        target = await this.options.createFreshRuntime(targetSessionId);
         this.options.onRuntimeReplaced?.(target);
         // createFreshRuntime 可能已经替换并关闭了旧 authority；后续 fire 状态必须
         // 写入当前 store，否则会在已关闭的 DatabaseSync 上失败，留下 running fire。
         store = this.store();
       }
-      if (automation.executionTemplate.sessionId !== undefined && target.getSnapshot().info.sessionId !== automation.executionTemplate.sessionId) {
-        await target.resumeSession(automation.executionTemplate.sessionId);
+      if (target.getSnapshot().state.kind !== "idle") {
+        if (targetSessionId !== undefined) throw new AutomationTargetBusyError(targetSessionId);
+        store.deferFire(claimed.fireId, new Date(Date.now() + deferDelay(automation)), "Runtime Host is busy; fire deferred.");
+        return;
+      }
+      if (targetSessionId !== undefined && target.getSnapshot().info.sessionId !== targetSessionId) {
+        // 没有 Host registry 的同进程 fallback 仍允许复用单 runtime；正常 Host 会在
+        // createFreshRuntime(sessionId) 中直接创建/取得目标条目，不会在这里改写 session。
+        await target.resumeSession(targetSessionId);
       }
       const submitted = target.submitPrompt(
         automation.executionTemplate.prompt,
@@ -489,6 +519,10 @@ export class AutomationScheduler {
       else store.failFire(claimed.fireId, outcome.error ?? "Automation run ended as " + outcome.status + ".");
     } catch (error) {
       const currentStore = this.store();
+      if (error instanceof AutomationTargetBusyError) {
+        currentStore.deferFire(claimed.fireId, new Date(Date.now() + deferDelay(automation)), error.message);
+        return;
+      }
       currentStore.failFire(claimed.fireId, error instanceof Error ? error.message : String(error));
     }
   }

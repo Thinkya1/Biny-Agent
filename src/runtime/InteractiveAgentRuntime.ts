@@ -23,6 +23,7 @@ import type {
   RuntimeOperation
 } from "./agentEvents.js";
 import { reduceInteractiveRunState } from "./agentEvents.js";
+import { perfNow, recordPerfPhase } from "../observability/perfTiming.js";
 
 export interface SubmittedAgentRun {
   runId: string;
@@ -40,6 +41,9 @@ export interface RuntimeRequestIds {
   turnId?: string;
   parentRunId?: string;
   continuationSource?: string;
+  retryOfMessageId?: string;
+  /** 编辑时替换的原用户消息 ID。 */
+  replaceUserMessageId?: string;
 }
 
 export interface QueuedAgentMessage {
@@ -70,7 +74,7 @@ export interface InteractiveAgentHost {
 
 /** Desktop、TUI 和 Unix socket 客户端共享的最小交互运行时形状。 */
 export interface InteractiveRuntimeHandle {
-  submitPrompt(input: string, mode?: AgentRunMode, attachments?: AgentAttachment[], requestIds?: RuntimeRequestIds): SubmittedAgentRun;
+  submitPrompt(input: string, mode?: AgentRunMode, attachments?: AgentAttachment[], requestIds?: RuntimeRequestIds, promptContext?: string): SubmittedAgentRun;
   steer(input: string, attachments?: AgentAttachment[], requestIds?: RuntimeRequestIds): QueuedAgentMessage;
   followUp(input: string, attachments?: AgentAttachment[], requestIds?: RuntimeRequestIds): QueuedAgentMessage;
   continueInterruptedTurn(): Promise<AgentRunOutcome | undefined>;
@@ -86,6 +90,7 @@ export interface InteractiveRuntimeHandle {
   resumeSession(session: string): Promise<ResumedAgentSession>;
   /** 开始一个全新的空会话并重置会话级状态，不重建 runtime 基础设施（MCP/索引/技能）。忙碌时拒绝。 */
   startDraft(): Promise<AgentSessionInfo>;
+  switchMessageVersion(messageId: string, direction: "prev" | "next"): Promise<void>;
   runExclusiveOperation<T>(operation: RuntimeOperation, execute: (signal: AbortSignal) => Promise<T>): Promise<T>;
   startBackgroundOperation<T extends { completion: Promise<unknown> }>(
     operation: RuntimeOperation,
@@ -106,6 +111,10 @@ interface AgentRun extends ActiveRunSnapshot {
   startedAtMs: number;
   continuation: boolean;
   attachments: AgentAttachment[];
+  promptContext?: string;
+  retryOfMessageId?: string;
+  replaceUserMessageId?: string;
+  replacementUserMessageId?: string;
 }
 
 interface PendingPermission extends PendingPermissionSnapshot {
@@ -165,6 +174,17 @@ export class InteractiveAgentRuntime {
         ? new SessionRunLedger(commandRuntime.persistenceRoot)
         : undefined);
     this.runtimeAuthority = options.runtimeAuthority ?? commandRuntime.runtimeAuthority;
+    // 自动技能提取在回合终态之后 fire-and-forget；宿主在这里把草稿通知转成 host event，
+    // 经 wireRuntimeEvents 广播到渲染层。sessionId 回调时现取，避免沿用装配期快照。
+    commandRuntime.agent.setOnSkillDraftCreated?.((notice) => {
+      this.emit({
+        type: "skill.draft_created",
+        sessionId: this.commandRuntime.agent.getInfo().sessionId,
+        runId: notice.runId ?? "",
+        timestamp: new Date().toISOString(),
+        draft: notice.draft
+      });
+    });
   }
 
   private getInfo(): AgentSessionInfo {
@@ -177,9 +197,10 @@ export class InteractiveAgentRuntime {
     input: string,
     mode: AgentRunMode = "chat",
     attachments: AgentAttachment[] = [],
-    requestIds?: RuntimeRequestIds
+    requestIds?: RuntimeRequestIds,
+    promptContext?: string
   ): SubmittedAgentRun {
-    return this.startRun(input, mode, attachments, false, requestIds);
+    return this.startRun(input, mode, attachments, false, requestIds, undefined, promptContext);
   }
 
   steer(input: string, attachments: AgentAttachment[] = [], requestIds?: RuntimeRequestIds): QueuedAgentMessage {
@@ -227,7 +248,8 @@ export class InteractiveAgentRuntime {
     attachments: AgentAttachment[],
     continuation: boolean,
     requestIds?: RuntimeRequestIds,
-    continuationTurnId?: string
+    continuationTurnId?: string,
+    promptContext?: string
   ): SubmittedAgentRun {
     if (this.closed) throw new Error("Agent runtime is closed.");
     if (this.state.kind === "maintenance") {
@@ -257,7 +279,11 @@ export class InteractiveAgentRuntime {
       status: "thinking",
       startedAt: new Date(startedAtMs).toISOString(),
       startedAtMs,
-      continuation
+      continuation,
+      promptContext,
+      retryOfMessageId: requestIds?.retryOfMessageId,
+      replaceUserMessageId: requestIds?.replaceUserMessageId,
+      replacementUserMessageId: requestIds?.replaceUserMessageId === undefined ? undefined : randomUUID()
     };
     const controller = new AbortController();
     try {
@@ -272,7 +298,9 @@ export class InteractiveAgentRuntime {
           input,
           mode,
           continuation,
-          messageId
+          messageId,
+          retryOfMessageId: requestIds?.retryOfMessageId,
+          replaceUserMessageId: requestIds?.replaceUserMessageId
         }
       });
       if (admission && !admission.created) {
@@ -422,6 +450,12 @@ export class InteractiveAgentRuntime {
     // 草稿已经切走，旧会话的 writer claim 一并释放；否则旧会话会被这个 surface 一直占着。
     await this.releaseSessionClaim();
     return this.getSnapshot().info;
+  }
+
+  async switchMessageVersion(messageId: string, direction: "prev" | "next"): Promise<void> {
+    await this.runExclusiveOperation("message_version", async () => {
+      await this.commandRuntime.agent.switchMessageVersion(messageId, direction);
+    });
   }
 
   /**
@@ -853,19 +887,26 @@ export class InteractiveAgentRuntime {
   private async executeRun(run: AgentRun, signal: AbortSignal): Promise<AgentRunOutcome> {
     const agent = this.commandRuntime.agent;
     const startedAtMs = Date.now();
+    const executePerfStartedAt = perfNow();
     await this.startRunLedger(run);
-    await this.commandRuntime.refreshSkills();
     const info = this.getInfo();
     run.sessionId = info.sessionId;
     run.status = "thinking";
     run.startedAt = new Date(startedAtMs).toISOString();
     this.commandRuntime.setSubagentParentRunId(run.runId);
     this.tools.clear();
-    if (!run.continuation) {
+    if (!run.continuation && run.retryOfMessageId === undefined) {
       this.emit({
         ...this.eventBase(run),
         type: "message.user",
         messageId: run.messageId,
+        content: run.input
+      });
+    } else if (run.replaceUserMessageId !== undefined && run.replacementUserMessageId !== undefined) {
+      this.emit({
+        ...this.eventBase(run),
+        type: "message.user",
+        messageId: run.replacementUserMessageId,
         content: run.input
       });
     }
@@ -873,6 +914,7 @@ export class InteractiveAgentRuntime {
       ...this.eventBase(run),
       type: "run.started",
       messageId: run.messageId,
+      retryOfMessageId: run.retryOfMessageId,
       input: run.input,
       mode: run.mode,
       model: {
@@ -885,6 +927,11 @@ export class InteractiveAgentRuntime {
     });
 
     try {
+      // 先发布运行状态，让界面在技能刷新等本地准备阶段立即进入忙碌态；准备完成后才调用模型。
+      const refreshSkillsPerfStartedAt = perfNow();
+      await this.commandRuntime.refreshSkills();
+      recordPerfPhase("runtime.refreshSkills", refreshSkillsPerfStartedAt, { runId: run.runId, sessionId: run.sessionId });
+      recordPerfPhase("runtime.executeRun.pre", executePerfStartedAt, { runId: run.runId, sessionId: run.sessionId });
       let turn: AgentTurnOutcome | undefined;
       // Chat/Plan 只驱动一个 AgentSession 回合；Plan 的权限感知工具面与提示词由 Session 负责。
       let terminalEvents = 0;
@@ -894,12 +941,20 @@ export class InteractiveAgentRuntime {
         confirmPermission: async (request: AgentPermissionEventRequest) => await this.waitForPermission(run, request),
         mode: run.mode,
         attachments: run.attachments,
+        promptContext: run.promptContext,
         runId: run.runId,
+        messageId: run.messageId,
+        retryOfMessageId: run.retryOfMessageId,
+        replaceUserMessageId: run.replaceUserMessageId,
+        replacementInput: run.replaceUserMessageId === undefined ? undefined : run.input,
+        replacementUserMessageId: run.replacementUserMessageId,
         turnId: run.turnId
       };
       const stream = run.continuation
         ? agent.continueInterruptedTurn(runOptions)
-        : agent.prompt(run.input, runOptions);
+        : run.retryOfMessageId === undefined
+          ? agent.prompt(run.input, runOptions)
+          : agent.retry(run.retryOfMessageId, runOptions);
       for await (const event of stream) {
         streamFailure ??= this.handleAgentEvent(run, event);
         if (event.type === "done") {
@@ -1534,6 +1589,7 @@ function publicOperationName(operation: RuntimeOperation): string {
   if (operation === "telos") return "a TELOS update";
   if (operation === "personalization") return "personalization settings";
   if (operation === "checkpoint") return "checkpoint restore";
+  if (operation === "message_version") return "message version switching";
   return "a subagent task";
 }
 

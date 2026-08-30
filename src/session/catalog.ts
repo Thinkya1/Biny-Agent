@@ -32,6 +32,8 @@ export type SessionBranchPoint =
   | { kind: "event"; index: number }
   | { kind: "user_message"; index: number; messageId?: string };
 
+export type SessionIsolation = "shared" | "worktree";
+
 export interface SessionCatalogRecord {
   version: typeof catalogVersion;
   sessionId: string;
@@ -44,6 +46,7 @@ export interface SessionCatalogRecord {
   unread?: boolean;
   labels?: string[];
   personalization?: ChatPersonalizationOverride;
+  isolation?: SessionIsolation;
   createdAt: string;
   updatedAt: string;
 }
@@ -61,6 +64,7 @@ export interface SessionCatalogItem {
   unread?: boolean;
   labels?: string[];
   personalization?: ChatPersonalizationOverride;
+  isolation?: SessionIsolation;
   metadataRevision?: string;
   hasChildren: boolean;
 }
@@ -97,6 +101,7 @@ export interface SessionCatalogMetadataPatch {
   unread?: boolean;
   labels?: string[];
   personalization?: ChatPersonalizationOverride;
+  isolation?: SessionIsolation;
 }
 
 export class SessionCatalogConflictError extends Error {
@@ -146,6 +151,7 @@ export async function registerSessionBranch(
     personalization: parent?.personalization === undefined
       ? undefined
       : cloneChatPersonalizationOverride(parent.personalization),
+    isolation: parent?.isolation,
     createdAt: now,
     updatedAt: now
   });
@@ -214,6 +220,7 @@ export async function updateSessionCatalogMetadata(
       personalization: patch.personalization === undefined
         ? base.personalization
         : cloneChatPersonalizationOverride(patch.personalization),
+      isolation: patch.isolation === undefined ? base.isolation : patch.isolation,
       updatedAt: now
     };
     assertCatalogRecord(next);
@@ -229,7 +236,8 @@ export async function readSessionCatalogRecord(
   sessionId: string
 ): Promise<SessionCatalogRecord | undefined> {
   assertSessionId(sessionId);
-  const directory = await ensureCatalogDirectory(workspaceRoot);
+  const directory = await readCatalogDirectory(workspaceRoot);
+  if (!directory) return undefined;
   return await readCatalogFile(catalogFilePath(directory, sessionId));
 }
 
@@ -254,7 +262,7 @@ export async function deleteSessionCatalogRecord(workspaceRoot: string, sessionI
 export async function listSessionCatalog(workspaceRoot: string): Promise<SessionCatalogItem[]> {
   const summaries = await listSessionSummaries(workspaceRoot);
   if (!summaries.length) return [];
-  const directory = await ensureCatalogDirectory(workspaceRoot).catch(() => undefined);
+  const directory = await readCatalogDirectory(workspaceRoot);
   const items = await Promise.all(summaries.map(async (summary) => {
     const id = summary.fileName.replace(/\.jsonl$/u, "");
     const record = directory === undefined
@@ -293,7 +301,6 @@ export async function querySessionCatalog(
 ): Promise<SessionCatalogPage> {
   const all = await listSessionCatalog(workspaceRoot);
   const page = querySessionCatalogItems(all, options);
-  writeSessionIndexFile(workspaceRoot, page.items);
   return page;
 }
 
@@ -384,6 +391,7 @@ function toCatalogItem(summary: SessionSummary, record: SessionCatalogRecord | u
     personalization: record?.personalization === undefined
       ? undefined
       : cloneChatPersonalizationOverride(record.personalization),
+    isolation: record?.isolation,
     metadataRevision: record === undefined ? undefined : sessionCatalogRecordRevision(record),
     hasChildren: false
   };
@@ -414,6 +422,7 @@ function catalogRevision(items: readonly SessionCatalogItem[]): string {
     unread: item.unread,
     labels: item.labels,
     personalization: item.personalization,
+    isolation: item.isolation,
     metadataRevision: item.metadataRevision
   }));
   return `sha256:${createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`;
@@ -471,6 +480,27 @@ async function ensureCatalogDirectory(workspaceRoot: string): Promise<string> {
   return directory;
 }
 
+async function readCatalogDirectory(workspaceRoot: string): Promise<string | undefined> {
+  const canonicalWorkspace = await fs.realpath(path.resolve(workspaceRoot));
+  const sessionsDirectory = path.resolve(projectSessionsDir(canonicalWorkspace));
+  const canonicalSessions = await readRealDirectory(sessionsDirectory, "Project session storage");
+  if (!canonicalSessions) return undefined;
+  return await readRealDirectory(path.join(canonicalSessions, catalogDirectoryName), "Session catalog directory");
+}
+
+async function readRealDirectory(directory: string, label: string): Promise<string | undefined> {
+  try {
+    const stat = await fs.lstat(directory);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || await fs.realpath(directory) !== directory) {
+      throw new Error(`${label} must be a real directory.`);
+    }
+    return directory;
+  } catch (error) {
+    if (isNotFound(error)) return undefined;
+    throw error;
+  }
+}
+
 /**
  * 在项目 session 目录根写一份 `index.json`，缓存最近一次 catalog 列表的轻量元数据。
  *
@@ -493,7 +523,8 @@ async function writeSessionIndexFile(workspaceRoot: string, items: readonly Sess
         parentSessionId: item.parentSessionId,
         createdAt: item.summary.createdAt,
         updatedAt: item.summary.updatedAt,
-        eventCount: item.summary.eventCount
+        eventCount: item.summary.eventCount,
+        isolation: item.isolation
       }))
     };
     await writeAtomically(path.join(sessionsDirectory, sessionIndexFileName), `${JSON.stringify(payload, null, 2)}\n`);
@@ -535,7 +566,8 @@ function catalogMetadataEquals(left: SessionCatalogRecord, right: SessionCatalog
     && left.archived === right.archived
     && left.unread === right.unread
     && optionalStringArraysEqual(left.labels, right.labels)
-    && JSON.stringify(left.personalization) === JSON.stringify(right.personalization);
+    && JSON.stringify(left.personalization) === JSON.stringify(right.personalization)
+    && left.isolation === right.isolation;
 }
 
 function optionalStringArraysEqual(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
@@ -704,6 +736,7 @@ function isCatalogRecord(value: unknown): value is SessionCatalogRecord {
   if (value.unread !== undefined && typeof value.unread !== "boolean") return false;
   if (value.labels !== undefined && (!Array.isArray(value.labels) || !value.labels.every((label) => typeof label === "string"))) return false;
   if (value.personalization !== undefined && !chatPersonalizationOverrideSchema.safeParse(value.personalization).success) return false;
+  if (value.isolation !== undefined && value.isolation !== "shared" && value.isolation !== "worktree") return false;
   return typeof value.createdAt === "string" && typeof value.updatedAt === "string";
 }
 
@@ -711,6 +744,9 @@ function assertCatalogMetadata(record: SessionCatalogRecord): void {
   if (record.title !== undefined && (!record.title.trim() || record.title.length > 120)) throw new Error("Invalid session catalog title.");
   if (record.labels !== undefined && record.labels.some((label) => !label.trim() || label.length > 64)) throw new Error("Invalid session catalog labels.");
   if (record.personalization !== undefined) chatPersonalizationOverrideSchema.parse(record.personalization);
+  if (record.isolation !== undefined && record.isolation !== "shared" && record.isolation !== "worktree") {
+    throw new Error("Invalid session isolation.");
+  }
 }
 
 function assertBranchPoint(value: SessionBranchPoint): void {

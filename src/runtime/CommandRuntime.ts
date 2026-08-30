@@ -19,11 +19,13 @@ import { TodoStore } from "../session/todoStore.js";
 import { CheckpointStore } from "../session/checkpointStore.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
 import { createSkillResourceTool, createSkillTool, expandSkillCommand as expandSkillCommandText, loadSkills, type SkillBundle, type SkillDefinition } from "../extensions/skills.js";
+import { perfNow, recordPerfPhase } from "../observability/perfTiming.js";
 import { loadPlugins } from "../extensions/plugins.js";
 import { createMcpResourceTools, McpToolHost } from "../extensions/mcp.js";
 import { createSubagentTool, runSubagentTask as executeSubagentTask, type SubagentOptions } from "../extensions/subagent.js";
 import { buildSubagentDefinitionsPrompt, loadSubagentDefinitions, type SubagentDefinition } from "../extensions/agents.js";
 import { createMemoryTools } from "../extensions/memory.js";
+import { createEmotionTool } from "../tools/emotion.js";
 import { createActivityReportTool } from "../tools/activity/report.js";
 import { createActivityDigestTool } from "../tools/activity/digest.js";
 import { createActivitySearchTool } from "../tools/activity/search.js";
@@ -83,6 +85,8 @@ export interface CommandRuntimeOptions {
   persistenceRoot?: string;
   configStore?: AgentConfigStore;
   attachmentRoot?: string;
+  /** Host 为新 session 预先分配的 id；历史 session 仍由 InteractiveAgentRuntime.resumeSession 载入。 */
+  sessionId?: string;
 }
 
 export async function createCommandRuntime(workspaceRoot: string, options: CommandRuntimeOptions = {}): Promise<CommandRuntime> {
@@ -99,7 +103,7 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
   const automationStore = await AutomationStore.open(persistenceRoot, runtimeAuthority);
   const graphs = await GoalGraphStore.open(persistenceRoot, runtimeAuthority);
   const capabilities = await CapabilityStore.open(persistenceRoot, runtimeAuthority);
-  const recorder = new SessionRecorder(persistenceRoot, undefined, undefined, runtimeAuthority.asSink());
+  const recorder = new SessionRecorder(persistenceRoot, options.sessionId, undefined, runtimeAuthority.asSink());
   const managedProcesses = new ManagedProcessService({ workspaceRoot, persistenceRoot });
   await managedProcesses.initialize();
   const toolRegistry = createToolRegistry(
@@ -152,12 +156,14 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
   const skillProjectOverrides = config.extensions.skillProjectOverrides[createProjectSkillKey(workspaceRoot)];
   try {
     // 技能扫描可能因项目内配置路径的软链/硬链问题抛错，放在清理保护内执行。
+    const loadSkillsPerfStartedAt = perfNow();
     skills = await loadSkills({
       workspaceRoot,
       projectPaths: config.extensions.skills,
       globalDefaults: config.extensions.skillDefaults,
       projectOverrides: skillProjectOverrides
     });
+    recordPerfPhase("host.loadSkills", loadSkillsPerfStartedAt, { count: skills.skills.length }, workspaceRoot);
     toolRegistry.registerUserTool(createSkillTool(() => requireSkillBundle(skills)));
     toolRegistry.registerUserTool(createSkillResourceTool(() => requireSkillBundle(skills)));
     // 先注册通用资源工具。若服务器工具归一化后撞名，connectConfiguredServers 中的
@@ -165,7 +171,10 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
     if (Object.values(config.extensions.mcp).some((server) => server.enabled)) {
       for (const tool of createMcpResourceTools(mcpHost)) toolRegistry.registerMcpTool(tool);
     }
+    const mcpPerfStartedAt = perfNow();
     await mcpHost.connectConfiguredServers(workspaceRoot, config, toolRegistry);
+    recordPerfPhase("host.mcpConnect", mcpPerfStartedAt, undefined, workspaceRoot);
+    const pluginsPerfStartedAt = perfNow();
     const managedPluginPaths = await listEnabledProjectPluginPaths(workspaceRoot).catch((error: unknown) => {
       loadedPlugins.push(`managed plugins (failed: ${error instanceof Error ? error.message : String(error)})`);
       return [];
@@ -178,8 +187,11 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
         loadedPlugins.push(`${pluginPath} (failed: ${error instanceof Error ? error.message : String(error)})`);
       }
     }
+    recordPerfPhase("host.loadPlugins", pluginsPerfStartedAt, { count: loadedPlugins.length }, workspaceRoot);
     // 插件必须先完成 Provider/API 注册，默认模型才能使用插件提供的新类型。
+    const modelManagerPerfStartedAt = perfNow();
     modelManager = await ModelManager.create(workspaceRoot, config, configStore, ai);
+    recordPerfPhase("host.modelManagerCreate", modelManagerPerfStartedAt, undefined, workspaceRoot);
     if (config.extensions.subagent.enabled) {
       toolRegistry.registerSubagentTool(createSubagentTool(subagentOptions, subagentTaskManager!));
       subagentDefinitions = await loadAgentDefinitions();
@@ -188,6 +200,12 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
     // 工具始终注册；显式 save_memory 不会因聊天策略关闭而丢失。
     for (const tool of createMemoryTools(() => agent?.getLocalMemory())) {
       toolRegistry.registerBuiltinTool(tool);
+    }
+    if (config.context.emotion.enabled && config.context.emotion.allowModelUpdate) {
+      toolRegistry.registerBuiltinTool(createEmotionTool({
+        getStorage: () => agent?.getEmotionStorage(),
+        getFatigue: () => agent?.getFatigue() ?? 0
+      }));
     }
     // Activity 回忆改为主动工具集：模型按需生成打工日记/时间线/搜索，而不是把脱敏事件
     // 注入每个回合。模型、策略、记忆库与嵌入运行时都在调用时现取（当前聊天模型 + 最新

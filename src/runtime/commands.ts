@@ -25,8 +25,7 @@ import type { CommandSurface } from "./commandRegistry.js";
 import { isTaskRunTerminal, type TaskRunStatus } from "./TaskRunStore.js";
 import type {
   AgentPersonalizationState,
-  ChatPersonalizationOverridePatch,
-  PersonalityPreset
+  ChatPersonalizationOverridePatch
 } from "../personalization/index.js";
 
 export interface RuntimeCommandResult {
@@ -155,17 +154,6 @@ export async function executeRuntimeCommand(
       card: buildPluginsCard(services.extensionStatus().plugins)
     };
   }
-  if (command === "/personality") {
-    const patch = personalityPatch(args);
-    if (!patch) return result(command, "Personality", formatPersonalizationState(await services.agent.getPersonalizationState()));
-    const state = await services.agent.getPersonalizationState();
-    if (!state.catalogRevision) throw new Error("Chat personalization revision is unavailable.");
-    const updated = await runtime.runExclusiveOperation(
-      "personalization",
-      async () => await services.agent.updateChatPersonalization(patch, state.catalogRevision)
-    );
-    return result(command, "Personality", `${formatPersonalizationState(updated)}\n\nChanges apply from the next root turn.`);
-  }
   if (command === "/memories") {
     const patch = memoryPolicyPatch(args[0]);
     if (!patch) return result(command, "Memories", formatPersonalizationState(await services.agent.getPersonalizationState()));
@@ -217,26 +205,6 @@ export async function executeRuntimeCommand(
   return undefined;
 }
 
-function personalityPatch(args: string[]): ChatPersonalizationOverridePatch | undefined {
-  const action = args[0]?.toLowerCase();
-  if (!action) return undefined;
-  if (action === "inherit" || action === "none" || action === "friendly" || action === "pragmatic" || action === "buddy") {
-    return { personality: action as "inherit" | PersonalityPreset };
-  }
-  if (action === "instructions") {
-    const instructionAction = args[1]?.toLowerCase();
-    if (instructionAction === "inherit") return { customInstructions: { mode: "inherit" } };
-    if (instructionAction === "off" || instructionAction === "disabled" || instructionAction === "clear") {
-      return { customInstructions: { mode: "disabled" } };
-    }
-    if (instructionAction === "set") {
-      const value = args.slice(2).join(" ").trim();
-      if (value) return { customInstructions: { mode: "replace", value } };
-    }
-  }
-  throw new Error("Usage: /personality [inherit|none|friendly|pragmatic|buddy] | instructions [set <text>|inherit|off]");
-}
-
 function memoryPolicyPatch(action: string | undefined): ChatPersonalizationOverridePatch | undefined {
   if (action === undefined) return undefined;
   if (action === "inherit") return { useMemories: "inherit", contributeMemories: "inherit" };
@@ -249,8 +217,6 @@ function memoryPolicyPatch(action: string | undefined): ChatPersonalizationOverr
 
 function formatPersonalizationState(state: AgentPersonalizationState): string {
   return [
-    `Personality: ${state.resolved.personality} (override: ${state.override.personality})`,
-    `Custom instructions: ${state.override.customInstructions.mode}; ${state.resolved.instructionsHash}`,
     `Use memories: ${state.resolved.useMemories ? "yes" : "no"} (override: ${String(state.override.useMemories)})`,
     `Contribute memories: ${state.resolved.contributeMemories ? "yes" : "no"} (override: ${String(state.override.contributeMemories)})`
   ].join("\n");

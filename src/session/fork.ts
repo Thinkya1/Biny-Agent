@@ -11,6 +11,7 @@
  * 一条"已中断"的假结果（见 `replay.ts` 的 `interruptedToolResults`），分叉出来的会话从第一
  * 步起就带着一个从未发生过的失败。
  */
+import { randomUUID } from "node:crypto";
 import { createSessionFile, resolveSessionFile, sessionIdFromFile } from "./store.js";
 import { createSessionId } from "./recorder.js";
 import { readStoredSessionEvents } from "./events.js";
@@ -28,6 +29,42 @@ export interface ForkedSession {
   sourceSessionId: string;
   /** 实际保留的事件数，可能小于请求值（为了不切断工具调用配对）。 */
   events: number;
+}
+
+/**
+ * 分叉复制的是对话内容，不是原会话已经发生过的运行事实。
+ *
+ * runtime event id 在整个 workspace 内唯一，run/turn id 也会关联 authority 中的运行记录；
+ * 原样复制这些 metadata 会让新会话在下次启动重建 projection 时被判定为冲突。重新编号不会
+ * 改变模型消息、工具参数或消息父链，只把新分支视为一条独立的运行历史。
+ */
+export function rebaseForkedSessionEvents(events: readonly SessionEvent[]): SessionEvent[] {
+  const runIds = new Map<string, string>();
+  const turnIds = new Map<string, string>();
+  let eventSeq = 0;
+  const remap = (ids: Map<string, string>, value: string | undefined): string | undefined => {
+    if (value === undefined) return undefined;
+    const existing = ids.get(value);
+    if (existing !== undefined) return existing;
+    const replacement = randomUUID();
+    ids.set(value, replacement);
+    return replacement;
+  };
+
+  return events.map((event) => {
+    const runtime = event.runtime;
+    if (runtime === undefined) return event;
+    eventSeq += 1;
+    return {
+      ...event,
+      runtime: {
+        eventId: randomUUID(),
+        eventSeq,
+        runId: remap(runIds, runtime.runId),
+        turnId: remap(turnIds, runtime.turnId)
+      }
+    };
+  });
 }
 
 export async function forkSession(
@@ -48,7 +85,7 @@ export async function forkSession(
   const cut = safeCutPoint(events, Math.min(requested, events.length));
   if (cut === 0) throw new Error("No safe fork point exists before the requested event.");
 
-  const kept = events.slice(0, cut);
+  const kept = rebaseForkedSessionEvents(events.slice(0, cut));
   const bytes = Buffer.from(`${kept.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
   const sessionId = createSessionId();
   const filePath = await createSessionFile(persistenceRoot, sessionId, bytes);

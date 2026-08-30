@@ -30,6 +30,10 @@ assert.throws(
   () => validateRunOptions({ permissionMode: "safe" as never }),
   /permissionMode must be one of ask, read-only, auto, full-access/
 );
+assert.throws(
+  () => validateRunOptions({ isolated: true, model: "deepseek-v4-pro" }),
+  /--isolated.*cannot be combined with --model/
+);
 
 await testRunConfigStoreKeepsOverridesEphemeral();
 testShellOutputCapTrimsByBytes();

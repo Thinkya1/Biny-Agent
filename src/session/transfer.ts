@@ -23,6 +23,7 @@ import { attachmentFilePath, attachmentRoot, saveAttachment } from "../attachmen
 import { parseSessionEvents, readStoredSessionEvents } from "./events.js";
 import type { SessionEvent } from "./recorder.js";
 import { createSessionId } from "./recorder.js";
+import { rebaseForkedSessionEvents } from "./fork.js";
 import { createSessionFile, resolveSessionFile, sessionIdFromFile } from "./store.js";
 import { refreshSessionIndex } from "./catalog.js";
 
@@ -203,7 +204,8 @@ async function persistImportedSession(
 ): Promise<ImportedSession> {
   const restored = await restoreBundleAttachments(workspaceRoot, bundleAttachments);
   const remapped = restored.pathBySource.size > 0 ? rewriteAttachmentPaths(events, restored.pathBySource) : events;
-  const content = `${remapped.map((event) => JSON.stringify(event)).join("\n")}\n`;
+  const rebased = rebaseForkedSessionEvents(remapped);
+  const content = `${rebased.map((event) => JSON.stringify(event)).join("\n")}\n`;
   // 与读取路径共用同一套校验：任何能在列表/恢复里读出来的会话，必须能过这一关。
   const validated = parseSessionEvents(content);
   const sessionId = createSessionId();

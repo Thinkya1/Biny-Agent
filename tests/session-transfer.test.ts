@@ -16,6 +16,7 @@ const { attachmentRoot, readAttachment, saveAttachment } = await import("../src/
 const { globalAgentDir, legacyProjectStateDirName, projectSessionsDir, projectStateDirName } = await import("../src/config/paths.js");
 const { readStoredSessionEvents } = await import("../src/session/events.js");
 const { createSessionId, SessionRecorder } = await import("../src/session/recorder.js");
+const { RuntimeEventAuthority } = await import("../src/runtime/RuntimeAuthority.js");
 const { ensureAgentDirs, resolveSessionFile } = await import("../src/session/store.js");
 const {
   BINY_BUNDLE_FORMAT,
@@ -149,7 +150,9 @@ try {
     assert.equal(imported.attachmentsRenamed, 1); // saveAttachment 自带新前缀，必然换路径
 
     const { events } = await readStoredSessionEvents(target, imported.sessionId);
+    const sourceEvents = (await readStoredSessionEvents(source, sessionId)).events;
     assert.deepEqual(events.map((event) => event.type), ["user_message", "tool_call", "tool_result", "assistant_message"]);
+    assert.notEqual(events[0]?.runtime?.eventId, sourceEvents[0]?.runtime?.eventId);
     const user = events[0];
     assert.equal(user?.type, "user_message");
     const refs = (user as { attachments?: Array<{ path: string; name: string }> }).attachments;
@@ -160,6 +163,12 @@ try {
     // 落到磁盘的附件字节也读得回来。
     const disk = await readFile(path.join(attachmentRoot(target), path.basename(refs[0].path)));
     assert.equal(disk.toString(), "hello attachment");
+
+    const importedAgain = await importSessionFile(target, bundlePath);
+    const importedAgainEvents = (await readStoredSessionEvents(target, importedAgain.sessionId)).events;
+    assert.notEqual(importedAgainEvents[0]?.runtime?.eventId, events[0]?.runtime?.eventId);
+    const reopenedAuthority = await RuntimeEventAuthority.open(target);
+    reopenedAuthority.close();
   }
 
   // ── Claude Code：导出 .jsonl 再导入，对话事实保持 ──────────────────────────

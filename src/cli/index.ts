@@ -181,6 +181,7 @@ program
   .option("--soft-steps <steps>", "override the soft step limit", parsePositiveInteger)
   .option("--permission-mode <mode>", "override permission mode: ask, read-only, auto, full-access")
   .option("--headless", "run without interactive permission prompts")
+  .option("--isolated", "run in a dedicated git worktree session")
   .option("--json", "print one machine-readable JSON result")
   .argument("<input...>", "task text")
   .action((input: string[], options: RunCommandOptions) => wrap(async () => { await runCommand(workspaceRoot, input.join(" "), options); })());

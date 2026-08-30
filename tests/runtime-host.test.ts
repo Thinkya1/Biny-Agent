@@ -53,7 +53,6 @@ async function main(): Promise<void> {
   let maintenanceRuns = 0;
   let chatExpectedRevision: string | undefined;
   let globalExpectedRevision: string | undefined;
-  const globalPersonalization = { enabled: true, personality: "none" as const, customInstructions: "" };
   const memoryPolicy = {
     useMemories: false,
     generateMemories: false,
@@ -77,10 +76,9 @@ async function main(): Promise<void> {
     failedEntries: 0
   });
   const personalizationState = () => ({
-    global: globalPersonalization,
     memory: memoryPolicy,
     override: defaultChatPersonalizationOverride,
-    resolved: resolveChatPersonalization(globalPersonalization, memoryPolicy),
+    resolved: resolveChatPersonalization(memoryPolicy),
     catalogRevision: "catalog-revision-1",
     configRevision: "config-revision-1"
   });
@@ -354,9 +352,9 @@ async function main(): Promise<void> {
   assert.equal(client.getSnapshot().permissionMode, "full-access");
 
   assert.equal((await client.getPersonalizationState()).catalogRevision, "catalog-revision-1");
-  await client.updateChatPersonalization({ personality: "friendly" }, "catalog-revision-1");
+  await client.updateChatPersonalization({ useMemories: "inherit", contributeMemories: "inherit" }, "catalog-revision-1");
   assert.equal(chatExpectedRevision, "catalog-revision-1");
-  await client.updateGlobalPersonalization({ personalization: globalPersonalization }, "config-revision-1");
+  await client.updateGlobalPersonalization({ memory: memoryPolicy }, "config-revision-1");
   assert.equal(globalExpectedRevision, "config-revision-1");
 
   const exclusiveOperationsBeforeMemory = exclusiveOperations.length;
@@ -377,9 +375,15 @@ async function main(): Promise<void> {
     ["memory"],
     "attached v3 memory requests must use the runtime maintenance boundary"
   );
+  const exclusiveOperationsBeforeRead = exclusiveOperations.length;
   const remoteOverview = await client.memory<{
     maintenance: { state: string; eligible: number };
   }>("overview-v3", { selector: "all" });
+  assert.deepEqual(
+    exclusiveOperations.slice(exclusiveOperationsBeforeRead),
+    [],
+    "ordinary v3 memory reads must not occupy the runtime maintenance boundary"
+  );
   assert.deepEqual(remoteOverview.maintenance, {
     state: "idle",
     eligible: 0,
@@ -435,6 +439,9 @@ async function main(): Promise<void> {
   assert.ok(secondClient);
   assert.equal(secondClient.getSnapshot().info.sessionId, "session-host-test");
   await client.claimSession("session-host-test");
+  const foreignSubmit = await secondClient.submitRun("must be rejected by the session writer claim");
+  assert.equal(foreignSubmit.accepted, false, "另一个 client 不能绕过已登记的 session writer claim");
+  assert.equal(foreignSubmit.errorCode, "session_writer_conflict");
   await assert.rejects(
     secondClient.claimSession("session-host-test"),
     /already open in another tui client/u
@@ -480,7 +487,7 @@ async function main(): Promise<void> {
   await fs.chmod(hostPaths.registrationPath, 0o600);
   await assert.rejects(
     connectRuntimeHost(workspace, { clientId: "incompatible-client", surface: "tui" }),
-    /protocol 2 is incompatible with 3/u
+    /protocol 2 is incompatible with 5/u
   );
   assert.deepEqual(JSON.parse(await readFile(hostPaths.registrationPath, "utf8")), incompatibleRegistration);
   await fs.rm(hostPaths.registrationPath);

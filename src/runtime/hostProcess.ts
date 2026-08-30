@@ -1,17 +1,19 @@
 /**
  * 独立 Runtime Host 进程入口。
  *
- * 这个文件只负责 composition root 和进程信号；协议、owner 选举和 runtime
- * 重建都留在 RuntimeHost.ts，便于 CLI、Desktop 和测试共享同一套边界。
+ * 这个文件只负责 composition root 和进程信号；协议、owner 选举、生命周期和 runtime
+ * 重建都留在 `runtime/host/`，便于 CLI、Desktop 和测试共享同一套边界。
  */
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFileConfigStore } from "../config/store.js";
 import { createInteractiveAgentHost, type InteractiveAgentHost } from "./InteractiveAgentRuntime.js";
+import { WorktreeManager } from "./host/worktree.js";
 import {
   findLatestInterruptedSession,
   startRuntimeHost,
-  type RuntimeHostFactory
+  type RuntimeHostFactory,
+  type RuntimeHostFactoryOptions
 } from "./RuntimeHost.js";
 
 export interface RuntimeHostProcessOptions {
@@ -30,14 +32,16 @@ export async function runRuntimeHostProcess(argv: readonly string[] = process.ar
   const configStore = createFileConfigStore(options.workspaceRoot, {
     globalDir: options.configDir
   });
-  const createRuntime: RuntimeHostFactory = async (sessionId?: string): Promise<InteractiveAgentHost> => {
-    const host = await createInteractiveAgentHost(options.workspaceRoot, {
+  const createRuntime: RuntimeHostFactory = async (sessionId?: string, factoryOptions?: RuntimeHostFactoryOptions): Promise<InteractiveAgentHost> => {
+    const fresh = factoryOptions?.fresh === true;
+    const host = await createInteractiveAgentHost(factoryOptions?.workspaceRoot ?? options.workspaceRoot, {
       persistenceRoot: options.persistenceRoot,
       configStore,
-      attachmentRoot: options.attachmentRoot
+      attachmentRoot: options.attachmentRoot,
+      sessionId: fresh ? sessionId : undefined
     });
     try {
-      if (sessionId !== undefined) await host.runtime.resumeSession(sessionId);
+      if (sessionId !== undefined && !fresh) await host.runtime.resumeSession(sessionId);
       return host;
     } catch (error) {
       await host.runtime.close();
@@ -45,10 +49,15 @@ export async function runRuntimeHostProcess(argv: readonly string[] = process.ar
     }
   };
 
-  const initial = await createRuntime(selectedSession);
+  const worktrees = new WorktreeManager(options.workspaceRoot, options.persistenceRoot);
+  const initialFactoryOptions = selectedSession === undefined
+    ? undefined
+    : await worktrees.runtimeFactoryOptions(selectedSession);
+  const initial = await createRuntime(selectedSession, initialFactoryOptions);
   let server;
   try {
     server = await startRuntimeHost(options.persistenceRoot, initial.runtime, initial.commands, {
+      workspaceRoot: options.workspaceRoot,
       createRuntime,
       resumeInterrupted: options.resumeInterrupted,
       configDir: options.configDir

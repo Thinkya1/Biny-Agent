@@ -8,6 +8,7 @@ import {
   connectOrSpawnRuntimeHost,
   startRuntimeHost,
   type RuntimeHostFactory,
+  type RuntimeHostFactoryOptions,
   type RuntimeHostServer
 } from "../../runtime/RuntimeHost.js";
 import { withCliAbortSignal } from "../sigint.js";
@@ -29,9 +30,13 @@ export async function planCommand(workspaceRoot: string, task: string): Promise<
   if (attached) {
     runtime = attached;
   } else {
-    const createLocalRuntime: RuntimeHostFactory = async (sessionId?: string): Promise<InteractiveAgentHost> => {
-      const local = await createInteractiveAgentHost(workspaceRoot);
-      if (sessionId !== undefined) await local.runtime.resumeSession(sessionId);
+    const createLocalRuntime: RuntimeHostFactory = async (sessionId?: string, factoryOptions?: RuntimeHostFactoryOptions): Promise<InteractiveAgentHost> => {
+      const fresh = factoryOptions?.fresh === true;
+      const local = await createInteractiveAgentHost(factoryOptions?.workspaceRoot ?? workspaceRoot, {
+        persistenceRoot: workspaceRoot,
+        sessionId: fresh ? sessionId : undefined
+      });
+      if (sessionId !== undefined && !fresh) await local.runtime.resumeSession(sessionId);
       return local;
     };
     const local = await createLocalRuntime();

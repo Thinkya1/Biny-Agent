@@ -28,7 +28,8 @@ export type RuntimeOperation =
   | "telos"
   | "personalization"
   | "model_catalog"
-  | "checkpoint";
+  | "checkpoint"
+  | "message_version";
 
 export interface AgentEventBase {
   sessionId: string;
@@ -39,6 +40,7 @@ export interface AgentEventBase {
 export interface RunStartedEvent extends AgentEventBase {
   type: "run.started";
   messageId: string;
+  retryOfMessageId?: string;
   input: string;
   mode: AgentRunMode;
   model: AgentRunModel;
@@ -79,7 +81,9 @@ export type AgentHostEvent =
   | (AgentEventBase & { type: "run.cancelled"; durationMs: number; reason: string; stopReason?: AgentTurnStopReason; finishReason?: string; steps?: number; usage?: SessionUsage })
   /** 旧宿主仍可能发布 aborted；新用户取消应优先发布 run.cancelled。 */
   | (AgentEventBase & { type: "run.aborted"; durationMs: number; reason: string; stopReason?: AgentTurnStopReason; finishReason?: string; steps?: number })
-  | (AgentEventBase & { type: "run.failed"; durationMs: number; error: string; stopReason?: AgentTurnStopReason; finishReason?: string; steps?: number });
+  | (AgentEventBase & { type: "run.failed"; durationMs: number; error: string; stopReason?: AgentTurnStopReason; finishReason?: string; steps?: number })
+  /** 自动技能提取产出待审核草稿后的界面审核入口；不进入时间线，仅触发聊天内草稿卡。 */
+  | (AgentEventBase & { type: "skill.draft_created"; draft: { id: string; name: string; description: string; toolCalls: number } });
 
 export type TerminalRunEvent = Extract<AgentHostEvent, {
   type:
@@ -128,6 +132,7 @@ export interface ActiveRunSnapshot {
   sessionId: string;
   runId: string;
   messageId: string;
+  retryOfMessageId?: string;
   input: string;
   mode: AgentRunMode;
   status: AgentRunStatus;
@@ -181,6 +186,7 @@ export function reduceInteractiveRunState(
         sessionId: event.sessionId,
         runId: event.runId,
         messageId: event.messageId,
+        retryOfMessageId: event.retryOfMessageId,
         input: event.input,
         mode: event.mode,
         status: "thinking",
