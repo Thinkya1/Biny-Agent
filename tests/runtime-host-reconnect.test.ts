@@ -10,6 +10,7 @@ import {
 } from "../src/runtime/host/credentials.js";
 import {
   acquireHostLock,
+  ensureRuntimeHostDirectory,
   isProcessAlive,
   waitForHostRegistration
 } from "../src/runtime/host/lifecycle.js";
@@ -225,6 +226,7 @@ assert.equal(authenticateRuntimeHostHello(helloFor(5), registrationFor(3), 3), f
     releaseSessionClaim: async () => undefined,
     close: async () => undefined
   } as unknown as InteractiveRuntimeHandle;
+  await ensureRuntimeHostDirectory(path.dirname(paths.endpoint));
   const lock = await acquireHostLock(paths, persistenceRoot);
   const server = new RuntimeHostServer(stubRuntime, {} as unknown as CommandRuntime, registration, lock);
   let rejection: { error?: string; errorCode?: string } | undefined;
