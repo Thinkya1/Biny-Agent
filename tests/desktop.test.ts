@@ -674,7 +674,7 @@ async function testDraftSessionsDoNotReachTheSessionList(): Promise<void> {
     await activeDraft.close();
     assert.deepEqual((await listSessionSummaries(workspaceRoot)).map((session) => session.fileName), ["draft.jsonl"]);
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -704,7 +704,7 @@ async function testDesktopSafeStorageCredentialStore(): Promise<void> {
     const unavailable = new DesktopSafeStorageCredentialStore(root, () => ({ ...cipher, isAvailable: () => false }));
     await assert.rejects(unavailable.set("provider:x:apiKey", "v"), /加密存储不可用/u);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -756,8 +756,8 @@ async function testDesktopRestoresPersistedTerminalStatus(): Promise<void> {
     assert.equal(timeline[1]?.resumable, true);
     assert.match(timeline[1]?.error ?? "", /hard step limit/u);
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -792,8 +792,8 @@ async function testDesktopMessageEditFork(): Promise<void> {
     assert.equal(forked.events[0]?.type === "user_message" ? forked.events[0].content : undefined, "第一条");
     assert.notEqual(forked.events[0]?.runtime?.eventId, first.runtime?.eventId);
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -841,7 +841,7 @@ async function testDesktopPromptIdempotency(): Promise<void> {
     assert.equal(failedExecutions, 1, "失败操作的重复 IPC 也不能再次执行");
   } finally {
     await agents?.closeAll();
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -866,8 +866,8 @@ async function testDesktopPinAfterOpeningSessionUsesFreshRevision(): Promise<voi
     assert.equal(pinned?.pinned, true);
     await agents.closeAll();
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -892,8 +892,8 @@ async function testDesktopOpenSessionSkipsGlobalSessionScan(): Promise<void> {
     await agents.markSessionRead(project.id, recorder.sessionId, document.session.metadataRevision);
     await agents.closeAll();
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -926,8 +926,8 @@ async function testDesktopOpenSessionReturnsWriterConflictReadOnlyDocument(): Pr
   } finally {
     await agents?.closeAll();
     owner?.close();
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -975,8 +975,8 @@ async function testDesktopOpenSessionReturnsConsistentMetadataSnapshot(): Promis
     assert.deepEqual(current.labels, ["新标签"]);
     await agents.closeAll();
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1001,8 +1001,8 @@ async function testDesktopRuntimeInitializationIsShared(): Promise<void> {
     assert.equal(internals.runtimes.size, 1);
   } finally {
     await agents?.closeAll();
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1030,8 +1030,8 @@ async function testWorkspaceFilePreview(): Promise<void> {
     assert.equal(large.truncated, true);
     await assert.rejects(projects.readWorkspaceFile(project, "../outside.txt"), /Path escapes workspace/);
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1060,9 +1060,9 @@ async function testWorkspaceDirectoryListing(): Promise<void> {
     await symlink(outsideRoot, path.join(workspaceRoot, "outside-link"), "dir");
     await assert.rejects(projects.listWorkspaceDirectory(project, "outside-link"), /symbolic link/);
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
-    await rm(outsideRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(outsideRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1085,8 +1085,8 @@ async function testDesktopGitInspectionDisablesHelpers(): Promise<void> {
     await projects.createProject(workspaceRoot);
     await assert.rejects(access(sentinel));
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1145,9 +1145,9 @@ async function testDesktopGitBranches(): Promise<void> {
     await assert.rejects(projects.switchProjectBranch(nonGitProject.id, "main"), /不是 Git/u);
   } finally {
     await agents?.closeAll();
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(nonGitRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(nonGitRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1203,8 +1203,8 @@ async function testInlineImageReading(): Promise<void> {
     assert.equal(await projects.readInlineImage(project, "@attachments/../../escape.png"), undefined);
     assert.equal(await projects.readInlineImage(project, "missing.png"), undefined);
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1256,7 +1256,7 @@ async function testFilePanelSizing(): Promise<void> {
     await restored.setFilePanelWidth(1);
     assert.equal(restored.filePanelWidth(), MIN_FILE_PANEL_WIDTH);
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1462,7 +1462,7 @@ async function testSidebarStateNormalizesWidth(): Promise<void> {
     await state.setSidebarWidth(480);
     assert.equal(state.sidebarWidth(), MAX_SIDEBAR_WIDTH);
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1480,7 +1480,7 @@ async function testDesktopThemePreference(): Promise<void> {
     await restored.setThemePreference("light");
     assert.equal(restored.themePreference(), "light");
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1508,7 +1508,7 @@ async function testDesktopActiveViewPersistence(): Promise<void> {
     await migrated.load();
     assert.equal(migrated.activeView(), "chat");
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1615,8 +1615,8 @@ async function testDesktopSettingsTransaction(): Promise<void> {
     await restartedAgents.closeAll();
   } finally {
     await agents?.closeAll();
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1661,8 +1661,8 @@ async function testDesktopSetDefaultModelImmediate(): Promise<void> {
     );
   } finally {
     await agents?.closeAll();
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1759,9 +1759,9 @@ async function testDesktopGlobalWriteGateAndRuntimeRefresh(): Promise<void> {
     await agents?.closeAll();
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(firstRoot, { recursive: true, force: true });
-    await rm(secondRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(firstRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(secondRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1823,9 +1823,9 @@ async function testDesktopSettingsSaveReturnsBeforeRuntimeRefresh(): Promise<voi
     await agents?.closeAll();
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(firstRoot, { recursive: true, force: true });
-    await rm(secondRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(firstRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(secondRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -1880,9 +1880,9 @@ async function testDesktopGlobalPersonalizationRefreshesInBackground(): Promise<
     await agents?.closeAll();
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(firstRoot, { recursive: true, force: true });
-    await rm(secondRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(firstRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(secondRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2010,8 +2010,8 @@ async function testDesktopSettingsCredentialLifecycle(): Promise<void> {
     assert.equal((await readFile(state.settingsTransactionJournalPath(), "utf8").catch(() => "")).includes("one-shot-secret"), false);
   } finally {
     await agents?.closeAll();
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2138,8 +2138,8 @@ async function testDesktopModelConfiguration(): Promise<void> {
     await assert.rejects(access(path.join(workspaceRoot, "config.json")));
     await agents.closeAll();
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2188,8 +2188,8 @@ async function testDesktopModelSwitchDoesNotResumeInterruptedTurn(): Promise<voi
     await agents?.closeAll();
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2226,8 +2226,8 @@ async function testDesktopModelSwitchDoesNotStartDetachedHost(): Promise<void> {
     assert.equal(configStore.supportsDetachedRuntimeHost, false);
   } finally {
     await agents?.closeAll();
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2262,8 +2262,8 @@ async function testDesktopSubagentSlashCommands(): Promise<void> {
 
     await agents.closeAll();
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2293,8 +2293,8 @@ async function testDesktopDoesNotResumePersistedIdleSession(): Promise<void> {
   } finally {
     await agents?.closeAll();
     owner?.close();
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2324,8 +2324,8 @@ async function testDesktopPermissionModePersistsInIdleSnapshot(): Promise<void> 
     await agents?.closeAll();
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2365,8 +2365,8 @@ async function testDesktopPermissionModePersistsThroughExistingHost(): Promise<v
     else process.env.BINY_AGENT_DIR = previousAgentRoot;
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2412,8 +2412,8 @@ async function testDesktopReconcilesPersistedPermissionWithExistingHost(): Promi
     else process.env.BINY_AGENT_DIR = previousAgentRoot;
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2491,8 +2491,8 @@ async function testDesktopMemoryChangesKeepPermissionMode(): Promise<void> {
     else process.env.BINY_AGENT_DIR = previousAgentRoot;
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2513,7 +2513,7 @@ async function testDesktopCredentialsAreSeparated(): Promise<void> {
     assert.equal(loaded.providers.deepseek?.apiKey, "desktop-secret");
     assert.equal(loaded.web.search.apiKey, "tvly-web-secret");
   } finally {
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2593,8 +2593,8 @@ async function testDesktopWebSearchSettings(): Promise<void> {
 
     await agents.closeAll();
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2668,8 +2668,8 @@ async function testDesktopPersonalizationCasAndChatOverride(): Promise<void> {
     else process.env[BINY_AGENT_DIR_ENV] = previousAgentDir;
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2834,9 +2834,9 @@ async function testDesktopMemoryV3CasAndOriginFilters(): Promise<void> {
     else process.env[BINY_AGENT_DIR_ENV] = previousAgentDir;
     if (previousHostEntry === undefined) delete process.env.BINY_RUNTIME_HOST_ENTRY;
     else process.env.BINY_RUNTIME_HOST_ENTRY = previousHostEntry;
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(otherWorkspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(otherWorkspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2890,8 +2890,8 @@ async function testDesktopRequiresModelConfiguration(): Promise<void> {
     assert.equal((await configStore.load()).defaultModel, "fallback-model");
   } finally {
     await agents?.closeAll();
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -2970,8 +2970,8 @@ async function testDesktopConnectionMetadata(): Promise<void> {
     );
     await agents.closeAll();
   } finally {
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -3096,8 +3096,8 @@ async function testDesktopOAuthCommitSurvivesCatalogFailure(): Promise<void> {
   } finally {
     await agents?.closeAll();
     globalThis.fetch = originalFetch;
-    await rm(workspaceRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -3123,9 +3123,9 @@ async function testWorkspaceSnapshotDoesNotReorderProjects(): Promise<void> {
     assert.equal(state.project(second.id)?.lastOpenedAt, secondOpenedAt);
     assert.deepEqual(state.projects().map((project) => project.id), [first.id, second.id]);
   } finally {
-    await rm(firstRoot, { recursive: true, force: true });
-    await rm(secondRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(firstRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(secondRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -3170,9 +3170,9 @@ async function testDesktopNavigationReadsDoNotPersistSelection(): Promise<void> 
     assert.equal(state.activeProjectId(), first.id);
     await agents.closeAll();
   } finally {
-    await rm(firstRoot, { recursive: true, force: true });
-    await rm(secondRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(firstRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(secondRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -3199,9 +3199,9 @@ async function testDesktopSidebarListsEveryProjectSession(): Promise<void> {
     assert.deepEqual(new Set(sessions.map((session) => session.id)), new Set(["first-session", "second-session"]));
     await agents.closeAll();
   } finally {
-    await rm(firstRoot, { recursive: true, force: true });
-    await rm(secondRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(firstRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(secondRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -3234,10 +3234,10 @@ async function testDesktopProjectReorder(): Promise<void> {
       [third.id, first.id, second.id]
     );
   } finally {
-    await rm(firstRoot, { recursive: true, force: true });
-    await rm(secondRoot, { recursive: true, force: true });
-    await rm(thirdRoot, { recursive: true, force: true });
-    await rm(desktopRoot, { recursive: true, force: true });
+    await rm(firstRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(secondRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(thirdRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
