@@ -5,12 +5,13 @@ import { formatProjectContext } from "../../project/ProjectContext.js";
 import { buildMemoryOverview } from "./memoryFormat.js";
 import { LocalMemory, formatMemoryMatches, redactSecrets } from "./LocalMemory.js";
 import { formatRepoMapCandidates, WorkspaceContext } from "./WorkspaceContext.js";
+import { perfNow, recordPerfPhase } from "../../observability/perfTiming.js";
 import type { CompactionResult, CompactionStatus, ContextBudgetStatus, ContextStatus, LoadedInstruction, MemoryMatch, RecentWorkspaceActivity, WorkspaceTurnData } from "./types.js";
 import type { ModelUsageObserver } from "../../observability/usage.js";
 import type { ContextComponentUsage, SessionContextCheckpoint, SessionContextState } from "../../session/metadata.js";
 import type { ModelContextBudget } from "../../ai/types.js";
 import type { AgentAttachment } from "../AgentSession.js";
-import type { PersonalizationMetadata } from "../../personalization/index.js";
+import type { PersonalizationMetadata } from "../../session/metadata.js";
 import { canonicalToolSchemaHash, type PromptEpochReason } from "../../llm/promptCache.js";
 import type { MemoryOrigin, MemoryOriginCounts, MemoryRecallReport } from "./memoryTypes.js";
 import type { HybridMemoryRetriever } from "./HybridMemoryRetriever.js";
@@ -122,14 +123,20 @@ export class ContextMemory {
   ): Promise<PreparedAgentContext> {
     this.memoryUseEnabled = useMemories;
     signal?.throwIfAborted();
+    const workspacePerfStartedAt = perfNow();
     await this.workspace.initialize(signal);
     signal?.throwIfAborted();
     const workspace = await this.workspace.prepareTurn(input, signal);
+    recordPerfPhase("context.workspace", workspacePerfStartedAt);
     // 概览（codex 式锚点）始终注入；语义召回的条目作为其下增量。条目内容由 recall_memory
     // 按需取用；引用在回合结束解析 <memory-citations> 后回写使用统计。
+    const overviewPerfStartedAt = perfNow();
     const memoryOverview = useMemories ? await this.loadMemoryOverview(signal) : "";
+    recordPerfPhase("context.memoryOverview", overviewPerfStartedAt);
     this.memoryOverviewChars = memoryOverview.length;
+    const recallPerfStartedAt = perfNow();
     const recalled = useMemories ? await this.findRelevantMemory(input, [...workspace.explicitPaths, ...workspace.recentActivity.paths], signal) : { matches: [], report: emptyMemoryRecallReport(), entries: [] };
+    recordPerfPhase("context.memoryRecall", recallPerfStartedAt, { matches: recalled.matches.length });
     const memoryMatches = recalled.matches;
     signal?.throwIfAborted();
     const budget = this.currentBudget();
@@ -149,6 +156,7 @@ export class ContextMemory {
     );
     let compaction = noCompaction(this.summary, estimateMessageTokens(this.history));
     if (this.shouldCompact(assembly.budget.requestedTokens ?? assembly.budget.usedTokens, limits)) {
+      const compactPerfStartedAt = perfNow();
       compaction = await this.compactMessages(
         this.history,
         undefined,
@@ -156,6 +164,7 @@ export class ContextMemory {
         false,
         assembly.budget.requestedTokens
       );
+      recordPerfPhase("context.compact", compactPerfStartedAt, { compacted: compaction.compacted });
       if (compaction.compacted) {
         assembly = assembleContext(
           systemPrompt,

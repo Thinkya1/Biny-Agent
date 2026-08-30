@@ -304,7 +304,7 @@ export class MemoryStorage {
     const safe = resolveEntryOrigin(sanitizeMemoryEntryInput(input), workspaceOrigin(canonicalWorkspace));
     assertAllowedScopedEntry(safe, canonicalWorkspace);
     return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.now ?? new Date(), options.signal);
+      const snapshot = await this.readScopeLocked(directory, options.signal);
       assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
       if (safe.summary.length < 20) return { written: false, revision: snapshot.state.revision };
       const duplicate = snapshot.entries.find(({ entry }) => entry.topic === safe.topic && memoryEntryEquals(entry, safe));
@@ -342,7 +342,7 @@ export class MemoryStorage {
     const canonicalWorkspace = await fs.realpath(path.resolve(this.workspaceRoot));
     return await this.withScopeLock("project", true, options.signal, async (directory) => {
       const now = options.now ?? new Date();
-      const snapshot = await this.readScopeLocked(directory, now, options.signal);
+      const snapshot = await this.readScopeLocked(directory, options.signal);
       assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
       const record = snapshot.entries.find(({ entry }) => entry.id === id);
       if (!record) return { written: false, revision: snapshot.state.revision };
@@ -395,7 +395,7 @@ export class MemoryStorage {
   private async deleteEntryInternal(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
     options.signal?.throwIfAborted();
     return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.now ?? new Date(), options.signal);
+      const snapshot = await this.readScopeLocked(directory, options.signal);
       assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
       const record = snapshot.entries.find(({ entry }) => entry.id === id);
       if (!record) return { deleted: false, revision: snapshot.state.revision };
@@ -417,7 +417,7 @@ export class MemoryStorage {
   async clearEntries(selector: MemoryOriginSelector, options: MemoryMutationOptions): Promise<MemoryClearResult> {
     options.signal?.throwIfAborted();
     return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.now ?? new Date(), options.signal);
+      const snapshot = await this.readScopeLocked(directory, options.signal);
       assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
       const workspaceId = currentWorkspaceId(directory);
       const targets = snapshot.entries.filter(({ entry }) => matchesOriginSelectors(entry.origin, [selector], workspaceId));
@@ -453,7 +453,7 @@ export class MemoryStorage {
     validateCandidateLineage(input);
     return await this.withScopeLock("project", true, options.signal, async (directory) => {
       const now = options.now ?? new Date();
-      const snapshot = await this.readScopeLocked(directory, now, options.signal);
+      const snapshot = await this.readScopeLocked(directory, options.signal);
       assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
       if (input.lineage.externalContext && options.excludeExternalContext) {
         return { queued: false, revision: snapshot.state.revision, reason: "external_context_excluded" };
@@ -520,7 +520,7 @@ export class MemoryStorage {
   async removeCandidate(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
     options.signal?.throwIfAborted();
     return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.now ?? new Date(), options.signal);
+      const snapshot = await this.readScopeLocked(directory, options.signal);
       assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
       if (!snapshot.candidates.some((candidate) => candidate.id === id)) {
         return { deleted: false, revision: snapshot.state.revision };
@@ -578,7 +578,7 @@ export class MemoryStorage {
     options.signal?.throwIfAborted();
     return await this.withScopeLock(scope, true, options.signal, async (directory) => {
       const now = options.now ?? new Date();
-      const snapshot = await this.readScopeLocked(directory, now, options.signal);
+      const snapshot = await this.readScopeLocked(directory, options.signal);
       assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
       const sourceSet = new Set(sourceEntryIds);
       if (sourceSet.size !== sourceEntryIds.length) throw new Error("Consolidation source ids must be unique.");
@@ -668,37 +668,36 @@ export class MemoryStorage {
     });
   }
 
-  /** 读路径不取目录锁：所有持久化文件都经 atomicWriteFile 落盘，读者只会看到完整快照。 */
+  /** 读路径不取目录锁：单文件写入是原子的，跨文件视图允许短暂不一致。 */
   private async readScope(scope: MemoryScope, signal?: AbortSignal): Promise<ScopeSnapshot> {
     signal?.throwIfAborted();
     const existing = await resolveScopeDirectory(this.workspaceRoot, scope, false);
     if (!existing) return emptySnapshot();
-    return await this.readScopeUnlocked(existing, new Date(), signal);
+    return await this.readScopeUnlocked(existing, signal);
   }
 
   /** 锁内读：供写路径在持有目录锁时复用，做 revision CAS 与恢复。 */
-  private async readScopeLocked(directory: PinnedScopeDirectory, now: Date, signal?: AbortSignal): Promise<ScopeSnapshot> {
-    return await this.readScopeInternal(directory, now, signal, true);
+  private async readScopeLocked(directory: PinnedScopeDirectory, signal?: AbortSignal): Promise<ScopeSnapshot> {
+    return await this.readScopeInternal(directory, signal, true);
   }
 
-  /** 无锁读：跳过待提交恢复的写回与 reconcile 落盘，读到的是上一次已提交的一致性快照。 */
-  private async readScopeUnlocked(directory: PinnedScopeDirectory, now: Date, signal?: AbortSignal): Promise<ScopeSnapshot> {
-    return await this.readScopeInternal(directory, now, signal, false);
+  /** 无锁读：跳过待提交恢复和状态修复，读到的是允许短暂不一致的快照。 */
+  private async readScopeUnlocked(directory: PinnedScopeDirectory, signal?: AbortSignal): Promise<ScopeSnapshot> {
+    return await this.readScopeInternal(directory, signal, false);
   }
 
-  private async readScopeInternal(directory: PinnedScopeDirectory, now: Date, signal: AbortSignal | undefined, locked: boolean): Promise<ScopeSnapshot> {
+  private async readScopeInternal(directory: PinnedScopeDirectory, signal: AbortSignal | undefined, locked: boolean): Promise<ScopeSnapshot> {
     signal?.throwIfAborted();
     await assertPinnedScopeDirectory(this.workspaceRoot, directory);
     const rawState = await readState(directory);
-    // 只有持锁写方才负责恢复中断的 mutation 并把 reconcile 结果落盘；无锁读不重放未提交内容。
+    // 只有持锁写方才负责恢复中断的 mutation；普通读不重放未提交内容，也不修复状态文件。
     const state = locked
       ? await recoverPendingMutationLocked(directory, rawState, signal)
       : rawState;
     const entries = await applyUsageProjection(directory, await readEntryRecords(directory, signal), signal);
     const candidates = await readCandidates(directory, false, signal);
-    const reconciled = reconcileState(state, entries, candidates, now);
-    if (locked && reconciled.revision !== state.revision) await atomicWriteFile(directory, stateFileName, renderState(reconciled));
-    return { directory, state: locked ? reconciled : state, entries, candidates };
+    const snapshotState = locked ? stateForSnapshot(state, entries, candidates) : state;
+    return { directory, state: snapshotState, entries, candidates };
   }
 
   private async withScopeLock<T>(
@@ -850,7 +849,7 @@ async function ensureRealDirectory(directory: string, create: boolean, label: st
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new Error(`Local memory storage ${label} must be a real directory, not a symbolic link.`);
   }
-  await fs.chmod(directory, 0o700);
+  if (create) await fs.chmod(directory, 0o700);
   return stat;
 }
 
@@ -1102,9 +1101,9 @@ async function unlinkCandidate(directory: PinnedScopeDirectory, id: string): Pro
 
 
 
-function reconcileState(state: MemoryState, entries: ScopeEntryRecord[], candidates: MemoryCandidate[], now: Date): MemoryState {
+function stateForSnapshot(state: MemoryState, entries: ScopeEntryRecord[], candidates: MemoryCandidate[]): MemoryState {
   const revision = Math.max(state.revision, ...entries.map(({ entry }) => entry.revision), ...candidates.map((candidate) => candidate.revision), 0);
-  return revision === state.revision ? state : { ...state, revision, updatedAt: now.toISOString() };
+  return revision === state.revision ? state : { ...state, revision };
 }
 
 function chooseEntryFileName(entry: MemoryEntry, records: ScopeEntryRecord[]): string {

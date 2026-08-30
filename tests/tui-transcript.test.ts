@@ -27,7 +27,6 @@ import {
   isDoubleCtrlC,
   memoryPolicyOptionForOverride,
   memoryPolicySelectOptions,
-  personalitySelectOptions,
   runtimeStatus,
   selectDialogRow,
   shouldConfirmAutocompleteOnEnter,
@@ -288,26 +287,25 @@ function testSlashCommandParity(): void {
   const tuiCommands = slashCommandsForSurface("tui");
   const desktopCommands = slashCommandsForSurface("desktop");
   const desktopNames = new Set(desktopCommands.map((command) => command.name));
-  assert.equal(tuiCommands.length, 25);
-  for (const removed of ["/help", "/approvals", "/sessions", "/quit"]) {
+  assert.equal(tuiCommands.length, 26);
+  for (const removed of ["/help", "/approvals", "/quit"]) {
     assert.equal(tuiCommands.some((command) => command.name === removed), false);
   }
   assert.equal(tuiCommands.some((command) => command.name === "/plan"), false);
   assert.equal(tuiCommands.some((command) => command.name === "/mode"), false);
   assert.ok(tuiCommands.some((command) => command.name === "/memory"));
-  assert.ok(tuiCommands.some((command) => command.name === "/personality"));
   assert.ok(tuiCommands.some((command) => command.name === "/memories"));
   assert.ok(tuiCommands.some((command) => command.name === "/undo"));
   assert.equal(tuiCommands.some((command) => command.name === "/continue"), false);
   assert.ok(tuiCommands.some((command) => command.name === "/fork"));
   assert.ok(tuiCommands.some((command) => command.name === "/new"));
+  assert.ok(tuiCommands.some((command) => command.name === "/sessions"));
+  assert.ok(tuiCommands.some((command) => command.name === "/worktree"));
   assert.ok(tuiCommands.some((command) => command.name === "/app"));
-  assert.ok(["/status", "/usage", "/personality", "/memories", "/memory", "/subagent"].every((name) => desktopNames.has(name)));
   assert.equal(desktopNames.has("/context"), false);
 }
 
 function testPersonalizationSelectors(): void {
-  assert.deepEqual(personalitySelectOptions.map((option) => option.value), ["inherit", "none", "friendly", "pragmatic", "buddy"]);
   assert.deepEqual(memoryPolicySelectOptions.map((option) => option.value), ["inherit", "both", "use", "contribute", "off"]);
   const override = {
     ...defaultChatPersonalizationOverride,
@@ -315,9 +313,10 @@ function testPersonalizationSelectors(): void {
     contributeMemories: "inherit" as const
   };
   const resolved = resolveChatPersonalization(
-    { enabled: true, personality: "none", customInstructions: "" },
+    { enabled: true },
     {
       useMemories: true,
+      contributeMemories: true,
       generateMemories: true,
       extractModel: undefined,
       consolidationModel: undefined,
@@ -326,7 +325,7 @@ function testPersonalizationSelectors(): void {
     },
     override
   );
-  assert.equal(memoryPolicyOptionForOverride({ override, resolved }), "contribute");
+  assert.equal(memoryPolicyOptionForOverride({ override, resolved }), "both");
 }
 
 function testStatusReportUsesRuntimeAndContextFields(): void {

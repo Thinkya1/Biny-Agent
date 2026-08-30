@@ -10,6 +10,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { EmbeddingModelRuntime, EmbeddingThresholds } from "../../llm/embedding/types.js";
 import { redactSecrets } from "../../utils/secrets.js";
+import { perfNow, recordPerfPhase } from "../../observability/perfTiming.js";
 import { memoryVectorContentHash, type MemoryVectorIndexStatus, type MemoryVectorSearchResult } from "./MemoryVectorIndex.js";
 import type {
   MemoryEntriesResult,
@@ -48,7 +49,6 @@ export interface MemoryVectorSearchIndex {
       entryIds?: ReadonlySet<string>;
     }
   ): MemoryVectorSearchResult[];
-  recordRecall(entryIds: readonly string[], recalledAt?: string): void;
   close?(): void;
 }
 
@@ -56,7 +56,7 @@ export interface HybridMemoryRetrieverOptions {
   localMemory: AutomaticMemoryStore;
   workspaceRoot: string;
   getEmbeddingRuntime: () => Promise<EmbeddingModelRuntime | undefined>;
-  getVectorIndex: () => MemoryVectorSearchIndex;
+  getReadOnlyVectorIndex: () => MemoryVectorSearchIndex | undefined;
   getThresholds: (fingerprint: string, recommended: EmbeddingThresholds) => EmbeddingThresholds;
   rewriteQuery?: (query: string, signal?: AbortSignal) => Promise<string>;
   queryRewriteEnabled?: () => boolean;
@@ -115,16 +115,21 @@ export class HybridMemoryRetriever {
     }
   ): Promise<MemorySearchResult> {
     options.signal?.throwIfAborted();
+    const listPerfStartedAt = perfNow();
     const snapshot = await this.options.localMemory.listMemoryEntries({
       origins: options.origins ?? ["all"],
       signal: options.signal
     });
+    recordPerfPhase("memory.listEntries", listPerfStartedAt);
     if (!snapshot.entries.length || options.limit < 1) return emptySearchResult(snapshot);
 
     const safeQuery = redactSecrets(query).trim();
+    const rewritePerfStartedAt = perfNow();
     const rewritten = await this.rewrite(safeQuery, snapshot.entries, options.signal);
+    recordPerfPhase("memory.rewrite", rewritePerfStartedAt, { changed: rewritten !== safeQuery });
     const lexicalQueries = [...new Set([safeQuery, rewritten].filter(Boolean))];
     if (!lexicalQueries.length && paths.length) lexicalQueries.push("");
+    const lexicalPerfStartedAt = perfNow();
     const lexicalResults = await Promise.all(lexicalQueries.map(async (value) => (
       await this.options.localMemory.search(value, paths, {
         origins: ["all"],
@@ -132,6 +137,7 @@ export class HybridMemoryRetriever {
         signal: options.signal
       })
     )));
+    recordPerfPhase("memory.lexical", lexicalPerfStartedAt);
     const exactId = snapshot.entries.find(({ id }) => id === safeQuery)?.id;
     const lexicalRankings = lexicalResults.map(({ matches }) => {
       const ids = matches.map(({ entry }) => entry.id);
@@ -142,7 +148,9 @@ export class HybridMemoryRetriever {
       for (const match of result.matches) if (!matchPaths.has(match.entry.id)) matchPaths.set(match.entry.id, match.path);
     }
 
+    const semanticPerfStartedAt = perfNow();
     const semantic = await this.semanticSearch(rewritten || safeQuery, snapshot.entries, options.signal);
+    recordPerfPhase("memory.semantic", semanticPerfStartedAt, { available: semantic.available });
     return rankHybridMemory({
       entries: snapshot.entries,
       currentWorkspaceId: await this.currentWorkspaceId,
@@ -160,11 +168,6 @@ export class HybridMemoryRetriever {
     const uniqueIds = [...new Set(ids)];
     if (!uniqueIds.length) return;
     await this.options.localMemory.recordInjectedRecall(uniqueIds, options);
-    try {
-      this.vectorIndex?.recordRecall(uniqueIds, (options.now ?? this.options.now?.() ?? new Date()).toISOString());
-    } catch {
-      // SQLite usage 是派生投影；损坏或锁冲突不能影响已组装好的模型上下文。
-    }
   }
 
   close(): void {
@@ -205,7 +208,8 @@ export class HybridMemoryRetriever {
       if (!queryVector || embedded.embeddings.length !== 1 || embedded.fingerprint !== runtime.descriptor.fingerprint) {
         return { available: false, results: [] };
       }
-      const index = this.vectorIndex ?? this.options.getVectorIndex();
+      const index = this.vectorIndex ?? this.options.getReadOnlyVectorIndex();
+      if (!index) return { available: false, results: [] };
       this.vectorIndex = index;
       const active = index.status().active;
       if (

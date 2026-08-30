@@ -10,6 +10,7 @@ async function main(): Promise<void> {
   await testCancellationDoesNotWaitForProviderStream();
   await testCancellationClosesLateProviderStream();
   await testProviderFailureDoesNotWaitForStreamCleanup();
+  await testUnknownToolCallStopsWithoutRetry();
   const calls: ModelStreamContext[] = [];
   const model: AgentModel = {
     provider: "test",
@@ -58,6 +59,32 @@ async function main(): Promise<void> {
   assert.equal(received.includes("tool_execution_end"), true);
   assert.equal(received.filter((type) => type === "turn_end").length, 2);
   console.log("agent core tests passed");
+}
+
+async function testUnknownToolCallStopsWithoutRetry(): Promise<void> {
+  let requests = 0;
+  const model: AgentModel = {
+    provider: "malformed-tool-test",
+    modelId: "malformed-tool-model",
+    stream: async (): Promise<AsyncIterable<ModelStreamEvent>> => {
+      requests += 1;
+      return events([
+        { type: "tool-call", id: "invalid-call", name: "", arguments: {} },
+        { type: "finish", reason: "tool-calls" }
+      ]);
+    }
+  };
+  const received: AgentEvent[] = [];
+  for await (const event of agentLoop([{ role: "user", content: "run" }], { messages: [], tools: [] }, {
+    model,
+    tools: [],
+    maxSteps: 4
+  })) received.push(event);
+
+  assert.equal(requests, 1, "an unknown tool must not trigger another provider request");
+  const failure = received.find((event): event is Extract<AgentEvent, { type: "error" }> => event.type === "error");
+  assert.equal(failure?.fatal, true);
+  assert.match(failure?.error ?? "", /missing a function name/iu);
 }
 
 async function testModelStreamWithoutFinishFails(): Promise<void> {

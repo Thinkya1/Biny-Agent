@@ -60,6 +60,7 @@ export interface MemoryEmbeddingServiceOptions {
   localMemory: LocalMemory;
   localManager: LocalEmbeddingManager;
   getVectorIndex: () => MemoryVectorIndex;
+  getReadOnlyVectorIndex: () => MemoryVectorIndex | undefined;
   getActiveModel: () => EmbeddingModelRef | undefined;
   getProviderModels: () => EmbeddingModelDescriptor[];
   getRuntime: () => Promise<EmbeddingModelRuntime | undefined>;
@@ -98,16 +99,24 @@ export class MemoryEmbeddingService {
       : models.find((candidate) => sameEmbeddingModel(candidate.ref, activeModel));
     let index: MemoryVectorIndexStatus;
     let states: ReturnType<MemoryVectorIndex["entryStates"]> = [];
+    let indexAvailable = false;
+    let statusIndex: MemoryVectorIndex | undefined;
     try {
-      index = this.vectorIndex().status();
-      states = descriptor === undefined
-        ? []
-        : this.vectorIndex().entryStates(descriptor.fingerprint, entries.entries.map((entry) => ({
-          entryId: entry.id,
-          contentHash: memoryEntryContentHash(entry)
-        })));
-      // entryStates 会把首次发现的内容哈希持久化为 pending；复读一次得到可用向量数。
-      index = this.vectorIndex().status();
+      statusIndex = this.vectorIndexInstance ?? this.options.getReadOnlyVectorIndex();
+      if (statusIndex === undefined) {
+        // 索引文件不存在时，状态页只报告未知/待处理，不为了一次读取创建空 SQLite。
+        index = { building: 0, failed: 0 };
+      } else {
+        indexAvailable = true;
+        index = statusIndex.status();
+        states = descriptor === undefined
+          ? []
+          : statusIndex.entryStates(descriptor.fingerprint, entries.entries.map((entry) => ({
+            entryId: entry.id,
+            contentHash: memoryEntryContentHash(entry)
+          })));
+        // entryStates 只在返回值中临时标记 pending，不修改索引状态；状态页不触发修复写。
+      }
     } catch (error) {
       return {
         activeModel,
@@ -121,6 +130,8 @@ export class MemoryEmbeddingService {
         operation: cloneOperation(this.operation),
         degradedReason: `向量索引不可用：${errorMessage(error)}`
       };
+    } finally {
+      if (statusIndex !== undefined && statusIndex !== this.vectorIndexInstance) statusIndex.close();
     }
     const activeMatches = descriptor !== undefined
       && index.active?.modelFingerprint === descriptor.fingerprint;
@@ -129,8 +140,10 @@ export class MemoryEmbeddingService {
     const failedEntries = states.filter(({ status }) => status === "failed").length;
     const pendingEntries = descriptor === undefined
       ? entries.entries.length
-      : states.filter(({ status }) => status === "pending").length
-        + (activeMatches ? 0 : storedIndexedEntries);
+      : !indexAvailable
+        ? entries.entries.length
+        : states.filter(({ status }) => status === "pending").length
+          + (activeMatches ? 0 : storedIndexedEntries);
     return {
       activeModel,
       models,

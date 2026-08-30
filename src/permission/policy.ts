@@ -31,6 +31,7 @@ export type ToolName =
   | "web_search"
   | "web_fetch"
   | "update_todos"
+  | "update_emotion"
   | "attempt_completion";
 
 export interface AnalyzePermissionInput {
@@ -217,6 +218,16 @@ export function analyzePermissionRequest(input: AnalyzePermissionInput): Permiss
       actionType: "write",
       riskLevel: "low",
       reason: "saves a redacted note to the source-aware durable memory library"
+    };
+  }
+
+  if (input.toolName === "update_emotion") {
+    // 情绪只写入 Agent 自己的表达层状态，不改变工作区文件、任务目标或工具权限。
+    return {
+      ...base(input),
+      actionType: "write",
+      riskLevel: "low",
+      reason: "updates the agent's local expression state"
     };
   }
 

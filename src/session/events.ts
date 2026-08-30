@@ -46,7 +46,7 @@ const modelRequestContextSchema = z.object({
   runId: z.string().optional(),
   turnId: z.string().optional(),
   step: z.number().int().nonnegative().optional(),
-  operation: z.enum(["agent", "plan", "compaction", "memory", "subagent"]).optional(),
+  operation: z.enum(["agent", "plan", "completion_review", "compaction", "memory", "subagent"]).optional(),
   promptEpoch: z.number().int().nonnegative().optional(),
   promptEpochReason: z.enum(["initial", "compaction", "rewind", "fork", "provider_changed", "model_changed", "tool_schema_changed"]).optional(),
   promptEpochCreatedAt: z.string().optional(),
@@ -126,6 +126,7 @@ const sessionEventSchema = z.discriminatedUnion("type", [
     preparationUsage: z.array(sessionUsageSchema).optional(),
     messageId: z.string().optional(),
     parentMessageId: z.string().optional(),
+    slotId: z.string().optional(),
     auditOnly: z.boolean().optional(),
     time: z.string().optional()
   }).passthrough(),
@@ -138,6 +139,11 @@ const sessionEventSchema = z.discriminatedUnion("type", [
     usage: sessionUsageSchema.optional(),
     relatedUsage: z.array(sessionUsageSchema).optional(),
     contextState: sessionContextSchema.optional(),
+    messageId: z.string().optional(),
+    parentMessageId: z.string().optional(),
+    slotId: z.string().optional(),
+    replyToMessageId: z.string().optional(),
+    retryOfMessageId: z.string().optional(),
     auditOnly: z.boolean().optional(),
     time: z.string().optional()
   }).passthrough(),
@@ -184,6 +190,9 @@ const sessionEventSchema = z.discriminatedUnion("type", [
     message: persistedAgentMessageSchema,
     messageId: z.string().optional(),
     parentMessageId: z.string().optional(),
+    slotId: z.string().optional(),
+    replyToMessageId: z.string().optional(),
+    retryOfMessageId: z.string().optional(),
     time: z.string().optional()
   }).passthrough(),
   z.object({
@@ -200,6 +209,12 @@ const sessionEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("model_request"),
     metrics: modelRequestMetricsSchema,
+    time: z.string().optional()
+  }).passthrough(),
+  z.object({
+    type: z.literal("message_version_selected"),
+    messageId: z.string(),
+    slotId: z.string(),
     time: z.string().optional()
   }).passthrough(),
   z.object({

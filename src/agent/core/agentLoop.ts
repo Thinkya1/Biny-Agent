@@ -110,12 +110,14 @@ async function* runLoop(
 
       const calls = assistant.content.filter((part): part is AgentToolCallContent => part.type === "toolCall");
       let toolResults: AgentToolResultMessage[] = [];
+      let fatalToolError = false;
       hasMoreToolCalls = calls.length > 0;
       if (calls.length > 0) {
         const truncated = assistant.stopReason === "length";
         const toolBatch = await executeToolCalls(context, assistant, calls, config, signal, truncated);
         toolResults = toolBatch.messages;
         yield* toolBatch.events;
+        fatalToolError = toolBatch.events.some((event) => event.type === "error" && event.fatal);
         for (const result of toolResults) {
           context.messages.push(result);
           newMessages.push(result);
@@ -124,6 +126,7 @@ async function* runLoop(
       }
 
       yield { type: "turn_end", message: assistant, toolResults, messages: [...context.messages] };
+      if (fatalToolError) return;
       const turnContext: AgentLoopTurnContext = { message: assistant, toolResults, context, newMessages };
       const nextTurn = await config.prepareNextTurn?.(turnContext);
       if (nextTurn) {
@@ -296,10 +299,14 @@ async function executeOneTool(
 ): Promise<{ message: AgentToolResultMessage; events: AgentEvent[]; terminate: boolean }> {
   const events: AgentEvent[] = [{ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.arguments }];
   const tool = context.tools.find((candidate) => candidate.name === call.name);
+  const unknownTool = tool === undefined;
   let result: AgentToolResult;
   let syntheticFailure = false;
-  if (!tool) {
-    result = errorResult(`Tool ${call.name} not found.`);
+  if (unknownTool) {
+    const message = call.name.trim()
+      ? `Tool ${call.name} not found.`
+      : "Tool call is missing a function name.";
+    result = { ...errorResult(message), terminate: true };
     syntheticFailure = true;
   } else if (truncated) {
     result = errorResult(`Tool call "${call.name}" was not executed because the model output was truncated.`);
@@ -332,7 +339,7 @@ async function executeOneTool(
   events.push({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result });
   if (syntheticFailure) {
     const message = result.content.find((part) => part.type === "text")?.text ?? `Tool ${call.name} failed.`;
-    events.push({ type: "error", error: message, fatal: false });
+    events.push({ type: "error", error: message, fatal: unknownTool });
   }
   return {
     message: {
@@ -345,7 +352,7 @@ async function executeOneTool(
     timestamp: Date.now()
     },
     events,
-    terminate: result.terminate === true
+    terminate: result.terminate === true || unknownTool
   };
 }
 

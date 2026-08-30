@@ -48,6 +48,7 @@ async function main(): Promise<void> {
   await testNativeTimeout();
   await testOpenAiResponsesTransport();
   await testStreamingProtocolsRequireTerminalEvents();
+  await testOpenAiToolCallsRequireFunctionNames();
   await testGoogleGenerativeAiTransport();
   await testAudioPayloads();
   await testQueuedFollowUp();
@@ -134,6 +135,53 @@ async function main(): Promise<void> {
     assert.equal(requestSummary.totalAttempts, 2);
     assert.equal(requestSummary.retries, 0);
     assert.equal(requestSummary.averageTimeToFirstEventMs !== undefined, true);
+    const initialReplay = await replaySession(recorder.filePath);
+    const target = [...initialReplay.messageTree].reverse().find((node) => node.message.role === "assistant" && node.message.content.some((part) => part.type === "text" && part.text === "native answer"));
+    assert.ok(target);
+    const retryEvents: AgentSessionEvent[] = [];
+    for await (const event of agent.retry(target.id, {
+      confirmPermission: async () => ({ approved: true, scope: "once" })
+    })) retryEvents.push(event);
+    const retryDone = retryEvents.find((event): event is Extract<AgentSessionEvent, { type: "done" }> => event.type === "done");
+    assert.equal(requestCount, 3);
+    assert.equal(retryDone?.outcome.status, "completed");
+    assert.equal(retryDone?.content, "native answer");
+    const replayedAfterRetry = await replaySession(recorder.filePath);
+    const retryMessageId = replayedAfterRetry.messageReferences.at(-1)?.id;
+    assert.notEqual(retryMessageId, target.id);
+    assert.equal(replayedAfterRetry.messages.at(-1)?.role, "assistant");
+    assert.equal(replayedAfterRetry.modelRequests.length, 3);
+    assert.ok(retryMessageId);
+    await agent.switchMessageVersion(retryMessageId, "prev");
+    const replayedPreviousVersion = await replaySession(recorder.filePath);
+    assert.equal(replayedPreviousVersion.messageReferences.at(-1)?.id, target.id);
+    const sourceUserId = replayedPreviousVersion.messageReferences.find((reference) => {
+      const message = replayedPreviousVersion.messages[reference.index];
+      return message?.role === "user";
+    })?.id;
+    assert.ok(sourceUserId);
+    const editEvents: AgentSessionEvent[] = [];
+    for await (const event of agent.retry(sourceUserId, {
+      confirmPermission: async () => ({ approved: true, scope: "once" }),
+      replaceUserMessageId: sourceUserId,
+      replacementInput: "edited prompt",
+      replacementUserMessageId: "edited-user"
+    })) editEvents.push(event);
+    const editDone = editEvents.find((event): event is Extract<AgentSessionEvent, { type: "done" }> => event.type === "done");
+    assert.equal(requestCount, 4);
+    assert.equal(editDone?.outcome.status, "completed");
+    const replayedAfterEdit = await replaySession(recorder.filePath);
+    const editedAssistantId = replayedAfterEdit.messageReferences.at(-1)?.id;
+    assert.equal(replayedAfterEdit.messageReferences[0]?.id, "edited-user");
+    assert.equal(replayedAfterEdit.messages[0]?.role, "user");
+    const editedUserMessage = replayedAfterEdit.messages[0];
+    assert.equal(editedUserMessage?.role === "user" && typeof editedUserMessage.content === "string" ? editedUserMessage.content : undefined, "edited prompt");
+    assert.notEqual(editedAssistantId, target.id);
+    assert.ok(editedAssistantId);
+    await agent.switchMessageVersion(editedAssistantId, "prev");
+    const replayedAfterEditSwitch = await replaySession(recorder.filePath);
+    assert.equal(replayedAfterEditSwitch.messageReferences[0]?.id, sourceUserId);
+    assert.notEqual(replayedAfterEditSwitch.messageReferences.at(-1)?.id, editedAssistantId);
     await agent.close();
     closed = true;
     const storedEvents = (await readFile(recorder.filePath, "utf8"))
@@ -164,9 +212,12 @@ async function main(): Promise<void> {
       });
     assert.equal(storedEvents.find((event) => event.type === "tool_call")?.reasoningContent, "先检查当前状态。");
     assert.equal([...storedEvents].reverse().find((event) => event.type === "assistant_message")?.reasoningContent, "根据结果整理回复。");
+    assert.equal(storedEvents.filter((event) => event.type === "user_message").length, 2);
+    assert.equal(storedEvents.filter((event) => event.type === "assistant_message").length, 3);
+    assert.equal(storedEvents.filter((event) => event.type === "message_version_selected").length, 4);
     const requestEvents = storedEvents.filter((event) => event.type === "model_request");
-    assert.equal(requestEvents.length, 2);
-    assert.deepEqual(requestEvents.map((event) => event.metrics?.requestContext?.step), [1, 2]);
+    assert.equal(requestEvents.length, 4);
+    assert.deepEqual(requestEvents.map((event) => event.metrics?.requestContext?.step), [1, 2, 1, 1]);
     assert.equal(requestEvents[0]?.metrics?.requestContext?.sessionId, recorder.sessionId);
     assert.equal(requestEvents[0]?.metrics?.requestContext?.runId, requestEvents[1]?.metrics?.requestContext?.runId);
     assert.deepEqual(requestEvents[1]?.metrics?.requestContext?.relatedToolCallIds, ["call-1"]);
@@ -176,7 +227,7 @@ async function main(): Promise<void> {
     assert.equal(requestEvents[0]?.metrics?.promptShapeStatus, "full");
     assert.equal(requestEvents[1]?.metrics?.promptShape?.stablePrefixHash, requestEvents[0]?.metrics?.promptShape?.stablePrefixHash);
     assert.equal(requestEvents[1]?.metrics?.promptShape?.requestShapeChangeReason, "history_projection_changed");
-    assert.equal((await replaySession(recorder.filePath)).modelRequests.length, 2);
+    assert.equal((await replaySession(recorder.filePath)).modelRequests.length, 3);
   } finally {
     globalThis.fetch = originalFetch;
     if (!closed) await agent.close();
@@ -1567,6 +1618,34 @@ async function testStreamingProtocolsRequireTerminalEvents(): Promise<void> {
       }
     }, /stream ended/iu);
   }
+}
+
+async function testOpenAiToolCallsRequireFunctionNames(): Promise<void> {
+  const model = createNativeModel({
+    provider: "openai-compatible",
+    modelId: "missing-tool-name",
+    api: "chat_completions",
+    baseUrl: "https://example.test/v1",
+    fetch: async () => new Response([
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"arguments":"{}"}}]},"finish_reason":null}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+      "data: [DONE]"
+    ].join("\n\n") + "\n\n", { status: 200, headers: { "content-type": "text/event-stream" } })
+  });
+
+  await assert.rejects(async () => {
+    for await (const _event of await model.stream({
+      messages: [{ role: "user", content: "call a tool" }],
+      tools: [{
+        name: "known",
+        description: "Known tool",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        execute: async () => ({ content: [{ type: "text", text: "ok" }] })
+      }]
+    })) {
+      // Drain until the adapter rejects the malformed tool call.
+    }
+  }, /without a function name/iu);
 }
 
 async function testAudioPayloads(): Promise<void> {

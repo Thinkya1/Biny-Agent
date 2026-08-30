@@ -161,7 +161,14 @@ export class TelosStorage {
   }
 
   async overview(): Promise<TelosOverview> {
-    await this.ensureRoot();
+    if (!await this.hasRoot()) {
+      return {
+        revision: 0,
+        patterns: [],
+        drifts: [],
+        counts: { observations: 0, candidatePatterns: 0, confirmedPatterns: 0, openDrifts: 0 }
+      };
+    }
     const state = await this.readState();
     const [universal, workspace, patterns, drifts, observations] = await Promise.all([
       this.readDocument("universal"),
@@ -470,6 +477,17 @@ export class TelosStorage {
     } finally {
       await handle?.close().catch(() => undefined);
       await fs.unlink(temporary).catch(() => undefined);
+    }
+  }
+
+  private async hasRoot(): Promise<boolean> {
+    try {
+      const stat = await fs.lstat(this.root);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("TELOS storage root must be a real directory.");
+      return true;
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
     }
   }
 

@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { RuntimeEventAuthority } from "../src/runtime/RuntimeAuthority.js";
 import { forkSession } from "../src/session/fork.js";
 import { createSessionId, SessionRecorder, type SessionEvent } from "../src/session/recorder.js";
-import { replaySession } from "../src/session/replay.js";
+import { replaySession, replaySessionEvents } from "../src/session/replay.js";
 import { ensureAgentDirs, sessionFilePath } from "../src/session/store.js";
 
 async function main(): Promise<void> {
@@ -12,6 +13,7 @@ async function main(): Promise<void> {
   try {
     await ensureAgentDirs(root);
     testSessionIdsAreTimeSortable();
+    testMessageVersionReplay();
     const source = await seedSession(root);
     await testFullForkIsIndependent(root, source);
     await testTruncatedForkNeverSplitsAToolCall(root, source);
@@ -20,6 +22,52 @@ async function main(): Promise<void> {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+/** 重新生成保留在同一消息槽；回放默认只把最新版本交给模型，切换标记可回到旧版本。 */
+function testMessageVersionReplay(): void {
+  const assistant = (messageId: string, text: string): Extract<SessionEvent, { type: "agent_message" }> => ({
+    type: "agent_message",
+    message: { role: "assistant", content: [{ type: "text", text }] },
+    messageId,
+    parentMessageId: "user-1",
+    slotId: "slot-1"
+  });
+  const flat = (messageId: string, content: string, retryOfMessageId?: string): Extract<SessionEvent, { type: "assistant_message" }> => ({
+    type: "assistant_message",
+    content,
+    messageId,
+    parentMessageId: "user-1",
+    slotId: "slot-1",
+    replyToMessageId: "user-1",
+    retryOfMessageId
+  });
+  const events: SessionEvent[] = [
+    { type: "user_message", content: "same prompt", messageId: "user-1", slotId: "user-1" },
+    assistant("assistant-1", "first answer"),
+    flat("assistant-1", "first answer"),
+    assistant("assistant-2", "second answer"),
+    flat("assistant-2", "second answer", "assistant-1")
+  ];
+
+  const latest = replaySessionEvents(events, { sessionId: "versioned" });
+  assert.deepEqual(latest.messageReferences.map((reference) => reference.id), ["user-1", "assistant-2"]);
+  assert.equal(latest.messages.at(-1)?.role === "assistant" ? latest.messages.at(-1)?.content[0]?.type === "text" ? latest.messages.at(-1)?.content[0]?.text : undefined : undefined, "second answer");
+
+  const selected = replaySessionEvents([
+    ...events,
+    { type: "message_version_selected", messageId: "assistant-1", slotId: "slot-1" }
+  ], { sessionId: "versioned" });
+  assert.deepEqual(selected.messageReferences.map((reference) => reference.id), ["user-1", "assistant-1"]);
+
+  const retryFromPrevious = replaySessionEvents([
+    ...events,
+    { type: "message_version_selected", messageId: "assistant-1", slotId: "slot-1" },
+    assistant("assistant-3", "third answer"),
+    flat("assistant-3", "third answer", "assistant-1"),
+    { type: "message_version_selected", messageId: "assistant-3", slotId: "slot-1" }
+  ], { sessionId: "versioned" });
+  assert.deepEqual(retryFromPrevious.messageReferences.map((reference) => reference.id), ["user-1", "assistant-3"]);
 }
 
 function testSessionIdsAreTimeSortable(): void {
@@ -47,15 +95,23 @@ async function seedSession(root: string): Promise<string> {
 
 /** 分叉出来的会话必须完全独立：写它不能影响原会话。 */
 async function testFullForkIsIndependent(root: string, source: string): Promise<void> {
+  const seededAuthority = await RuntimeEventAuthority.open(root);
+  seededAuthority.close();
   const forked = await forkSession(root, source);
   assert.notEqual(forked.sessionId, source);
   assert.equal(forked.sourceSessionId, source);
   assert.equal(forked.events, 6);
 
   const replayed = await replaySession(forked.filePath);
+  const originalEvents = await replaySession(sessionFilePath(root, source));
+  assert.notEqual(originalEvents.events[0]?.runtime?.eventId, replayed.events[0]?.runtime?.eventId);
+  assert.deepEqual(replayed.events.map((event) => event.runtime?.eventSeq), [1, 2, 3, 4, 5, 6]);
   assert.equal(replayed.recoveredToolResults.length, 0, "a clean fork must not carry a synthetic interrupted result");
   assert.equal(replayed.messageTree.length, 2);
   assert.equal(replayed.messageTree[1]?.parentId, replayed.messageTree[0]?.id);
+
+  const reopenedAuthority = await RuntimeEventAuthority.open(root);
+  reopenedAuthority.close();
 
   const appended = new SessionRecorder(root, forked.sessionId, forked.filePath);
   appended.repairTailForAppend();

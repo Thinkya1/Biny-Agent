@@ -88,7 +88,7 @@ async function testLexicalFallbackAndRewrite(): Promise<void> {
       localMemory: store,
       workspaceRoot,
       getEmbeddingRuntime: async () => undefined,
-      getVectorIndex: () => { throw new Error("vector index must stay lazy during lexical fallback"); },
+      getReadOnlyVectorIndex: () => undefined,
       getThresholds: (_fingerprint, recommended) => recommended,
       rewriteQuery: async (query) => {
         rewritten.push(query);
@@ -111,7 +111,7 @@ async function testRewriteFailureUsesOriginalQuery(): Promise<void> {
       localMemory: store,
       workspaceRoot,
       getEmbeddingRuntime: async () => undefined,
-      getVectorIndex: () => { throw new Error("unused"); },
+      getReadOnlyVectorIndex: () => undefined,
       getThresholds: (_fingerprint, recommended) => recommended,
       rewriteQuery: async () => { throw new Error("rewrite unavailable"); }
     });
@@ -155,7 +155,7 @@ async function testFingerprintThresholdAndCrossWorkspaceGate(): Promise<void> {
       localMemory: store,
       workspaceRoot,
       getEmbeddingRuntime: async () => runtime,
-      getVectorIndex: () => index,
+      getReadOnlyVectorIndex: () => index,
       getThresholds: (resolvedFingerprint) => {
         thresholdFingerprint = resolvedFingerprint;
         return { currentWorkspace: 0.8, crossWorkspace: 0.86 };
@@ -168,7 +168,6 @@ async function testFingerprintThresholdAndCrossWorkspaceGate(): Promise<void> {
 
     await retriever.recordInjectedRecall(result.matches.map(({ entry }) => entry.id), { now: new Date("2026-08-13T00:00:00.000Z") });
     assert.deepEqual(store.recalled, [current.id, user.id].sort());
-    assert.deepEqual(index.recalled, [current.id, user.id].sort());
     retriever.close();
     assert.equal(index.closed, true);
   });
@@ -211,7 +210,6 @@ class FakeMemoryStore implements AutomaticMemoryStore {
 }
 
 class FakeVectorIndex implements MemoryVectorSearchIndex {
-  recalled: string[] = [];
   closed = false;
 
   constructor(
@@ -236,10 +234,6 @@ class FakeVectorIndex implements MemoryVectorSearchIndex {
 
   search(): Array<{ entryId: string; contentHash: string; similarity: number }> {
     return this.results;
-  }
-
-  recordRecall(ids: readonly string[]): void {
-    this.recalled = [...ids].sort();
   }
 
   close(): void {

@@ -83,14 +83,15 @@ export interface SessionTurnStatusEvent {
 
 type SessionEventPayload =
   // session 事件类型要保持稳定；resume、未来上下文压缩和记忆功能都会依赖这几个基础类型。
-  | { type: "user_message"; content: string; attachments?: AttachmentReference[]; skills?: string[]; contextUsage?: SessionContextUsage; contextState?: SessionContextState; preparationUsage?: SessionUsage[]; messageId?: string; parentMessageId?: string; auditOnly?: boolean; time?: string }
-  | { type: "assistant_message"; content: string; reasoningContent?: string; reasoningProviderOptions?: Record<string, unknown>; reasoningBlocks?: ReasoningBlock[]; usage?: SessionUsage; relatedUsage?: SessionUsage[]; contextState?: SessionContextState; auditOnly?: boolean; time?: string }
+  | { type: "user_message"; content: string; attachments?: AttachmentReference[]; skills?: string[]; contextUsage?: SessionContextUsage; contextState?: SessionContextState; preparationUsage?: SessionUsage[]; messageId?: string; parentMessageId?: string; slotId?: string; auditOnly?: boolean; time?: string }
+  | { type: "assistant_message"; content: string; reasoningContent?: string; reasoningProviderOptions?: Record<string, unknown>; reasoningBlocks?: ReasoningBlock[]; usage?: SessionUsage; relatedUsage?: SessionUsage[]; contextState?: SessionContextState; messageId?: string; parentMessageId?: string; slotId?: string; replyToMessageId?: string; retryOfMessageId?: string; auditOnly?: boolean; time?: string }
   | { type: "tool_call"; tool: string; args: unknown; toolCallId?: string; sequence?: number; assistantContent?: string; reasoningContent?: string; reasoningProviderOptions?: Record<string, unknown>; reasoningBlocks?: ReasoningBlock[]; auditOnly?: boolean; time?: string }
   | { type: "tool_execution"; tool: string; toolCallId: string; sequence: number; operationId: string; state: ToolExecutionState; evidence?: string; retrySafety?: ToolRetrySafety; time?: string }
   | { type: "tool_result"; tool: string; result: unknown; toolCallId?: string; sequence?: number; relatedUsage?: SessionUsage[]; executionStatus?: ToolExecutionResultStatus; recovered?: boolean; operationId?: string; evidence?: string; auditOnly?: boolean; time?: string }
-  | { type: "agent_message"; message: Exclude<AgentMessage, { role: "user" }>; messageId?: string; parentMessageId?: string; time?: string }
+  | { type: "agent_message"; message: Exclude<AgentMessage, { role: "user" }>; messageId?: string; parentMessageId?: string; slotId?: string; replyToMessageId?: string; retryOfMessageId?: string; time?: string }
   | ({ type: "context_checkpoint"; reason: "threshold" | "overflow" | "manual"; time?: string } & SessionContextCheckpoint)
   | { type: "model_request"; metrics: ModelRequestMetrics; time?: string }
+  | { type: "message_version_selected"; messageId: string; slotId: string; time?: string }
   | SessionTurnStatusEvent
   | { type: "error"; message: string; detail?: unknown; relatedUsage?: SessionUsage[]; time?: string };
 
@@ -294,7 +295,12 @@ export class SessionRecorder {
   private linkCanonicalMessage(event: SessionEvent): SessionEvent {
     if (event.type !== "agent_message" && (event.type !== "user_message" || event.auditOnly)) return event;
     const messageId = event.messageId ?? createMessageId();
-    const linked = { ...event, messageId, parentMessageId: event.parentMessageId ?? this.lastMessageId };
+    const linked = {
+      ...event,
+      messageId,
+      parentMessageId: event.parentMessageId ?? this.lastMessageId,
+      slotId: event.slotId ?? messageId
+    };
     this.lastMessageId = messageId;
     return linked;
   }
@@ -432,6 +438,7 @@ function redactSessionEvent(event: SessionEvent): SessionEvent {
       affectedTodoIds: event.affectedTodoIds?.map((todoId) => redactSecrets(todoId))
     };
   }
+  if (event.type === "message_version_selected") return event;
   return {
     ...event,
     message: redactSecrets(event.message),

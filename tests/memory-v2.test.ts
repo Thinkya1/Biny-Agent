@@ -3,14 +3,18 @@ import { promises as fs } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { AgentModel } from "../src/agent/core/types.js";
 import {
   LocalMemory,
   MemoryRevisionConflictError,
   type MemoryEntryInput
 } from "../src/agent/context/LocalMemory.js";
+import { MemoryEmbeddingService } from "../src/agent/context/MemoryEmbeddingService.js";
+import { MemoryVectorIndex } from "../src/agent/context/MemoryVectorIndex.js";
 import { MemoryStorage } from "../src/agent/context/memoryStorage.js";
 import { BINY_AGENT_DIR_ENV } from "../src/config/paths.js";
+import type { LocalEmbeddingManager } from "../src/llm/embedding/LocalEmbeddingRuntime.js";
 
 async function main(): Promise<void> {
   await testSingleStoreCasOriginAndEdit();
@@ -19,6 +23,8 @@ async function main(): Promise<void> {
   await testCandidateOriginEligibilityAndExactContent();
   await testSingleRootSafetyBoundary();
   await testListEntriesPagination();
+  await testReadPathsDoNotRepair();
+  await testEmbeddingStatusDoesNotCreateIndex();
   console.log("memory v3 tests passed");
 }
 
@@ -237,6 +243,61 @@ async function testSingleRootSafetyBoundary(): Promise<void> {
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   }
+}
+
+async function testReadPathsDoNotRepair(): Promise<void> {
+  await withSharedAgent(async (agentRoot) => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-v3-read-"));
+    const memoryRoot = path.join(agentRoot, "memory");
+    await fs.mkdir(memoryRoot, { recursive: true, mode: 0o755 });
+    await fs.chmod(agentRoot, 0o755);
+    await fs.chmod(memoryRoot, 0o755);
+    try {
+      await new MemoryStorage(workspaceRoot).getOverview();
+      assert.equal((await fs.stat(agentRoot)).mode & 0o777, 0o755, "普通记忆读取不能偷偷修复目录权限");
+      assert.equal((await fs.stat(memoryRoot)).mode & 0o777, 0o755, "普通记忆读取不能偷偷修复目录权限");
+
+      const index = new MemoryVectorIndex(memoryRoot);
+      const database = new DatabaseSync(index.databasePath);
+      try {
+        const fingerprint = "sha256:test";
+        const input = { entryId: "entry-1", contentHash: "a".repeat(64) };
+        const count = (): number => Number((database.prepare(
+          "SELECT COUNT(*) AS count FROM memory_vector_entry_states"
+        ).get() as { count?: unknown } | undefined)?.count ?? 0);
+        assert.equal(count(), 0);
+        assert.equal(index.entryStates(fingerprint, [input])[0]?.status, "pending");
+        assert.equal(count(), 0, "读取索引状态不能写入 pending 修复记录");
+        index.entryStates(fingerprint, [input]);
+        assert.equal(count(), 0, "重复读取索引状态仍不能写入 pending 修复记录");
+      } finally {
+        database.close();
+        index.close();
+      }
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+async function testEmbeddingStatusDoesNotCreateIndex(): Promise<void> {
+  await withIsolatedMemory(async (workspaceRoot, agentRoot) => {
+    const memoryRoot = path.join(agentRoot, "memory");
+    const databasePath = path.join(memoryRoot, ".memory-index.sqlite");
+    const service = new MemoryEmbeddingService({
+      localMemory: new LocalMemory(workspaceRoot, unusedModel),
+      localManager: { list: async () => [] } as unknown as LocalEmbeddingManager,
+      getVectorIndex: () => { throw new Error("status must not open a writable vector index"); },
+      getReadOnlyVectorIndex: () => MemoryVectorIndex.openReadOnly(memoryRoot),
+      getActiveModel: () => undefined,
+      getProviderModels: () => [],
+      getRuntime: async () => undefined
+    });
+    const status = await service.status();
+    assert.equal(status.index.active, undefined);
+    assert.equal(status.pendingEntries, 0);
+    await assert.rejects(fs.access(databasePath), /ENOENT/u, "读取状态不能创建空向量索引");
+  });
 }
 
 function projectEntry(title: string, summary: string): MemoryEntryInput {

@@ -30,6 +30,8 @@ async function main(): Promise<void> {
 async function testStorageAndCas(workspaceA: string, workspaceB: string, agentRoot: string): Promise<void> {
   const storageA = new TelosStorage(workspaceA);
   const storageB = new TelosStorage(workspaceB);
+  assert.equal((await storageA.overview()).revision, 0);
+  await assert.rejects(fs.access(path.join(agentRoot, "telos")), /ENOENT/u);
   await storageA.initialize();
   assert.equal((await storageA.overview()).revision, 0);
 

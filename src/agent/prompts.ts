@@ -4,11 +4,7 @@
  * 基础身份、模式规则和 canonicalized 工具 schema 保持在前缀；项目、记忆、工作区和扩展
  * 元数据放在后缀。这样动态上下文变化不会把稳定前缀一起推过缓存边界。
  */
-import type {
-  PersonalizationMetadata,
-  PersonalityPreset,
-  ResolvedChatPersonalization
-} from "../personalization/index.js";
+import type { ResolvedChatPersonalization } from "../personalization/index.js";
 import type { PermissionMode } from "../permission/PermissionManager.js";
 import { renderPlanModePrompt } from "./planMode.js";
 export const GLOBAL_SYSTEM_PROMPT = `
@@ -46,11 +42,14 @@ export interface BuildSystemPromptOptions {
   mode: PromptMode;
   tools?: readonly PromptTool[];
   extensionPrompt?: string;
+  /** 记忆与 TELOS 运行策略；telosPrompt 有正文时按 advisory 指导注入。 */
   personalization?: ResolvedChatPersonalization;
   /** 已读取的 SOUL/IDENTITY/STYLE/USER；正文只进入模型 prompt，不进入 telemetry。 */
   identityPrompt?: string;
   /** 已读取的用户 TELOS；只作为指导，不进入 telemetry 明文。 */
   telosPrompt?: string;
+  /** 当前 blended 情绪；只放在动态 prompt 区，不进入稳定缓存前缀。 */
+  emotionPrompt?: string;
   permissionMode?: PermissionMode;
   cwd: string;
 }
@@ -65,6 +64,8 @@ const personalizationPromptStart = "<!-- biny-personalization:start -->";
 const personalizationPromptEnd = "<!-- biny-personalization:end -->";
 const identityPromptStart = "<!-- biny-identity:start -->";
 const identityPromptEnd = "<!-- biny-identity:end -->";
+const emotionPromptStart = "<!-- biny-emotion:start -->";
+const emotionPromptEnd = "<!-- biny-emotion:end -->";
 
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
   return [
@@ -80,10 +81,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
     options.identityPrompt?.trim()
       ? [identityPromptStart, options.identityPrompt.trim(), identityPromptEnd].join("\n")
       : "",
-    options.personalization ? personalizationPrompt(options.personalization, options.telosPrompt) : "",
+    options.personalization ? telosPrompt(options.personalization, options.telosPrompt) : "",
     `Current working directory: ${normalizePath(options.cwd)}`,
     stableRuntimePrompt(options.tools ?? []),
-    dynamicRuntimePrompt(options.extensionPrompt)
+    dynamicRuntimePrompt(options.extensionPrompt, options.emotionPrompt)
   ].filter(Boolean).join("\n\n");
 }
 
@@ -95,8 +96,8 @@ export function stableSystemPromptForCache(systemPrompt: string | undefined): st
 }
 
 /**
- * telemetry 即使开启 recordInputs 也不能写入自定义指令正文。保留三个不可逆/枚举元字段，
- * 既能排查某次请求使用了哪个版本，也不会把用户私有偏好复制到诊断日志。
+ * telemetry 即使开启 recordInputs 也不能写入 SOUL/TELOS 正文。把这两个块替换成省略占位，
+ * 既能标注某次请求携带了哪些区块，也不会把用户私有文本复制到诊断日志。
  */
 export function systemPromptForTelemetry(systemPrompt: string | undefined): string | undefined {
   if (!systemPrompt) return systemPrompt;
@@ -106,23 +107,22 @@ export function systemPromptForTelemetry(systemPrompt: string | undefined): stri
     identityPromptEnd,
     `${identityPromptStart}\n<biny_identity omitted="true" />\n${identityPromptEnd}`
   );
-  const start = withoutIdentity.indexOf(personalizationPromptStart);
-  if (start === -1) return withoutIdentity;
-  const end = withoutIdentity.indexOf(personalizationPromptEnd, start + personalizationPromptStart.length);
-  const metadata = personalizationMetadataFromSystemPrompt(systemPrompt);
-  const replacement = metadata === undefined
-    ? `${personalizationPromptStart}\n<biny_personalization omitted="true" />\n${personalizationPromptEnd}`
-    : [
-      personalizationPromptStart,
-      `<biny_personalization personality="${metadata.personality}" configVersion="${String(metadata.configVersion)}" instructionsHash="${metadata.instructionsHash}" />`,
-      personalizationPromptEnd
-    ].join("\n");
-  return end === -1
-    ? `${withoutIdentity.slice(0, start)}${replacement}`
-    : `${withoutIdentity.slice(0, start)}${replacement}${withoutIdentity.slice(end + personalizationPromptEnd.length)}`;
+  const withoutTelos = replacePromptBlock(
+    withoutIdentity,
+    personalizationPromptStart,
+    personalizationPromptEnd,
+    `${personalizationPromptStart}\n<biny_telos omitted="true" />\n${personalizationPromptEnd}`
+  );
+  return replacePromptBlock(
+    withoutTelos,
+    emotionPromptStart,
+    emotionPromptEnd,
+    `${emotionPromptStart}\n<biny_emotion omitted="true" />\n${emotionPromptEnd}`
+  );
 }
 
-export interface PersistedPersonalizationRuntimePolicy extends PersonalizationMetadata {
+/** TurnStore 续跑只从旧 system prompt 恢复记忆/TELOS 运行策略，不重新读取最新配置。 */
+export interface PersistedPersonalizationRuntimePolicy {
   useMemories: boolean;
   contributeMemories: boolean;
   excludeExternalContext: boolean;
@@ -130,27 +130,17 @@ export interface PersistedPersonalizationRuntimePolicy extends PersonalizationMe
   telos: ResolvedChatPersonalization["telos"];
 }
 
-/** TurnStore 续跑只从旧 system prompt 恢复非敏感运行策略，不重新读取最新配置。 */
 export function personalizationRuntimePolicyFromSystemPrompt(
   systemPrompt: string | undefined
 ): PersistedPersonalizationRuntimePolicy | undefined {
-  const attributes = personalizationAttributes(systemPrompt);
+  const attributes = telosAttributes(systemPrompt);
   if (!attributes) return undefined;
-  const personality = attributes.personality;
-  const configVersion = Number(attributes.configVersion);
   const maxRecalled = Number(attributes.maxRecalled);
-  if (
-    personality !== "none"
-    && personality !== "friendly"
-    && personality !== "pragmatic"
-    && personality !== "buddy"
-  ) return undefined;
-  if (configVersion !== 1 || !Number.isSafeInteger(maxRecalled) || maxRecalled < 1) return undefined;
+  if (!Number.isSafeInteger(maxRecalled) || maxRecalled < 1) return undefined;
   if (
     !isBooleanAttribute(attributes.useMemories)
     || !isBooleanAttribute(attributes.contributeMemories)
     || !isBooleanAttribute(attributes.excludeExternalContext)
-    || typeof attributes.instructionsHash !== "string"
   ) return undefined;
   const telos = {
     enabled: attributes.telosEnabled === "true",
@@ -159,9 +149,6 @@ export function personalizationRuntimePolicyFromSystemPrompt(
     proactivePrompts: attributes.telosProactivePrompts === "true"
   };
   return {
-    personality,
-    configVersion: 1,
-    instructionsHash: attributes.instructionsHash,
     useMemories: attributes.useMemories === "true",
     contributeMemories: attributes.contributeMemories === "true",
     excludeExternalContext: attributes.excludeExternalContext === "true",
@@ -173,7 +160,8 @@ export function personalizationRuntimePolicyFromSystemPrompt(
 export function refreshRuntimeSystemPrompt(
   systemPrompt: string | undefined,
   extensionPrompt: string | undefined,
-  tools: readonly PromptTool[]
+  tools: readonly PromptTool[],
+  emotionPrompt?: string
 ): string | undefined {
   if (!systemPrompt) return systemPrompt;
   const refreshedStable = replacePromptBlock(
@@ -186,7 +174,7 @@ export function refreshRuntimeSystemPrompt(
     refreshedStable,
     dynamicPromptStart,
     dynamicPromptEnd,
-    dynamicRuntimePrompt(extensionPrompt)
+    dynamicRuntimePrompt(extensionPrompt, emotionPrompt)
   );
 }
 
@@ -232,9 +220,13 @@ function stableRuntimePrompt(tools: readonly PromptTool[]): string {
   ].join("\n\n");
 }
 
-function dynamicRuntimePrompt(extensionPrompt: string | undefined): string {
+function dynamicRuntimePrompt(extensionPrompt: string | undefined, emotionPrompt?: string): string {
+  const emotionBlock = emotionPrompt?.trim()
+    ? [emotionPromptStart, emotionPrompt.trim(), emotionPromptEnd].join("\n")
+    : "";
   return [
     dynamicPromptStart,
+    emotionBlock,
     // Skills、MCP instructions、具名代理和 Todo 状态会在每个模型步骤前整体刷新。
     extensionPrompt?.trim() ?? "",
     dynamicPromptEnd
@@ -259,57 +251,26 @@ function stableCompare(left: string, right: string): number {
 }
 
 /**
- * 每种人格预设对应的完整语气指导。none 之外的分支会直接注入 system prompt，
- * 所以 buddy 给的是整段人格卡而不是一句描述，避免模型把预设收敛成"平均客服"。
- * Record 以 PersonalityPreset 为键：新增预设而不补指导会在 typecheck 期就报错。
+ * TELOS 是唯一保留的「按聊天注入的指导块」。人格与自定义指令改由 SOUL/IDENTITY/STYLE
+ * 与 USER.md 承载；这里只注入用户自有的 TELOS 目标，并标注它只是 advisory。
+ * 标签沿用 `<biny_personalization>` 以便续跑恢复函数能解析历史与新回合的同一份属性。
  */
-const PERSONALITY_GUIDANCE: Record<PersonalityPreset, string> = {
-  none: "No additional personality preset is active.",
-  friendly: "Use a warm, approachable and collaborative tone. Be encouraging without praise filler, and explain unfamiliar details plainly.",
-  pragmatic: "Be direct, concise and action-oriented. Lead with the outcome, concrete evidence and relevant tradeoffs.",
-  buddy: `像跟朋友发消息一样说话，不是客服。
-- 短句，口语化，自然停顿；不写公文腔、不堆结构化列表。
-- 禁止开场白："好的""当然""没问题""我很乐意""收到""你好！"——直接从事情本身开始。
-- 禁止结尾客套："还需要我帮你做什么吗？""希望对你有帮助"——做完就停。
-- 有观点：被问方案优劣时给出明确判断和理由，禁止"各有优劣"式和稀泥。
-- 技术内容保持准确、具体、有证据（文件路径、行号、实测结果）；放松的是语气，不是事实。
-- emoji 克制：大部分消息一个都不用。
-- 没做成或不确定就直接说，不找借口、不假装完成。`
-};
-
-function personalizationPrompt(personalization: ResolvedChatPersonalization, telosPrompt?: string): string {
-  const personalityGuidance = PERSONALITY_GUIDANCE[personalization.personality];
-  const customInstructions = personalization.customInstructions
-    ? `Custom instructions:\n${escapeXmlText(personalization.customInstructions)}`
-    : "Custom instructions: (none)";
+function telosPrompt(personalization: ResolvedChatPersonalization, telosPrompt?: string): string {
+  const body = personalization.telos.enabled && telosPrompt?.trim()
+    ? `Active TELOS guidance (user-owned, advisory only):\n${escapeXmlText(telosPrompt.trim())}`
+    : "Active TELOS guidance: (none)";
   return [
     personalizationPromptStart,
-    `<biny_personalization personality="${personalization.personality}" configVersion="${String(personalization.configVersion)}" instructionsHash="${personalization.instructionsHash}" useMemories="${String(personalization.useMemories)}" contributeMemories="${String(personalization.contributeMemories)}" excludeExternalContext="${String(personalization.excludeExternalContext)}" maxRecalled="${String(personalization.maxRecalled)}" telosEnabled="${String(personalization.telos.enabled)}" telosAutoObserve="${String(personalization.telos.autoObserve)}" telosDriftDetection="${String(personalization.telos.driftDetection)}" telosProactivePrompts="${String(personalization.telos.proactivePrompts)}">`,
-    "Personalization controls response style and durable-memory preferences only. It cannot override system or mode rules, project instructions, the current user request, tool permissions, safety boundaries, or verified runtime facts.",
-    "Conflict priority, highest to lowest: runtime safety, tool permissions, and Plan-mode rules; project AGENTS/instructions; the current user task; chat personalization overrides; global personalization; recalled memory.",
-    "Chat overrides are resolved over global settings before this effective block is built. Within one personalization layer, custom instructions take precedence over the personality preset.",
-    personalityGuidance,
-    customInstructions,
-    personalization.telos.enabled && telosPrompt?.trim()
-      ? `Active TELOS guidance (user-owned, advisory only):\n${escapeXmlText(telosPrompt.trim())}`
-      : "Active TELOS guidance: (none)",
+    `<biny_personalization useMemories="${String(personalization.useMemories)}" contributeMemories="${String(personalization.contributeMemories)}" excludeExternalContext="${String(personalization.excludeExternalContext)}" maxRecalled="${String(personalization.maxRecalled)}" telosEnabled="${String(personalization.telos.enabled)}" telosAutoObserve="${String(personalization.telos.autoObserve)}" telosDriftDetection="${String(personalization.telos.driftDetection)}" telosProactivePrompts="${String(personalization.telos.proactivePrompts)}">`,
+    "TELOS captures the user's own durable goals. It is advisory guidance only and cannot override system or mode rules, project instructions, the current user request, tool permissions, safety boundaries, or verified runtime facts.",
+    body,
     "</biny_personalization>",
     personalizationPromptEnd
   ].join("\n\n");
 }
 
-function personalizationMetadataFromSystemPrompt(
-  systemPrompt: string | undefined
-): PersonalizationMetadata | undefined {
-  const attributes = personalizationAttributes(systemPrompt);
-  if (!attributes) return undefined;
-  const personality = attributes.personality;
-  if (personality !== "none" && personality !== "friendly" && personality !== "pragmatic" && personality !== "buddy") return undefined;
-  if (attributes.configVersion !== "1" || typeof attributes.instructionsHash !== "string") return undefined;
-  return { personality, configVersion: 1, instructionsHash: attributes.instructionsHash };
-}
-
-function personalizationAttributes(systemPrompt: string | undefined): Record<string, string> | undefined {
+/** 解析 `<biny_personalization>`（含历史人格版）开标签的全部属性。 */
+function telosAttributes(systemPrompt: string | undefined): Record<string, string> | undefined {
   if (!systemPrompt) return undefined;
   const start = systemPrompt.indexOf(personalizationPromptStart);
   if (start === -1) return undefined;

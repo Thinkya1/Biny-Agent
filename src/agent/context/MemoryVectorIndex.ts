@@ -28,12 +28,6 @@ export interface MemoryVectorSearchResult {
   similarity: number;
 }
 
-export interface MemoryVectorUsage {
-  entryId: string;
-  recallCount: number;
-  lastRecalledAt?: string;
-}
-
 export type MemoryVectorEntryStatus = "pending" | "failed" | "indexed";
 
 export interface MemoryVectorEntryIdentity {
@@ -77,12 +71,6 @@ interface VectorRow {
   embedding: unknown;
 }
 
-interface UsageRow {
-  entry_id: unknown;
-  recall_count: unknown;
-  last_recalled_at: unknown;
-}
-
 interface EntryStateRow {
   entry_id: unknown;
   model_fingerprint: unknown;
@@ -92,22 +80,34 @@ interface EntryStateRow {
   updated_at: unknown;
 }
 
+interface MemoryVectorIndexOpenOptions {
+  readOnly?: boolean;
+}
+
 export class MemoryVectorIndex {
   readonly databasePath: string;
   private readonly database: DatabaseSync;
   private closed = false;
 
-  constructor(memoryRoot: string) {
+  static openReadOnly(memoryRoot: string): MemoryVectorIndex | undefined {
     const resolvedRoot = path.resolve(memoryRoot);
-    mkdirSync(resolvedRoot, { recursive: true });
+    const databasePath = path.join(resolvedRoot, indexFileName);
+    if (!existsSync(databasePath)) return undefined;
+    return new MemoryVectorIndex(resolvedRoot, { readOnly: true });
+  }
+
+  constructor(memoryRoot: string, options: MemoryVectorIndexOpenOptions = {}) {
+    const resolvedRoot = path.resolve(memoryRoot);
+    if (!options.readOnly) mkdirSync(resolvedRoot, { recursive: true });
     this.databasePath = path.join(resolvedRoot, indexFileName);
     assertSafeDatabaseFile(this.databasePath);
     this.database = new DatabaseSync(this.databasePath, {
       timeout: sqliteBusyTimeoutMs,
-      enableForeignKeyConstraints: true
+      enableForeignKeyConstraints: true,
+      readOnly: options.readOnly
     });
     try {
-      this.migrate();
+      if (!options.readOnly) this.migrate();
     } catch (error) {
       this.database.close();
       throw error;
@@ -208,6 +208,9 @@ export class MemoryVectorIndex {
   /**
    * 只把与当前内容哈希和 active generation 都一致的条目视为 indexed。这样即使进程在
    * Markdown 提交后崩溃，重启后的统计也不会把旧内容向量误报成已索引。
+   *
+   * 这是纯读取：缺失或失配状态只在返回值中临时视为 pending，持久化状态由明确的
+   * 增量索引和完整重建写路径负责，不能让 status() 暗中修复索引。
    */
   entryStates(
     modelFingerprint: string,
@@ -234,11 +237,6 @@ export class MemoryVectorIndex {
       )))
       : new Set<string>();
     const now = new Date().toISOString();
-    const repairs = [...requested].flatMap(([key, input]) => {
-      const state = states.get(key);
-      return state === undefined || (state.status === "indexed" && !activeVectors.has(key)) ? [input] : [];
-    });
-    if (repairs.length) this.writeEntryStates(modelFingerprint, repairs, "pending");
     return [...requested].map(([key, input]) => {
       const state = states.get(key);
       if (!state) return { ...input, modelFingerprint, status: "pending", updatedAt: now };
@@ -255,11 +253,9 @@ export class MemoryVectorIndex {
     if (!ids.length) return;
     this.transaction(() => {
       const removeVector = this.database.prepare("DELETE FROM memory_vectors WHERE entry_id = ?");
-      const removeUsage = this.database.prepare("DELETE FROM memory_vector_usage WHERE entry_id = ?");
       const removeState = this.database.prepare("DELETE FROM memory_vector_entry_states WHERE entry_id = ?");
       for (const id of ids) {
         removeVector.run(id);
-        removeUsage.run(id);
         removeState.run(id);
       }
     });
@@ -313,36 +309,6 @@ export class MemoryVectorIndex {
     return results
       .sort((left, right) => right.similarity - left.similarity || left.entryId.localeCompare(right.entryId))
       .slice(0, limit);
-  }
-
-  recordRecall(entryIds: readonly string[], recalledAt = new Date().toISOString()): void {
-    this.assertOpen();
-    if (Number.isNaN(Date.parse(recalledAt))) throw new Error("Memory recall timestamp must be an ISO date.");
-    const ids = uniqueEntryIds(entryIds);
-    if (!ids.length) return;
-    this.transaction(() => {
-      const statement = this.database.prepare(
-        "INSERT INTO memory_vector_usage (entry_id, recall_count, last_recalled_at) VALUES (?, 1, ?) ON CONFLICT(entry_id) DO UPDATE SET recall_count = recall_count + 1, last_recalled_at = excluded.last_recalled_at"
-      );
-      for (const id of ids) statement.run(id, recalledAt);
-    });
-  }
-
-  usage(entryIds?: readonly string[]): MemoryVectorUsage[] {
-    this.assertOpen();
-    const ids = entryIds === undefined ? undefined : new Set(uniqueEntryIds(entryIds));
-    const rows = this.database.prepare(
-      "SELECT entry_id, recall_count, last_recalled_at FROM memory_vector_usage ORDER BY entry_id ASC"
-    ).all() as unknown as UsageRow[];
-    return rows.flatMap((row) => {
-      const entryId = stringValue(row.entry_id, "entry id");
-      if (ids && !ids.has(entryId)) return [];
-      return [{
-        entryId,
-        recallCount: nonNegativeInteger(row.recall_count, "recall count"),
-        lastRecalledAt: optionalString(row.last_recalled_at)
-      }];
-    });
   }
 
   status(): MemoryVectorIndexStatus {
@@ -486,8 +452,14 @@ export class MemoryVectorIndex {
     this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
     const version = this.database.prepare("PRAGMA user_version").get() as { user_version?: unknown } | undefined;
     const current = nonNegativeInteger(version?.user_version, "memory vector schema version");
-    if (current > 2) throw new Error(`Memory vector index schema ${String(current)} is newer than this Biny build.`);
-    if (current === 2) return;
+    if (current > 3) throw new Error(`Memory vector index schema ${String(current)} is newer than this Biny build.`);
+    if (current === 3) return;
+    if (current === 2) {
+      this.transaction(() => {
+        this.database.exec("DROP TABLE IF EXISTS memory_vector_usage; PRAGMA user_version = 3;");
+      });
+      return;
+    }
     if (current === 1) {
       this.transaction(() => {
         this.database.exec(`
@@ -509,7 +481,8 @@ export class MemoryVectorIndex {
           INNER JOIN memory_vector_generations AS generations
             ON generations.generation_id = vectors.generation_id
           WHERE generations.status = 'active';
-          PRAGMA user_version = 2;
+          DROP TABLE IF EXISTS memory_vector_usage;
+          PRAGMA user_version = 3;
         `);
       });
       return;
@@ -538,11 +511,6 @@ export class MemoryVectorIndex {
           PRIMARY KEY (generation_id, entry_id)
         );
         CREATE INDEX memory_vectors_entry_idx ON memory_vectors(entry_id);
-        CREATE TABLE memory_vector_usage (
-          entry_id TEXT PRIMARY KEY,
-          recall_count INTEGER NOT NULL DEFAULT 0 CHECK (recall_count >= 0),
-          last_recalled_at TEXT
-        );
         CREATE TABLE memory_vector_entry_states (
           entry_id TEXT NOT NULL,
           model_fingerprint TEXT NOT NULL,
@@ -554,7 +522,7 @@ export class MemoryVectorIndex {
         );
         CREATE INDEX memory_vector_entry_states_model_idx
           ON memory_vector_entry_states(model_fingerprint, status);
-        PRAGMA user_version = 2;
+        PRAGMA user_version = 3;
       `);
     });
   }

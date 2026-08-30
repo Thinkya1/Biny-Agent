@@ -13,6 +13,7 @@ import { parseMemoryCitations, type MemoryCitation } from "../../../agent/contex
 import type { ToolInputDisplay, ToolUpdate } from "../../../tools/types.js";
 import type { AgentPermissionEventRequest, AgentRunModel, AgentHostEvent } from "../../../runtime/agentEvents.js";
 import { activitySummaryText } from "../../../runtime/activitySummary.js";
+import { activeSessionEventsForPath } from "../../../session/messageTree.js";
 import type { SessionEvent } from "../../../session/recorder.js";
 import type { SessionUsage } from "../../../session/metadata.js";
 import { publicUserMessage } from "../../../session/publicMessage.js";
@@ -142,7 +143,14 @@ export interface TimelineTurn {
   /** 回答末尾引用的记忆条目（已从展示正文剥离）；来自 <memory-citations> 协议块。 */
   memoryCitations?: MemoryCitation[];
   userMessageIndex?: number;
+  userMessageId?: string;
   assistant: string;
+  assistantMessageId?: string;
+  versionSlotId?: string;
+  versionIndex?: number;
+  versionCount?: number;
+  /** 实时重新生成尚未落盘时，用目标消息把新 run 合并回原 turn。 */
+  retryOfMessageId?: string;
   reasoning: string;
   reasoningStatus?: string;
   reasoningDurationMs?: number;
@@ -224,10 +232,23 @@ function isVisibleTimelineTurn(turn: TimelineTurn): boolean {
 /** 合成完整时间线；末尾过滤掉完全空的轮次（只有元信息、没有任何可展示内容）。 */
 export function buildSessionTimeline(events: SessionEvent[], liveEvents: AgentHostEvent[]): TimelineTurn[] {
   const history = historicalPrefix(events, liveEvents);
-  const historicalTurns = buildHistoricalTurns(history);
+  const historicalTurns = hasVersionMetadata(history)
+    ? buildVersionedHistoricalTurns(history)
+    : buildHistoricalTurns(history);
   // 实时轮次的用户消息序号要接着历史的算，「编辑消息」功能依赖这个序号定位。
   const historicalUserMessages = history.filter((event) => event.type === "user_message").length;
-  return [...historicalTurns, ...buildLiveTurns(liveEvents, historicalUserMessages)].filter(isVisibleTimelineTurn);
+  return mergeLiveRetryTurns(historicalTurns, buildLiveTurns(liveEvents, historicalUserMessages)).filter(isVisibleTimelineTurn);
+}
+
+function hasVersionMetadata(events: SessionEvent[]): boolean {
+  return events.some((event) => (
+    event.type === "agent_message"
+    && event.message.role === "assistant"
+    && event.slotId !== undefined
+  ) || (
+    event.type === "assistant_message"
+    && (event.messageId !== undefined || event.slotId !== undefined || event.replyToMessageId !== undefined)
+  ));
 }
 
 /**
@@ -273,6 +294,7 @@ function buildHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
       current = emptyTurn(`history-${String(anonymousIndex)}`, event.time);
       current.user = publicUserMessage(event.content);
       current.userMessageIndex = userMessageIndex;
+      current.userMessageId = event.messageId;
       userMessageIndex += 1;
       turns.push(current);
       continue;
@@ -288,6 +310,8 @@ function buildHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
       turn.timestamp = event.time ?? turn.timestamp;
       turn.status = "completed";
       turn.usage = event.usage;
+      turn.assistantMessageId = event.messageId ?? turn.assistantMessageId;
+      turn.versionSlotId = event.slotId ?? turn.versionSlotId;
       if (event.usage) {
         turn.model = {
           alias: event.usage.modelAlias,
@@ -352,6 +376,7 @@ function buildHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
     if (event.type === "tool_execution") continue;
     if (event.type === "context_checkpoint") continue;
     if (event.type === "model_request") continue;
+    if (event.type === "message_version_selected") continue;
     const turn = ensureTurn(event.time);
     turn.error = event.message;
     turn.durationMs = elapsedMs(turn.timestamp, event.time) ?? turn.durationMs;
@@ -363,6 +388,186 @@ function buildHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
         if (tool.status === "running" || tool.status === "failed") tool.status = "unknown";
       }
     }
+  }
+  return turns;
+}
+
+interface HistoricalVersionRecord {
+  messageId: string;
+  slotId: string;
+  eventIndex: number;
+}
+
+/** 新消息树的历史投影：同一 user turn 下只展示活动版本，工具事件按 runId 回填。 */
+function buildVersionedHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
+  const activeEvents = activeSessionEventsForPath(events);
+  const turns: TimelineTurn[] = [];
+  const turnsByUserId = new Map<string, TimelineTurn>();
+  const turnsByRunId = new Map<string, TimelineTurn>();
+  const runToUserId = new Map<string, string>();
+  const versionsBySlot = new Map<string, HistoricalVersionRecord[]>();
+  const userIndexes = new Map<string, number>();
+  let rawUserIndex = 0;
+  for (const event of events) {
+    if (event.type !== "user_message" || event.auditOnly) continue;
+    if (event.messageId) userIndexes.set(event.messageId, rawUserIndex);
+    rawUserIndex += 1;
+  }
+  for (const [eventIndex, event] of events.entries()) {
+    if (event.type !== "assistant_message" || !event.messageId || !event.slotId) continue;
+    const records = versionsBySlot.get(event.slotId) ?? [];
+    records.push({ messageId: event.messageId, slotId: event.slotId, eventIndex });
+    versionsBySlot.set(event.slotId, records);
+  }
+  for (const records of versionsBySlot.values()) records.sort((left, right) => left.eventIndex - right.eventIndex);
+  for (const event of events) {
+    if (event.runtime?.runId === undefined) continue;
+    if (event.type === "user_message" && !event.auditOnly && event.messageId) runToUserId.set(event.runtime.runId, event.messageId);
+    if (event.type === "assistant_message" && event.replyToMessageId) runToUserId.set(event.runtime.runId, event.replyToMessageId);
+    if (event.type === "agent_message" && event.replyToMessageId) runToUserId.set(event.runtime.runId, event.replyToMessageId);
+  }
+
+  let current: TimelineTurn | undefined;
+  let anonymousIndex = 0;
+  let activeUserIndex = 0;
+  const ensureTurn = (timestamp?: string): TimelineTurn => {
+    if (current) return current;
+    anonymousIndex += 1;
+    current = emptyTurn(`history-${String(anonymousIndex)}`, timestamp);
+    turns.push(current);
+    return current;
+  };
+  const turnForEvent = (event: SessionEvent, timestamp?: string): TimelineTurn => {
+    const runId = event.runtime?.runId;
+    const runTurn = runId === undefined ? undefined : turnsByRunId.get(runId);
+    if (runTurn) return runTurn;
+    const runUserId = runId === undefined ? undefined : runToUserId.get(runId);
+    const mappedRunTurn = runUserId === undefined ? undefined : turnsByUserId.get(runUserId);
+    if (mappedRunTurn) {
+      turnsByRunId.set(runId!, mappedRunTurn);
+      return mappedRunTurn;
+    }
+    if (event.type === "assistant_message" && event.replyToMessageId) {
+      const replyTurn = turnsByUserId.get(event.replyToMessageId);
+      if (replyTurn) {
+        if (runId) turnsByRunId.set(runId, replyTurn);
+        return replyTurn;
+      }
+    }
+    return ensureTurn(timestamp);
+  };
+
+  for (const event of activeEvents) {
+    if (event.type === "tool_result" && event.auditOnly && event.recovered && resultString(event.result, "status") !== "skipped") continue;
+    if (event.type === "user_message") {
+      if (event.auditOnly) continue;
+      anonymousIndex += 1;
+      current = emptyTurn(`history-${String(anonymousIndex)}`, event.time);
+      current.user = publicUserMessage(event.content);
+      current.userMessageIndex = event.messageId === undefined ? activeUserIndex : userIndexes.get(event.messageId) ?? activeUserIndex;
+      current.userMessageId = event.messageId;
+      activeUserIndex += 1;
+      turns.push(current);
+      if (event.messageId) turnsByUserId.set(event.messageId, current);
+      if (event.runtime?.runId) turnsByRunId.set(event.runtime.runId, current);
+      continue;
+    }
+    if (event.type === "assistant_message") {
+      if (!event.content && !event.reasoningContent) continue;
+      const turn = turnForEvent(event, event.time);
+      const parsed = event.content ? parseMemoryCitations(event.content) : undefined;
+      turn.memoryCitations = parsed?.citations.length ? parsed.citations : turn.memoryCitations;
+      turn.assistant = (parsed?.textWithoutBlock || event.content) || turn.assistant;
+      appendHistoricalReasoning(turn, event.reasoningContent);
+      appendHistoricalAssistant(turn, parsed?.textWithoutBlock || event.content);
+      turn.durationMs = elapsedMs(turn.timestamp, event.time) ?? turn.durationMs;
+      turn.timestamp = event.time ?? turn.timestamp;
+      turn.status = "completed";
+      turn.usage = event.usage;
+      turn.assistantMessageId = event.messageId ?? turn.assistantMessageId;
+      turn.versionSlotId = event.slotId ?? turn.versionSlotId;
+      if (event.usage) {
+        turn.model = {
+          alias: event.usage.modelAlias,
+          provider: event.usage.provider,
+          label: modelLabel(event.usage.provider, event.usage.model),
+          reasoning: ""
+        };
+      }
+      continue;
+    }
+    if (event.type === "turn_status") {
+      const turn = turnForEvent(event, event.time);
+      turn.status = event.status;
+      turn.timestamp = event.time ?? turn.timestamp;
+      turn.resumable = event.resumable;
+      turn.finishReason = event.finishReason ?? event.stopReason;
+      turn.error = event.status === "completed" ? undefined : historicalTurnStatusSummary(event);
+      for (const tool of turn.tools) {
+        if (tool.status !== "running" && tool.status !== "waiting") continue;
+        tool.status = event.status === "failed" ? "failed" : event.status === "cancelled" ? "cancelled" : "unknown";
+      }
+      continue;
+    }
+    if (event.type === "tool_call") {
+      const turn = turnForEvent(event, event.time);
+      appendInvokedSkill(turn, event.tool, event.args);
+      const projection = historicalToolProjection(event.tool, event.args);
+      appendHistoricalReasoning(turn, event.reasoningContent);
+      appendHistoricalAssistant(turn, event.assistantContent, true);
+      const tool: TimelineTool = {
+        id: event.toolCallId ?? `history-tool-${String(turn.tools.length)}`,
+        tool: event.tool,
+        args: event.args,
+        status: "running",
+        display: projection.display,
+        path: projection.path,
+        updates: [],
+        timestamp: event.time
+      };
+      turn.tools.push(tool);
+      turn.steps.push({ kind: "tool", id: tool.id, tool });
+      continue;
+    }
+    if (event.type === "tool_result") {
+      const turn = turnForEvent(event, event.time);
+      const tool = [...turn.tools].reverse().find((candidate) => candidate.id === event.toolCallId || (candidate.tool === event.tool && candidate.result === undefined));
+      if (tool) {
+        tool.result = event.result;
+        tool.status = timelineToolStatus(event.result, event.executionStatus);
+        tool.error = resultError(event.result);
+        tool.diff = resultString(event.result, "output") ?? resultString(event.result, "diffPreview");
+        tool.executionStatus = event.executionStatus;
+        tool.recovered = event.recovered;
+        tool.operationId = event.operationId;
+        tool.evidence = event.evidence;
+      }
+      continue;
+    }
+    if (event.type === "agent_message" || event.type === "tool_execution" || event.type === "context_checkpoint" || event.type === "model_request" || event.type === "message_version_selected") continue;
+    const turn = turnForEvent(event, event.time);
+    turn.error = event.message;
+    turn.durationMs = elapsedMs(turn.timestamp, event.time) ?? turn.durationMs;
+    turn.timestamp = event.time ?? turn.timestamp;
+    const aborted = /abort|中止|interrupted/i.test(event.message);
+    turn.status = aborted ? "aborted" : "failed";
+    if (aborted) {
+      for (const tool of turn.tools) {
+        if (tool.status === "running" || tool.status === "failed") tool.status = "unknown";
+      }
+    }
+  }
+
+  for (const turn of turns) {
+    if (!turn.assistantMessageId) continue;
+    const slotId = turn.versionSlotId;
+    const records = slotId === undefined ? undefined : versionsBySlot.get(slotId);
+    if (!records?.length) continue;
+    const index = records.findIndex((record) => record.messageId === turn.assistantMessageId);
+    if (index < 0) continue;
+    turn.versionSlotId = slotId;
+    turn.versionIndex = index;
+    turn.versionCount = records.length;
   }
   return turns;
 }
@@ -530,6 +735,7 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
       } else {
         turn.user = content;
         turn.userMessageIndex = userMessageIndex;
+        turn.userMessageId = event.messageId;
       }
       userMessageIndex += 1;
       turn.status = "running";
@@ -537,6 +743,8 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
       turn.status = "running";
       turn.model = event.model;
       turn.startedAt = event.timestamp;
+      turn.retryOfMessageId = event.retryOfMessageId;
+      if (event.retryOfMessageId !== undefined) turn.assistantMessageId = event.messageId;
     } else if (event.type === "context.retrying") {
       turn.steps.push({
         kind: "reasoning",
@@ -681,6 +889,9 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
       turn.error = event.reason;
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
+      // 重试运行未产生 agent_message 时，run.started 写入的 assistantMessageId 是幻影 ID，
+      // 清掉让重试回退到 userMessageId，避免 "not on the active conversation path"。
+      if (turn.retryOfMessageId !== undefined) turn.assistantMessageId = undefined;
       turn.usage = event.usage;
       settleMetrics(turn);
       for (const tool of turn.tools) {
@@ -695,6 +906,9 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
       turn.error = event.reason;
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
+      // 重试运行未产生 agent_message 时，run.started 写入的 assistantMessageId 是幻影 ID，
+      // 清掉让重试回退到 userMessageId，避免 "not on the active conversation path"。
+      if (turn.retryOfMessageId !== undefined) turn.assistantMessageId = undefined;
       for (const tool of turn.tools) {
         if (tool.status !== "running" && tool.status !== "waiting") continue;
         tool.status = "unknown";
@@ -707,6 +921,9 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
       turn.error = event.error;
       turn.durationMs = event.durationMs;
       finishReasoning(event.runId, event.timestamp);
+      // 重试运行未产生 agent_message 时，run.started 写入的 assistantMessageId 是幻影 ID，
+      // 清掉让重试回退到 userMessageId，避免 "not on the active conversation path"。
+      if (turn.retryOfMessageId !== undefined) turn.assistantMessageId = undefined;
       settleMetrics(turn);
       for (const tool of turn.tools) {
         if (tool.status !== "running" && tool.status !== "waiting") continue;
@@ -768,6 +985,41 @@ function buildLiveTurns(events: AgentHostEvent[], initialUserMessageIndex: numbe
   return fold.snapshot();
 }
 
+/** 重新生成没有新的 user 事件，实时 assistant 需要替换原回答所在的视觉位置。 */
+function mergeLiveRetryTurns(history: TimelineTurn[], live: TimelineTurn[]): TimelineTurn[] {
+  const result = [...history];
+  for (const liveTurn of live) {
+    const targetId = liveTurn.retryOfMessageId;
+    if (!targetId) {
+      result.push(liveTurn);
+      continue;
+    }
+    const targetIndex = result.findIndex((turn) => turn.assistantMessageId === targetId || turn.userMessageId === targetId);
+    if (targetIndex < 0) {
+      result.push(liveTurn);
+      continue;
+    }
+    const target = result[targetIndex];
+    if (!target) {
+      result.push(liveTurn);
+      continue;
+    }
+    const hasReplacementUser = liveTurn.userMessageId !== undefined
+      && liveTurn.userMessageId !== target.userMessageId;
+    result[targetIndex] = {
+      ...liveTurn,
+      id: target.id,
+      user: hasReplacementUser ? liveTurn.user : target.user,
+      userMessageIndex: target.userMessageIndex,
+      userMessageId: hasReplacementUser ? liveTurn.userMessageId : target.userMessageId,
+      versionSlotId: target.versionSlotId ?? target.userMessageId,
+      versionIndex: target.versionCount ?? 1,
+      versionCount: (target.versionCount ?? 1) + 1
+    };
+  }
+  return result;
+}
+
 /**
  * 增量时间线投影器。
  *
@@ -790,7 +1042,7 @@ export function createSessionTimelineProjector(): SessionTimelineProjector {
 
   const rebuild = (events: SessionEvent[], liveEvents: AgentHostEvent[]): void => {
     const history = historicalPrefix(events, liveEvents);
-    historyTurns = buildHistoricalTurns(history).filter(isVisibleTimelineTurn);
+    historyTurns = (hasVersionMetadata(history) ? buildVersionedHistoricalTurns(history) : buildHistoricalTurns(history)).filter(isVisibleTimelineTurn);
     const historicalUserMessages = history.filter((event) => event.type === "user_message").length;
     const nextFold = createLiveTimelineFold(historicalUserMessages);
     for (const event of liveEvents) nextFold.apply(event);
@@ -819,7 +1071,7 @@ export function createSessionTimelineProjector(): SessionTimelineProjector {
         processedLive = liveEvents.length;
       }
       const liveTurns = (fold ? fold.snapshot() : []).filter(isVisibleTimelineTurn);
-      return [...historyTurns, ...liveTurns];
+      return mergeLiveRetryTurns(historyTurns, liveTurns).filter(isVisibleTimelineTurn);
     }
   };
 }

@@ -25,6 +25,9 @@ export function migrateGlobalConfigDocument(value: unknown): ConfigMigrationResu
   // 嵌入字段曾在配置已版本化之后短暂写进 activity.*，版本门内的迁移够不到这批文件；
   // 严格 schema 不认识这两个键，所以这段清理必须对所有版本无条件执行。
   migrateActivityEmbeddingPolicy(document);
+  // 人格预设与自定义指令已下线（改由 SOUL/USER 承载）。顶层 personalization 块不再属于
+  // 严格 schema，无条件剥离以兼容任何版本的存量配置文件。
+  delete document.personalization;
   return { document };
 }
 
@@ -56,17 +59,21 @@ function migrateMemoryPolicy(document: Record<string, unknown>): void {
   const memory = context && isRecord(context.memory) ? context.memory : undefined;
   if (!memory) return;
 
+  const legacyEnabled = typeof memory.enabled === "boolean" ? memory.enabled : undefined;
   if (memory.useMemories === undefined && typeof memory.enabled === "boolean") {
     memory.useMemories = memory.enabled;
   }
   if (memory.generateMemories === undefined && typeof memory.autoRemember === "boolean") {
     memory.generateMemories = memory.autoRemember;
   }
+  // 旧版本只有一个总开关；没有 autoRemember 时也必须保留“关闭整个功能”的语义，
+  // 不能被新 schema 的 generateMemories 默认值重新打开。
+  if (legacyEnabled !== undefined) memory.enabled = legacyEnabled;
   if (typeof memory.model === "string" && memory.model.length > 0) {
     if (memory.extractModel === undefined) memory.extractModel = memory.model;
     if (memory.consolidationModel === undefined) memory.consolidationModel = memory.model;
   }
-  delete memory.enabled;
+  if (legacyEnabled === undefined) delete memory.enabled;
   delete memory.autoRemember;
   delete memory.model;
 }

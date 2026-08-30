@@ -1,35 +1,12 @@
 /**
  * 个性化配置与会话覆盖的共享内核。
  *
- * 配置、Desktop、TUI 和 Agent runtime 都复用这里的严格 schema 与解析规则，避免不同入口
- * 对 inherit/disabled、字节上限或记忆开关产生不同解释。自定义指令正文只进入模型 prompt；
- * 普通 session/telemetry 使用不可逆摘要元数据。
+ * 人格预设与自定义指令已下线（改由 SOUL/IDENTITY/STYLE 与 USER.md 承载）；这里只保留
+ * 记忆与 TELOS 策略，以及「按聊天覆盖记忆开关」这一最小能力。配置、Desktop、TUI 和
+ * Agent runtime 都复用这里的严格 schema 与解析规则，避免不同入口对记忆开关产生不同解释。
  */
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { EmbeddingModelRef } from "../llm/embedding/types.js";
-
-export const PERSONALIZATION_CONFIG_VERSION = 1 as const;
-export const PERSONALIZATION_CUSTOM_INSTRUCTIONS_MAX_BYTES = 4 * 1024;
-
-export const personalityPresetSchema = z.enum(["none", "friendly", "pragmatic", "buddy"]);
-export type PersonalityPreset = z.infer<typeof personalityPresetSchema>;
-
-const customInstructionsSchema = z.string().superRefine((value, context) => {
-  if (Buffer.byteLength(value, "utf8") <= PERSONALIZATION_CUSTOM_INSTRUCTIONS_MAX_BYTES) return;
-  context.addIssue({
-    code: z.ZodIssueCode.custom,
-    message: `Custom instructions must not exceed ${String(PERSONALIZATION_CUSTOM_INSTRUCTIONS_MAX_BYTES)} UTF-8 bytes.`
-  });
-});
-
-export const personalizationSettingsSchema = z.object({
-  enabled: z.boolean().default(true),
-  personality: personalityPresetSchema.default("none"),
-  customInstructions: customInstructionsSchema.default("")
-}).strict().default({ enabled: true, personality: "none", customInstructions: "" });
-
-export type PersonalizationSettings = z.infer<typeof personalizationSettingsSchema>;
 
 export const embeddingModelRefSchema: z.ZodType<EmbeddingModelRef> = z.discriminatedUnion("kind", [
   z.object({
@@ -46,7 +23,7 @@ export const embeddingModelRefSchema: z.ZodType<EmbeddingModelRef> = z.discrimin
 export type { EmbeddingModelRef } from "../llm/embedding/types.js";
 
 export const telosPolicySchema = z.object({
-  /** 显式 TELOS 可以独立于事实记忆启用。 */
+  /** TELOS 受 memory.enabled 外层门禁约束；这里是 TELOS 自身的总开关。 */
   enabled: z.boolean().default(false),
   /** 是否从成功根回合中积累脱敏行为观察。 */
   autoObserve: z.boolean().default(false),
@@ -116,7 +93,7 @@ const rawMemoryPolicySchema = z.preprocess(stripDeprecatedMemoryPolicy, z.object
 
 export const memoryPolicySchema = rawMemoryPolicySchema.transform((policy) => ({
   ...policy,
-  // v2 没有总开关。读取旧配置时用两个既有开关的 OR 初始化，避免升级后意外停用。
+  // 缺少总开关的旧配置按两个自动开关的 OR 推导；显式关闭总开关时由迁移结果保留关闭语义。
   enabled: policy.enabled ?? (policy.useMemories || policy.generateMemories)
 })).default({
   enabled: false,
@@ -136,61 +113,38 @@ export const memoryPolicySchema = rawMemoryPolicySchema.transform((policy) => ({
 
 export type MemoryPolicy = z.infer<typeof memoryPolicySchema>;
 
-export const chatCustomInstructionsOverrideSchema = z.object({
-  mode: z.enum(["inherit", "replace", "disabled"]),
-  value: customInstructionsSchema.optional()
-}).strict().superRefine((override, context) => {
-  if (override.mode === "replace" && override.value === undefined) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["value"],
-      message: "Replacement custom instructions require a value."
-    });
-  }
-  if (override.mode !== "replace" && override.value !== undefined) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["value"],
-      message: "Only replacement custom instructions may include a value."
-    });
-  }
-});
+/**
+ * 按聊天的记忆开关覆盖。人格/指令字段已从可编辑面移除，但旧 session catalog 记录里仍可能
+ * 携带这些废弃键；`.passthrough()` + transform 读旧记录时丢弃它们，只保留记忆开关。
+ */
+const chatMemorySwitchSchema = z.union([z.literal("inherit"), z.boolean()]);
 
 export const chatPersonalizationOverrideSchema = z.object({
-  personality: z.enum(["inherit", "none", "friendly", "pragmatic", "buddy"]),
-  customInstructions: chatCustomInstructionsOverrideSchema,
-  useMemories: z.union([z.literal("inherit"), z.boolean()]),
-  contributeMemories: z.union([z.literal("inherit"), z.boolean()])
-}).strict();
+  useMemories: chatMemorySwitchSchema,
+  contributeMemories: chatMemorySwitchSchema
+}).passthrough().transform(({ useMemories, contributeMemories }) => ({ useMemories, contributeMemories }));
 
 export type ChatPersonalizationOverride = z.infer<typeof chatPersonalizationOverrideSchema>;
 
 export const chatPersonalizationOverridePatchSchema = z.object({
-  personality: chatPersonalizationOverrideSchema.shape.personality.optional(),
-  customInstructions: chatCustomInstructionsOverrideSchema.optional(),
-  useMemories: chatPersonalizationOverrideSchema.shape.useMemories.optional(),
-  contributeMemories: chatPersonalizationOverrideSchema.shape.contributeMemories.optional()
+  useMemories: chatMemorySwitchSchema.optional(),
+  contributeMemories: chatMemorySwitchSchema.optional()
 }).strict();
 
 export const defaultChatPersonalizationOverride: ChatPersonalizationOverride = {
-  personality: "inherit",
-  customInstructions: { mode: "inherit", value: undefined },
   useMemories: "inherit",
   contributeMemories: "inherit"
 };
 
 export type ChatPersonalizationOverridePatch = z.infer<typeof chatPersonalizationOverridePatchSchema>;
 
-/** 普通 session/telemetry 可持久化的个性化摘要；不含自定义指令正文。 */
-export interface PersonalizationMetadata {
-  personality: PersonalityPreset;
-  configVersion: typeof PERSONALIZATION_CONFIG_VERSION;
-  instructionsHash: string;
-}
+/**
+ * 持久化到 session/telemetry 的个性化元数据占位。人格/指令已下线，此结构仅保留为历史
+ * session 记录的兼容字段（SessionContextState.personalization），不再承载任何信息。
+ */
+export interface PersonalizationMetadata {}
 
-export interface ResolvedChatPersonalization extends PersonalizationMetadata {
-  enabled: boolean;
-  customInstructions: string;
+export interface ResolvedChatPersonalization {
   memoryEnabled: boolean;
   useMemories: boolean;
   contributeMemories: boolean;
@@ -207,8 +161,7 @@ export interface ResolvedChatPersonalization extends PersonalizationMetadata {
 }
 
 export interface AgentPersonalizationState {
-  /** 当前工作区的有效基础配置（全局 config 叠加 project settings 后）。 */
-  global: PersonalizationSettings;
+  /** 当前工作区的有效记忆策略（全局 config 叠加 project settings 后）。 */
   memory: MemoryPolicy;
   override: ChatPersonalizationOverride;
   resolved: ResolvedChatPersonalization;
@@ -217,34 +170,24 @@ export interface AgentPersonalizationState {
 }
 
 export const globalPersonalizationUpdateSchema = z.object({
-  personalization: personalizationSettingsSchema.optional(),
   memory: memoryPolicySchema.optional()
 }).strict();
 
 export type GlobalPersonalizationUpdate = z.infer<typeof globalPersonalizationUpdateSchema>;
 
 export function resolveChatPersonalization(
-  settings: PersonalizationSettings,
   memory: MemoryPolicy,
   override: ChatPersonalizationOverride = defaultChatPersonalizationOverride
 ): ResolvedChatPersonalization {
-  const parsedSettings = personalizationSettingsSchema.parse(settings);
   const parsedMemory = memoryPolicySchema.parse(memory);
   const parsedOverride = chatPersonalizationOverrideSchema.parse(override);
-  const enabled = parsedSettings.enabled;
-  const personality = enabled
-    ? parsedOverride.personality === "inherit" ? parsedSettings.personality : parsedOverride.personality
-    : "none";
-  const customInstructions = enabled
-    ? parsedOverride.customInstructions.mode === "inherit"
-      ? parsedSettings.customInstructions
-      : parsedOverride.customInstructions.mode === "replace"
-        ? parsedOverride.customInstructions.value ?? ""
-        : ""
-    : "";
+  const configuredTelos = parsedMemory.telos ?? defaultTelosPolicy;
+  // memory.enabled 是 TELOS 的外层门禁；任一层关闭都不注入策略、不记录观察、不检测偏差，
+  // 但不清理已保存的 TELOS 文档、观察或审核结果。
+  const telos = parsedMemory.enabled && configuredTelos.enabled
+    ? configuredTelos
+    : defaultTelosPolicy;
   return {
-    enabled,
-    customInstructions,
     memoryEnabled: parsedMemory.enabled,
     useMemories: parsedMemory.enabled && (parsedOverride.useMemories === "inherit" ? parsedMemory.useMemories : parsedOverride.useMemories),
     contributeMemories: parsedMemory.enabled && (parsedOverride.contributeMemories === "inherit"
@@ -259,8 +202,7 @@ export function resolveChatPersonalization(
     similarityThresholds: parsedMemory.similarityThresholds,
     excludeExternalContext: parsedMemory.excludeExternalContext,
     maxRecalled: parsedMemory.maxRecalled,
-    telos: parsedMemory.telos ?? defaultTelosPolicy,
-    ...personalizationMetadata(personality, customInstructions)
+    telos
   };
 }
 
@@ -271,10 +213,6 @@ export function mergeChatPersonalizationOverride(
   const parsedPatch = chatPersonalizationOverridePatchSchema.parse(patch);
   return chatPersonalizationOverrideSchema.parse({
     ...current,
-    personality: parsedPatch.personality === undefined ? current.personality : parsedPatch.personality,
-    customInstructions: parsedPatch.customInstructions === undefined
-      ? current.customInstructions
-      : parsedPatch.customInstructions,
     useMemories: parsedPatch.useMemories === undefined ? current.useMemories : parsedPatch.useMemories,
     contributeMemories: parsedPatch.contributeMemories === undefined
       ? current.contributeMemories
@@ -282,30 +220,16 @@ export function mergeChatPersonalizationOverride(
   });
 }
 
-export function personalizationMetadata(
-  personality: PersonalityPreset,
-  customInstructions: string
-): PersonalizationMetadata {
-  return {
-    personality,
-    configVersion: PERSONALIZATION_CONFIG_VERSION,
-    instructionsHash: `sha256:${createHash("sha256").update(customInstructions, "utf8").digest("hex")}`
-  };
+export function personalizationMetadata(): PersonalizationMetadata {
+  return {};
 }
 
-export function metadataForPersonalization(value: ResolvedChatPersonalization): PersonalizationMetadata {
-  return {
-    personality: value.personality,
-    configVersion: value.configVersion,
-    instructionsHash: value.instructionsHash
-  };
+export function metadataForPersonalization(): PersonalizationMetadata {
+  return {};
 }
 
 export function cloneChatPersonalizationOverride(
   override: ChatPersonalizationOverride
 ): ChatPersonalizationOverride {
-  return {
-    ...override,
-    customInstructions: { ...override.customInstructions }
-  };
+  return { ...override };
 }

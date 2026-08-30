@@ -249,6 +249,7 @@ export function tuiReducer(state: TuiState, event: TuiAction): TuiState {
     case "context.updated":
     case "compact.started":
     case "compact.completed":
+    case "skill.draft_created":
       return state;
   }
 }

@@ -16,9 +16,7 @@ import {
 } from "../activity/settings.js";
 import {
   memoryPolicySchema,
-  personalizationSettingsSchema,
-  type MemoryPolicy,
-  type PersonalizationSettings
+  type MemoryPolicy
 } from "../personalization/index.js";
 import { GLOBAL_CONFIG_FORMAT, GLOBAL_CONFIG_VERSION } from "./migrations.js";
 
@@ -40,13 +38,13 @@ const agentSchema = z.object({
 
 const permissionSchema = z.object({
   mode: z.enum(["ask", "read-only", "auto", "full-access"]).default("ask"),
-  allowTools: z.array(z.string()).default(["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory"]),
+  allowTools: z.array(z.string()).default(["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory", "update_emotion"]),
   allowPaths: z.array(z.string()).default([]),
   denyPaths: z.array(z.string()).default([".env", ".env.local", ".ssh/", "node_modules/"]),
   criticalAlwaysAsk: z.boolean().default(true)
 }).default({
   mode: "ask",
-  allowTools: ["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory"],
+  allowTools: ["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory", "update_emotion"],
   allowPaths: [],
   denyPaths: [".env", ".env.local", ".ssh/", "node_modules/"],
   criticalAlwaysAsk: true
@@ -100,6 +98,13 @@ const identityPolicySchema = z.object({
 
 export type IdentityPolicy = z.infer<typeof identityPolicySchema>;
 
+export const emotionPolicySchema = z.object({
+  enabled: z.boolean().default(true),
+  allowModelUpdate: z.boolean().default(true)
+}).strict().default({ enabled: true, allowModelUpdate: true });
+
+export type EmotionPolicy = z.infer<typeof emotionPolicySchema>;
+
 const contextSchema = z.object({
   // 不配置时按当前模型的上下文窗口自动推导；配置了就作为额外上限。
   maxInputTokens: z.number().int().min(2_048).max(2_000_000).optional(),
@@ -109,12 +114,14 @@ const contextSchema = z.object({
   instructionsMaxBytes: z.number().int().min(1_024).max(131_072).default(32 * 1024),
   compaction: compactionSchema,
   identity: identityPolicySchema,
+  emotion: emotionPolicySchema,
   memory: memoryPolicySchema
 }).default({
   maxTurnToolResultBytes: 128 * 1024,
   instructionsMaxBytes: 32 * 1024,
   compaction: { enabled: true, reserveTokens: undefined, triggerPercent: undefined, keepRecentTokens: undefined, keepRecentMessages: undefined, maxSummaryTokens: 4_096, summaryModel: undefined },
   identity: { enabled: true, userEnabled: true },
+  emotion: { enabled: true, allowModelUpdate: true },
   memory: {
     enabled: false,
     useMemories: true,
@@ -574,7 +581,6 @@ const canonicalConfigSchema = z.object({
   workspace: z.object({
     ignore: z.array(z.string())
   }),
-  personalization: personalizationSettingsSchema,
   activity: activitySettingsSchema,
   context: contextSchema,
   chat: chatParamsSchema,
@@ -727,7 +733,7 @@ export type WebFetchConfig = z.infer<typeof webFetchSchema>;
 export type WebSearchConfig = z.infer<typeof webSearchSchema>;
 export type WebCookiesConfig = z.infer<typeof webCookiesSchema>;
 export type WebConfig = z.infer<typeof webSchema>;
-export type { ActivityDataResidency, ActivityExternalPolicy, ActivitySettings, MemoryPolicy, PersonalizationSettings };
+export type { ActivityDataResidency, ActivityExternalPolicy, ActivitySettings, MemoryPolicy };
 
 const defaultWorkspaceIgnore = [
   "node_modules",
@@ -787,7 +793,7 @@ export const defaultConfig: AgentConfig = {
   },
   permission: {
     mode: "ask",
-    allowTools: ["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory"],
+    allowTools: ["read_file", "list_files", "search_files", "git_status", "git_diff", "web_search", "save_memory", "update_emotion"],
     allowPaths: [],
     denyPaths: [".env", ".env.local", ".ssh/", "node_modules/"],
     criticalAlwaysAsk: true
@@ -795,7 +801,6 @@ export const defaultConfig: AgentConfig = {
   workspace: {
     ignore: defaultWorkspaceIgnore
   },
-  personalization: { enabled: true, personality: "none", customInstructions: "" },
   activity: defaultActivitySettings,
   chat: { temperature: undefined, maxOutputTokens: undefined },
   checkpoints: { enabled: true },
@@ -813,6 +818,7 @@ export const defaultConfig: AgentConfig = {
     instructionsMaxBytes: 32 * 1024,
     compaction: { enabled: true, reserveTokens: undefined, triggerPercent: undefined, keepRecentTokens: undefined, keepRecentMessages: undefined, maxSummaryTokens: 4_096, summaryModel: undefined },
     identity: { enabled: true, userEnabled: true },
+    emotion: { enabled: true, allowModelUpdate: true },
     memory: {
       enabled: false,
       useMemories: true,

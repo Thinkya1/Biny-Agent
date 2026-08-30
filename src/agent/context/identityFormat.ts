@@ -9,15 +9,11 @@ import type { IdentityDocument, IdentityDocumentKind } from "./identityTypes.js"
 
 export const identityDocumentFileNames: Record<IdentityDocumentKind, string> = {
   soul: "SOUL.md",
-  identity: "IDENTITY.md",
-  style: "STYLE.md",
   user: "USER.md"
 };
 
 export const maxIdentityDocumentChars: Record<IdentityDocumentKind, number> = {
   soul: 24_000,
-  identity: 8_000,
-  style: 16_000,
   user: 16_000
 };
 
@@ -71,8 +67,8 @@ export interface IdentityPromptInput {
  */
 export function renderIdentityPrompt(input: IdentityPromptInput): string | undefined {
   const kinds: IdentityDocumentKind[] = input.includeUser
-    ? ["soul", "identity", "style", "user"]
-    : ["soul", "identity", "style"];
+    ? ["soul", "user"]
+    : ["soul"];
   const sections = kinds
     .map((kind) => input.documents[kind])
     .filter((document): document is IdentityDocument => document !== undefined && document.content.trim().length > 0)

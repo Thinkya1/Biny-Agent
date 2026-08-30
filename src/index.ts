@@ -26,8 +26,6 @@ export type {
   GlobalPersonalizationUpdate,
   MemoryPolicy,
   PersonalizationMetadata,
-  PersonalizationSettings,
-  PersonalityPreset,
   ResolvedChatPersonalization
 } from "./personalization/index.js";
 export type {

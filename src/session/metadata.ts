@@ -6,7 +6,16 @@
  */
 import type { AgentUsage } from "../agent/core/types.js";
 import type { PromptEpochReason } from "../llm/promptCache.js";
-import type { PersonalizationMetadata } from "../personalization/index.js";
+
+/**
+ * 历史 session 在 contextState.personalization 里持久化的人格/指令摘要。这两个字段已下线，
+ * 结构只保留用于读取旧 JSONL；新回合写入的是空对象，字段全部可选以兼容两种形态。
+ */
+export interface PersonalizationMetadata {
+  personality?: string;
+  configVersion?: number;
+  instructionsHash?: string;
+}
 
 export type UsageOperation = "agent" | "plan" | "compaction" | "memory" | "subagent";
 export type ContextBudgetSource = "estimated" | "provider";
@@ -71,7 +80,7 @@ export interface SessionContextState {
   lastCompactedAt?: string;
   budget: SessionContextUsage;
   checkpoint?: SessionContextCheckpoint;
-  /** 自定义指令正文不进入 JSONL；只保存不可逆 hash 与枚举/版本元数据。 */
+  /** 旧人格/指令摘要（只读历史）；新回合只写空对象，自定义指令正文从不进入 JSONL。 */
   personalization?: PersonalizationMetadata;
   /** 稳定 prompt 前缀的 session epoch；旧 session 没有该字段时从 0 开始。 */
   promptEpoch?: number;

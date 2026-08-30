@@ -12,8 +12,10 @@ import path from "node:path";
 import type { AgentMessage, AgentReasoningContent, ModelRequestMetrics } from "../agent/core/types.js";
 import { createToolOperationId, type ToolExecutionState } from "../tools/types.js";
 import { readSessionEvents, readStoredSessionEvents } from "./events.js";
+import { activeSessionEventsForPath, sessionMessageTree, type SessionMessageNode, type SessionMessageReference } from "./messageTree.js";
 import type { ReasoningBlock, SessionContextCheckpoint, SessionContextState, SessionContextUsage, SessionEvent, SessionUsage } from "./recorder.js";
 import { validateRuntimeEventStream, type RuntimeHighWater } from "./runtimeEvent.js";
+export { activeSessionEventsForPath, activeSessionMessageIds, sessionMessageTree, type SessionMessageNode, type SessionMessageReference } from "./messageTree.js";
 
 export interface SessionReplay {
   events: SessionEvent[];
@@ -53,18 +55,6 @@ export interface SessionDiscardedToolCall {
   reason: "not_started";
 }
 
-export interface SessionMessageNode {
-  id: string;
-  parentId?: string;
-  eventIndex: number;
-  message: AgentMessage;
-}
-
-export interface SessionMessageReference {
-  id?: string;
-  index: number;
-}
-
 export async function replaySession(filePath: string): Promise<SessionReplay> {
   return replaySessionEvents(await readSessionEvents(filePath), { sessionId: sessionIdFromPath(filePath) });
 }
@@ -90,14 +80,15 @@ export function replaySessionEvents(recordedEvents: SessionEvent[], options: Ses
   const recovery = interruptedToolResults(recordedEvents, options);
   const recoveredToolResults = recovery.results;
   const events = orderRecoveredToolResults(recordedEvents, recoveredToolResults);
-  const projection = projectSessionConversation(events, {
+  const activeEvents = activeSessionEventsForPath(events);
+  const projection = projectSessionConversation(activeEvents, {
     discardedToolCallIds: new Set(recovery.discarded.map((call) => call.toolCallId).filter((id): id is string => id !== undefined)),
     recoveredToolResults
   });
-  const contextCheckpoint = latestContextCheckpoint(events);
+  const contextCheckpoint = latestContextCheckpoint(activeEvents);
   const activeProjection = applyContextCheckpoint(projection, contextCheckpoint);
   const contextStartMessageIndex = activeProjection.references[0]?.index ?? projection.messages.length;
-  const persistedContextState = latestContextState(events);
+  const persistedContextState = latestContextState(activeEvents);
   const contextState = persistedContextState && contextCheckpoint
     ? {
       ...persistedContextState,
@@ -116,11 +107,11 @@ export function replaySessionEvents(recordedEvents: SessionEvent[], options: Ses
       .slice(0, contextStartMessageIndex)
       .filter((message) => message.role === "user").length,
     totalMessageCount: projection.messages.length,
-    contextUsage: latestContextUsage(events),
+    contextUsage: latestContextUsage(activeEvents),
     contextState,
     contextCheckpoint,
-    usage: sessionUsage(events),
-    modelRequests: sessionModelRequests(events),
+    usage: sessionUsage(activeEvents),
+    modelRequests: sessionModelRequests(activeEvents),
     recoveredToolResults,
     discardedToolCalls: recovery.discarded,
     messageTree: sessionMessageTree(events),
@@ -234,26 +225,6 @@ function findRecoveryBoundary(events: SessionEvent[], callIndex: number): number
     if (event?.type === "agent_message" && event.message.role === "assistant") return index;
   }
   return events.length;
-}
-
-/** 新格式直接保留 canonical 消息的父子关系；旧事件没有 ID 时仍按原重放路径兼容。 */
-export function sessionMessageTree(events: SessionEvent[]): SessionMessageNode[] {
-  return events.flatMap((event, eventIndex): SessionMessageNode[] => {
-    if (event.type === "user_message" && !event.auditOnly) {
-      if (!event.messageId) return [];
-      return [{
-        id: event.messageId,
-        parentId: event.parentMessageId,
-        eventIndex,
-        message: { role: "user", content: event.content }
-      }];
-    }
-    if (event.type === "agent_message") {
-      if (!event.messageId) return [];
-      return [{ id: event.messageId, parentId: event.parentMessageId, eventIndex, message: event.message }];
-    }
-    return [];
-  });
 }
 
 /**
@@ -571,8 +542,8 @@ function projectSessionConversation(
   let canonicalTurn = false;
   const recoveredResults = new Set(options.recoveredToolResults ?? []);
   const consumedRecoveredResults = new Set<Extract<SessionEvent, { type: "tool_result" }>>();
-  const appendMessage = (message: AgentMessage, id?: string): void => {
-    references.push({ id, index: messages.length });
+  const appendMessage = (message: AgentMessage, id?: string, parentId?: string, slotId?: string): void => {
+    references.push({ id, index: messages.length, parentId, slotId });
     messages.push(message);
   };
 
@@ -648,7 +619,7 @@ function projectSessionConversation(
       flushPendingCalls();
       appendRecoveredResultsForOpenCalls();
       resetPendingCalls();
-      appendMessage({ role: "user", content: event.content }, event.messageId);
+      appendMessage({ role: "user", content: event.content }, event.messageId, event.parentMessageId, event.slotId);
       canonicalTurn = false;
       continue;
     }
@@ -659,12 +630,12 @@ function projectSessionConversation(
       resetPendingCalls();
       if (event.message.role === "assistant") {
         const content = event.message.content.filter((part) => part.type !== "toolCall" || !options.discardedToolCallIds?.has(part.id));
-        if (content.length) appendMessage({ ...event.message, content }, event.messageId);
+        if (content.length) appendMessage({ ...event.message, content }, event.messageId, event.parentMessageId, event.slotId);
         for (const part of content) {
           if (part.type === "toolCall") openCalls.set(part.id, { id: part.id, name: part.name, args: part.arguments });
         }
       } else {
-        appendMessage(event.message, event.messageId);
+        appendMessage(event.message, event.messageId, event.parentMessageId, event.slotId);
       }
       if (event.message.role !== "assistant") {
         openCalls.delete(event.message.toolCallId);
@@ -688,7 +659,7 @@ function projectSessionConversation(
       appendMessage({
         role: "assistant",
         content
-      });
+      }, event.messageId, event.parentMessageId, event.slotId);
       continue;
     }
 
