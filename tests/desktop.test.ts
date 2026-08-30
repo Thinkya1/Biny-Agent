@@ -14,6 +14,7 @@ import { startRuntimeHost } from "../src/runtime/RuntimeHost.js";
 import { executeRuntimeCommand } from "../src/runtime/commands.js";
 import { SessionLeaseStore } from "../src/runtime/SessionLease.js";
 import { isTerminalRunEvent, pendingPermission, type AgentHostEvent } from "../src/runtime/agentEvents.js";
+import type { RuntimeHostFactoryOptions } from "../src/runtime/host/types.js";
 import type { CredentialStore } from "../src/config/credentials.js";
 import { BINY_AGENT_DIR_ENV } from "../src/config/paths.js";
 import { createFileConfigStore } from "../src/config/store.js";
@@ -2430,14 +2431,16 @@ async function testDesktopMemoryChangesKeepPermissionMode(): Promise<void> {
     const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
     const project = await projects.createProject(workspaceRoot);
     const dataRoot = await projects.dataRoot(project);
-    const createRuntime = async (sessionId?: string) => {
-      const next = await createInteractiveAgentHost(project.path, {
+    const createRuntime = async (sessionId?: string, factoryOptions?: RuntimeHostFactoryOptions) => {
+      const fresh = factoryOptions?.fresh === true;
+      const next = await createInteractiveAgentHost(factoryOptions?.workspaceRoot ?? project.path, {
         persistenceRoot: dataRoot,
         configStore,
-        attachmentRoot: projects.attachmentsRoot(project)
+        attachmentRoot: projects.attachmentsRoot(project),
+        sessionId: fresh ? sessionId : undefined
       });
       try {
-        if (sessionId !== undefined) await next.runtime.resumeSession(sessionId);
+        if (sessionId !== undefined && !fresh) await next.runtime.resumeSession(sessionId);
         return next;
       } catch (error) {
         await next.runtime.close();
