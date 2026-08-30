@@ -142,7 +142,7 @@ export type ChatPersonalizationOverridePatch = z.infer<typeof chatPersonalizatio
  * 持久化到 session/telemetry 的个性化元数据占位。人格/指令已下线，此结构仅保留为历史
  * session 记录的兼容字段（SessionContextState.personalization），不再承载任何信息。
  */
-export interface PersonalizationMetadata {}
+export type PersonalizationMetadata = object;
 
 export interface ResolvedChatPersonalization {
   memoryEnabled: boolean;

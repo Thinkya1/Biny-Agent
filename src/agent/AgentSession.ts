@@ -2035,11 +2035,10 @@ export class AgentSession {
       // 快照路径：读快照跳过整条 replay（读字节 + JSON.parse + zod + 事件重放）。
       // 指纹不匹配或快照损坏时自动回退到完整重放，并在重放后异步写入新快照。
       const fingerprint = sessionFileFingerprint(resumeStat);
-      let snapshot: SessionSnapshotData | undefined;
+      const snapshot: SessionSnapshotData | undefined = await tryReadSessionSnapshot(resumeRecorder.filePath, fingerprint);
       let replay: SessionReplay;
-      snapshot = await tryReadSessionSnapshot(resumeRecorder.filePath, fingerprint);
       if (snapshot) {
-        replay = snapshotToReplay(snapshot, resumeRecorder.sessionId);
+        replay = snapshotToReplay(snapshot);
         // 预热 parse 缓存，让后续依赖 events 的操作（如摘要）也能命中。
         cachedSessionEvents(resumeRecorder.filePath, fingerprint, () => ({
           events: parseSessionEvents(resumeRecorder.readText()),

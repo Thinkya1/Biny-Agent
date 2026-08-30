@@ -125,7 +125,7 @@ export async function writeSessionSnapshot(
  * 返回的 replay 对象包含 resume() 需要的所有字段，events 为空数组——调用方
  * 不应依赖返回值的 events 字段（快照路径下也没有 events）。
  */
-export function snapshotToReplay(snapshot: SessionSnapshotData, sessionId?: string): SessionReplay {
+export function snapshotToReplay(snapshot: SessionSnapshotData): SessionReplay {
   return {
     events: [],
     messages: snapshot.messages,
