@@ -444,6 +444,8 @@ export class RuntimeHostServer {
       );
       this.send(connection, { kind: "response", requestId: frame.requestId, ok: true, result });
     } catch (error) {
+      // DEBUG-CI: 临时打印服务端原始错误栈
+      console.error("HOST-FRAME-ERROR", frame.operation, error);
       this.send(connection, {
         kind: "response",
         requestId: frame.requestId,
