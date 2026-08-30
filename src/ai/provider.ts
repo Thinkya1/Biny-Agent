@@ -74,7 +74,8 @@ const definitions: ProviderDefinition[] = [
   definition("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY", { reasoningProtocol: "alibaba", modelDefaults: reasoningProviderDefaults() }),
   definition("ollama", "http://127.0.0.1:11434/v1", undefined, { requiresApiKey: false }),
   definition("openai-compatible", undefined, undefined, {
-    embedding: { wire: "openai-compatible", models: [] }
+    embedding: { wire: "openai-compatible", models: [] },
+    modelDefaults: reasoningProviderDefaults()
   }),
   definition("xai", "https://api.x.ai/v1", "XAI_API_KEY", { reasoningProtocol: "openai", modelDefaults: reasoningProviderDefaults() }),
   definition("mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY"),

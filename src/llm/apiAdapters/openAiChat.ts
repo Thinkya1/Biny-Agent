@@ -98,7 +98,13 @@ export async function* streamOpenAi(
       if (!isRecord(raw)) continue;
       const fn = isRecord(raw.function) ? raw.function : {};
       const parsed = parseToolArgumentsValue(fn.arguments);
-      yield { type: "tool-call", id: readString(raw.id) ?? randomToolCallId(), name: readString(fn.name) ?? "unknown", arguments: parsed.args, invalid: parsed.invalid };
+      yield {
+        type: "tool-call",
+        id: readString(raw.id) ?? randomToolCallId(),
+        name: requireOpenAiToolName(readString(fn.name)),
+        arguments: parsed.args,
+        invalid: parsed.invalid
+      };
     }
     yield { type: "finish", reason: mapOpenAiStopReason(readString(choice?.finish_reason)), usage: isRecord(payload.usage) ? mapOpenAiUsage(payload.usage, cacheCapability) : undefined };
     return;
@@ -150,7 +156,19 @@ export async function* streamOpenAi(
   }
   for (const call of [...toolCalls.values()]) {
     const parsed = parseToolArguments(call.arguments);
-    yield { type: "tool-call", id: call.id || randomToolCallId(), name: call.name, arguments: parsed.args, invalid: parsed.invalid };
+    yield {
+      type: "tool-call",
+      id: call.id || randomToolCallId(),
+      name: requireOpenAiToolName(call.name),
+      arguments: parsed.args,
+      invalid: parsed.invalid
+    };
   }
   yield { type: "finish", reason: finishReason, usage };
+}
+
+function requireOpenAiToolName(name: string | undefined): string {
+  const normalized = name?.trim();
+  if (!normalized) throw new Error("OpenAI-compatible provider returned a tool call without a function name.");
+  return normalized;
 }

@@ -13,7 +13,9 @@ if (process.platform !== "darwin") {
 }
 
 mkdirSync(path.dirname(output), { recursive: true });
-const result = spawnSync("swiftc", ["-O", "-swift-version", "5", "-o", output, source], { stdio: "inherit" });
+// 走 xcrun 而不是裸 swiftc：PATH 里的 swiftc 可能被 swiftly 之类的版本管理器 shim 劫持，
+// 若其登记的 toolchain 已被删除会直接报错；xcrun 始终用 xcode-select 指定的 CLT/Xcode。
+const result = spawnSync("xcrun", ["swiftc", "-O", "-swift-version", "5", "-o", output, source], { stdio: "inherit" });
 if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 chmodSync(output, 0o755);

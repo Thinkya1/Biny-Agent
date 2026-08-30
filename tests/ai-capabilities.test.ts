@@ -90,6 +90,89 @@ const explicitContextConfig = configSchema.parse({
 });
 assert.equal(new ProviderRegistry(explicitContextConfig).forModel("flash-alias").model.contextWindow, 128_000);
 
+const customReasoningConfig = configSchema.parse({
+  ...defaultConfig,
+  defaultModel: "custom-deepseek",
+  providers: {
+    relay: {
+      type: "openai-compatible",
+      baseUrl: "https://relay.example/v1",
+      apiKey: "test-key"
+    }
+  },
+  models: {
+    "custom-deepseek": { provider: "relay", model: "deepseek-v4-flash" },
+    "custom-kimi": { provider: "relay", model: "kimi-k3" }
+  }
+});
+const customReasoningRuntime = new ProviderRegistry(customReasoningConfig);
+assert.deepEqual(customReasoningRuntime.forModel("custom-deepseek").model.reasoning?.efforts, ["high", "max"]);
+assert.deepEqual(customReasoningRuntime.forModel("custom-deepseek").model.thinkingLevelMap, {
+  off: "none",
+  high: "high",
+  max: "max"
+});
+assert.deepEqual(customReasoningRuntime.forModel("custom-kimi").model.reasoning?.efforts, ["low", "high", "max"]);
+
+// 自定义（非 OpenCode）relay 对托管模型误报 reasoning:false 且不给任何档位时，也应按模型 ID 恢复。
+const customRelayFalseConfig = configSchema.parse({
+  ...defaultConfig,
+  defaultModel: "relay-flash",
+  providers: {
+    relay: {
+      type: "openai-compatible",
+      baseUrl: "https://relay.example/v1",
+      apiKey: "test-key"
+    }
+  },
+  models: {
+    "relay-flash": { provider: "relay", model: "deepseek-v4-flash" }
+  }
+});
+const customRelayFalseEntry = {
+  id: "deepseek-v4-flash",
+  displayName: "deepseek-v4-flash",
+  provider: "relay",
+  capabilities: { tools: true, reasoning: false, streaming: true },
+  reasoningEfforts: [],
+  thinkingLevelMap: {}
+};
+const customRelayFalseModel = new ProviderRegistry(customRelayFalseConfig, [[
+  "relay",
+  [customRelayFalseEntry]
+]]).forModel("relay-flash").model;
+assert.equal(modelCapabilities(customRelayFalseModel).reasoning, true);
+// 普通 relay 没有该 ID 的生成快照条目，按 ID 推断出 high/max（与无目录的同 ID 行为一致）。
+assert.deepEqual(modelReasoningConfig(customRelayFalseModel)?.efforts, ["high", "max"]);
+assert.deepEqual(modelThinkingLevelMap(customRelayFalseModel), { off: "none", high: "high", max: "max" });
+const listedCustomRelayFalse = new ProviderRegistry(customRelayFalseConfig, [[
+  "relay",
+  [customRelayFalseEntry]
+]]).require("relay").getModels().find((entry) => entry.id === "deepseek-v4-flash");
+assert.equal(listedCustomRelayFalse?.capabilities.reasoning, true);
+assert.deepEqual(listedCustomRelayFalse?.reasoningEfforts, ["high", "max"]);
+assert.deepEqual(listedCustomRelayFalse?.thinkingLevelMap, { off: "none", high: "high", max: "max" });
+
+// 未知模型即便被目录误报 reasoning:false 也保持保守关闭，不凭空推断档位。
+const unknownFalseModel = new ProviderRegistry(configSchema.parse({
+  ...defaultConfig,
+  defaultModel: "unknown",
+  providers: { relay: { type: "openai-compatible", baseUrl: "https://relay.example/v1", apiKey: "test-key" } },
+  models: { unknown: { provider: "relay", model: "future-model" } }
+}), [[
+  "relay",
+  [{
+    id: "future-model",
+    displayName: "future-model",
+    provider: "relay",
+    capabilities: { tools: true, reasoning: false, streaming: true },
+    reasoningEfforts: [],
+    thinkingLevelMap: {}
+  }]
+]]).forModel("unknown").model;
+assert.equal(modelCapabilities(unknownFalseModel).reasoning, false);
+assert.deepEqual(modelReasoningConfig(unknownFalseModel)?.efforts, undefined);
+
 const openCodeFlashConfig = configSchema.parse({
   ...defaultConfig,
   defaultModel: "opencode-flash",

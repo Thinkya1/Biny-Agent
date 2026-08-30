@@ -102,5 +102,9 @@ jobs:
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
           else
-            gh release create "$RELEASE_TAG" release-assets/* --title "Biny ${RELEASE_TAG#v}" --generate-notes
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              gh release create "$RELEASE_TAG" release-assets/* --title "Biny ${RELEASE_TAG#v}" --generate-notes --prerelease
+            else
+              gh release create "$RELEASE_TAG" release-assets/* --title "Biny ${RELEASE_TAG#v}" --generate-notes
+            fi
           fi

@@ -74,6 +74,13 @@ export type KeychainCommand = (command: string, args: string[], input?: string) 
 
 export class MacKeychainCredentialStore implements CredentialStore {
   readonly persistent = true;
+  /**
+   * 进程内凭据缓存。`security` 每次调用都要 fork 一个子进程、在钥匙串锁定/等授权时还会
+   * 阻塞到超时；设置保存一次要全量水合配置好几轮，逐 provider 同步进程是主要卡顿来源。
+   * 这里把读到的值缓存进内存：之后的 get 命中内存、不再 fork；set/delete 仍真实落 Keychain
+   * 并同步缓存。Keychain 条目由本应用独占管理，进程内缓存是安全的。
+   */
+  private readonly cache = new Map<string, string | undefined>();
 
   constructor(
     private readonly run: KeychainCommand = async (command, args, input) => {
@@ -82,12 +89,18 @@ export class MacKeychainCredentialStore implements CredentialStore {
   ) {}
 
   async get(account: string): Promise<string | undefined> {
+    if (this.cache.has(account)) return this.cache.get(account);
     try {
       const result = await this.run("security", ["find-generic-password", "-s", BINY_KEYCHAIN_SERVICE, "-a", account, "-w"]);
       const value = result.stdout.trim();
-      return value || undefined;
+      const resolved = value || undefined;
+      this.cache.set(account, resolved);
+      return resolved;
     } catch (error) {
-      if (isKeychainItemMissing(error)) return undefined;
+      if (isKeychainItemMissing(error)) {
+        this.cache.set(account, undefined);
+        return undefined;
+      }
       throw keychainError("读取", account, error);
     }
   }
@@ -96,6 +109,7 @@ export class MacKeychainCredentialStore implements CredentialStore {
     try {
       // `security` 会在 `-w` 没有参数且位于末尾时从 stdin 读取，避免密钥出现在子进程 argv。
       await this.run("security", ["add-generic-password", "-U", "-s", BINY_KEYCHAIN_SERVICE, "-a", account, "-w"], `${value}\n`);
+      this.cache.set(account, value);
     } catch (error) {
       throw keychainError("保存", account, error);
     }
@@ -104,8 +118,12 @@ export class MacKeychainCredentialStore implements CredentialStore {
   async delete(account: string): Promise<void> {
     try {
       await this.run("security", ["delete-generic-password", "-s", BINY_KEYCHAIN_SERVICE, "-a", account]);
+      this.cache.delete(account);
     } catch (error) {
-      if (isKeychainItemMissing(error)) return;
+      if (isKeychainItemMissing(error)) {
+        this.cache.delete(account);
+        return;
+      }
       throw keychainError("删除", account, error);
     }
   }

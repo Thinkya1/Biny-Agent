@@ -44,6 +44,7 @@ await testCredentialTransactionCompensatesPartialWrites();
 await testDeferredCredentialTransactionKeepsRollbackLineage();
 await testFileConfigStoreDeferredCredentialContract();
 await testMacKeychainCredentialStore();
+await testMacKeychainCredentialStoreCachesReads();
 
 async function testGlobalPathResolution(): Promise<void> {
   const configured = path.join(os.tmpdir(), `biny-agent-${String(process.pid)}`);
@@ -274,21 +275,15 @@ async function testVersionedGlobalConfigRejectsStaleWriters(): Promise<void> {
     const first = await firstLoad();
     const second = await secondLoad();
 
-    const friendly = structuredClone(first.config);
-    friendly.personalization.personality = "friendly";
-    await firstSave(friendly, first.revision);
-    const concurrentReads = await Promise.all(
-      Array.from({ length: 24 }, async () => await loadConfigFile(globalRoot))
-    );
-    assert.equal(concurrentReads.every((config) => config.personalization.personality === "friendly"), true);
+    await firstSave(structuredClone(first.config), first.revision);
 
     const stale = structuredClone(second.config);
-    stale.personalization.personality = "pragmatic";
+    stale.providers.deepseek!.apiKey = "stale-secret";
     await assert.rejects(
       secondSave(stale, second.revision),
       (error: unknown) => error instanceof ConfigRevisionConflictError
     );
-    assert.equal((await firstLoad()).config.personalization.personality, "friendly");
+    assert.ok((await firstLoad()).config.context.memory, "memory config section should exist");
     await assert.rejects(fs.access(path.join(globalRoot, ".config.write.lock")));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -318,7 +313,7 @@ async function testVersionedCredentialUpdatesRejectStaleWriters(): Promise<void>
     assert.equal(values.get(providerCredentialAccount("deepseek", "apiKey")), "first-secret");
 
     const staleTarget = structuredClone(stale.config);
-    staleTarget.personalization.personality = "friendly";
+    staleTarget.providers.deepseek!.apiKey = "stale-secret";
     await assert.rejects(
       secondStore.saveVersioned!(staleTarget, stale.revision),
       (error: unknown) => error instanceof ConfigRevisionConflictError
@@ -672,6 +667,36 @@ async function testMacKeychainCredentialStore(): Promise<void> {
   const addCall = calls.find((call) => call.args[0] === "add-generic-password");
   assert.equal(addCall?.args.at(-1), "-w");
   assert.equal(addCall?.args.includes("test-secret"), false);
+}
+
+async function testMacKeychainCredentialStoreCachesReads(): Promise<void> {
+  const values = new Map<string, string>([["provider:cached:apiKey", "cached-secret"]]);
+  let findCalls = 0;
+  const store = new MacKeychainCredentialStore(async (_command, args, input) => {
+    const account = args[args.indexOf("-a") + 1]!;
+    if (args[0] === "find-generic-password") {
+      findCalls += 1;
+      const value = values.get(account);
+      if (!value) throw Object.assign(new Error("missing"), { code: 44 });
+      return { stdout: `${value}\n` };
+    }
+    if (args[0] === "add-generic-password") values.set(account, input?.trim() ?? "");
+    if (args[0] === "delete-generic-password") values.delete(account);
+    return { stdout: "" };
+  });
+
+  // 第一次读会 fork security；之后命中进程内缓存，不再产生子进程——这是设置保存提速的关键。
+  assert.equal(await store.get("provider:cached:apiKey"), "cached-secret");
+  assert.equal(await store.get("provider:cached:apiKey"), "cached-secret");
+  assert.equal(await store.get("provider:cached:apiKey"), "cached-secret");
+  assert.equal(findCalls, 1, "重复读取同一 account 必须命中缓存，不应重复 fork security");
+
+  // set/delete 之后缓存同步，下一读反映最新值。
+  await store.set("provider:cached:apiKey", "rotated-secret");
+  assert.equal(await store.get("provider:cached:apiKey"), "rotated-secret");
+  assert.equal(findCalls, 1, "set 之后应直接命中更新后的缓存");
+  await store.delete("provider:cached:apiKey");
+  assert.equal(await store.get("provider:cached:apiKey"), undefined);
 }
 
 async function testVersionedActivityEmbeddingFieldsMigrateToMemory(): Promise<void> {

@@ -7,7 +7,7 @@
 import type { AgentModel, ModelStreamContext, ModelStreamEvent, ModelStreamOptions } from "../agent/core/types.js";
 import { effectiveThinkingSelection, modelCapabilities, modelReasoningConfig, modelThinkingLevelMap, nativeReasoningEffort, normalizeModelMetadata, reasoningBudgetTokens } from "../ai/capabilities.js";
 import { fetchModelCatalogSnapshot } from "../ai/modelCatalog.js";
-import { accessPathThinkingLevelMap, isOpenCodeModelEndpoint, lookupModelMetadata, openCodeThinkingLevelMap, thinkingLevelMapForEfforts, type ModelMetadata } from "../ai/modelMetadata.js";
+import { accessPathThinkingLevelMap, inferThinkingLevelMap, lookupModelMetadata, thinkingLevelMapForEfforts, type ModelMetadata } from "../ai/modelMetadata.js";
 import { providerDefinition, providerProtocol } from "../ai/provider.js";
 import type { ModelCatalogEntry, ProviderDefinition } from "../ai/types.js";
 import type { AgentConfig, ModelAliasConfig, ModelApiBackend, ModelCompatibility, ProviderConfig, ThinkingLevelMap } from "../config/schema.js";
@@ -156,7 +156,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       ? mergeModelMetadata(generatedModel, catalogModel)
       : catalogModel ?? generatedModel;
     const merged = catalogBase ? mergeModelMetadata(catalogBase, model) : model;
-    const accessPathModel = openCodeKnownModelOverride(this.config.baseUrl, merged, generatedModel);
+    const accessPathModel = recoverKnownReasoningModel(merged, generatedModel);
     return normalizeModelMetadata(
       { ...accessPathModel, compatibility: mergeCompatibility(this.config.compatibility, accessPathModel.compatibility) },
       this.definition.modelDefaults
@@ -308,7 +308,7 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
     const generated = lookupModelMetadata(this.config.type, model.model, this.config.baseUrl);
     const generatedModel = generated ? metadataToModel(this.id, this.config.type, model.model, generated) : undefined;
     const metadataModel = generatedModel ? mergeModelMetadata(generatedModel, model) : model;
-    const accessPathModel = openCodeKnownModelOverride(this.config.baseUrl, metadataModel, generatedModel);
+    const accessPathModel = recoverKnownReasoningModel(metadataModel, generatedModel);
     const normalized = normalizeModelMetadata(accessPathModel, this.definition.modelDefaults);
     const reasoning = modelReasoningConfig(normalized);
     return {
@@ -495,20 +495,23 @@ function resolveSimpleThinking(
   return { enabled: true, effort: requested };
 }
 
-function openCodeKnownModelOverride(
-  baseUrl: string | undefined,
+/**
+ * 恢复「其实是推理家族、但目录没给出任何推理信息」的模型的 canonical 档位。
+ *
+ * 触发条件是目录对该模型完全沉默：既没有声明任何 effort，也没有可用的 thinkingLevelMap。
+ * 此时即便目录误标了 `reasoning: false`（OpenCode Zen/Go 和不少自定义 OpenAI 兼容 relay 对托管
+ * 模型都这么做），也不能当作「显式不支持」——真正显式的信号是目录列出了具体 efforts，那条路径
+ * 不会走到这里。对沉默的目录按模型 ID / 生成快照推断档位；推断不出（未知模型）则原样返回，
+ * 维持保守关闭。恢复仅补充「开启档」，不改动「关闭档」，所以不会破坏原有关闭行为。
+ */
+function recoverKnownReasoningModel(
   model: ModelAliasConfig,
   generatedModel: ModelAliasConfig | undefined
 ): ModelAliasConfig {
-  if (!isOpenCodeModelEndpoint(baseUrl)) return model;
   const hasThinkingLevels = Object.entries(model.thinkingLevelMap ?? {})
     .some(([level, native]) => level !== "off" && native !== null);
   if (hasThinkingLevels) return model;
-  const generatedThinkingLevelMap = generatedModel?.thinkingLevelMap;
-  const thinkingLevelMap = generatedThinkingLevelMap && Object.entries(generatedThinkingLevelMap)
-    .some(([level, native]) => level !== "off" && native !== null)
-    ? generatedThinkingLevelMap
-    : openCodeThinkingLevelMap(baseUrl, model.model);
+  const thinkingLevelMap = inferThinkingLevelMap(model.model, generatedModel?.thinkingLevelMap);
   if (!thinkingLevelMap) return model;
   return {
     ...model,

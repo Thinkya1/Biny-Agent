@@ -75,14 +75,20 @@ export function isOpenCodeModelEndpoint(baseUrl: string | undefined): boolean {
 }
 
 /**
- * OpenCode Zen/Go 的模型目录没有可靠的 reasoning 字段，已保存配置也可能因此留下空 map。
- * 对能从模型 ID 确认推理家族的模型，恢复统一的 canonical 档位；未知模型仍保持保守关闭。
+ * 为「目录没有给出任何推理信息」的模型推断 canonical 档位。
+ *
+ * 优先用生成快照（若携带可用档位），否则按模型 ID 命中已知推理家族（gpt-5、claude-4、deepseek-v4、
+ * kimi-k3 等）推断。与 access path / OpenCode 端点无关，对所有 provider 生效；未知模型返回
+ * undefined，调用方据此维持保守关闭。
  */
-export function openCodeThinkingLevelMap(baseUrl: string | undefined, modelId: string): ThinkingLevelMap | undefined {
-  if (!isOpenCodeModelEndpoint(baseUrl)) return undefined;
-  const metadata = openCodeKnownModelMetadata(baseUrl, modelId);
-  if (metadata?.thinkingLevelMap) return { ...metadata.thinkingLevelMap };
-  if (metadata?.reasoningEfforts.length) return thinkingLevelMapForEfforts(metadata.reasoningEfforts);
+export function inferThinkingLevelMap(
+  modelId: string,
+  generatedThinkingLevelMap?: ThinkingLevelMap
+): ThinkingLevelMap | undefined {
+  if (generatedThinkingLevelMap && Object.entries(generatedThinkingLevelMap)
+    .some(([level, native]) => level !== "off" && native !== null)) {
+    return { ...generatedThinkingLevelMap };
+  }
   const efforts = inferReasoningEfforts(modelId);
   return efforts.length
     ? { off: "none", ...thinkingLevelMapForEfforts(efforts) }
