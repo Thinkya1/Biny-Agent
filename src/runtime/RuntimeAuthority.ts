@@ -598,8 +598,16 @@ export class RuntimeEventAuthority implements RuntimeEventSink {
     const sessions = await listSessionFiles(this.persistenceRoot);
     for (const fileName of sessions) {
       const sessionId = sessionIdFromFile(fileName);
-      const filePath = await resolveSessionFile(this.persistenceRoot, sessionId);
-      const before = await fs.stat(filePath);
+      let filePath: string;
+      let before: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        filePath = await resolveSessionFile(this.persistenceRoot, sessionId);
+        before = await fs.stat(filePath);
+      } catch {
+        // 列目录到解析之间文件可能已被并发清理（草稿回收/删除会话）；
+        // 修复扫描跳过它即可，不能让单个消失的会话阻断 authority open。
+        continue;
+      }
       const fileSize = before.size;
       const modifiedAtMs = Math.trunc(before.mtimeMs);
       const backfill = this.database.prepare(
@@ -620,7 +628,13 @@ export class RuntimeEventAuthority implements RuntimeEventSink {
         // session 恢复路径会报告更具体的顺序/重复 ID 错误。
         continue;
       }
-      const after = await fs.stat(filePath);
+      let after: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        after = await fs.stat(filePath);
+      } catch {
+        // 读事件期间文件被并发删除时不记录水位；下次 open 会再次完成投影。
+        continue;
+      }
       if (after.size !== fileSize || Math.trunc(after.mtimeMs) !== modifiedAtMs) {
         // 启动期间仍在追加的文件不记录水位；下次 open 会再次完成投影。
         continue;
