@@ -509,6 +509,7 @@ async function main(): Promise<void> {
         ...defaultConfig.models["deepseek-v4-flash"],
         provider: "host",
         model: "host-test-model",
+        contextWindow: 128_000,
         displayName: "Host Test"
       }
     }
