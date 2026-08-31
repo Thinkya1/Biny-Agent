@@ -244,7 +244,7 @@ export class PermissionDialog extends Container {
       actionLines.push("");
       actionLines.push(theme.fg("warning", "Enter a reason, then press enter, to reject with context."));
       actionLines.push(`${theme.fg("muted", "> ")}${this.denialReason}${theme.fg("warning", "█")}`);
-      if (this.denialReasonAttempted) {
+      if (this.denialReasonAttempted && !this.denialReason.trim()) {
         actionLines.push(theme.fg("error", "A denial reason is required."));
       }
     } else if (this.request.requireFullYes && (selectedChoice === "allow_once" || selectedChoice === "allow_always")) {
