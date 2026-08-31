@@ -8,7 +8,8 @@
  */
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { isFullYesConfirmation } from "../../../../permission/confirmation.js";
-import { permissionScopeForAlways, type PermissionAction, type PermissionResult } from "../../../../permission/PermissionManager.js";
+import type { PermissionAction, PermissionResult } from "../../../../permission/PermissionManager.js";
+import { permissionScopeForAlways } from "../../../../permission/permissionScope.js";
 import { tokenizeCommand } from "../commandHighlight.js";
 import { classifyTool, firstLine, toolRowState, VARIANT_TITLES } from "../chatModel.js";
 import type { TimelineCommand, TimelineTool } from "../sessionTimeline.js";

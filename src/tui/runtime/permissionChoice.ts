@@ -1,5 +1,5 @@
 import type { PermissionResult } from "../../permission/PermissionManager.js";
-import { permissionScopeForAlways } from "../../permission/PermissionManager.js";
+import { permissionScopeForAlways } from "../../permission/permissionScope.js";
 import type { PermissionChoice } from "../types.js";
 import type { TuiPermissionRequest } from "../types.js";
 

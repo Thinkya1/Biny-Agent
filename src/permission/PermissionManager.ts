@@ -5,6 +5,7 @@
  * 工具动作类型和风险等级决定放行、询问或拒绝。工具本身不做 UI 确认。
  */
 import path from "node:path";
+import { permissionScopeForAlways } from "./permissionScope.js";
 
 export type ActionType = "read" | "write" | "delete" | "shell" | "network" | "git" | "install" | "unknown";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
@@ -238,13 +239,6 @@ export class PermissionManager {
       projectPolicySource: this.policy.source
     };
   }
-}
-
-/** Alma 的 Always Allow 对应当前请求的最小稳定授权范围。 */
-export function permissionScopeForAlways(
-  request: Pick<PermissionRequestContext, "command" | "targetPath">
-): Exclude<PermissionGrantScope, "once"> {
-  return request.command ? "command" : request.targetPath ? "path" : "tool";
 }
 
 function permissionScopeForResult(
