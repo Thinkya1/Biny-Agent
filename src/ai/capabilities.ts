@@ -238,9 +238,16 @@ export function modelContextBudget(
   const capabilities = modelCapabilities(model);
   const maxOutputTokens = model.maxOutputTokens;
   const modelLimits = model.limits;
+  const contextWindow = model.contextWindow;
+  if (contextWindow === undefined) {
+    const modelReference = modelAlias
+      ? `${modelAlias} (${model.provider}/${model.model})`
+      : `${model.provider}/${model.model}`;
+    throw new Error(`Model ${modelReference} is missing contextWindow metadata; fallback is disabled.`);
+  }
   const outputReserveTokens = Math.min(
     maxOutputTokens ?? defaultModelOutputTokens,
-    Math.max(2_048, Math.floor((model.contextWindow ?? defaultModelContextWindow) * 0.25))
+    Math.max(2_048, Math.floor(contextWindow * 0.25))
   );
   const reasoningReserveTokens = options.reasoning !== undefined && options.reasoning !== "off" && capabilities.reasoning
     ? Math.max(
@@ -255,13 +262,6 @@ export function modelContextBudget(
     ?? modelLimits?.systemPromptReserveTokens
     ?? defaultSystemPromptReserveTokens;
   const protocolSafetyMarginTokens = modelLimits?.protocolSafetyMarginTokens ?? defaultProtocolSafetyMarginTokens;
-  // 没声明窗口时按「输入上限 / 有效窗口比例」反推，至少给到默认窗口；这只是保守的
-  // 展示与组装 fallback，不把具体 provider 的旧 reserve 公式重新带回主预算。
-  const contextWindow = model.contextWindow
-    ?? Math.max(
-      defaultModelContextWindow,
-      Math.ceil(((model.maxInputTokens ?? configuredMaxInputTokens ?? 0) * 100) / defaultEffectiveContextWindowPercent)
-    );
   const effectiveContextWindowPercent = defaultEffectiveContextWindowPercent;
   const effectiveContextWindow = Math.max(
     minimumUsableInputTokens,

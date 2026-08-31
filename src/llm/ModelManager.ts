@@ -216,18 +216,24 @@ export function listPickerModelChoices(
   return filterPickerModelChoices(listModelChoices(config, catalogs));
 }
 
-export function listConfiguredModelChoices(config: AgentConfig): ModelChoice[] {
+export function listConfiguredModelChoices(
+  config: AgentConfig,
+  catalogs: readonly [string, ModelCatalogEntry[]][] = []
+): ModelChoice[] {
   // 设置页需要展示所有已保存的模型，即使凭据暂时缺失或 provider 当前不可用。
   // “是否可用”只影响模型选择器和发送任务，不应让用户看不到自己的配置。
-  return listModelChoices(config).filter((model) => model.source === "configured");
+  return listModelChoices(config, catalogs).filter((model) => model.source === "configured");
 }
 
 export function hasUsableModelConfiguration(config: AgentConfig, alias = config.defaultModel): boolean {
   return hasUsableRegisteredModel(config, alias);
 }
 
-export function modelRuntimeInfo(config: AgentConfig): ModelRuntimeInfo {
-  return modelRuntimeInfoFromRuntime(config, new ModelRuntime(config));
+export function modelRuntimeInfo(
+  config: AgentConfig,
+  catalogs: readonly [string, ModelCatalogEntry[]][] = []
+): ModelRuntimeInfo {
+  return modelRuntimeInfoFromRuntime(config, new ModelRuntime(config, catalogs));
 }
 
 function modelRuntimeInfoFromRuntime(config: AgentConfig, runtime: ModelRuntime): ModelRuntimeInfo {

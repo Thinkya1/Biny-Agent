@@ -113,6 +113,10 @@ assert.deepEqual(customReasoningRuntime.forModel("custom-deepseek").model.thinki
   max: "max"
 });
 assert.deepEqual(customReasoningRuntime.forModel("custom-kimi").model.reasoning?.efforts, ["low", "high", "max"]);
+assert.throws(
+  () => modelContextBudget(customReasoningRuntime.forModel("custom-deepseek").model, 64_000, "custom-deepseek"),
+  /contextWindow metadata.*fallback is disabled/u
+);
 
 // 自定义（非 OpenCode）relay 对托管模型误报 reasoning:false 且不给任何档位时，也应按模型 ID 恢复。
 const customRelayFalseConfig = configSchema.parse({

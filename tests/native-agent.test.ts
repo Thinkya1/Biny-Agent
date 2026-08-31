@@ -79,7 +79,7 @@ async function main(): Promise<void> {
     ...defaultConfig,
     defaultModel: "test-model",
     providers: { active: { type: "openai", apiKey: "test-key", baseUrl: "https://example.test/v1" } },
-    models: { "test-model": { provider: "active", model: "test-model" } },
+    models: { "test-model": { provider: "active", model: "test-model", contextWindow: 128_000 } },
     thinking: { enabled: false, effort: "high" },
     permission: defaultConfig.permission,
     workspace: defaultConfig.workspace,

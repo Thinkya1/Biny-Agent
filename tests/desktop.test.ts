@@ -2209,7 +2209,7 @@ async function testDesktopModelSwitchDoesNotStartDetachedHost(): Promise<void> {
       ...defaultConfig,
       defaultModel: "test-model",
       providers: { active: { type: "openai", apiKey: "test-key", baseUrl: "https://api.openai.com/v1" } },
-      models: { "test-model": { provider: "active", model: "test-model" } },
+      models: { "test-model": { provider: "active", model: "test-model", contextWindow: 128_000 } },
       thinking: { ...defaultConfig.thinking, enabled: false }
     });
     const projects = new DesktopProjectService(state, storage, configStore);
@@ -3284,7 +3284,7 @@ async function createDesktopTestServices(root: string): Promise<{
     ...defaultConfig,
     defaultModel: "test-model",
     providers: { active: { type: "openai", apiKey: "test-key", baseUrl: "https://api.openai.com/v1" } },
-    models: { "test-model": { provider: "active", model: "test-model" } },
+    models: { "test-model": { provider: "active", model: "test-model", contextWindow: 128_000 } },
     thinking: { ...defaultConfig.thinking, enabled: false }
   });
   return { configStore, projects: new DesktopProjectService(state, storage, configStore), state };
@@ -3397,6 +3397,7 @@ function testModelChoicesDeduplicateEquivalentAliases(): void {
     displayName: "MiniMax-M2.7",
     provider: "opencode-ai",
     contextWindow: 1_000_000,
+    maxInputTokens: 900_000,
     maxOutputTokens: undefined,
     capabilities: { tools: true },
     reasoningEfforts: [],
@@ -3412,6 +3413,14 @@ function testModelChoicesDeduplicateEquivalentAliases(): void {
   assert.deepEqual(multiProviderChoices.find((model) => model.alias === "opencode-ai-minimax-m3")?.efforts, ["high", "max"]);
   assert.equal(multiProviderChoices.find((model) => model.alias === "opencode-ai-minimax-m3")?.defaultThinking, "high");
   assert.equal(multiProviderChoices.some((model) => model.alias === "opencode-ai/minimax-m2.7"), false);
+  const configuredCatalogModel: ModelCatalogEntry = { ...catalogModel, id: "minimax-m3", displayName: "MiniMax-M3" };
+  const configuredChoices = listConfiguredModelChoices(multiProviderConfig, [[
+    "opencode-ai",
+    [catalogModel, configuredCatalogModel]
+  ]]);
+  const configuredChoice = configuredChoices.find((model) => model.alias === "opencode-ai-minimax-m3");
+  assert.equal(configuredChoice?.contextWindow, 1_000_000);
+  assert.equal(configuredChoice?.inputBudgetTokens, 900_000);
 }
 
 function testHistoricalAbortProjection(): void {

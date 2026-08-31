@@ -29,6 +29,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { thinkingLevelMapForModel } from "../../../ai/capabilities.js";
+import type { ModelCatalogEntry } from "../../../ai/types.js";
 import { providerDefinition } from "../../../ai/provider.js";
 import { builtinProviderModels } from "../../../ai/builtinModels.js";
 import { loadProjectSettings } from "../../../config/projectSettings.js";
@@ -248,7 +249,7 @@ export class DesktopAgentManager {
       this.projects.listWorkspaceSessions(project, runtimeSnapshots, this.projectEvents(projectId))
     ]);
     const catalogs = config ? await restoreProviderCatalogs(Object.keys(config.providers), this.modelsStore) : [];
-    const models = config ? listConfiguredModelChoices(config) : [];
+    const models = config ? listConfiguredModelChoices(config, catalogs) : [];
     const pickerModels = config ? listPickerModelChoices(config, catalogs) : [];
     const runtimeProjection = runtime === undefined ? undefined : await this.runtimeProjection(projectId);
     // 磁盘配置是跨 Desktop/TUI 共享的持久化来源；Runtime 快照只在配置不可读时兜底。
@@ -863,7 +864,7 @@ export class DesktopAgentManager {
         return candidate;
       });
       this.runtimeErrors.delete(projectId);
-      return modelRuntimeInfo(effective);
+      return modelRuntimeInfo(effective, catalogs);
     }
     const { runtime, commands } = await this.ensureRuntime(projectId);
     if (commands) {
@@ -912,7 +913,8 @@ export class DesktopAgentManager {
   async settingsConfigSnapshot(projectId: string): Promise<DesktopSettingsConfigSnapshot> {
     const project = this.projects.requireProject(projectId);
     const current = await this.requireVersionedConfig().loadVersioned!(project.path);
-    return describeSettingsConfigSnapshot(current.config, current.revision, projectId, project.path);
+    const catalogs = await restoreProviderCatalogs(Object.keys(current.config.providers), this.modelsStore);
+    return describeSettingsConfigSnapshot(current.config, current.revision, projectId, project.path, catalogs);
   }
 
   async settingsChatSnapshot(projectId: string, sessionId: string): Promise<DesktopSettingsChatSnapshot> {
@@ -2963,7 +2965,13 @@ function describeWebSearchSettings(search: AgentConfig["web"]["search"]): Deskto
   };
 }
 
-function describeSettingsConfigSnapshot(config: AgentConfig, revision: string, projectId: string, workspaceRoot: string): DesktopSettingsConfigSnapshot {
+function describeSettingsConfigSnapshot(
+  config: AgentConfig,
+  revision: string,
+  projectId: string,
+  workspaceRoot: string,
+  catalogs: readonly [string, ModelCatalogEntry[]][]
+): DesktopSettingsConfigSnapshot {
   return {
     revision,
     activity: structuredClone(config.activity),
@@ -2974,7 +2982,7 @@ function describeSettingsConfigSnapshot(config: AgentConfig, revision: string, p
     permission: structuredClone(config.permission),
     webSearch: describeWebSearchSettings(config.web.search),
     models: {
-      configured: listConfiguredModelChoices(config),
+      configured: listConfiguredModelChoices(config, catalogs),
       connections: describeModelConnections(config),
       embeddingModels: describeEmbeddingModels(config),
       defaultModel: config.defaultModel,
