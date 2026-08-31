@@ -2014,7 +2014,7 @@ export class DesktopAgentManager {
           },
           // 目录元数据只参与当前运行时解析，不自动写成用户覆盖；已有同模型配置中的
           // 限制字段则继续保留，用户可以在 config.json 中显式维护它们。
-          contextWindow: sameModel ? existingModel.contextWindow : undefined,
+          contextWindow: input.contextWindow ?? (sameModel ? existingModel.contextWindow : undefined),
           maxInputTokens: sameModel ? existingModel.maxInputTokens : undefined,
           maxOutputTokens: sameModel ? existingModel.maxOutputTokens : undefined,
           limits: sameModel ? existingModel.limits : undefined,

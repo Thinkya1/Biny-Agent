@@ -401,6 +401,7 @@ async function testExtensibleProviderRuntime(): Promise<void> {
         provider: "custom",
         model: "configured-model",
         displayName: "Configured Model",
+        contextWindow: 32_000,
         capabilities: { tools: true, reasoning: true, streaming: true },
         thinkingLevelMap: { off: "none", high: "provider-high" }
       }
@@ -529,9 +530,9 @@ async function testProviderRuntimeMetadata(): Promise<void> {
       "flash-alias": { provider: "deepseek", model: "deepseek-v4-flash" },
       "pro-alias": { provider: "deepseek", model: "deepseek-v4-pro" },
       "gpt-alias": { provider: "openai", model: "gpt-5.2" },
-      "gemini-flash": { provider: "gemini", model: "gemini-3.5-flash" },
-      "gemini-pro": { provider: "gemini", model: "gemini-3.5-pro" },
-      unknown: { provider: "unknown", model: "future-model" }
+      "gemini-flash": { provider: "gemini", model: "gemini-3.5-flash", contextWindow: 128_000 },
+      "gemini-pro": { provider: "gemini", model: "gemini-3.5-pro", contextWindow: 1_048_576 },
+      unknown: { provider: "unknown", model: "future-model", contextWindow: 64_000 }
     }
   });
   const providers = new ProviderRegistry(config);
@@ -759,6 +760,7 @@ async function testNoOffThinkingUsesDefaultEffort(): Promise<void> {
       "always-reasoning": {
         provider: "openai",
         model: "always-reasoning",
+        contextWindow: 128_000,
         capabilities: { tools: true, reasoning: true, streaming: true },
         thinkingLevelMap: { low: "low", high: "provider-high", max: "max" }
       }
@@ -910,7 +912,7 @@ async function testPersistedProviderCatalog(): Promise<void> {
         }
       },
       models: {
-        "configured-model": { provider: "catalog", model: "configured-model" }
+        "configured-model": { provider: "catalog", model: "configured-model", contextWindow: 64_000 }
       }
     });
     const catalogs = await restoreProviderCatalogs(["catalog"], new FileModelsStore(filePath));

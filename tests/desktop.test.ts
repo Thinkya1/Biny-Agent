@@ -1636,7 +1636,7 @@ async function testDesktopSetDefaultModelImmediate(): Promise<void> {
       ...base,
       models: {
         ...base.models,
-        "alt-model": { provider: "active", model: "alt-model" }
+        "alt-model": { provider: "active", model: "alt-model", contextWindow: 128_000 }
       }
     }, workspaceRoot);
 
@@ -1980,6 +1980,7 @@ async function testDesktopSettingsCredentialLifecycle(): Promise<void> {
           providerType: "openai-compatible",
           model: "staged-model",
           baseUrl: "https://example.com/v1",
+          contextWindow: 128_000,
           apiKeyHandle: staged.handle,
           supportsTools: true
         }],
@@ -2043,6 +2044,7 @@ async function testDesktopModelConfiguration(): Promise<void> {
           providerType: "ollama",
           model: "qwen3:4b",
           baseUrl: "http://127.0.0.1:11434/v1",
+          contextWindow: 128_000,
           apiKeyEnv: undefined,
           apiKey: undefined,
           supportsTools: true,
@@ -2063,6 +2065,7 @@ async function testDesktopModelConfiguration(): Promise<void> {
           providerType: "ollama",
           model: "qwen3:8b",
           baseUrl: "http://127.0.0.1:11434/v1",
+          contextWindow: 128_000,
           apiKeyEnv: undefined,
           apiKey: undefined,
           supportsTools: true,
@@ -2116,6 +2119,7 @@ async function testDesktopModelConfiguration(): Promise<void> {
           providerType: "openai-compatible",
           model: "deepseek-v4-flash",
           baseUrl: "https://plan.example/v1",
+          contextWindow: 128_000,
           apiKey: "plan-test-key",
           supportsTools: true,
           supportsThinking: true
@@ -2854,7 +2858,7 @@ async function testDesktopRequiresModelConfiguration(): Promise<void> {
     const unconfigured = structuredClone(defaultConfig);
     unconfigured.defaultModel = "setup-model";
     unconfigured.providers = { setup: { type: "openai-compatible", baseUrl: "https://example.com/v1" } };
-    unconfigured.models = { "setup-model": { provider: "setup", model: "setup-model", supportsTools: true } };
+    unconfigured.models = { "setup-model": { provider: "setup", model: "setup-model", contextWindow: 128_000, supportsTools: true } };
     unconfigured.thinking = { enabled: false, effort: "high" };
     await configStore.save(unconfigured);
     const initial = await agents.workspaceSnapshot(project.id);
@@ -2880,6 +2884,7 @@ async function testDesktopRequiresModelConfiguration(): Promise<void> {
     fallbackAvailable.models["fallback-model"] = {
       provider: "fallback",
       model: "fallback-model",
+      contextWindow: 128_000,
       supportsTools: true
     };
     await configStore.save(fallbackAvailable);

@@ -193,9 +193,13 @@ export class ModelRegistry {
     const capabilities = modelCapabilities(normalized);
     const reasoning = modelReasoningConfig(normalized);
     const thinkingLevelMap = modelThinkingLevelMap(normalized);
-    const contextBudget = modelContextBudget(normalized, this.config.context.maxInputTokens, alias, {
-      reasoning: effectiveThinkingSelection(normalized, this.config.thinking)
-    });
+    // 动态目录允许暂时缺少窗口元数据；这类候选仍可展示，但不能伪造预算。
+    // 已配置模型仍交给 modelContextBudget 明确报错，要求配置或目录提供真实窗口。
+    const contextBudget = normalized.contextWindow === undefined
+      ? undefined
+      : modelContextBudget(normalized, this.config.context.maxInputTokens, alias, {
+          reasoning: effectiveThinkingSelection(normalized, this.config.thinking)
+        });
     return {
       alias,
       displayName: normalized.displayName ?? normalized.model,
@@ -206,18 +210,18 @@ export class ModelRegistry {
       modelKey: modelKey(normalized.provider, normalized.model),
       supportsTools: capabilities.tools,
       capabilities,
-      contextWindow: contextBudget.contextWindow,
-      effectiveContextWindow: contextBudget.effectiveContextWindow,
-      effectiveContextWindowPercent: contextBudget.effectiveContextWindowPercent,
-      contextReserveTokens: contextBudget.contextReserveTokens,
-      autoCompactTokenLimit: contextBudget.autoCompactTokenLimit,
+      contextWindow: contextBudget?.contextWindow,
+      effectiveContextWindow: contextBudget?.effectiveContextWindow,
+      effectiveContextWindowPercent: contextBudget?.effectiveContextWindowPercent,
+      contextReserveTokens: contextBudget?.contextReserveTokens,
+      autoCompactTokenLimit: contextBudget?.autoCompactTokenLimit,
       maxInputTokens: normalized.maxInputTokens ?? normalized.limits?.maxInputTokens,
-      inputBudgetTokens: contextBudget.maxInputTokens,
-      outputReserveTokens: contextBudget.outputReserveTokens,
-      reasoningReserveTokens: contextBudget.reasoningReserveTokens,
-      toolSchemaReserveTokens: contextBudget.toolSchemaReserveTokens,
-      systemPromptReserveTokens: contextBudget.systemPromptReserveTokens,
-      protocolSafetyMarginTokens: contextBudget.protocolSafetyMarginTokens,
+      inputBudgetTokens: contextBudget?.maxInputTokens,
+      outputReserveTokens: contextBudget?.outputReserveTokens,
+      reasoningReserveTokens: contextBudget?.reasoningReserveTokens,
+      toolSchemaReserveTokens: contextBudget?.toolSchemaReserveTokens,
+      systemPromptReserveTokens: contextBudget?.systemPromptReserveTokens,
+      protocolSafetyMarginTokens: contextBudget?.protocolSafetyMarginTokens,
       maxOutputTokens: normalized.maxOutputTokens,
       limits: normalized.limits,
       efforts: [...(reasoning?.efforts ?? [])],
