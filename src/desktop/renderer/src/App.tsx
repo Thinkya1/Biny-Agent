@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { InteractiveAgentRunMode } from "../../../agent/AgentSession.js";
+import type { AgentCapabilitySelection } from "../../../agent/capabilitySelection.js";
 import type { ContextBudgetStatus } from "../../../agent/context/types.js";
 import { defaultEffectiveContextWindowPercent } from "../../../ai/capabilities.js";
 import type { PermissionMode, PermissionResult } from "../../../permission/PermissionManager.js";
@@ -29,6 +30,7 @@ import type {
   DesktopSettingsCloseResponse,
   DesktopSettingsSnapshot,
   DesktopSkillCatalogEntry,
+  DesktopToolCatalogEntry,
   DesktopSlashResult,
   DesktopThemePreference,
   DesktopWorkspaceDirectory,
@@ -97,6 +99,7 @@ function DesktopApp(): React.JSX.Element {
   const [sidebarSessions, setSidebarSessions] = useState<DesktopSessionSummary[]>([]);
   const [workspace, setWorkspace] = useState<DesktopWorkspaceSnapshot>();
   const [composerSkills, setComposerSkills] = useState<DesktopSkillCatalogEntry[]>([]);
+  const [composerTools, setComposerTools] = useState<DesktopToolCatalogEntry[]>([]);
   const [document, setDocument] = useState<DesktopSessionDocument>();
   const documentRef = useRef<DesktopSessionDocument | undefined>(undefined);
   const [writerConflict, setWriterConflict] = useState<DesktopSessionWriterConflict>();
@@ -239,18 +242,22 @@ function DesktopApp(): React.JSX.Element {
     const projectId = workspace?.project.id;
     if (!projectId || page !== "chat") {
       setComposerSkills([]);
+      setComposerTools([]);
       return () => { active = false; };
     }
     void Promise.all([
       window.biny.skillCatalog(projectId),
-      window.biny.skillSettings(projectId)
-    ]).then(([catalog, settings]) => {
+      window.biny.skillSettings(projectId),
+      window.biny.toolCatalog(projectId)
+    ]).then(([catalog, settings, tools]) => {
       if (!active) return;
       const enabledById = new Map(settings.activations.map((activation) => [activation.id, activation.enabled]));
       setComposerSkills(catalog.skills.filter((skill) => enabledById.get(skill.id) !== false));
+      setComposerTools(tools);
     }).catch((error) => {
       if (!active) return;
       setComposerSkills([]);
+      setComposerTools([]);
       setWarning(`无法加载 Skill 补全：${errorMessage(error)}`);
     });
     return () => { active = false; };
@@ -784,7 +791,7 @@ function DesktopApp(): React.JSX.Element {
     };
   }, [newTask, openProject, openSearch, openSettings, toggleSidebar]);
 
-  const sendPrompt = useCallback(async (input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string): Promise<void> => {
+  const sendPrompt = useCallback(async (input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string, capabilitySelection?: AgentCapabilitySelection): Promise<void> => {
     const projectId = projectRef.current;
     if (!projectId) throw new Error("请先打开一个项目。");
     const previousSessionId = selectedRef.current;
@@ -802,7 +809,9 @@ function DesktopApp(): React.JSX.Element {
       attachments,
       delivery,
       previousSessionId === undefined && draftMemoryOverride !== undefined ? draftPersonalization : undefined,
-      idempotencyKey
+      idempotencyKey,
+      undefined,
+      capabilitySelection
     );
     setSelectedSessionId(receipt.sessionId);
     setDraftMemoryOverride(undefined);
@@ -832,14 +841,14 @@ function DesktopApp(): React.JSX.Element {
 
   // 首页（无会话）首条消息：先播过场动画再让聊天布局接管。失败回滚交给 Workspace。
   // 空白草稿的 Composer 本就在底部停靠，无需过场，直接发送。
-  const sendPromptWithFlight = useCallback(async (input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string): Promise<void> => {
+  const sendPromptWithFlight = useCallback(async (input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string, capabilitySelection?: AgentCapabilitySelection): Promise<void> => {
     const isHomeSubmit = Boolean(projectRef.current) && selectedRef.current === undefined && !blankDraft;
     if (isHomeSubmit) {
       homeFlightNonceRef.current += 1;
       setHomeFlight({ text: input, nonce: homeFlightNonceRef.current });
     }
     try {
-      await sendPrompt(input, mode, attachments, delivery, idempotencyKey);
+      await sendPrompt(input, mode, attachments, delivery, idempotencyKey, capabilitySelection);
     } catch (error) {
       if (isHomeSubmit) setHomeFlight(null);
       throw error;
@@ -1364,7 +1373,9 @@ function DesktopApp(): React.JSX.Element {
       prefillInput={composerDraft}
       submitDraft={composerSubmitDraft}
       onSubmitDraftConsumed={() => setComposerSubmitDraft(undefined)}
+      capabilityDefaults={workspace?.capabilityDefaults ?? { tools: "auto", skills: "auto" }}
       skills={composerSkills}
+      toolCatalog={composerTools}
       modelSetupRequired={Boolean(workspace?.requiresModelConfiguration)}
       models={workspace?.pickerModels ?? workspace?.models ?? []}
       onPermissionMode={setPermissionMode}

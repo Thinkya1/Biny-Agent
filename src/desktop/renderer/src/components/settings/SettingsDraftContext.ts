@@ -10,6 +10,7 @@ import type {
   DesktopIdentitySettings,
   DesktopMemorySettings,
   DesktopModelConfigurationInput,
+  DesktopPermissionSettings,
   DesktopSettingsSaveResult,
   DesktopSettingsSnapshot,
   DesktopSettingsCredentialScope,
@@ -36,6 +37,7 @@ export interface DesktopSettingsDraft {
   memory: DesktopMemorySettings;
   compaction: DesktopCompactionSettings;
   chatParams: DesktopChatParamsSettings;
+  permission: DesktopPermissionSettings;
   webSearch: DesktopWebSearchSettingsInput;
   chat?: DesktopChatPersonalizationOverride;
   models: SettingsModelDraft;
@@ -57,6 +59,7 @@ export interface SettingsDraftContextValue {
   setMemory(value: DesktopMemorySettings): void;
   setCompaction(value: DesktopCompactionSettings): void;
   setChatParams(value: DesktopChatParamsSettings): void;
+  setPermission(value: DesktopPermissionSettings): void;
   setWebSearch(value: DesktopWebSearchSettingsInput): void;
   setChat(value: DesktopChatPersonalizationOverride): void;
   setSkills(value: DesktopSkillSettingsInput): void;

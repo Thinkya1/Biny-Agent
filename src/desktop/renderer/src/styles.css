@@ -770,6 +770,38 @@ button:disabled { opacity: 0.42; }
 .personality-option.is-selected { border-color: color-mix(in srgb, var(--accent) 48%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--surface-soft)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent); }
 .personality-option strong { color: var(--text); font-size: calc(12.5px * var(--font-scale)); font-weight: 600; }
 .personality-option small { color: var(--text-tertiary); font-size: calc(10.5px * var(--font-scale)); line-height: 1.45; }
+.capability-default-field { padding: 13px 0; border-top: 1px solid var(--border); }
+.capability-default-field > strong { display: block; color: var(--text); font-size: calc(12px * var(--font-scale)); font-weight: 560; }
+.capability-default-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 9px; }
+.capability-default-option {
+  display: flex;
+  min-height: 82px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: var(--surface-soft);
+  text-align: left;
+  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+}
+.capability-default-option:hover:not(:disabled):not(.is-selected) { border-color: var(--border-strong); background: var(--surface-hover); }
+.capability-default-option.is-selected { border-color: color-mix(in srgb, var(--accent) 48%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--surface-soft)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent); }
+.capability-default-option-title { display: inline-flex; align-items: center; gap: 7px; color: var(--text); font-size: calc(12px * var(--font-scale)); font-weight: 600; }
+.capability-default-option small { color: var(--text-tertiary); font-size: calc(10.5px * var(--font-scale)); line-height: 1.45; }
+.agent-permission-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 12px; }
+.agent-permission-option { display: flex; min-width: 0; align-items: flex-start; gap: 9px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; color: var(--text-secondary); background: var(--surface-soft); text-align: left; transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease; }
+.agent-permission-option:hover:not(:disabled):not(.is-selected) { border-color: var(--border-strong); background: var(--surface-hover); }
+.agent-permission-option.is-selected { border-color: color-mix(in srgb, var(--accent) 48%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--surface-soft)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent); }
+.agent-permission-option > span:last-child { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.agent-permission-option strong { color: var(--text); font-size: calc(12px * var(--font-scale)); font-weight: 600; }
+.agent-permission-option small { color: var(--text-tertiary); font-size: calc(10.5px * var(--font-scale)); line-height: 1.45; }
+.permission-scope-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 12px; }
+.permission-scope-summary > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; padding: 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-soft); }
+.permission-scope-summary strong { color: var(--text-secondary); font-size: calc(10.5px * var(--font-scale)); font-weight: 560; }
+.permission-scope-summary small { color: var(--text-tertiary); font-size: calc(10.5px * var(--font-scale)); }
 .personalization-instructions,
 .chat-instructions-field textarea {
   width: 100%;
@@ -808,7 +840,10 @@ button:disabled { opacity: 0.42; }
 .chat-instructions-field > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 @media (max-width: 720px) {
   .personality-option-grid,
-  .chat-override-grid { grid-template-columns: 1fr; }
+  .chat-override-grid,
+  .capability-default-grid,
+  .agent-permission-options,
+  .permission-scope-summary { grid-template-columns: 1fr; }
 }
 
 /* 记忆设置面板 */

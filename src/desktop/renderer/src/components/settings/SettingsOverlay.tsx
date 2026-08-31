@@ -31,6 +31,7 @@ import { ProviderBrandGlyph } from "../ProviderBrandGlyph.js";
 import { SettingsAbout } from "./SettingsAbout.js";
 import { SettingsAppearance } from "./SettingsAppearance.js";
 import { SettingsChatParams } from "./SettingsChatParams.js";
+import { SettingsCapabilityDefaults } from "./SettingsCapabilityDefaults.js";
 import { SettingsCompaction } from "./SettingsCompaction.js";
 import { SettingsActivity } from "./SettingsActivity.js";
 import { SettingsCheckbox } from "./SettingsCheckbox.js";
@@ -42,6 +43,7 @@ import { SettingsDraftProvider } from "./SettingsDraftProvider.js";
 import { SettingsMemory } from "./SettingsMemory.js";
 import { SettingsQuickChat } from "./SettingsQuickChat.js";
 import { SettingsPageFooter } from "./SettingsPageFooter.js";
+import { SettingsPermissions } from "./SettingsPermissions.js";
 import { SettingsExtensionsView } from "./SettingsExtensionsView.js";
 import { searchSettings } from "./settingsSearch.js";
 
@@ -96,25 +98,36 @@ interface SettingsOverlayProps {
   onCancelModelLogin(provider: DesktopModelLoginProvider, authRequestId: string): Promise<void>;
 }
 
-export type SettingsTab = "通用" | "聊天" | "快速对话" | "模型" | "MCP 服务器" | "技能" | "插件" | "活动记录" | "记忆" | "联网搜索" | "关于";
+export type SettingsTab = "通用" | "聊天" | "快速对话" | "模型" | "MCP 服务器" | "技能" | "插件" | "权限" | "活动记录" | "记忆" | "联网搜索" | "关于";
 
-const settingsNav: Array<{ badge?: string; icon: IconName; tab: SettingsTab; label: string }> = [
-  { icon: "sun", tab: "通用", label: "通用" },
-  { icon: "message", tab: "聊天", label: "聊天" },
-  { icon: "compose", tab: "快速对话", label: "快速对话" },
-  { icon: "network", tab: "模型", label: "模型供应商" },
-  { icon: "plug", tab: "MCP 服务器", label: "MCP 服务器" },
-  { icon: "wand", tab: "技能", label: "技能" },
-  { icon: "puzzle", tab: "插件", label: "插件" },
-  { badge: "Beta", icon: "activity", tab: "活动记录", label: "活动记录" },
-  { badge: "Beta", icon: "brain", tab: "记忆", label: "记忆" },
-  { badge: "Beta", icon: "search", tab: "联网搜索", label: "联网搜索" },
-  { icon: "help", tab: "关于", label: "关于" }
+type SettingsNavGroup = "preferences" | "capabilities" | "activity" | "system";
+
+const settingsNav: Array<{ badge?: string; group: SettingsNavGroup; icon: IconName; tab: SettingsTab; label: string }> = [
+  { group: "preferences", icon: "sun", tab: "通用", label: "通用" },
+  { group: "preferences", icon: "message", tab: "聊天", label: "聊天" },
+  { group: "preferences", icon: "compose", tab: "快速对话", label: "快速对话" },
+  { group: "capabilities", icon: "network", tab: "模型", label: "模型供应商" },
+  { group: "capabilities", icon: "plug", tab: "MCP 服务器", label: "MCP 服务器" },
+  { group: "capabilities", icon: "wand", tab: "技能", label: "技能" },
+  { group: "capabilities", icon: "puzzle", tab: "插件", label: "插件" },
+  { badge: "Beta", group: "capabilities", icon: "brain", tab: "记忆", label: "记忆" },
+  { badge: "Beta", group: "capabilities", icon: "search", tab: "联网搜索", label: "联网搜索" },
+  { badge: "Beta", group: "activity", icon: "activity", tab: "活动记录", label: "活动记录" },
+  { group: "system", icon: "shield", tab: "权限", label: "权限" },
+  { group: "system", icon: "help", tab: "关于", label: "关于" }
+];
+
+const settingsNavGroups: Array<{ label: string; items: typeof settingsNav }> = [
+  { label: "偏好", items: settingsNav.filter((item) => item.group === "preferences") },
+  { label: "能力", items: settingsNav.filter((item) => item.group === "capabilities") },
+  { label: "活动", items: settingsNav.filter((item) => item.group === "activity") },
+  { label: "系统", items: settingsNav.filter((item) => item.group === "system") }
 ];
 
 const settingsTitles: Record<SettingsTab, string> = {
   通用: "通用",
   聊天: "聊天",
+  权限: "权限",
   快速对话: "快速对话",
   模型: "模型供应商",
   "MCP 服务器": "MCP 服务器",
@@ -136,6 +149,7 @@ const settingsSubtitles: Record<SettingsTab, string> = {
   记忆: "记忆检索、自动生成、长期策略与条目管理。",
   联网搜索: "配置联网搜索与数据来源。",
   聊天: "温度、输出额度与自动压缩策略。",
+  权限: "Agent 工具执行的批准策略、风险边界与 macOS 系统权限。",
   快速对话: "全局快捷键与悬浮窗行为。",
   关于: "版本与产品信息。"
 };
@@ -317,12 +331,17 @@ function SettingsOverlayContent({
             </nav>
           ) : (
             <nav aria-label="设置分类" className="settings-nav-list">
-              {settingsNav.map((item) => (
-                <button aria-current={tab === item.tab ? "page" : undefined} className={tab === item.tab ? "is-selected" : ""} key={item.tab} onClick={() => selectTab(item.tab)} type="button">
-                  <Icon name={item.icon} size={17} />
-                  <span>{item.label}</span>
-                  {item.badge ? <em className="settings-nav-badge">{item.badge}</em> : null}
-                </button>
+              {settingsNavGroups.map((group) => (
+                <div className="settings-nav-section" key={group.label}>
+                  <h3 className="settings-nav-group">{group.label}</h3>
+                  {group.items.map((item) => (
+                    <button aria-current={tab === item.tab ? "page" : undefined} className={tab === item.tab ? "is-selected" : ""} key={item.tab} onClick={() => selectTab(item.tab)} type="button">
+                      <Icon name={item.icon} size={17} />
+                      <span>{item.label}</span>
+                      {item.badge ? <em className="settings-nav-badge">{item.badge}</em> : null}
+                    </button>
+                  ))}
+                </div>
               ))}
             </nav>
           )}
@@ -453,7 +472,8 @@ function SettingsOverlayContent({
             onNotify={(nextMessage) => notifyForTab("通用", nextMessage)}
           /> : null}
           {tab === "活动记录" ? <SettingsActivity /> : null}
-          {tab === "聊天" ? (<><SettingsChatParams /><SettingsCompaction /></>) : null}
+          {tab === "聊天" ? (<><SettingsChatParams /><SettingsCapabilityDefaults /><SettingsCompaction /></>) : null}
+          {tab === "权限" ? <SettingsPermissions /> : null}
           {tab === "快速对话" ? <SettingsQuickChat /> : null}
           {memoryVisited ? <SettingsMemory
             models={settingsModels}

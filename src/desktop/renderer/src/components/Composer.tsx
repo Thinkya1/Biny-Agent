@@ -9,16 +9,18 @@ import { ChatComposer, ChatComposerDrawer, ChatComposerInput } from "@astryxdesi
 import type { ChatComposerInputHandle } from "@astryxdesign/core/Chat";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentSessionInfo, InteractiveAgentRunMode } from "../../../../agent/AgentSession.js";
+import type { AgentCapabilitySelection } from "../../../../agent/capabilitySelection.js";
 import type { ModelChoice } from "../../../../llm/ModelManager.js";
 import { modelThinkingSelections, thinkingSelectionForModel, type ThinkingSelection } from "../../../../llm/modelThinking.js";
 import type { PermissionMode } from "../../../../permission/PermissionManager.js";
-import type { DesktopAttachment, DesktopProject, DesktopSkillCatalogEntry } from "../../../protocol.js";
+import type { DesktopAttachment, DesktopCapabilityDefaults, DesktopProject, DesktopSkillCatalogEntry, DesktopToolCatalogEntry } from "../../../protocol.js";
 import { DESKTOP_SLASH_COMMANDS } from "../../../protocol.js";
 import { catalogForConnection } from "../providerCatalog.js";
 import { formatContextUsage, type ContextUsage } from "../usagePresentation.js";
 import { AttachmentList } from "./composer/AttachmentList.js";
 import type { PendingAttachment } from "./composer/AttachmentList.js";
 import { ComposerActionButton } from "./composer/ComposerActionButton.js";
+import { CapabilitiesMenu } from "./composer/CapabilitiesMenu.js";
 import { AddMenu, PermissionMenu } from "./composer/ComposerMenus.js";
 import { ModelPickerMenu } from "./composer/ModelPickerMenu.js";
 import { permissionIcon, permissionLabel, thinkingLabel } from "./composer/composerLabels.js";
@@ -54,8 +56,10 @@ interface ComposerProps {
   onSubmitDraftConsumed?(): void;
   /** 内联进底栏的工作区/分支选择器（Alma 式：文件夹图标 + 项目名 位于工具栏左组）。 */
   workspaceContext?: React.ReactNode;
+  capabilityDefaults: DesktopCapabilityDefaults;
   skills: DesktopSkillCatalogEntry[];
-  onSend(input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string): Promise<void>;
+  toolCatalog: DesktopToolCatalogEntry[];
+  onSend(input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string, capabilitySelection?: AgentCapabilitySelection): Promise<void>;
   onSlashCommand(command: string): Promise<void>;
   onExpandSkillCommand(input: string): Promise<string>;
   onStop(): Promise<void>;
@@ -66,11 +70,18 @@ interface ComposerProps {
   onWarning(message: string): void;
 }
 
-type ComposerMenu = "permission" | "model" | "add" | null;
+type ComposerMenu = "permission" | "model" | "add" | "capabilities" | null;
 type PendingModelSelection = { alias: string; thinking: ThinkingSelection };
 
 const MAX_COMPOSER_ATTACHMENTS = 8;
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+
+function selectionFromDefaults(defaults: DesktopCapabilityDefaults): AgentCapabilitySelection {
+  return {
+    tools: defaults.tools === "none" ? [] : defaults.tools,
+    skills: defaults.skills === "none" ? [] : defaults.skills
+  };
+}
 
 export const Composer = memo(function Composer({
   project,
@@ -92,7 +103,9 @@ export const Composer = memo(function Composer({
   submitDraft,
   onSubmitDraftConsumed,
   workspaceContext,
+  capabilityDefaults,
   skills,
+  toolCatalog,
   onSend,
   onSlashCommand,
   onExpandSkillCommand,
@@ -107,6 +120,7 @@ export const Composer = memo(function Composer({
   const [mode, setMode] = useState<InteractiveAgentRunMode>("chat");
   const [attachments, setAttachments] = useState<DesktopAttachment[]>([]);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [capabilitySelection, setCapabilitySelection] = useState<AgentCapabilitySelection>(() => selectionFromDefaults(capabilityDefaults));
   const [menu, setMenu] = useState<ComposerMenu>(null);
   const [busy, setBusy] = useState(false);
   const [stopPending, setStopPending] = useState(false);
@@ -117,12 +131,15 @@ export const Composer = memo(function Composer({
   useBreathingCaret(editorWrapRef, breathingCaretRef);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const addAnchorRef = useRef<HTMLDivElement>(null);
+  const capabilityAnchorRef = useRef<HTMLDivElement>(null);
   const permissionAnchorRef = useRef<HTMLDivElement>(null);
   const modelAnchorRef = useRef<HTMLDivElement>(null);
   const modelSwitchQueueRef = useRef<Promise<void>>(Promise.resolve());
   const modelSwitchPromiseRef = useRef<Promise<void> | undefined>(undefined);
   const modelSwitchRequestRef = useRef(0);
   const submitFlightRef = useRef(false);
+  const defaultToolSelection = capabilityDefaults.tools;
+  const defaultSkillSelection = capabilityDefaults.skills;
 
   useEffect(() => {
     modelSwitchRequestRef.current += 1;
@@ -133,8 +150,9 @@ export const Composer = memo(function Composer({
     setAttachments([]);
     setPendingAttachments([]);
     setMode("chat");
+    setCapabilitySelection(selectionFromDefaults({ tools: defaultToolSelection, skills: defaultSkillSelection }));
     setMenu(null);
-  }, [project?.id]);
+  }, [defaultSkillSelection, defaultToolSelection, project?.id]);
 
   useEffect(() => {
     if (focusToken) inputRef.current?.focus();
@@ -220,7 +238,7 @@ export const Composer = memo(function Composer({
         // 否则用户紧接着按 Enter 时可能把消息发给旧模型。
         setInput("");
         setAttachments([]);
-        await onSend(sendValue, mode, sentAttachments, delivery, globalThis.crypto.randomUUID());
+        await onSend(sendValue, mode, sentAttachments, delivery, globalThis.crypto.randomUUID(), capabilitySelection);
       } catch (submitError) {
         setInput(value);
         setAttachments(sentAttachments);
@@ -323,6 +341,7 @@ export const Composer = memo(function Composer({
       selectedModel.baseUrl
     )
     : undefined;
+  const toolsSupported = selectedModel?.supportsTools !== false;
   const modelName = selectedModel?.displayName ?? runtimeInfo?.modelLabel ?? "未配置模型";
   const startModelSwitch = (alias: string, thinking: ThinkingSelection): void => {
     const requestId = modelSwitchRequestRef.current + 1;
@@ -410,6 +429,21 @@ export const Composer = memo(function Composer({
   useEffect(() => {
     if (permissionSwitchDisabled && menu === "permission") setMenu(null);
   }, [menu, permissionSwitchDisabled]);
+  const capabilitySwitchDisabled = !project || running || runtimeBusy || busy || sessionWriterConflict;
+  const capabilitySwitchDisabledReason = !project
+    ? "请先打开一个项目。"
+    : sessionWriterConflict
+      ? "会话已在另一个应用中打开。"
+      : running
+        ? "当前对话正在运行，请等待结束后再选择能力。"
+        : runtimeBusy
+          ? "Runtime 正在处理其他操作，请稍候再选择能力。"
+          : busy
+            ? "当前附件或命令正在处理，请稍候。"
+            : undefined;
+  useEffect(() => {
+    if (capabilitySwitchDisabled && menu === "capabilities") setMenu(null);
+  }, [capabilitySwitchDisabled, menu]);
 
   const handleInputChange = (value: string): void => {
     setInput(value);
@@ -491,6 +525,33 @@ export const Composer = memo(function Composer({
                 <span>规划</span>
               </ComposerActionButton>
             ) : null}
+            <div className="composer-menu-anchor" ref={capabilityAnchorRef}>
+              <ComposerActionButton
+                active={menu === "capabilities"}
+                aria-expanded={menu === "capabilities"}
+                aria-haspopup="dialog"
+                className="biny-capabilities-pill"
+                data-composer-menu="capabilities"
+                disabled={capabilitySwitchDisabled}
+                disabledReason={capabilitySwitchDisabledReason}
+                label="选择本条消息可用的工具与 Skill"
+                onClick={() => setMenu(menu === "capabilities" ? null : "capabilities")}
+                tooltip={menu === "capabilities" ? undefined : "选择本条消息可用的工具与 Skill"}
+              >
+                <Icon name="wand" size={14} />
+                <span>能力</span>
+                <Icon name="chevron" size={10} />
+              </ComposerActionButton>
+              <CapabilitiesMenu
+                anchorRef={capabilityAnchorRef}
+                onChange={setCapabilitySelection}
+                open={menu === "capabilities"}
+                selection={capabilitySelection}
+                skills={skills}
+                tools={toolCatalog}
+                toolsSupported={toolsSupported}
+              />
+            </div>
             {workspaceContext}
             <div className="composer-menu-anchor" ref={permissionAnchorRef}>
               <ComposerActionButton

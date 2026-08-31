@@ -59,6 +59,13 @@ const webSearchSettingsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(60_000),
   maxResults: z.number().int().min(1).max(10)
 });
+const permissionSettingsSchema = z.object({
+  mode: z.enum(["ask", "read-only", "auto", "full-access"]),
+  allowTools: z.array(idSchema).max(512),
+  allowPaths: z.array(z.string().min(1).max(2_000)).max(512),
+  denyPaths: z.array(z.string().min(1).max(2_000)).max(512),
+  criticalAlwaysAsk: z.boolean()
+}).strict();
 /**
  * 按聊天的记忆开关覆盖。人格/指令字段已下线（改由 SOUL/USER 承载），这里只保留 use/contribute
  * 两个记忆开关。渲染层只发送这两个键；读取历史 catalog 的宽松兼容在上游 schema 处理。
@@ -87,6 +94,7 @@ export const settingsSaveInputSchema = z.object({
   memory: memorySettingsSchema.optional(),
   compaction: compactionSchema.optional(),
   chatParams: chatParamsSchema.optional(),
+  permission: permissionSettingsSchema.optional(),
   webSearch: webSearchSettingsSchema.optional(),
   models: z.object({
     upserts: z.array(modelConfigurationSchema).max(200),

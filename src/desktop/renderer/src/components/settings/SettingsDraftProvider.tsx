@@ -15,6 +15,7 @@ import type {
   DesktopIdentitySettings,
   DesktopMemorySettings,
   DesktopModelConfigurationInput,
+  DesktopPermissionSettings,
   DesktopSettingsSaveInput,
   DesktopSettingsSaveResult,
   DesktopSettingsSnapshot,
@@ -120,6 +121,10 @@ export function SettingsDraftProvider({
 
   const setChatParams = useCallback((value: DesktopChatParamsSettings): void => {
     setDraft((current) => current ? { ...current, chatParams: value } : current);
+  }, []);
+
+  const setPermission = useCallback((value: DesktopPermissionSettings): void => {
+    setDraft((current) => current ? { ...current, permission: value } : current);
   }, []);
 
   const setWebSearch = useCallback((value: DesktopWebSearchSettingsInput): void => {
@@ -310,6 +315,7 @@ export function SettingsDraftProvider({
     setMemory,
     setCompaction,
     setChatParams,
+    setPermission,
     setWebSearch,
     setChat,
     setSkills,
@@ -341,6 +347,7 @@ export function SettingsDraftProvider({
     setDefaultModel,
     setFontPreference,
     setMemory,
+    setPermission,
     setActivity,
     setIdentity,
     setThemePreference,
@@ -363,6 +370,7 @@ function draftFromSnapshot(snapshot: DesktopSettingsSnapshot): DesktopSettingsDr
     memory: structuredClone(snapshot.memory),
     compaction: structuredClone(snapshot.compaction),
     chatParams: structuredClone(snapshot.chatParams),
+    permission: structuredClone(snapshot.permission),
     webSearch: webSearchInput(snapshot.webSearch),
     chat: snapshot.chat ? structuredClone(snapshot.chat.personalization) : undefined,
     models: { upserts: [], removeAliases: [], defaultModel: undefined, oauthCredentialHandles: [] },
@@ -396,6 +404,7 @@ function countNonPreferenceDirtyFields(snapshot: DesktopSettingsSnapshot, draft:
   if (!sameJson(draft.memory, snapshot.memory)) count += 1;
   if (!sameJson(draft.compaction, snapshot.compaction)) count += 1;
   if (!sameJson(draft.chatParams, snapshot.chatParams)) count += 1;
+  if (!sameJson(draft.permission, snapshot.permission)) count += 1;
   if (!sameWebSearch(draft.webSearch, snapshot.webSearch)) count += 1;
   if (draft.models.upserts.length || draft.models.removeAliases.length || draft.models.defaultModel || draft.models.oauthCredentialHandles.length) count += 1;
   if (snapshot.chat && draft.chat && !sameJson(draft.chat, snapshot.chat.personalization)) count += 1;
@@ -438,6 +447,7 @@ function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraf
     memory: sameJson(draft.memory, snapshot.memory) ? undefined : draft.memory,
     compaction: sameJson(draft.compaction, snapshot.compaction) ? undefined : draft.compaction,
     chatParams: sameJson(draft.chatParams, snapshot.chatParams) ? undefined : draft.chatParams,
+    permission: sameJson(draft.permission, snapshot.permission) ? undefined : draft.permission,
     webSearch: sameWebSearch(draft.webSearch, snapshot.webSearch) ? undefined : draft.webSearch,
     skills: sameJson(draft.skills, skillInputFromSnapshot(snapshot.skills)) ? undefined : draft.skills,
     models: modelsDirty ? {

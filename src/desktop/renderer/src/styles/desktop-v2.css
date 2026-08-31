@@ -1218,7 +1218,9 @@ select {
   min-height: 0;
   border: 0;
   border-radius: 0;
-  background: var(--surface-raised);
+  /* Maka 的设置页以侧栏为外层底板，右侧内容再浮一层；两块同色会让
+     分组边界消失，尤其是在浅色主题下更明显。 */
+  background: var(--sidebar);
   box-shadow: none;
 }
 
@@ -1231,7 +1233,8 @@ select {
 .settings-modal.is-full-page .settings-tabs {
   width: 264px;
   padding: 62px 24px 24px;
-  background: var(--surface-raised);
+  border-inline-end: 1px solid var(--border);
+  background: var(--sidebar);
 }
 
 .settings-back-button {
@@ -1318,6 +1321,24 @@ select {
   gap: 2px;
 }
 
+.settings-nav-section + .settings-nav-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+
+.settings-nav-group {
+  margin: 6px 12px 6px;
+  color: var(--text-tertiary);
+  font-size: calc(10px * var(--font-scale));
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.settings-nav-section:first-child .settings-nav-group {
+  margin-top: 2px;
+}
+
 .settings-tabs .settings-nav-list button {
   height: 36px;
   gap: 8px;
@@ -1348,7 +1369,7 @@ select {
   margin: 0;
   padding: 0 0 40px;
   border-radius: 0;
-  background: var(--surface-raised);
+  background: var(--surface-soft);
 }
 
 .settings-modal.is-full-page .settings-content > header {
@@ -1358,7 +1379,7 @@ select {
   gap: 24px;
   min-height: 122px;
   padding: 62px max(28px, calc((100% - var(--settings-content-max)) / 2)) 20px;
-  background: linear-gradient(to bottom, var(--surface-raised) 76%, transparent);
+  background: linear-gradient(to bottom, var(--surface-soft) 76%, transparent);
 }
 
 .settings-heading h2 {
@@ -1398,7 +1419,7 @@ select {
   justify-content: space-between;
   gap: 20px;
   padding: 12px max(28px, calc((100% - var(--settings-sidebar-width) - var(--settings-content-max)) / 2)) 12px calc(var(--settings-sidebar-width) + max(28px, calc((100% - var(--settings-sidebar-width) - var(--settings-content-max)) / 2)));
-  background: var(--surface-raised);
+  background: var(--surface-soft);
 }
 
 .settings-page-footer::before {
@@ -2659,7 +2680,7 @@ select {
 
 /* 卡片浮于页面底色之上；统计/权限/会话行等内层盒子再用更亮一级的底色分层。 */
 .settings-sections .activity-card {
-  background: var(--surface-raised);
+  background: var(--surface);
 }
 
 .activity-overview {

@@ -712,6 +712,7 @@ export class DesktopSettingsTransaction {
       memory: config.memory,
       compaction: structuredClone(config.compaction),
       chatParams: structuredClone(config.chatParams),
+      permission: structuredClone(config.permission),
       webSearch: config.webSearch,
       models: config.models,
       skills: config.skills ?? {
@@ -875,6 +876,7 @@ function createJournal(
     || input.memory !== undefined
     || input.compaction !== undefined
     || input.chatParams !== undefined
+    || input.permission !== undefined
     || input.webSearch !== undefined
     || input.models !== undefined
     || input.skills !== undefined;
@@ -1185,6 +1187,7 @@ function listAppliedFields(input: DesktopSettingsSaveInput): string[] {
   if (input.memory !== undefined) fields.push("memory");
   if (input.compaction !== undefined) fields.push("compaction");
   if (input.chatParams !== undefined) fields.push("chatParams");
+  if (input.permission !== undefined) fields.push("permission");
   if (input.webSearch !== undefined) fields.push("webSearch");
   if (input.models !== undefined) fields.push("models");
   if (input.skills !== undefined) fields.push("skills");
