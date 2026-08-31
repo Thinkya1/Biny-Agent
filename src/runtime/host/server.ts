@@ -67,6 +67,7 @@ import {
   publicErrorCode,
   publicErrorData,
   readAttachments,
+  readCapabilitySelection,
   readAutomationCreateInput,
   readCapabilityOwnerType,
   readGraphNodes,
@@ -591,7 +592,8 @@ export class RuntimeHostServer {
           readRunMode(payload.mode),
           readAttachments(payload.attachments),
           ids,
-          readPromptContext(payload.promptContext)
+          readPromptContext(payload.promptContext),
+          readCapabilitySelection(payload.capabilitySelection)
         );
         this.trackCompletion(submitted);
         return {
@@ -610,7 +612,8 @@ export class RuntimeHostServer {
             readRunMode(payload.mode),
             readAttachments(payload.attachments),
             ids,
-            readPromptContext(payload.promptContext)
+            readPromptContext(payload.promptContext),
+            readCapabilitySelection(payload.capabilitySelection)
           );
           this.trackCompletion(submitted);
           return { runId: submitted.runId, messageId: submitted.messageId };
@@ -1013,6 +1016,8 @@ export class RuntimeHostServer {
       }
       case "skills.list":
         return commands.listSkills();
+      case "tools.list":
+        return commands.listTools();
       case "skills.expand":
         return await commands.expandSkillCommand(requiredString(payload.input, "input"));
       case "mcp.status":

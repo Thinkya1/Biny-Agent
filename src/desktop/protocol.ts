@@ -8,6 +8,7 @@
  * 通道名统一用 `desktop:<领域>:<动作>` 的形式，便于排查。
  */
 import type { InteractiveAgentRunMode } from "../agent/AgentSession.js";
+import type { AgentCapabilitySelection, CapabilitySelectionMode } from "../agent/capabilitySelection.js";
 import type { ActivitySettings, ActivitySettingsInput } from "../activity/settings.js";
 import type { ActivityRuntimeSnapshot } from "../activity/types.js";
 import type { ActivityReportResult } from "../activity/analyzer.js";
@@ -83,6 +84,7 @@ export const desktopIpc = {
   importSession: "desktop:session:import",
   sessionMenu: "desktop:session:menu",
   sendPrompt: "desktop:agent:send",
+  toolCatalog: "desktop:agent:tool-catalog",
   resumeInterruptedTurn: "desktop:agent:resume-interrupted",
   editPrompt: "desktop:agent:edit",
   retryPrompt: "desktop:agent:retry",
@@ -408,12 +410,34 @@ export interface DesktopWorkspaceSnapshot {
   runtimeError?: string;
   /** 跨 Desktop/TUI 共享的已保存权限模式；Runtime 启动时会先与这个持久化值对齐。 */
   permissionMode: PermissionMode;
+  capabilityDefaults: DesktopCapabilityDefaults;
   requiresModelConfiguration: boolean;
   /** 普通 Composer 选择器使用的已启用且当前可用模型；设置页的 `models` 仍表示已保存模型。 */
   pickerModels: ModelChoice[];
   models: ModelChoice[];
   connections: DesktopModelConnection[];
   runtimeProjection?: DesktopRuntimeProjection;
+}
+
+export interface DesktopCapabilityDefaults {
+  tools: CapabilitySelectionMode;
+  skills: CapabilitySelectionMode;
+}
+
+export interface DesktopToolCatalogEntry {
+  name: string;
+  description: string;
+  source: "builtin" | "mcp" | "skill" | "plugin" | "subagent";
+  risk?: "read" | "write" | "execute";
+}
+
+/** Agent 权限策略的脱敏设置视图；工具选择器不读写这里的 allowTools。 */
+export interface DesktopPermissionSettings {
+  mode: PermissionMode;
+  allowTools: string[];
+  allowPaths: string[];
+  denyPaths: string[];
+  criticalAlwaysAsk: boolean;
 }
 
 /** 渲染进程启动时一次性取回的初始状态，之后的变化都通过事件推送。 */
@@ -1204,6 +1228,7 @@ export interface DesktopSettingsSnapshot {
   memory: DesktopMemorySettings;
   compaction: DesktopCompactionSettings;
   chatParams: DesktopChatParamsSettings;
+  permission: DesktopPermissionSettings;
   webSearch: DesktopWebSearchSettings;
   models: DesktopSettingsModelsSnapshot;
   skills: DesktopSkillSettings;
@@ -1239,6 +1264,7 @@ export interface DesktopSettingsSaveInput {
   memory?: DesktopMemorySettings;
   compaction?: DesktopCompactionSettings;
   chatParams?: DesktopChatParamsSettings;
+  permission?: DesktopPermissionSettings;
   webSearch?: DesktopWebSearchSettingsInput;
   models?: DesktopSettingsModelsInput;
   skills?: DesktopSkillSettingsInput;
@@ -1435,8 +1461,10 @@ export interface DesktopApi {
     delivery?: "steer" | "followUp",
     personalization?: DesktopChatPersonalizationOverride,
     idempotencyKey?: string,
-    promptContext?: string
+    promptContext?: string,
+    capabilitySelection?: AgentCapabilitySelection
   ): Promise<DesktopRunReceipt>;
+  toolCatalog(projectId: string): Promise<DesktopToolCatalogEntry[]>;
   resumeInterruptedTurn(projectId: string, sessionId: string): Promise<DesktopRunReceipt | undefined>;
   editPrompt(projectId: string, sessionId: string, userMessageIndex: number, input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], idempotencyKey?: string): Promise<DesktopRunReceipt>;
   retryPrompt(projectId: string, sessionId: string, targetMessageId: string, input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], idempotencyKey?: string): Promise<DesktopRunReceipt>;

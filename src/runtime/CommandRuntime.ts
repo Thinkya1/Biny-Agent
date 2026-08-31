@@ -19,6 +19,8 @@ import { TodoStore } from "../session/todoStore.js";
 import { CheckpointStore } from "../session/checkpointStore.js";
 import { PermissionManager } from "../permission/PermissionManager.js";
 import { createSkillResourceTool, createSkillTool, expandSkillCommand as expandSkillCommandText, loadSkills, type SkillBundle, type SkillDefinition } from "../extensions/skills.js";
+import { skillPathsForSelection, skillPromptForSelection } from "../extensions/skills.js";
+import type { ToolRisk, ToolSource } from "../tools/types.js";
 import { perfNow, recordPerfPhase } from "../observability/perfTiming.js";
 import { loadPlugins } from "../extensions/plugins.js";
 import { createMcpResourceTools, McpToolHost } from "../extensions/mcp.js";
@@ -70,6 +72,8 @@ export interface CommandRuntime {
   extensionStatus(): ExtensionStatus;
   /** 当前可用于 TUI 补全的 Skill 元数据；正文仍按需加载。 */
   listSkills(): SkillDefinition[];
+  /** 当前注册表的脱敏工具目录，供 Desktop 的单回合能力选择器使用。 */
+  listTools(): RuntimeToolCatalogEntry[];
   /** 用户提交 `/skill:name` 后才读取并展开 Skill 正文。 */
   expandSkillCommand(input: string): Promise<string>;
   /** 每个新根回合前重新扫描 Skill，使新增和元数据修改无需重启即可生效。 */
@@ -79,6 +83,13 @@ export interface CommandRuntime {
   startSubagentTask(task: string, options?: SubagentTaskRunOptions): SubmittedSubagentTask;
   setSubagentParentRunId(parentRunId?: string): void;
   close(): Promise<void>;
+}
+
+export interface RuntimeToolCatalogEntry {
+  name: string;
+  description: string;
+  source: ToolSource;
+  risk?: ToolRisk;
 }
 
 export interface CommandRuntimeOptions {
@@ -251,9 +262,9 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
       toolRegistry,
       permissionManager,
       recorder,
-      skillPrompt: () => requireSkillBundle(skills).prompt,
+      skillPrompt: (selection) => skillPromptForSelection(requireSkillBundle(skills), selection),
       subagentPrompt: buildSubagentDefinitionsPrompt(subagentDefinitions),
-      skillPaths: () => requireSkillBundle(skills).paths,
+      skillPaths: (selection) => skillPathsForSelection(requireSkillBundle(skills), selection),
       mcpPrompt: () => mcpHost.instructionsPrompt(),
       todoStore: todos,
       createCheckpoint: checkpoints ? async (label) => await checkpoints.create(label) : undefined,
@@ -351,6 +362,12 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
     extensionReport: (section?: ExtensionSection): string => formatExtensionReport(extensionStatus(), section),
     extensionStatus: (): ExtensionStatus => extensionStatus(),
     listSkills: (): SkillDefinition[] => [...requireSkillBundle(skills).skills],
+    listTools: (): RuntimeToolCatalogEntry[] => toolRegistry.listEntries().map(({ source, tool }) => ({
+      name: tool.name,
+      description: tool.description,
+      source,
+      risk: tool.risk
+    })),
     expandSkillCommand: async (input: string): Promise<string> => await expandSkillCommandText(requireSkillBundle(skills), input),
     refreshSkills: async (): Promise<void> => {
       skills = await loadSkills({

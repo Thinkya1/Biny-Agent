@@ -5,11 +5,12 @@
  */
 import { randomUUID } from "node:crypto";
 import type { AgentAttachment, AgentRunMode } from "../../agent/AgentSession.js";
+import { agentCapabilitySelectionSchema, type AgentCapabilitySelection } from "../../agent/capabilitySelection.js";
 import type { AgentRunOutcome, RuntimeRequestIds } from "../InteractiveAgentRuntime.js";
 import type { BehaviorPatternReviewAction, TelosDocumentInput, TelosDriftResolutionAction, TelosScope } from "../../agent/context/telosTypes.js";
 import type { MemoryEntryInput, MemoryEntryPatch, MemoryKind, MemoryLineage, MemoryLineageSource, MemoryOriginSelector } from "../../agent/context/memoryTypes.js";
 import { thinkingLevelSchema } from "../../config/schema.js";
-import type { PermissionMode, PermissionResult } from "../../permission/PermissionManager.js";
+import type { PermissionAction, PermissionMode, PermissionResult } from "../../permission/PermissionManager.js";
 import type { RuntimeRunStatus } from "../RuntimeAuthority.js";
 import type { TaskRunStatus } from "../TaskRunStore.js";
 import type { AutomationCreateInput } from "../AutomationScheduler.js";
@@ -40,6 +41,11 @@ export function readPromptContext(value: unknown): string | undefined {
     throw new Error("Runtime Host prompt context must be a string of at most 30000 characters.");
   }
   return value;
+}
+
+export function readCapabilitySelection(value: unknown): AgentCapabilitySelection | undefined {
+  if (value === undefined) return undefined;
+  return agentCapabilitySelectionSchema.parse(value);
 }
 
 export function optionalString(value: unknown): string | undefined {
@@ -342,13 +348,26 @@ export function readPermissionMode(value: unknown): PermissionMode {
 export function readPermissionResult(value: unknown): PermissionResult {
   const record = asRecord(value);
   if (typeof record.approved !== "boolean") throw new Error("Runtime Host permission result is invalid.");
+  const action = readPermissionAction(record.action);
+  if (action !== undefined && (action === "allow_once" || action === "allow_always") !== record.approved) {
+    throw new Error("Runtime Host permission action does not match approved.");
+  }
+  const message = optionalString(record.message);
+  if (action === "deny_with_reason" && !message?.trim()) throw new Error("Runtime Host denial reason is required.");
   return {
     approved: record.approved,
+    action,
     scope: record.scope as PermissionResult["scope"],
     nextMode: record.nextMode as PermissionResult["nextMode"],
-    message: optionalString(record.message),
+    message,
     confirmation: optionalString(record.confirmation)
   };
+}
+
+function readPermissionAction(value: unknown): PermissionAction | undefined {
+  if (value === undefined) return undefined;
+  if (value === "allow_once" || value === "allow_always" || value === "deny" || value === "deny_with_reason") return value;
+  throw new Error("Runtime Host permission action is invalid.");
 }
 
 export function readThinking(value: unknown): ThinkingSelection | undefined {

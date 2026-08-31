@@ -122,6 +122,7 @@ import {
   type ResolvedChatPersonalization
 } from "../personalization/index.js";
 import type { MemoryEntry, MemorySearchOptions, MemorySearchResult } from "./context/memoryTypes.js";
+import { resolveCapabilityNames, type AgentCapabilitySelection } from "./capabilitySelection.js";
 
 export interface AgentSessionOptions {
   workspaceRoot: string;
@@ -133,10 +134,10 @@ export interface AgentSessionOptions {
   permissionManager: PermissionManager;
   recorder: SessionRecorder;
   modelManager?: ModelManager;
-  skillPrompt?: string | (() => string);
+  skillPrompt?: string | ((selection?: AgentCapabilitySelection["skills"]) => string | undefined);
   /** 具名子代理定义元数据段（delegate_task 可用的 agent 列表）。 */
   subagentPrompt?: string;
-  skillPaths?: string[] | (() => string[]);
+  skillPaths?: string[] | ((selection?: AgentCapabilitySelection["skills"]) => string[]);
   /** MCP 服务器 initialize 返回的 instructions 汇总；重连后会变化，因此每回合实时读取。 */
   mcpPrompt?: () => string;
   /** 模型自己维护的计划清单；每回合实时读取，历史压缩不会让它丢失。 */
@@ -199,11 +200,13 @@ export interface AgentRunOptions {
   replyToMessageId?: string;
   /** 本轮临时附加到 system context 的外部上下文，不改写要记录的用户原文。 */
   promptContext?: string;
+  /** 当前回合临时选择的工具与 Skill；未提供时读取 chat 默认值。 */
+  capabilitySelection?: AgentCapabilitySelection;
 }
 
 export type AgentPromptOptions = Pick<
   AgentRunOptions,
-  "abortSignal" | "confirmPermission" | "mode" | "attachments" | "runId" | "messageId" | "turnId" | "promptContext"
+  "abortSignal" | "confirmPermission" | "mode" | "attachments" | "runId" | "messageId" | "turnId" | "promptContext" | "capabilitySelection"
 >;
 
 export type { AgentAttachment } from "../attachments/store.js";
@@ -454,9 +457,9 @@ export class AgentSession {
   }
 
   /** 技能元数据、具名子代理清单与 MCP instructions 共同构成 system prompt 的扩展段。 */
-  private extensionPrompt(): string | undefined {
+  private extensionPrompt(capabilitySelection?: AgentCapabilitySelection): string | undefined {
     const sections = [
-      this.skillPrompt()?.trim(),
+      this.skillPrompt(capabilitySelection?.skills)?.trim(),
       this.options.subagentPrompt?.trim(),
       this.options.mcpPrompt?.().trim(),
       (this.options.todoStore?.promptSection() ?? this.options.todoPrompt?.())?.trim()
@@ -464,12 +467,12 @@ export class AgentSession {
     return sections.length ? sections.join("\n\n") : undefined;
   }
 
-  private skillPrompt(): string | undefined {
-    return typeof this.options.skillPrompt === "function" ? this.options.skillPrompt() : this.options.skillPrompt;
+  private skillPrompt(selection?: AgentCapabilitySelection["skills"]): string | undefined {
+    return typeof this.options.skillPrompt === "function" ? this.options.skillPrompt(selection) : this.options.skillPrompt;
   }
 
-  private skillPaths(): string[] {
-    const paths = typeof this.options.skillPaths === "function" ? this.options.skillPaths() : this.options.skillPaths;
+  private skillPaths(selection?: AgentCapabilitySelection["skills"]): string[] {
+    const paths = typeof this.options.skillPaths === "function" ? this.options.skillPaths(selection) : this.options.skillPaths;
     return [...(paths ?? [])];
   }
 
@@ -484,11 +487,13 @@ export class AgentSession {
   private async baseSystemPrompt(
     mode: AgentRunMode,
     permissionMode: PermissionMode,
-    personalization: ResolvedChatPersonalization
+    personalization: ResolvedChatPersonalization,
+    capabilitySelection?: AgentCapabilitySelection
   ): Promise<string> {
+    const selectedToolNames = this.selectedToolNames(capabilitySelection);
     const initialTools = mode === "plan"
-      ? selectPlanTools(this.options.toolRegistry.list(), permissionMode)
-      : this.options.toolRegistry.list();
+      ? selectPlanTools(this.promptTools(selectedToolNames ? [...selectedToolNames] : undefined), permissionMode)
+      : this.promptTools(selectedToolNames ? [...selectedToolNames] : undefined);
     const telosPrompt = personalization.telos.enabled
       ? await this.telosStorage.promptText()
       : undefined;
@@ -499,7 +504,7 @@ export class AgentSession {
     return buildSystemPrompt({
       mode: mode === "plan" ? "plan" : "qa",
       permissionMode,
-      extensionPrompt: this.extensionPrompt(),
+      extensionPrompt: this.extensionPrompt(capabilitySelection),
       tools: initialTools,
       personalization,
       identityPrompt,
@@ -507,6 +512,14 @@ export class AgentSession {
       emotionPrompt,
       cwd: this.options.workspaceRoot
     });
+  }
+
+  private selectedToolNames(capabilitySelection?: AgentCapabilitySelection): ReadonlySet<string> | undefined {
+    return resolveCapabilityNames(
+      capabilitySelection?.tools,
+      this.activeConfig.chat.defaultToolSelection,
+      this.options.toolRegistry.list().map((tool) => tool.name)
+    );
   }
 
   /** 每次 provider 请求前重新读取情绪，但只替换动态 prompt，不触发上下文重建。 */
@@ -943,7 +956,7 @@ export class AgentSession {
     const permissionMode = this.options.permissionManager.getStatus().mode;
     this.contextMemory.restore(prefixMessages, replay.contextState ?? replay.contextUsage);
     this.contextMessageReferences = prefixReferences;
-    const basePrompt = await this.baseSystemPrompt(mode, permissionMode, personalization);
+    const basePrompt = await this.baseSystemPrompt(mode, permissionMode, personalization, options.capabilitySelection);
     const prepared = await this.contextMemory.prepareTurn(
       sourceInput,
       appendPromptContext(basePrompt, options.promptContext),
@@ -1130,7 +1143,7 @@ export class AgentSession {
         type: "user_message",
         content: input,
         attachments: sessionAttachments(runOptions.attachments),
-        skills: this.skillPaths(),
+        skills: this.skillPaths(runOptions.capabilitySelection?.skills),
         contextUsage: this.contextMemory.getBudget(),
         contextState: this.contextMemory.persistedState(),
         preparationUsage: this.usageRecords.slice(usageBeforePreparation),
@@ -1223,7 +1236,7 @@ export class AgentSession {
       // Plan 的协作状态独立于权限模式：普通权限收窄为只读工具，full-access 才恢复
       // 写入/执行工具；这与 Plan 提示词的分支必须使用同一份权限快照。
       const systemPromptPerfStartedAt = perfNow();
-      const baseSystemPrompt = await this.baseSystemPrompt(mode, permissionMode, turnPersonalization);
+      const baseSystemPrompt = await this.baseSystemPrompt(mode, permissionMode, turnPersonalization, runOptions.capabilitySelection);
       recordPerfPhase("turn.baseSystemPrompt", systemPromptPerfStartedAt, { runId: runtimeRunId });
       const prepareTurnPerfStartedAt = perfNow();
       const prepared = await this.contextMemory.prepareTurn(
@@ -1387,9 +1400,10 @@ export class AgentSession {
     const permissionManager = this.options.permissionManager;
     const confirmPermission = runOptions.confirmPermission;
     const runtime = this.runtimeContext({ ...runOptions, abortSignal, confirmPermission });
+    const selectedToolNames = this.selectedToolNames(runOptions.capabilitySelection);
     const allowedToolNames = mode === "plan"
-      ? new Set(selectPlanTools(this.options.toolRegistry.list(), permissionMode).map((tool) => tool.name))
-      : undefined;
+      ? new Set(selectPlanTools(this.promptTools(selectedToolNames ? [...selectedToolNames] : undefined), permissionMode).map((tool) => tool.name))
+      : selectedToolNames;
     let stepAssistantContent = "";
     let stepReasoningOutput = "";
     let stepReasoningBlocks: ReasoningBlock[] | undefined;
@@ -1460,8 +1474,8 @@ export class AgentSession {
     const initialTools = activeModelSettings.model.supportsTools === false ? [] : coordinator.createAgentTools();
     systemPrompt = refreshRuntimeSystemPrompt(
       systemPrompt,
-      this.extensionPrompt(),
-      this.promptTools(initialTools.map((tool) => tool.name)),
+      this.extensionPrompt(runOptions.capabilitySelection),
+      this.promptTools(selectedToolNames ? [...selectedToolNames] : initialTools.map((tool) => tool.name)),
       await this.currentEmotionPrompt()
     );
     const nativeContext: AgentContext = { systemPrompt, messages: [...messages], tools: initialTools };
@@ -1521,8 +1535,8 @@ export class AgentSession {
           const tools = settings.model.supportsTools === false ? [] : coordinator.createAgentTools();
           context.systemPrompt = refreshRuntimeSystemPrompt(
             context.systemPrompt,
-            this.extensionPrompt(),
-            this.promptTools(tools.map((tool) => tool.name)),
+            this.extensionPrompt(runOptions.capabilitySelection),
+            this.promptTools(selectedToolNames ? [...selectedToolNames] : tools.map((tool) => tool.name)),
             await this.currentEmotionPrompt()
           );
           this.contextMemory.recordToolSchema(tools);

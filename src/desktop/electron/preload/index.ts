@@ -41,7 +41,7 @@ const api: DesktopApi = {
   exportSession: async (projectId, sessionId, format) => await ipcRenderer.invoke(desktopIpc.exportSession, projectId, sessionId, format),
   importSession: async (projectId) => await ipcRenderer.invoke(desktopIpc.importSession, projectId),
   showSessionMenu: async (projectId, sessionId, pinned, archived) => await ipcRenderer.invoke(desktopIpc.sessionMenu, projectId, sessionId, pinned, archived),
-  sendPrompt: async (projectId, sessionId, input, mode, attachments, delivery, personalization, idempotencyKey, promptContext) => await ipcRenderer.invoke(
+  sendPrompt: async (projectId, sessionId, input, mode, attachments, delivery, personalization, idempotencyKey, promptContext, capabilitySelection) => await ipcRenderer.invoke(
     desktopIpc.sendPrompt,
     projectId,
     sessionId,
@@ -51,8 +51,10 @@ const api: DesktopApi = {
     delivery,
     personalization,
     idempotencyKey,
-    promptContext
+    promptContext,
+    capabilitySelection
   ),
+  toolCatalog: async (projectId) => await ipcRenderer.invoke(desktopIpc.toolCatalog, projectId),
   resumeInterruptedTurn: async (projectId, sessionId) => await ipcRenderer.invoke(desktopIpc.resumeInterruptedTurn, projectId, sessionId),
   editPrompt: async (projectId, sessionId, userMessageIndex, input, mode, attachments, idempotencyKey) => await ipcRenderer.invoke(desktopIpc.editPrompt, projectId, sessionId, userMessageIndex, input, mode, attachments, idempotencyKey),
   retryPrompt: async (projectId, sessionId, targetMessageId, input, mode, attachments, idempotencyKey) => await ipcRenderer.invoke(desktopIpc.retryPrompt, projectId, sessionId, targetMessageId, input, mode, attachments, idempotencyKey),

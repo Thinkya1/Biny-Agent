@@ -20,6 +20,7 @@ import {
   type SaveDialogOptions
 } from "electron";
 import { z } from "zod";
+import { agentCapabilitySelectionSchema } from "../../../agent/capabilitySelection.js";
 import {
   chatPersonalizationSchema,
   configRevisionSchema,
@@ -265,6 +266,7 @@ function settingsSaveRequiresIdleRuntime(input: DesktopSettingsSaveInput): boole
     || input.memory !== undefined
     || input.compaction !== undefined
     || input.chatParams !== undefined
+    || input.permission !== undefined
     || input.webSearch !== undefined
     || input.models !== undefined
     || input.skills !== undefined
@@ -510,7 +512,7 @@ export function registerDesktopIpc(context: IpcContext): void {
     return await context.agents.importSession(parsedProjectId, sourcePath);
   });
 
-  handleRecoveryGated(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown, personalization: unknown, idempotencyKey: unknown, promptContext: unknown) => {
+  handleRecoveryGated(desktopIpc.sendPrompt, async (_event, projectId: unknown, sessionId: unknown, input: unknown, mode: unknown, attachments: unknown, delivery: unknown, personalization: unknown, idempotencyKey: unknown, promptContext: unknown, capabilitySelection: unknown) => {
     return await context.agents.sendPrompt(
       idSchema.parse(projectId),
       sessionId === undefined ? undefined : idSchema.parse(sessionId),
@@ -520,9 +522,12 @@ export function registerDesktopIpc(context: IpcContext): void {
       z.enum(["steer", "followUp"]).optional().parse(delivery),
       chatPersonalizationSchema.optional().parse(personalization),
       idempotencyKeySchema.parse(idempotencyKey),
-      promptContextSchema.parse(promptContext)
+      promptContextSchema.parse(promptContext),
+      capabilitySelection === undefined ? undefined : agentCapabilitySelectionSchema.parse(capabilitySelection)
     );
   });
+
+  handle(desktopIpc.toolCatalog, async (_event, projectId: unknown) => await context.agents.toolCatalog(idSchema.parse(projectId)));
 
   handleRecoveryGated(desktopIpc.resumeInterruptedTurn, async (_event, projectId: unknown, sessionId: unknown) => {
     return await context.agents.resumeInterruptedTurn(idSchema.parse(projectId), idSchema.parse(sessionId));

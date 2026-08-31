@@ -14,6 +14,7 @@
  * 模型配置的保存与连通性测试也在这里：写入前先用候选配置实际发一次请求，避免存下一份用不了的配置。
  */
 import type { AgentAttachment, InteractiveAgentRunMode } from "../../../agent/AgentSession.js";
+import type { AgentCapabilitySelection } from "../../../agent/capabilitySelection.js";
 import type {
   MemoryEntriesResult,
   MemoryMaintenanceStatus,
@@ -125,6 +126,7 @@ import type {
   DesktopSettingsCredentialScope,
   DesktopSettingsModelsSnapshot,
   DesktopSkillSettings,
+  DesktopToolCatalogEntry,
   DesktopSettingsSaveInput,
   DesktopStagedModelLoginResult,
   DesktopStagedSettingsCredential,
@@ -174,6 +176,7 @@ export interface DesktopSettingsConfigSnapshot {
   memory: AgentConfig["context"]["memory"];
   compaction: AgentConfig["context"]["compaction"];
   chatParams: AgentConfig["chat"];
+  permission: AgentConfig["permission"];
   webSearch: DesktopWebSearchSettings;
   models: DesktopSettingsModelsSnapshot;
   skills?: DesktopSkillSettings;
@@ -262,6 +265,10 @@ export class DesktopAgentManager {
       sessionRuntimes: Object.fromEntries(runtimeSnapshots.map((snapshot) => [snapshot.info.sessionId, snapshot])),
       runtimeError: this.runtimeErrors.get(projectId),
       permissionMode,
+      capabilityDefaults: {
+        tools: config?.chat.defaultToolSelection ?? "auto",
+        skills: config?.chat.defaultSkillSelection ?? "auto"
+      },
       // 默认模型失效不等于整个应用没有模型。只要选择器里还有一个可用模型，
       // 用户就应能继续输入并切换过去，不能被“需要配置模型”状态锁死。
       requiresModelConfiguration: !config || pickerModels.length === 0,
@@ -277,6 +284,14 @@ export class DesktopAgentManager {
     if (!managed) return undefined;
     if (managed.commands) return managed.commands.mcp.listServers();
     return await requireRemoteRuntime(managed.runtime).mcpStatus();
+  }
+
+  async toolCatalog(projectId: string): Promise<DesktopToolCatalogEntry[]> {
+    const managed = await this.ensureRuntime(projectId);
+    const entries = managed.commands
+      ? managed.commands.listTools()
+      : await requireRemoteRuntime(managed.runtime).listTools();
+    return entries.map((entry) => ({ ...entry }));
   }
 
   async mcpDetails(projectId: string, serverName: string): Promise<McpServerDetails> {
@@ -500,7 +515,8 @@ export class DesktopAgentManager {
     delivery?: "steer" | "followUp",
     personalization?: DesktopChatPersonalizationOverride,
     idempotencyKey?: string,
-    promptContext?: string
+    promptContext?: string,
+    capabilitySelection?: AgentCapabilitySelection
   ): Promise<DesktopRunReceipt> {
     return await this.runIdempotently(projectId, "send", idempotencyKey, async () => await this.sendPromptOnce(
       projectId,
@@ -510,7 +526,8 @@ export class DesktopAgentManager {
       attachments,
       delivery,
       personalization,
-      promptContext
+      promptContext,
+      capabilitySelection
     ));
   }
 
@@ -522,7 +539,8 @@ export class DesktopAgentManager {
     attachments: DesktopAttachment[],
     delivery?: "steer" | "followUp",
     personalization?: DesktopChatPersonalizationOverride,
-    promptContext?: string
+    promptContext?: string,
+    capabilitySelection?: AgentCapabilitySelection
   ): Promise<DesktopRunReceipt> {
     const sendPerfStartedAt = perfNow();
     const requestedSessionId = sessionId ?? this.draftSessionIds.get(projectId);
@@ -559,8 +577,8 @@ export class DesktopAgentManager {
     }
     const info = snapshot.info;
     const submitted = runtime instanceof RuntimeHostClient
-      ? runtime.submitPromptForSession(targetSessionId, prompt, mode, nativeAttachments, undefined, promptContext)
-      : runtime.submitPrompt(prompt, mode, nativeAttachments, undefined, promptContext);
+      ? runtime.submitPromptForSession(targetSessionId, prompt, mode, nativeAttachments, undefined, promptContext, capabilitySelection)
+      : runtime.submitPrompt(prompt, mode, nativeAttachments, undefined, promptContext, capabilitySelection);
     if (this.draftSessionIds.get(projectId) === targetSessionId) this.draftSessionIds.delete(projectId);
     await this.state.setSelectedSession(projectId, info.sessionId);
     this.observeRunCompletion(projectId, submitted.completion);
@@ -918,6 +936,7 @@ export class DesktopAgentManager {
       || input.memory !== undefined
       || input.compaction !== undefined
       || input.chatParams !== undefined
+      || input.permission !== undefined
       || input.webSearch !== undefined
       || input.models !== undefined
       || input.skills !== undefined) {
@@ -959,6 +978,12 @@ export class DesktopAgentManager {
       next = configSchema.parse({
         ...next,
         chat: input.chatParams
+      });
+    }
+    if (input.permission !== undefined) {
+      next = configSchema.parse({
+        ...next,
+        permission: input.permission
       });
     }
     if (input.skills !== undefined) {
@@ -2946,6 +2971,7 @@ function describeSettingsConfigSnapshot(config: AgentConfig, revision: string, p
     memory: structuredClone(config.context.memory),
     compaction: structuredClone(config.context.compaction),
     chatParams: structuredClone(config.chat),
+    permission: structuredClone(config.permission),
     webSearch: describeWebSearchSettings(config.web.search),
     models: {
       configured: listConfiguredModelChoices(config),

@@ -50,6 +50,8 @@ const permissionSchema = z.object({
   criticalAlwaysAsk: true
 });
 
+const capabilityDefaultSelectionSchema = z.enum(["auto", "all", "none"]);
+
 /**
  * 自动压缩策略。reserve/keep 缺省时按当前模型可用输入预算动态缩放；显式配置时作为额外上限。
  * 触发阈值优先级：显式 reserveTokens > triggerPercent > 模型参考线/动态推导。
@@ -83,10 +85,16 @@ export const chatParamsSchema = z.object({
   /** 采样温度 0–2；越低越确定，越高越发散。 */
   temperature: z.number().min(0).max(2).optional(),
   /** 单次回复的最大输出 token 数。 */
-  maxOutputTokens: z.number().int().min(256).max(131_072).optional()
+  maxOutputTokens: z.number().int().min(256).max(131_072).optional(),
+  /** 默认把哪些工具暴露给模型；单条消息可在 Composer 中覆盖。 */
+  defaultToolSelection: capabilityDefaultSelectionSchema.default("auto"),
+  /** 默认把哪些 Skill 元数据暴露给模型；单条消息可在 Composer 中覆盖。 */
+  defaultSkillSelection: capabilityDefaultSelectionSchema.default("auto")
 }).default({
   temperature: undefined,
-  maxOutputTokens: undefined
+  maxOutputTokens: undefined,
+  defaultToolSelection: "auto",
+  defaultSkillSelection: "auto"
 });
 
 const identityPolicySchema = z.object({
@@ -802,7 +810,7 @@ export const defaultConfig: AgentConfig = {
     ignore: defaultWorkspaceIgnore
   },
   activity: defaultActivitySettings,
-  chat: { temperature: undefined, maxOutputTokens: undefined },
+  chat: { temperature: undefined, maxOutputTokens: undefined, defaultToolSelection: "auto", defaultSkillSelection: "auto" },
   checkpoints: { enabled: true },
   sandbox: { mode: "off", allowNetwork: true },
   hooks: { beforeTool: [], afterTool: [] },

@@ -19,6 +19,7 @@ import { DEFAULT_PROJECT_SKILL_PATHS, defaultGlobalSkillRoots, GLOBAL_SKILL_ROOT
 import { resolveSkillActivation } from "./skillActivation.js";
 import { createSkillId, createSkillRef } from "./skillRef.js";
 import type { SkillRef } from "./skillTypes.js";
+import type { CapabilitySelectionValue } from "../agent/capabilitySelection.js";
 
 const maxDiscoveredSkillCount = 256;
 const maxSkillMetadataBytes = 64 * 1024;
@@ -229,6 +230,22 @@ function buildSkillPrompt(skills: SkillDefinition[]): string {
   let visible = skills.length;
   while (visible > 0 && render(80, visible).length > maxInitialSkillPromptChars) visible -= 1;
   return render(80, visible);
+}
+
+/** 按当前回合的 Skill 选择裁剪渐进式披露元数据；正文仍由 invoke_skill 按需读取。 */
+export function skillPromptForSelection(bundle: SkillBundle, selection?: CapabilitySelectionValue): string {
+  return buildSkillPrompt(selectSkills(bundle, selection));
+}
+
+export function skillPathsForSelection(bundle: SkillBundle, selection?: CapabilitySelectionValue): string[] {
+  return selectSkills(bundle, selection).map((skill) => skill.path);
+}
+
+function selectSkills(bundle: SkillBundle, selection?: CapabilitySelectionValue): SkillDefinition[] {
+  if (selection === undefined || selection === "auto" || selection === "all") return bundle.skills;
+  if (selection === "none") return [];
+  const selected = new Set(selection);
+  return bundle.skills.filter((skill) => selected.has(skill.ref) || selected.has(skill.id) || selected.has(skill.name));
 }
 
 const invokeSkillArgsSchema = z.object({

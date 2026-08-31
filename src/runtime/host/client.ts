@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import net from "node:net";
 import type { AgentAttachment, AgentRunMode, AgentSessionInfo, ResumedAgentSession } from "../../agent/AgentSession.js";
+import type { AgentCapabilitySelection } from "../../agent/capabilitySelection.js";
 import type { AgentRunOutcome, InteractiveRuntimeHandle, QueuedAgentMessage, RuntimeRequestIds, SubmittedAgentRun } from "../InteractiveAgentRuntime.js";
 import type { ContextStatus } from "../../agent/context/types.js";
 import type { AgentRuntimeUpdate, InteractiveRuntimeSnapshot, RuntimeOperation } from "../agentEvents.js";
@@ -147,8 +148,8 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     };
   }
 
-  submitPrompt(input: string, mode: AgentRunMode = "chat", attachments: AgentAttachment[] = [], requestIds?: RuntimeRequestIds, promptContext?: string): SubmittedAgentRun {
-    return this.submitPromptForSession(this.focusedSessionId, input, mode, attachments, requestIds, promptContext);
+  submitPrompt(input: string, mode: AgentRunMode = "chat", attachments: AgentAttachment[] = [], requestIds?: RuntimeRequestIds, promptContext?: string, capabilitySelection?: AgentCapabilitySelection): SubmittedAgentRun {
+    return this.submitPromptForSession(this.focusedSessionId, input, mode, attachments, requestIds, promptContext, capabilitySelection);
   }
 
   /** 向指定 session 提交回合；旧 submitPrompt 始终指向 focused session。 */
@@ -158,7 +159,8 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     mode: AgentRunMode = "chat",
     attachments: AgentAttachment[] = [],
     requestIds?: RuntimeRequestIds,
-    promptContext?: string
+    promptContext?: string,
+    capabilitySelection?: AgentCapabilitySelection
   ): SubmittedAgentRun {
     if (!input.trim()) throw new Error("Agent prompt cannot be empty.");
     const ids = normalizeRequestIds(requestIds);
@@ -175,6 +177,7 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
       retryOfMessageId: ids.retryOfMessageId,
       replaceUserMessageId: ids.replaceUserMessageId,
       promptContext,
+      capabilitySelection,
       sessionId,
       writeIntent: true,
       expectedRevision: this.currentRevision(sessionId)
@@ -195,9 +198,10 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     input: string,
     mode: AgentRunMode = "chat",
     attachments: AgentAttachment[] = [],
-    requestIds?: RuntimeRequestIds
+    requestIds?: RuntimeRequestIds,
+    capabilitySelection?: AgentCapabilitySelection
   ): Promise<HostOperationResult<{ runId: string; messageId: string }>> {
-    return await this.submitRunForSession(this.focusedSessionId, input, mode, attachments, requestIds);
+    return await this.submitRunForSession(this.focusedSessionId, input, mode, attachments, requestIds, capabilitySelection);
   }
 
   async submitRunForSession(
@@ -205,7 +209,8 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     input: string,
     mode: AgentRunMode = "chat",
     attachments: AgentAttachment[] = [],
-    requestIds?: RuntimeRequestIds
+    requestIds?: RuntimeRequestIds,
+    capabilitySelection?: AgentCapabilitySelection
   ): Promise<HostOperationResult<{ runId: string; messageId: string }>> {
     if (!input.trim()) throw new Error("Agent prompt cannot be empty.");
     const ids = normalizeRequestIds(requestIds);
@@ -220,6 +225,7 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
       continuationSource: ids.continuationSource,
       retryOfMessageId: ids.retryOfMessageId,
       replaceUserMessageId: ids.replaceUserMessageId,
+      capabilitySelection,
       sessionId,
       writeIntent: true,
       expectedRevision: this.currentRevision(sessionId)
@@ -822,6 +828,10 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
 
   async listSkills(): Promise<Awaited<ReturnType<CommandRuntime["listSkills"]>>> {
     return await this.request("skills.list", { sessionId: this.focusedSessionId });
+  }
+
+  async listTools(): Promise<Awaited<ReturnType<CommandRuntime["listTools"]>>> {
+    return await this.request("tools.list", { sessionId: this.focusedSessionId });
   }
 
   async expandSkillCommand(input: string): Promise<string> {
