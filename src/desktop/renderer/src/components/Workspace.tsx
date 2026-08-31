@@ -65,7 +65,7 @@ interface WorkspaceProps {
   onRuntimeError(error: unknown): void;
   onRuntimeMutation(operation: DesktopRuntimeMutation, payload: Record<string, unknown>): Promise<void>;
   onRuntimeRefresh(): Promise<void>;
-  /** 建议 pill 点击即提交（Alma 行为），由 App 转发给 Composer 的统一提交路径。 */
+  /** 建议 pill 点击即提交，由 App 转发给 Composer 的统一提交路径。 */
   onSubmitPrompt(prompt: string): void;
   /** 项目行「新建任务」直达的空白草稿：跳过欢迎态，直接渲染空白聊天 + 底部 Composer。 */
   blankDraft?: boolean;
@@ -73,7 +73,7 @@ interface WorkspaceProps {
   homeFlight?: HomeFlightSignal;
   /** 过场动画落地完成（500ms）后回调，App 借此清掉信号。 */
   onHomeFlightLanded(): void;
-  /** 顶部工具条：自动化/技能入口（搜索与新建任务在侧栏 chrome，对齐 Alma）。 */
+  /** 顶部工具条：自动化/技能入口（搜索与新建任务在侧栏 chrome）。 */
   onOpenRuntime(): void;
   onOpenExtensions(): void;
   children?: React.ReactNode;
@@ -135,7 +135,7 @@ export function Workspace({
     : runtimeProjection?.worktrees.find((worktree) => worktree.sessionId === sessionId);
   const worktreeView = sessionIsolation === "worktree" ? desktopWorktreeView(selectedWorktree) : undefined;
 
-  // —— 首页 → 聊天 过场（Alma 式 FLIP，0.5s cubic-bezier(.32,.72,0,1)）——
+  // —— 首页 → 聊天过场（FLIP，0.5s cubic-bezier(.32,.72,0,1)）——
   // flying：保持首页布局、播动画；landed：落地完成、切聊天布局（此时 sessionId/消息通常已就位，
   // 正好无缝接管）。发送失败时 App 清空 homeFlight，走回滚分支。
   const [flight, setFlight] = useState<{ text: string } | null>(null);
@@ -347,7 +347,7 @@ export function Workspace({
                 sessionId={sessionId}
                 turns={turns}
               />
-              {/* 技能草稿审核卡：消息流末尾、运行状态行之前（Alma 式，回合成功后的审核入口）。 */}
+              {/* 技能草稿审核卡：消息流末尾、运行状态行之前（回合成功后的审核入口）。 */}
               {skillDraftNotices && skillDraftNotices.length > 0 && projectId ? (
                 <div className="biny-skill-draft-notices">
                   {skillDraftNotices.map((notice) => (

@@ -54,7 +54,7 @@ interface ComposerProps {
   submitDraft?: { text: string; nonce: number };
   /** submitDraft 被领取后回调清掉源头——draft 是单次信号，不清的话 Composer 每次重挂载（过场落地、新建任务回首页）都会把旧草稿再发一遍。 */
   onSubmitDraftConsumed?(): void;
-  /** 内联进底栏的工作区/分支选择器（Alma 式：文件夹图标 + 项目名 位于工具栏左组）。 */
+  /** 内联进底栏的工作区/分支选择器（文件夹图标 + 项目名位于工具栏左组）。 */
   workspaceContext?: React.ReactNode;
   capabilityDefaults: DesktopCapabilityDefaults;
   skills: DesktopSkillCatalogEntry[];
@@ -512,7 +512,7 @@ export const Composer = memo(function Composer({
                 planActive={mode === "plan"}
               />
             </div>
-            {/* 规划模式激活后显示为可退出的模式 pill（参考 Maka Agent）。 */}
+            {/* 规划模式激活后显示为可退出的模式 pill。 */}
             {mode === "plan" ? (
               <ComposerActionButton
                 active

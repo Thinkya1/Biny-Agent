@@ -1,7 +1,7 @@
 /**
  * QuickChat 原生窗口生命周期。
  *
- * Alma 的 Quick Chat 不是第二个 renderer 入口，而是主页面的 `#/quick-chat` 路由。这里
+ * Quick Chat 不是第二个 renderer 入口，而是主页面的 `#/quick-chat` 路由。这里
  * 只负责窗口几何、显隐、快捷键唤醒后的焦点和点击穿透；上下文读取与聊天状态分别由独立
  * 服务和 renderer 组件处理，避免窗口控制器继续承载业务逻辑。
  */

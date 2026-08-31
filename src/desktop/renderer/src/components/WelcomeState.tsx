@@ -1,8 +1,8 @@
 /**
- * 新任务的欢迎空态（Alma 首页式布局）。
+ * 新任务的欢迎空态。
  *
  * 结构：hero（图标 + 标题 + 副标题）→ children（Composer 插槽）→ 建议 pill。
- * 建议 pill 点击即直接提交（对齐 Alma 的行为），不再只是预填。入场动画：
+ * 建议 pill 点击即直接提交，不再只是预填。入场动画：
  * hero 元素用 biny-hero-fade 即时淡入，pill 用 biny-hero-pop 按 220ms + 70ms×i
  * 阶梯弹入。提交过场（hero 淡出 / Composer 下滑）由 Workspace 的 flight 逻辑负责。
  */
@@ -16,7 +16,7 @@ const SUGGESTIONS: string[] = [
   "定位并修复项目中的问题或 bug"
 ];
 
-/** 与 Alma 一致：pill 入场基础延迟 220ms，每个递增 70ms。 */
+/** pill 入场基础延迟 220ms，每个递增 70ms。 */
 const PILL_BASE_DELAY = 220;
 const PILL_STEP_DELAY = 70;
 
@@ -28,7 +28,7 @@ export function WelcomeState({
   children
 }: {
   hasProject: boolean;
-  /** 提交过场中：hero 与 pill 淡出并让出指针事件（对齐 Alma 的 willLeave）。 */
+  /** 提交过场中：hero 与 pill 淡出并让出指针事件。 */
   leaving?: boolean;
   onOpenProject(): void;
   onPickSuggestion(prompt: string): void;

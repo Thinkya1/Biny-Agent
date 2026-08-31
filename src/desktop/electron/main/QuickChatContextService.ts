@@ -71,7 +71,7 @@ export class QuickChatContextService {
     this.cached = next;
     this.publish();
 
-    // 和 Alma 一样，前台应用快照先返回让窗口立即出现，AX 树在后台补齐。
+    // 前台应用快照先返回让窗口立即出现，AX 树在后台补齐。
     void this.traverseAndPublish(front.pid, sequence);
     return this.cachedContext();
   }

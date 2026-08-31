@@ -1,5 +1,5 @@
 /**
- * 连续执行步骤的聚合组（1:1 对齐 Alma 聊天，见 alma-reference/REFERENCE.md）。
+ * 连续执行步骤的聚合组。
  *
  * 头部行：相位头像堆叠（24px 圆形、-7px 叠放、ring 分隔，点头像看单相位）+ 汇总文案
  * （点了整体开合）+ 时间线视图切换（list-tree）+ chevron。早期相位折叠成「+N」pill，
@@ -281,7 +281,7 @@ function PhaseBody({ phase, running, showTitle, projectId, onPreviewFile, onOpen
   );
 }
 
-/** 活体状态徽章：2 列 × 4 行点阵，按列优先错峰呼吸（对齐 Alma 的 WorkingDotGrid）。 */
+/** 活体状态徽章：2 列 × 4 行点阵，按列优先错峰呼吸。 */
 function WorkingDotGrid(): React.JSX.Element {
   return (
     <span aria-hidden="true" className="chat-working-dots">

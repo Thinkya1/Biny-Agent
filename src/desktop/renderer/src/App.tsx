@@ -660,7 +660,7 @@ function DesktopApp(): React.JSX.Element {
       await openProject();
       return;
     }
-    // variant=blank：项目行「新建任务」直达空白聊天（对齐 Alma 的文件夹内新建）；其余入口走首页欢迎态。
+    // variant=blank：项目行「新建任务」直达空白聊天；其余入口走首页欢迎态。
     const target: DesktopNavigationTarget = variant === "blank"
       ? { projectId, draftVariant: "blank" }
       : { projectId, sessionId: undefined };

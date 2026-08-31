@@ -44,7 +44,7 @@ const providerBrandAssets: Record<string, string> = {
   volcengine: volcengineBrand
 };
 
-// 这些静态品牌图形是从 Maka 复制进本仓库的，为的是保留精确外形，同时运行时不依赖它的源码树。
+// 这些静态品牌图形内置于本仓库，运行时不依赖外部源码树。
 export function ProviderBrandGlyph({ type }: { type: string }): React.JSX.Element {
   const gradientPrefix = useId().replace(/:/g, "");
 

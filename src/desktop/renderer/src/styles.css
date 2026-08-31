@@ -534,7 +534,7 @@ button:disabled { opacity: 0.42; }
 .skeleton-line { display: block; width: 96px; height: 11px; border-radius: 5px; background: var(--surface-soft); box-shadow: inset 0 0 0 1px var(--biny-shadow-soft); }
 .skeleton-line.is-wide { width: 150px; height: 13px; }
 
-/* 详情 header 的「设为默认」出口（maka 的 badge 槽）：非默认连接才出现。 */
+/* 详情 header 的「设为默认」出口：非默认连接才出现。 */
 .connection-default-button { margin-left: auto; flex: 0 0 auto; align-self: center; }
 .connect-dialog > header > .icon-button { margin-left: 8px; }
 
@@ -556,14 +556,14 @@ button:disabled { opacity: 0.42; }
 .manual-model-row input:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .manual-model-row .ghost-button { flex: 0 0 auto; }
 
-/* ===== 连接详情：maka DetailSection + SettingsExpandableRow 语言 ===== */
-/* 区块：标题 + supporting 说明 + hairline，区块间 32px（maka VStack gap=8）。 */
+/* ===== 连接详情布局 ===== */
+/* 区块：标题 + supporting 说明 + hairline，区块间 32px。 */
 .detail-section + .detail-section { margin-top: 32px; }
 .detail-section-head { padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 .detail-section-head h3 { margin: 0; font-size: calc(13px * var(--font-scale)); font-weight: 600; }
 .detail-section-head p { margin: 2px 0 0; color: var(--text-secondary); font-size: calc(12px * var(--font-scale)); }
 
-/* 行组：无卡片，行间 hairline（maka rows.css 的 settingsRows）。 */
+/* 行组：无卡片，行间 hairline。 */
 .connection-rows { display: grid; grid-template-columns: minmax(0, 1fr); }
 .connection-rows > * + * { border-top: 1px solid var(--border); }
 
@@ -576,7 +576,7 @@ button:disabled { opacity: 0.42; }
 .connection-row-value.is-warn { color: var(--amber); }
 .connection-row-action { flex: 0 0 auto; margin-top: 1px; }
 
-/* 展开编辑器（maka settingsExpandableEditor）：粗体 label + 控件 + hint + 右下 保存/取消，grid gap 12px、block padding 12px。 */
+/* 展开编辑器：粗体 label + 控件 + hint + 右下 保存/取消，grid gap 12px、block padding 12px。 */
 .connection-row-editor { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 12px 0; }
 .connection-row-editor > .connection-row-label { font-weight: 600; }
 .connection-row-editor input:not([type]),
@@ -598,7 +598,7 @@ button:disabled { opacity: 0.42; }
 .connection-row-actions .settings-link { margin-right: auto; }
 .connection-row-actions-spacer { flex: 1; }
 
-/* 模型区按钮行：测试连接 secondary 在前，更新目录 / 添加模型 ghost 在后，gap 8px（maka HStack gap=2）。 */
+/* 模型区按钮行：测试连接 secondary 在前，更新目录 / 添加模型 ghost 在后，gap 8px。 */
 .connection-model-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .settings-secondary-button {
   min-height: 30px;

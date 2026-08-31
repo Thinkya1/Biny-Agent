@@ -1,7 +1,7 @@
 /**
  * activity_search 工具模块（keyword / semantic 双模式）。
  *
- * 两条检索路径合并暴露、内部分开实现（Alma 实测分开比混合排序好调）：
+ * 两条检索路径合并暴露、内部分开实现（分开实现更便于调节排序）：
  * - mode=keyword（默认）：走现有 FTS5，搜的是脱敏事件行（粒度细，能命中「某条操作」）。
  * - mode=semantic：本地嵌入 analysis 行（project+summary+topics+highlights）做
  *   cosine top N，适合「那个讲 XX 的页面/那件事」这类模糊指向；本地嵌入模型不可用或尚无

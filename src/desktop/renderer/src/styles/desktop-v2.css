@@ -1218,7 +1218,7 @@ select {
   min-height: 0;
   border: 0;
   border-radius: 0;
-  /* Maka 的设置页以侧栏为外层底板，右侧内容再浮一层；两块同色会让
+  /* 设置页以侧栏为外层底板，右侧内容再浮一层；两块同色会让
      分组边界消失，尤其是在浅色主题下更明显。 */
   background: var(--sidebar);
   box-shadow: none;

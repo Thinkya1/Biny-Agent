@@ -38,7 +38,7 @@ export type TaskRetryDecision =
 /**
  * 评估一次新的 TaskAttempt 是否可以从上一次失败继续。
  *
- * 这里故意只接受 Maka 当前明确的两类基础设施失败：provider 限流，或已经
+ * 这里故意只接受当前明确的两类基础设施失败：provider 限流，或已经
  * 证明发生在 provider dispatch 之前的 continuation abandonment。普通模型失败、
  * 工具失败、超时、取消和预算耗尽都必须由用户发新 prompt 或走专门恢复流程。
  */

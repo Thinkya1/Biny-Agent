@@ -1150,7 +1150,7 @@
 .biny-sidebar-topbar-hit-layer {
   display: flex;
   box-sizing: border-box;
-  /* 对齐 Alma：按钮簇右对齐贴侧栏右缘；侧栏收起（壳宽 0）时用 chrome 宽度兜底，按钮贴在红绿灯右侧。 */
+  /* 按钮簇右对齐贴侧栏右缘；侧栏收起（壳宽 0）时用 chrome 宽度兜底，按钮贴在红绿灯右侧。 */
   width: max(var(--biny-sidebar-chrome-width), 100%);
   height: 46px;
   min-height: 46px;
@@ -2435,7 +2435,7 @@
   opacity: 0.5;
 }
 
-/* ===== Alma 式首页：hero + 内联 composer + 建议 pill ===== */
+/* ===== 首页：hero + 内联 composer + 建议 pill ===== */
 
 @keyframes biny-hero-fade {
   from { opacity: 0; }
@@ -2472,7 +2472,7 @@
   text-align: center;
 }
 
-/* hero 块：提交过场时 200ms 淡出（Alma willLeave）。 */
+/* hero 块：提交过场时 200ms 淡出。 */
 .biny-welcome-hero {
   display: flex;
   width: 100%;
@@ -2542,7 +2542,7 @@
   padding: 4px 12px;
   border: 1px solid var(--biny-border);
   border-radius: 9999px;
-  /* Alma：text-foreground/80 + bg-muted/40 —— 比 text-secondary 亮一档 */
+  /* text-foreground/80 + bg-muted/40 —— 比 text-secondary 亮一档 */
   color: color-mix(in srgb, var(--biny-text) 80%, transparent);
   background: color-mix(in srgb, var(--biny-text) 5%, transparent);
   cursor: pointer;
@@ -2613,7 +2613,7 @@
   word-break: break-word;
 }
 
-/* 工具栏 1px 分隔（附件/工作区 与 权限/模型 之间，对齐 Alma）。 */
+/* 工具栏 1px 分隔（附件/工作区 与 权限/模型 之间）。 */
 .biny-composer-toolbar-divider {
   width: 1px;
   height: 16px;
@@ -3639,7 +3639,7 @@
   app-region: no-drag;
 }
 
-/* 模型和思考菜单都从左侧 footer 控件向上展开，保持与 MakaAgent 相同的紧凑宽度。 */
+/* 模型和思考菜单都从左侧 footer 控件向上展开，保持紧凑宽度。 */
 .biny-composer-popover.model-menu {
   width: 286px;
 }
@@ -3753,7 +3753,7 @@
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  /* 通栏内容列（对齐 Alma）：消息与输入框同宽铺满，两侧各留 24px 呼吸距离。 */
+  /* 通栏内容列：消息与输入框同宽铺满，两侧各留 24px 呼吸距离。 */
   --biny-chat-content-width: calc(100% - 48px);
 }
 
@@ -4323,7 +4323,7 @@
   app-region: no-drag;
 }
 
-/* 首页/欢迎态：body 整体居中（Alma 首页构图），内容超高时仍可滚。 */
+/* 首页/欢迎态：body 整体居中，内容超高时仍可滚。 */
 .biny-chat-body.is-welcome {
   display: flex;
   overflow-y: auto;
@@ -7117,7 +7117,7 @@
   padding: 13px 20px;
 }
 
-/* Alma 版头部：只有 名称+徽章 / 描述 两行，右侧无控件 */
+/* 版头：只有 名称+徽章 / 描述 两行，右侧无控件 */
 .biny-mcp-installed-heading {
   display: block;
 }
@@ -9156,7 +9156,7 @@
 .chat-temperature-reset { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); cursor: pointer; font-size: inherit; }
 .chat-temperature-reset:hover { text-decoration: underline; }
 
-/* ===== 聊天内技能草稿审核卡（参考 Alma SkillExtractionCard） =====
+/* ===== 聊天内技能草稿审核卡 =====
    回合成功后的审核入口：圆角卡片 + 左图标盒 + 标题/名称/描述 + 操作行。
    高度动画用 grid 0fr↔1fr 技巧，颜色全部走 var(--biny-*) token。 */
 .biny-skill-draft-notices {

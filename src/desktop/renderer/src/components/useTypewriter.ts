@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
- * 平滑流式「打字机」——与 Alma 聊天正文同款算法。
+ * 平滑流式「打字机」——用于聊天正文的流式展示。
  *
  * 不是固定节拍逐字吐（那样会滞后、机械），而是：
  *  1. 用 requestAnimationFrame 以「字符速率（CPS）」驱动 reveal，小数累积取整，

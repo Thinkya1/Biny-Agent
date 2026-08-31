@@ -2,7 +2,7 @@
  * Agent 情绪的本地 Markdown 存储。
  *
  * 只保存当前 base/context 快照，不维护历史曲线。frontmatter 使用固定的单行字段，trigger
- * 放在正文中，便于人工查看，也和 Alma 的情绪文件形状保持一致。
+ * 放在正文中，便于人工查看，也保持情绪文件结构稳定。
  */
 import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";

@@ -435,7 +435,7 @@ function ToolPayload({ tool, onPreviewFile }: { tool: TimelineTool; onPreviewFil
   const display = tool.display;
   if (display?.kind === "file_io") {
     // 操作和路径在折叠行的名称与摘要里已经表达过，这里只补充结果本身；
-    // 读文件的内容按扩展名做语法高亮（带行号），和 Alma 的 Read 展示对齐。
+    // 读文件的内容按扩展名做语法高亮（带行号）。
     const resultPreview = fileToolResult(tool.result);
     if (!resultPreview?.text && resultPreview?.count === undefined) return <></>;
     const path = display.path ?? tool.path;
@@ -463,7 +463,7 @@ function ToolPayload({ tool, onPreviewFile }: { tool: TimelineTool; onPreviewFil
   );
 }
 
-// 运行中的工具没有 durationMs，用事件时间戳实时递增，结束后回落到权威时长（Alma 同款交互）。
+// 运行中的工具没有 durationMs，用事件时间戳实时递增，结束后回落到权威时长。
 function useLiveDuration(tool: TimelineTool): number | undefined {
   const running = tool.durationMs === undefined && (tool.status === "running" || tool.status === "waiting");
   const [now, setNow] = useState(() => Date.now());

@@ -6,7 +6,7 @@ import { ComposerPopover } from "./ComposerPopover.js";
 import { Icon } from "../Icon.js";
 import { permissionOptions } from "./composerLabels.js";
 
-/** 加号菜单：添加附件 + 规划模式勾选（参考 Maka Agent 的模式勾选形态）。 */
+/** 加号菜单：添加附件 + 规划模式勾选。 */
 export function AddMenu({ anchorRef, open, planActive, onPickFiles, onPlanModeChange }: {
   anchorRef: RefObject<HTMLElement | null>;
   open: boolean;

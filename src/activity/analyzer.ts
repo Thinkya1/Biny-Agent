@@ -284,7 +284,7 @@ export async function buildActivityReport(
 }
 
 /**
- * 把一天的分析行渲染成 Alma 风格的打工日记：按项目分组、组内按时间排，条目去重。
+ * 把一天的分析行渲染成可读的工作日记：按项目分组、组内按时间排，条目去重。
  * 确定性模板渲染——分析已是结构化数据，聚合不需要再过模型，也避免二次编造。
  */
 export function renderActivityReport(rows: readonly ActivityAnalysisReportRow[], label: string): string {

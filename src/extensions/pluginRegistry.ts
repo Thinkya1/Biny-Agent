@@ -1,5 +1,5 @@
 /**
- * Biny Plugin Registry 与项目受管安装目录（Alma 式仓库目录安装）。
+ * Biny Plugin Registry 与项目受管安装目录（仓库目录安装）。
  *
  * 市场条目只指向 GitHub 仓库里的一个目录（repository + path），免打包、免哈希：
  * 安装 = 通过 GitHub tree API 列出目录文件、逐个 raw 下载写入 `.biny/plugins/<id>`。

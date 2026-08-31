@@ -690,7 +690,7 @@ export class DesktopAgentManager {
       const { runtime } = managed;
       const snapshot = runtime.getSnapshot();
       if (snapshot.state.kind === "runs") {
-        // Alma 的重试会先停掉当前回合，再把目标位置作为新版本重写；否则用户点早期消息时，
+        // 重试会先停掉当前回合，再把目标位置作为新版本重写；否则用户点早期消息时，
         // 后面的运行会一直占住 Runtime，前端也只能把刷新按钮变成无效操作。
         runtime.cancelCurrentRun();
         if (runtime instanceof RuntimeHostClient) await runtime.waitForIdle(sessionId);

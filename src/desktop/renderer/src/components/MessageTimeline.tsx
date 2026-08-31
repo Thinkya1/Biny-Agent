@@ -57,7 +57,7 @@ interface OptimisticRewrite {
 
 export const MessageTimeline = memo(function MessageTimeline({ projectId, sessionId, turns, onPreviewFile, onOpenExternal, onResolvePermission, onResume, thinking, onRetry, onSwitchVersion, onEditUserMessage, onCreateBranch, onRollbackFiles, onDeleteUserMessage }: MessageTimelineProps): React.JSX.Element {
   const [editing, setEditing] = useState<{ turnId: string; value: string; userMessageIndex: number }>();
-  // Alma 的重试/重写会先把目标之后的消息从视图中撤掉，再等待新回合流入；这里保留同样的
+  // 重试/重写会先把目标之后的消息从视图中撤掉，再等待新回合流入；这里保留同样的
   // 乐观投影。持久化仍由 App/Runtime 负责，组件只在请求尚未完成时负责视觉上的覆盖。
   const [optimisticRewrite, setOptimisticRewrite] = useState<OptimisticRewrite>();
   const [rewriteThinkingMessage] = useState(() => pickThinkingMessage());
@@ -586,7 +586,7 @@ function ExecutionTimeline({
         </div>
       ) : null}
       {groupExecutionSteps(steps).map((entry) => {
-        // 连续的工具 + 思考步骤聚合成一个可展开块（Alma 同款）；单个步骤不套聚合壳。
+        // 连续的工具 + 思考步骤聚合成一个可展开块；单个步骤不套聚合壳。
         if (Array.isArray(entry)) {
           if (entry.length === 1) {
             const only = entry[0];
@@ -875,7 +875,7 @@ function plainTextFromMarkdown(content: string): string {
     .trim();
 }
 
-/** 助手回复下方的操作条（复刻 Alma 的消息底栏人体工学）：
+/** 助手回复下方的操作条：
  *  复制/朗读/重新生成/更多 四个图标按钮 hover 揭示；日期感知时钟 + 运行指标
  *  （LLM 用时 / 首 token / 解码吞吐）常显。更多菜单与用量悬浮卡都走 portal
  *  fixed 定位：用量项悬停出详情卡（80ms 悬停意图防抖），结束原因带语义色点，
@@ -1123,7 +1123,7 @@ function AssistantActions({ content, timestamp, metrics, runMs, usage, finishRea
   );
 }
 
-/** 与 Alma 相同的消息版本控件：箭头、当前版本/总版本，跟随回复操作条显示。 */
+/** 消息版本控件：箭头、当前版本/总版本，跟随回复操作条显示。 */
 function VersionSwitcher({ onSwitchVersion, versionIndex, versionCount }: {
   onSwitchVersion(direction: "prev" | "next"): Promise<void>;
   versionIndex: number;

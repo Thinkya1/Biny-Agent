@@ -4,7 +4,7 @@
  * 这里是独立可测的纯逻辑：退避曲线只产出下一次等待的毫秒数，熔断只累计「spawn-即死」
  * 并在越限时给出终结错误；socket/进程等副作用仍归 client.ts 与 lifecycle.ts。
  *
- * 参数语义参照 maka packages/runtime-host/src/client/reconnect-lifecycle.ts 的
+ * 参数语义与客户端重连生命周期保持一致，包含
  * minMs/maxMs/stableConnectionMs（#3462 对策：host spawn 即死 + 固定间隔重试会把
  * 注册栈跑几千次直到主进程 OOM）。
  */

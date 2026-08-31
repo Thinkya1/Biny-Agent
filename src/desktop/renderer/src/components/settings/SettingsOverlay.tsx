@@ -709,7 +709,7 @@ function credentialHint(connection: DesktopModelConnection | undefined): string 
   return connection.requiresApiKey ? "尚未设置密钥，粘贴后点击“保存”" : "该服务通常无需密钥";
 }
 
-/** 凭据行折叠态的短值（maka 的 SettingsExpandableRow value 槽）：一行内说清状态，不展开细节。 */
+/** 凭据行折叠态的短值：一行内说清状态，不展开细节。 */
 function credentialSummary(connection: DesktopModelConnection | undefined): string {
   if (!connection) return "尚未设置密钥";
   if (connection.credentialSource === "env") return `环境变量 ${connection.apiKeyEnv ?? ""}`.trim();
@@ -757,7 +757,7 @@ export function SettingsModels({ active, loading, models, connections: connectio
   const connectionInfoFor = (providerAlias: string): DesktopModelConnection | undefined =>
     connectionInfos.find((item) => item.providerAlias === providerAlias);
   // 模型设置是四级视图：连接列表 / 服务商目录 / 新增连接 / 连接详情。目录独立成一层
-  // （参考 maka 的 list → catalog → setup 路由），列表页只放已连接的连接，不再把几十个
+  // 列表页只放已连接的连接，不再把几十个
   // 服务商平铺在设置主页。用一个 view 变量而不是多个布尔量，保证它们互斥。
   const [view, setView] = useState<{ kind: "list" } | { kind: "catalog" } | { kind: "connect"; provider: ProviderCatalogItem } | { kind: "detail"; provider: string }>({ kind: "list" });
   const [category, setCategory] = useState<ProviderCategory>("推荐");
@@ -887,7 +887,7 @@ export function SettingsModels({ active, loading, models, connections: connectio
     setView({ kind: "detail", provider: providerAlias });
   };
 
-  // 连接建立后直接落在详情页（maka 的 create → detail 动线）：连完之后用户紧接着要做的
+  // 连接建立后直接落在详情页：连完之后用户紧接着要做的
   // 几乎总是测试连接、调整启用模型，回列表等于多一次点击。详情页的 group 等派生数据在
   // 下一次渲染时从最新草稿自取，这里只需要把表单状态和路由摆对。
   const openDetailFresh = (providerAlias: string, baseUrl: string): void => {
@@ -1484,7 +1484,7 @@ export function SettingsModels({ active, loading, models, connections: connectio
           </div>
         </div>
         {loading && !connections.length ? (
-          // 骨架按真实卡片形状占位（maka 的 Skeleton 同款思路），快照到达时列表不跳动。
+          // 骨架按真实卡片形状占位，快照到达时列表不跳动。
           <div aria-hidden="true" className="connection-list">
             {[0, 1, 2].map((index) => (
               <div className="connection-card connection-card-skeleton" key={index}>
@@ -1512,7 +1512,7 @@ export function SettingsModels({ active, loading, models, connections: connectio
                       {catalog.label}
                       {isDefault ? <span className="default-pill">默认</span> : null}
                     </strong>
-                    {/* 副标题把默认模型名露出来（maka 的 "Provider · 默认模型" 同款），
+                    {/* 副标题把默认模型名露出来（“Provider · 默认模型”），
                         一眼看到当前默认指向哪个模型，不用点进详情。 */}
                     <small>{defaultModel ? `${connection.models.length} 个模型 · 默认 ${defaultModel.displayName}` : `已启用 ${connection.models.length} 个模型`}</small>
                   </span>
@@ -1545,7 +1545,7 @@ export function SettingsModels({ active, loading, models, connections: connectio
               </div>
               <button aria-label="关闭服务商目录" className="icon-button" onClick={() => setView({ kind: "list" })} type="button"><Icon name="close" /></button>
             </header>
-            {/* 搜索为主、分类收进下拉（maka 同款）：六个分类 tab 按钮排一行太吵，
+            {/* 搜索为主、分类收进下拉：六个分类 tab 按钮排一行太吵，
                 而且换分类时搜索词应该保留。 */}
             <div className="catalog-toolbar">
               <label className="provider-search">
@@ -1871,8 +1871,8 @@ function ConnectionDetailDialog({
 }): React.JSX.Element {
   const [manualModelOpen, setManualModelOpen] = useState(false);
   const [manualModelId, setManualModelId] = useState("");
-  // 凭据、服务地址与 API 格式采用「行式读取 + 点击展开编辑」（maka 的 SettingsExpandableRow
-  // 语言）：这些值设一次之后就是被读取的，常驻输入框等于一直让用户填一个已经填好的东西。
+  // 凭据、服务地址与 API 格式采用「行式读取 + 点击展开编辑」：这些值设一次之后就是被读取的，
+  // 常驻输入框等于一直让用户填一个已经填好的东西。
   // 一次只展开一行；展开或取消时把各行输入灌回已保存值，未提交的编辑不跨行残留。
   const [editingRow, setEditingRow] = useState<"key" | "endpoint" | "format" | null>(null);
   // 格式选择是草稿制：行内保存才暂存整组模型的协议改写，但真正生效要等设置保存提交，
@@ -1910,7 +1910,7 @@ function ConnectionDetailDialog({
           </div>
         </div>
         {!isDefaultConnection ? (
-          // maka 详情页 header 的 badge 槽：默认连接显示状态文本，非默认连接给出直达动作，
+          // 详情页 header 的 badge 槽：默认连接显示状态文本，非默认连接给出直达动作，
           // 否则「已连接」是个没有出口的只读标签。连接级默认落到该连接的首选模型上。
           <button
             className="ghost-button connection-default-button"
@@ -1940,7 +1940,7 @@ function ConnectionDetailDialog({
         </div>
       ) : null}
 
-      {/* 凭据行组（maka 的 SettingsExpandableRow 语言）：密钥 / 服务地址 / API 格式常态只读
+      {/* 凭据行组：密钥 / 服务地址 / API 格式常态只读
           显示已保存的值，点「更改」才展开成编辑器。这些值设一次之后就是被读取的，常驻输入框
           等于一直让用户填一个已经填好的东西。一次只展开一行。
           折叠态是两行式：label 行在上、值行在下（supporting 小字），操作按钮贴右侧顶对齐；
@@ -2050,7 +2050,7 @@ function ConnectionDetailDialog({
       </div>
       </section>
 
-      {/* 模型管理是一级区块（maka 的 DetailSection 模型管理），不再折叠进「高级设置」：
+      {/* 模型管理是一级区块，不再折叠进「高级设置」：
           连接建立后最常来的地方就是这里。选择器是 MultiSelector 形态：trigger 显示
           已选模型标签，点开是搜索 + 全选 + 勾选列表，而不是常驻整面 checkbox 墙。 */}
       <section className="detail-section">
@@ -2094,7 +2094,7 @@ function ConnectionDetailDialog({
                 <button className="text-button" onClick={() => { setManualModelOpen(false); setManualModelId(""); }} type="button">取消</button>
               </div>
             ) : null}
-            {/* 模型区动作行（maka 的模型管理按钮行）：测试 secondary 在前，更新目录 /
+            {/* 模型区动作行：测试 secondary 在前，更新目录 /
                 添加模型 ghost 在后。中转站常先透传新模型、目录还没更新，手动添加是按 ID
                 直接启用的逃生通道。 */}
             <div className="connection-model-actions">
@@ -2107,7 +2107,7 @@ function ConnectionDetailDialog({
             {testResult ? <ConnectionTestResult result={testResult} /> : null}
       </section>
 
-      {/* 危险区独立成段，段头已经说明行为，按钮上不再重复「连接」二字（maka 同例）。 */}
+      {/* 危险区独立成段，段头已经说明行为，按钮上不再重复「连接」二字。 */}
       <section className="detail-section danger-zone">
         <div className="detail-section-head">
           <h3>删除连接</h3>

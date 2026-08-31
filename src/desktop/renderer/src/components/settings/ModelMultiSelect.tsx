@@ -1,5 +1,5 @@
 /**
- * 连接详情「模型」区的启用选择器 —— maka provider-enabled-model-manager 的复刻：
+ * 连接详情「模型」区的启用选择器：
  * astryx MultiSelector，trigger 显示已选模型名（labels 而非"N 个已选"），
  * 点开后是 搜索（搜索模型）+ 全部启用 + 勾选列表。
  *

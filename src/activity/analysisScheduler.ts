@@ -1,8 +1,8 @@
 /**
- * Activity 分析的触发调度器（触发式，对齐 Alma 的实测行为）。
+ * Activity 分析的触发调度器（触发式，采用已验证的触发窗口）。
  *
  * 两条触发路径共用一个「跑一轮 pending 分析」的回调：
- * - session 结束触发：endSession 后防抖 ~60s（对应 Alma 实测结束后 43-77s 才触发），
+ * - session 结束触发：endSession 后防抖 ~60s（落在已验证的结束后 43-77s 触发窗口内），
  *   防抖窗口内又有 session 结束就重置计时合并成一次，避免快速连续 session 各烧一次模型。
  * - 周期 sweep 兜底：每 ~15min 扫一次「已结束但还没分析」的 session 补分析。模型瞬时失败
  *   保持 pending 的现状正好让 sweep 充当自然重试，无需 attempt 计数。
@@ -12,7 +12,7 @@
  * 策略放开后下一轮 sweep 自然补上）。进程退出/服务停止时 stop() 清理两个定时器。
  */
 
-/** session 结束后自动分析的防抖延迟；落在 Alma 实测的 43-77s 触发窗口内。 */
+/** session 结束后自动分析的防抖延迟；落在已验证的 43-77s 触发窗口内。 */
 export const ACTIVITY_ANALYSIS_DEBOUNCE_MS = 60_000;
 /** 周期 sweep 兜底间隔。 */
 export const ACTIVITY_ANALYSIS_SWEEP_INTERVAL_MS = 15 * 60_000;

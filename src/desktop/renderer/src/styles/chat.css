@@ -1,7 +1,7 @@
 /*
  * 聊天表面样式（时间线 / 思考链 / 工具调用 / Markdown / 代码块）。
  *
- * 设计原则（对齐 Alma 聊天交互）：
+ * 设计原则（聊天交互）：
  * - 运行中只有一处动效焦点：呼吸灯（图标光环或状态点）+ 微光标题，不叠加扫光；
  * - 折叠/展开用 grid-template-rows 高度动画 + 淡入，顺滑且无需测量；
  * - 颜色全部走 biny 主题 token，明暗主题自动适配；语法高亮用 --syn-* 变量双主题切换。
@@ -234,7 +234,7 @@
   margin-block: 2px;
 }
 
-/* 扁平线条图标（Alma 风格）：运行中由呼吸灯点替换，终态只换颜色。 */
+/* 扁平线条图标：运行中由呼吸灯点替换，终态只换颜色。 */
 .chat-tool-icon {
   display: inline-flex;
   align-items: center;
@@ -1656,7 +1656,7 @@
 
 /* ============ 用户消息与操作条 ============ */
 
-/* 用户消息：右对齐主色气泡（对齐 Alma：非对称圆角 24px/4px、阴影、最大 85% 宽）。 */
+/* 用户消息：右对齐主色气泡（非对称圆角 24px/4px、阴影、最大 85% 宽）。 */
 .biny-chat-scroll .user-message {
   display: flex;
   flex-direction: column;
@@ -1718,7 +1718,7 @@
   opacity: 0.6;
 }
 
-/* Alma 式版本导航：箭头和「当前版本/总版本」始终贴在回复底栏，避免把重新生成误解成分支。 */
+/* 版本导航：箭头和「当前版本/总版本」始终贴在回复底栏，避免把重新生成误解成分支。 */
 .biny-chat-scroll .message-version-switcher {
   display: inline-flex;
   align-items: center;
@@ -2240,7 +2240,7 @@
 }
 
 
-/* 流式正文末尾的呼吸光标（对齐 Alma .with-streaming-cursor）。 */
+/* 流式正文末尾的呼吸光标。 */
 .with-streaming-cursor .markdown-body > :last-child::after {
   content: "▍";
   color: var(--biny-focus);
@@ -2258,7 +2258,7 @@
   }
 }
 
-/* ============ 执行聚合组（对齐 Alma：相位头像堆叠 + 导轨展开体） ============ */
+/* ============ 执行聚合组（相位头像堆叠 + 导轨展开体） ============ */
 
 .biny-chat-scroll .chat-activity {
   margin-block: 2px;
@@ -2496,7 +2496,7 @@
   white-space: pre-wrap;
 }
 
-/* 活体点阵徽章：2 列 × 4 行，列优先错峰呼吸（对齐 Alma WorkingDotGrid）。 */
+/* 活体点阵徽章：2 列 × 4 行，列优先错峰呼吸。 */
 .chat-working-dots {
   display: inline-grid;
   flex: none;
@@ -2525,7 +2525,7 @@
   }
 }
 
-/* ============ 助手消息菜单与用量悬浮卡（portal 到 body，复刻 Alma 消息底栏） ============ */
+/* ============ 助手消息菜单与用量悬浮卡（portal 到 body） ============ */
 
 /* 注意：这两块通过 createPortal 挂到 document.body，不在 .biny-chat-scroll 作用域内，
    样式必须自包含；主题 token 走 :root 上的 --biny-* / --font-scale。 */

@@ -242,7 +242,7 @@ export function turnMetrics(turn: TimelineTurn): TurnMetrics {
   return metrics;
 }
 
-/* ============ 用量悬浮卡（复刻 Alma 消息菜单的 Usage 详情） ============ */
+/* ============ 用量悬浮卡（消息菜单的 Usage 详情） ============ */
 
 /** 悬浮用量卡的一行：标签 + 已格式化值。 */
 export interface UsageDetailRow {

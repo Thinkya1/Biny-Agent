@@ -265,7 +265,7 @@ async function startDesktopApplication(): Promise<void> {
   installApplicationMenu(() => mainWindow);
   createWindow();
 
-  // Alma 的平台约定：macOS 使用 Command+Shift+Space，其它平台使用 Ctrl+Shift+Space。
+  // 平台约定：macOS 使用 Command+Shift+Space，其它平台使用 Ctrl+Shift+Space。
   // 注册失败（被占用）时降级为静默无快捷键，设置页仍可从调试入口切换。
   const quickChatShortcut = process.platform === "darwin" ? "Command+Shift+Space" : "Ctrl+Shift+Space";
   try {

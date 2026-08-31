@@ -3482,7 +3482,7 @@ function testHistoricalUsageProjection(): void {
   assert.equal(lastReportedInputTokens(document), 18_061);
 }
 
-/** 时间线只展示活动回答，但保留 Alma 式的版本计数与切换锚点。 */
+/** 时间线只展示活动回答，但保留版本计数与切换锚点。 */
 function testMessageVersionTimelineProjection(): void {
   const assistant = (messageId: string, text: string): Extract<SessionEvent, { type: "agent_message" }> => ({
     type: "agent_message",
