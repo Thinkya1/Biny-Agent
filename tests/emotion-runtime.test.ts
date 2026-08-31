@@ -115,6 +115,7 @@ function testConfig(endpoint: string): AgentConfig {
         provider: "local",
         model: "local-test",
         displayName: "Local Emotion Provider",
+        contextWindow: 128_000,
         capabilities: { tools: true, reasoning: false, streaming: true }
       }
     },
