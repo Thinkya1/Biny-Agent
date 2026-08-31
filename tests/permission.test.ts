@@ -88,6 +88,12 @@ function testScopedGrants(): void {
   assert.equal(manager.evaluate({ ...baseRequest, targetPath: "another/file.ts" }).decision, "allow");
   manager.resetSession();
   assert.equal(manager.evaluate(baseRequest).decision, "ask");
+
+  // Alma 的 Always Allow 动作由权限层落成当前请求的最小稳定范围；不传 scope 也不能退化成一次性批准。
+  const actionManager = new PermissionManager({ mode: "ask", allowTools: [], denyPaths: [] });
+  actionManager.applyResult(baseRequest, { approved: true, action: "allow_always", scope: undefined });
+  assert.equal(actionManager.evaluate(baseRequest).decision, "allow");
+  assert.equal(actionManager.evaluate({ ...baseRequest, targetPath: "src/other.ts" }).decision, "ask");
 }
 
 function testMoveFileEvaluatesBothPaths(): void {

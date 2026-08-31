@@ -193,7 +193,7 @@ async function testInteractiveRuntimeProtocol(): Promise<void> {
   const submitted = runtime.submitPrompt("modify file");
   const permission = await permissionRequested;
   assert.equal(permission.toolCallId, "tool-1");
-  runtime.answerPermission(permission.requestId, { approved: true, scope: "once" });
+  runtime.answerPermission(permission.requestId, { approved: true, action: "allow_once", scope: "once", confirmation: undefined });
   await submitted.completion;
 
   assert.deepEqual(events.map((event) => event.type), [
@@ -211,6 +211,8 @@ async function testInteractiveRuntimeProtocol(): Promise<void> {
     "run.completed"
   ]);
   assert.ok(events.every((event) => event.sessionId === "session-1" && event.runId && event.timestamp));
+  const resolved = events.find((event): event is Extract<AgentHostEvent, { type: "permission.resolved" }> => event.type === "permission.resolved");
+  assert.equal(resolved?.action, "allow_once");
   await runtime.close();
 }
 

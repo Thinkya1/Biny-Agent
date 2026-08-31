@@ -72,6 +72,7 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
       memory: structuredClone(this.config.context.memory),
       compaction: structuredClone(this.config.context.compaction),
       chatParams: structuredClone(this.config.chat),
+      permission: structuredClone(this.config.permission),
       webSearch: {
         enabled: this.config.web.search.enabled,
         provider: this.config.web.search.provider,
@@ -111,6 +112,7 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
     if (input.memory !== undefined) after.context.memory = structuredClone(input.memory);
     if (input.compaction !== undefined) after.context.compaction = structuredClone(input.compaction);
     if (input.chatParams !== undefined) after.chat = structuredClone(input.chatParams);
+    if (input.permission !== undefined) after.permission = structuredClone(input.permission);
     if (input.webSearch !== undefined) {
       after.web.search = {
         enabled: input.webSearch.enabled,
@@ -133,6 +135,7 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
       || input.memory !== undefined
       || input.compaction !== undefined
       || input.chatParams !== undefined
+      || input.permission !== undefined
       || input.webSearch !== undefined
       || input.skills !== undefined
       || input.models !== undefined;
@@ -330,6 +333,7 @@ class FailPreferenceRollbackEvidenceTransaction extends DesktopSettingsTransacti
 await testCommitAndJournalRedaction();
 await testActivitySettingsUseConfigCas();
 await testChatParamsOnlySaveCommits();
+await testPermissionOnlySaveCommits();
 await testSkillSettingsOnlySaveCommits();
 await testPostCommitHookCannotRollbackSettings();
 await testPreflightConflictsAreZeroWrite();
@@ -382,6 +386,22 @@ async function testChatParamsOnlySaveCommits(): Promise<void> {
   });
 }
 
+async function testPermissionOnlySaveCommits(): Promise<void> {
+  await withFixture(async ({ state, agents }) => {
+    const transaction = new DesktopSettingsTransaction(state, agents);
+    const initial = await transaction.snapshot("project");
+    const result = await transaction.save("project", {
+      expectedPreferenceRevision: initial.preferenceRevision,
+      expectedConfigRevision: initial.configRevision,
+      permission: { ...initial.permission, mode: "read-only", criticalAlwaysAsk: false }
+    });
+    assert.equal(result.status, "committed", JSON.stringify(result));
+    assert.deepEqual(result.appliedFields, ["permission"]);
+    assert.equal(agents.config.permission.mode, "read-only");
+    assert.equal(agents.config.permission.criticalAlwaysAsk, false);
+  });
+}
+
 async function testSkillSettingsOnlySaveCommits(): Promise<void> {
   await withFixture(async ({ state, agents }) => {
     const transaction = new DesktopSettingsTransaction(state, agents);
@@ -415,6 +435,7 @@ function testSettingsSaveInputAcceptsCompactionAndChatParams(): void {
     memory: undefined,
     compaction: undefined,
     chatParams: undefined,
+    permission: undefined,
     webSearch: undefined,
     skills: undefined,
     models: undefined,
