@@ -179,6 +179,7 @@ function testConfig(endpoint: string): AgentConfig {
         provider: "local",
         model: "local-test",
         displayName: "Local E2E Provider",
+        contextWindow: 128_000,
         capabilities: { tools: true, reasoning: false, streaming: true }
       }
     },
