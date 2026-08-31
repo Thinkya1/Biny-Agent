@@ -336,8 +336,8 @@ function modelPermissionConfig(apiKeyEnv: string, permissionMode: "ask" | "full-
       }
     },
     models: {
-      first: { provider: "active", model: "first" },
-      second: { provider: "active", model: "second" }
+      first: { provider: "active", model: "first", contextWindow: 128_000 },
+      second: { provider: "active", model: "second", contextWindow: 128_000 }
     },
     permission: { ...defaultConfig.permission, mode: permissionMode }
   });
