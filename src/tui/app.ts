@@ -876,9 +876,9 @@ export class BinyTui {
     }
     const dialog = new PermissionDialog(
       { ...pending.request },
-      (choice) => {
+      (choice, denialReason) => {
         this.closeOverlay();
-        this.answerPermission(choice);
+        this.answerPermission(choice, denialReason);
       },
       () => {
         this.dispatch({ type: "permission.details.toggled" });
@@ -892,13 +892,13 @@ export class BinyTui {
     this.permissionDialogRequestId = pending.requestId;
   }
 
-  private answerPermission(choice: PermissionChoice): void {
+  private answerPermission(choice: PermissionChoice, denialReason?: string): void {
     const runtime = this.runtime;
     const request = pendingPermission(this.runtimeSnapshot);
     if (!runtime || !request) return;
     runtime.answerPermission(
       request.requestId,
-      permissionChoiceToResult(choice, request.request.requireFullYes)
+      permissionChoiceToResult(choice, request.request, denialReason)
     );
   }
 

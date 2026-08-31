@@ -11,6 +11,7 @@ export type RiskLevel = "low" | "medium" | "high" | "critical";
 export type PermissionMode = "ask" | "read-only" | "auto" | "full-access";
 export type PermissionGrantScope = "once" | "command" | "session" | "tool" | "path";
 export type PermissionDecision = "allow" | "ask" | "deny";
+export type PermissionAction = "allow_once" | "allow_always" | "deny" | "deny_with_reason";
 
 export interface ProjectPermissionPolicy {
   mode: PermissionMode;
@@ -55,6 +56,7 @@ export interface PermissionEvaluation {
 
 export interface PermissionApplyResult {
   approved: boolean;
+  action?: PermissionAction;
   scope?: PermissionGrantScope;
   nextMode?: PermissionMode;
   message?: string;
@@ -179,32 +181,34 @@ export class PermissionManager {
       return;
     }
 
-    if (result.scope === "tool") {
+    const scope = permissionScopeForResult(request, result);
+    if (scope === "tool") {
       this.sessionAllowedTools.add(request.toolName);
       return;
     }
 
-    if (result.scope === "path" && request.targetPath) {
+    if (scope === "path" && request.targetPath) {
       this.sessionAllowedPaths.add(normalizeRulePath(request.targetPath));
       return;
     }
 
-    if (result.scope === "command") {
+    if (scope === "command") {
       this.sessionAllowedCommands.add(requestKey(request));
       return;
     }
 
-    if (result.scope === "session") {
+    if (scope === "session") {
       this.sessionAllowedActions.add(actionKey(request));
     }
   }
 
   revokeResult(request: PermissionRequestContext, result: PermissionApplyResult | undefined): void {
     if (!result?.approved) return;
-    if (result.scope === "tool") this.sessionAllowedTools.delete(request.toolName);
-    else if (result.scope === "path" && request.targetPath) this.sessionAllowedPaths.delete(normalizeRulePath(request.targetPath));
-    else if (result.scope === "command") this.sessionAllowedCommands.delete(requestKey(request));
-    else if (result.scope === "session") this.sessionAllowedActions.delete(actionKey(request));
+    const scope = permissionScopeForResult(request, result);
+    if (scope === "tool") this.sessionAllowedTools.delete(request.toolName);
+    else if (scope === "path" && request.targetPath) this.sessionAllowedPaths.delete(normalizeRulePath(request.targetPath));
+    else if (scope === "command") this.sessionAllowedCommands.delete(requestKey(request));
+    else if (scope === "session") this.sessionAllowedActions.delete(actionKey(request));
   }
 
   setMode(mode: PermissionMode): void {
@@ -234,6 +238,22 @@ export class PermissionManager {
       projectPolicySource: this.policy.source
     };
   }
+}
+
+/** Alma 的 Always Allow 对应当前请求的最小稳定授权范围。 */
+export function permissionScopeForAlways(
+  request: Pick<PermissionRequestContext, "command" | "targetPath">
+): Exclude<PermissionGrantScope, "once"> {
+  return request.command ? "command" : request.targetPath ? "path" : "tool";
+}
+
+function permissionScopeForResult(
+  request: PermissionRequestContext,
+  result: PermissionApplyResult
+): PermissionGrantScope | undefined {
+  if (result.action === "allow_once") return "once";
+  if (result.action === "allow_always") return permissionScopeForAlways(request);
+  return result.scope;
 }
 
 function isAllowedBySession(

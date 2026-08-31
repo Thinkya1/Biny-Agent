@@ -6,6 +6,7 @@
  */
 import type { ToolInputDisplay } from "../tools/types.js";
 import type { CommandCardData } from "../runtime/commandCard.js";
+import type { PermissionAction } from "../permission/PermissionManager.js";
 
 export type TuiLaunchMode = "new" | "resume-picker" | "resume-session";
 
@@ -133,6 +134,4 @@ export interface TuiState {
 }
 
 export type PermissionChoice =
-  | "approve_once"
-  | "reject"
-  | "approve_command";
+  PermissionAction;

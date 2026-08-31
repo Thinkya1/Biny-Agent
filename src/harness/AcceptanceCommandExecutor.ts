@@ -274,6 +274,7 @@ function validateStrongConfirmation(
   ) return result;
   return {
     approved: false,
+    action: "deny",
     scope: "once",
     message: "Full yes confirmation was not provided.",
     confirmation: result.confirmation

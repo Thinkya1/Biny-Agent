@@ -8,7 +8,7 @@
  */
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { isFullYesConfirmation } from "../../../../permission/confirmation.js";
-import type { PermissionResult } from "../../../../permission/PermissionManager.js";
+import { permissionScopeForAlways, type PermissionAction, type PermissionResult } from "../../../../permission/PermissionManager.js";
 import { tokenizeCommand } from "../commandHighlight.js";
 import { classifyTool, firstLine, toolRowState, VARIANT_TITLES } from "../chatModel.js";
 import type { TimelineCommand, TimelineTool } from "../sessionTimeline.js";
@@ -112,16 +112,18 @@ function PermissionCard({
   onResolve(result: PermissionResult): Promise<void>;
 }): React.JSX.Element {
   const request = permission.request;
-  const alwaysScope = request.command ? "command" : request.targetPath ? "path" : "tool";
   const [confirmationState, setConfirmationState] = useState({ requestId: permission.requestId, value: "" });
+  const [denialState, setDenialState] = useState({ requestId: permission.requestId, open: false, value: "" });
   const confirmation = confirmationState.requestId === permission.requestId ? confirmationState.value : "";
+  const denialReason = denialState.requestId === permission.requestId ? denialState.value : "";
+  const showDenialReason = denialState.requestId === permission.requestId && denialState.open;
   const fullYesProvided = isFullYesConfirmation(confirmation);
 
   if (permission.resolved) {
     return (
       <div className={`permission-card is-resolved${permission.approved ? " is-approved" : " is-denied"}`}>
         <Icon name={permission.approved ? "check" : "close"} size={15} />
-        <span>{permission.approved ? "已允许" : "已拒绝"}{permission.message ? `：${permission.message}` : ""}</span>
+        <span>{resolvedPermissionLabel(permission.action, permission.approved === true)}{permission.message ? `：${permission.message}` : ""}</span>
       </div>
     );
   }
@@ -139,7 +141,22 @@ function PermissionCard({
         {request.targetPath ? <div className="permission-target"><Icon name="file" size={13} /><span>{request.targetPath}</span></div> : null}
         {request.preview && !request.command ? <pre className="permission-preview"><code>{request.preview}</code></pre> : null}
         {request.reason ? <p className="permission-reason">{request.reason}</p> : null}
-        {request.requireFullYes ? (
+        {showDenialReason ? (
+          <label className="permission-confirmation">
+            <span>说明拒绝原因后提交</span>
+            <input
+              autoCapitalize="none"
+              autoComplete="off"
+              disabled={disabled}
+              onChange={(event) => setDenialState({ requestId: permission.requestId, open: true, value: event.target.value.slice(0, 240) })}
+              placeholder="例如：先确认目标路径"
+              spellCheck={false}
+              type="text"
+              value={denialReason}
+            />
+          </label>
+        ) : null}
+        {request.requireFullYes && !showDenialReason ? (
           <label className="permission-confirmation">
             <span>高风险操作：输入完整的 <strong>yes</strong> 后才能允许</span>
             <input
@@ -154,13 +171,34 @@ function PermissionCard({
           </label>
         ) : null}
         <div className="permission-actions">
-          <button disabled={disabled} onClick={() => void onResolve({ approved: false, scope: "once", message: "Denied in Biny desktop." })} type="button">拒绝</button>
-          <button disabled={disabled || (request.requireFullYes && !fullYesProvided)} onClick={() => void onResolve({ approved: true, scope: alwaysScope, confirmation: request.requireFullYes ? confirmation : undefined })} type="button">始终允许同类操作</button>
-          <button className="is-primary" disabled={disabled || (request.requireFullYes && !fullYesProvided)} onClick={() => void onResolve({ approved: true, scope: "once", confirmation: request.requireFullYes ? confirmation : undefined })} type="button">允许一次</button>
+          <button className="is-danger" disabled={disabled} onClick={() => void onResolve({ approved: false, action: "deny", scope: "once", message: undefined, confirmation: undefined })} type="button">拒绝</button>
+          <button
+            disabled={disabled || (showDenialReason && !denialReason.trim())}
+            onClick={() => {
+              if (!showDenialReason) {
+                setDenialState({ requestId: permission.requestId, open: true, value: "" });
+                return;
+              }
+              const reason = denialReason.trim();
+              if (!reason) return;
+              void onResolve({ approved: false, action: "deny_with_reason", scope: "once", message: reason, confirmation: undefined });
+            }}
+            type="button"
+          >{showDenialReason ? "提交拒绝理由" : "拒绝并说明理由"}</button>
+          <button className="is-primary" disabled={disabled || (request.requireFullYes && !fullYesProvided)} onClick={() => void onResolve({ approved: true, action: "allow_once", scope: "once", confirmation: request.requireFullYes ? confirmation : undefined })} type="button">允许一次</button>
+          <button disabled={disabled || (request.requireFullYes && !fullYesProvided)} onClick={() => void onResolve({ approved: true, action: "allow_always", scope: permissionScopeForAlways(request), confirmation: request.requireFullYes ? confirmation : undefined })} type="button">始终允许</button>
         </div>
       </div>
     </section>
   );
+}
+
+function resolvedPermissionLabel(action: PermissionAction | undefined, approved: boolean): string {
+  if (action === "allow_always") return "已始终允许";
+  if (action === "allow_once") return "已允许一次";
+  if (action === "deny_with_reason") return "已拒绝并说明理由";
+  if (action === "deny") return "已拒绝";
+  return approved ? "已允许" : "已拒绝";
 }
 
 /** 命令按语义分段着色；配色规则见 styles.css 里的 `.command-text`。 */

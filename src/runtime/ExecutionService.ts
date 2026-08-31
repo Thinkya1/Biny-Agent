@@ -66,8 +66,10 @@ export class ExecutionService {
           permissionFailure ??= error;
           answerPermission(event.requestId, {
             approved: false,
+            action: "deny",
             scope: "once",
-            message: errorMessage(error)
+            message: errorMessage(error),
+            confirmation: undefined
           });
         }
       })();

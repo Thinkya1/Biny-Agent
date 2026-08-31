@@ -1175,6 +1175,7 @@ function validateStrongConfirmation(
   if (!request.requireFullYes || !result.approved || isFullYesConfirmation(result.confirmation ?? "")) return result;
   return {
     approved: false,
+    action: "deny",
     scope: "once",
     message: "Full yes confirmation was not provided.",
     confirmation: result.confirmation

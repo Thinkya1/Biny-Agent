@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { AgentAttachment, AgentRunMode, AgentSessionInfo, ResumedAgentSession } from "../agent/AgentSession.js";
+import type { AgentCapabilitySelection } from "../agent/capabilitySelection.js";
 import type { AgentPermissionResult, AgentSessionEvent, AgentTurnOutcome, AgentTurnStatus, AgentTurnStopReason, BlockedReason } from "../agent/types.js";
 import { isFullYesConfirmation } from "../permission/confirmation.js";
-import type { PermissionResult } from "../permission/PermissionManager.js";
+import type { PermissionAction, PermissionResult } from "../permission/PermissionManager.js";
 import type { ToolInputDisplay } from "../tools/types.js";
 import { redactSecrets, redactSensitiveValue } from "../utils/secrets.js";
 import { AgentEventBus } from "./AgentEventBus.js";
@@ -74,7 +75,7 @@ export interface InteractiveAgentHost {
 
 /** Desktop、TUI 和 Unix socket 客户端共享的最小交互运行时形状。 */
 export interface InteractiveRuntimeHandle {
-  submitPrompt(input: string, mode?: AgentRunMode, attachments?: AgentAttachment[], requestIds?: RuntimeRequestIds, promptContext?: string): SubmittedAgentRun;
+  submitPrompt(input: string, mode?: AgentRunMode, attachments?: AgentAttachment[], requestIds?: RuntimeRequestIds, promptContext?: string, capabilitySelection?: AgentCapabilitySelection): SubmittedAgentRun;
   steer(input: string, attachments?: AgentAttachment[], requestIds?: RuntimeRequestIds): QueuedAgentMessage;
   followUp(input: string, attachments?: AgentAttachment[], requestIds?: RuntimeRequestIds): QueuedAgentMessage;
   continueInterruptedTurn(): Promise<AgentRunOutcome | undefined>;
@@ -112,6 +113,7 @@ interface AgentRun extends ActiveRunSnapshot {
   continuation: boolean;
   attachments: AgentAttachment[];
   promptContext?: string;
+  capabilitySelection?: AgentCapabilitySelection;
   retryOfMessageId?: string;
   replaceUserMessageId?: string;
   replacementUserMessageId?: string;
@@ -198,9 +200,10 @@ export class InteractiveAgentRuntime {
     mode: AgentRunMode = "chat",
     attachments: AgentAttachment[] = [],
     requestIds?: RuntimeRequestIds,
-    promptContext?: string
+    promptContext?: string,
+    capabilitySelection?: AgentCapabilitySelection
   ): SubmittedAgentRun {
-    return this.startRun(input, mode, attachments, false, requestIds, undefined, promptContext);
+    return this.startRun(input, mode, attachments, false, requestIds, undefined, promptContext, capabilitySelection);
   }
 
   steer(input: string, attachments: AgentAttachment[] = [], requestIds?: RuntimeRequestIds): QueuedAgentMessage {
@@ -249,7 +252,8 @@ export class InteractiveAgentRuntime {
     continuation: boolean,
     requestIds?: RuntimeRequestIds,
     continuationTurnId?: string,
-    promptContext?: string
+    promptContext?: string,
+    capabilitySelection?: AgentCapabilitySelection
   ): SubmittedAgentRun {
     if (this.closed) throw new Error("Agent runtime is closed.");
     if (this.state.kind === "maintenance") {
@@ -281,6 +285,7 @@ export class InteractiveAgentRuntime {
       startedAtMs,
       continuation,
       promptContext,
+      capabilitySelection,
       retryOfMessageId: requestIds?.retryOfMessageId,
       replaceUserMessageId: requestIds?.replaceUserMessageId,
       replacementUserMessageId: requestIds?.replaceUserMessageId === undefined ? undefined : randomUUID()
@@ -359,7 +364,7 @@ export class InteractiveAgentRuntime {
   cancelRun(runId: string): boolean {
     if (this.activeRun?.runId === runId) {
       this.commandRuntime.subagents?.cancelParent(this.activeRun.runId, "Current turn interrupted.");
-      this.pendingPermission?.resolve({ approved: false, scope: "once", message: "Current turn interrupted." });
+      this.pendingPermission?.resolve({ approved: false, action: "deny", scope: "once", message: "Current turn interrupted.", confirmation: undefined });
       this.pendingPermission = undefined;
       this.activeRunController?.abort(new Error("Current turn interrupted."));
       return true;
@@ -370,11 +375,19 @@ export class InteractiveAgentRuntime {
   answerPermission(requestId: string, result: PermissionResult): void {
     const pending = this.pendingPermission;
     if (!pending || pending.requestId !== requestId) throw new Error("Permission request is no longer pending.");
+    const action = result.action ?? permissionActionForResult(result);
+    if ((action === "allow_once" || action === "allow_always") !== result.approved) {
+      throw new Error("Permission action does not match approved.");
+    }
+    if (action === "deny_with_reason" && !result.message?.trim()) {
+      throw new Error("A denial reason is required.");
+    }
     if (result.approved && pending.request.requireFullYes && !isFullYesConfirmation(result.confirmation ?? "")) {
       throw new Error("This operation requires the full word yes before it can be approved.");
     }
     pending.resolve({
       approved: result.approved,
+      action,
       scope: result.scope,
       nextMode: result.nextMode,
       message: result.message,
@@ -942,6 +955,7 @@ export class InteractiveAgentRuntime {
         mode: run.mode,
         attachments: run.attachments,
         promptContext: run.promptContext,
+        capabilitySelection: run.capabilitySelection,
         runId: run.runId,
         messageId: run.messageId,
         retryOfMessageId: run.retryOfMessageId,
@@ -1337,6 +1351,7 @@ export class InteractiveAgentRuntime {
       toolCallId,
       tool: publicRequest.tool,
       approved: result.approved,
+      action: result.action ?? permissionActionForResult(result),
       scope: result.scope,
       message: result.message === undefined ? undefined : redactSecrets(result.message)
     });
@@ -1633,4 +1648,10 @@ function incompleteReason(outcome: AgentTurnOutcome): string {
   if (outcome.stopReason === "model_length") return "Agent attempt reached the model output limit before completion.";
   if (outcome.stopReason === "budget_exhausted") return "Task budget was exhausted before completion.";
   return `Agent attempt is incomplete (${outcome.stopReason}).`;
+}
+
+function permissionActionForResult(result: PermissionResult): PermissionAction {
+  if (result.action !== undefined) return result.action;
+  if (!result.approved) return "deny";
+  return result.scope === "once" ? "allow_once" : "allow_always";
 }

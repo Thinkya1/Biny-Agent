@@ -43,20 +43,27 @@ export async function confirmPermissionRequest(
   output.write(`${request.details}\n`);
   output.write((request.requireFullYes ? [
     "Choose (full confirmation required):",
-    "  yes          Execute once",
-    "  yes command  Execute and do not ask again for this command",
-    "  n / Enter    Do not execute"
+    "  yes          Allow Once",
+    "  yes command  Always Allow",
+    "  n            Deny",
+    "  r <reason>   Deny With Reason"
   ] : [
     "Choose:",
-    "  y / Enter  Execute",
-    "  n          Do not execute",
-    "  c          Do not ask again for this command"
+    "  y / Enter   Allow Once",
+    "  a           Always Allow",
+    "  n           Deny",
+    "  r <reason>  Deny With Reason"
   ]).join("\n"));
   output.write("\n");
 
   const rl = createInterface({ input, output });
   try {
-    return permissionResultFromAnswer(await rl.question("> ", { signal }), request.requireFullYes);
+    const result = permissionResultFromAnswer(await rl.question("> ", { signal }), request.requireFullYes);
+    if (result.action !== "deny_with_reason" || result.message?.trim()) return result;
+    const reason = (await rl.question("Reason (required): ", { signal })).trim();
+    return reason
+      ? { ...result, message: reason }
+      : { approved: false, action: "deny", scope: "once", message: "Denied by user.", confirmation: undefined };
   } finally {
     rl.close();
   }

@@ -659,6 +659,7 @@
 
 .permission-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
 }
@@ -676,6 +677,15 @@
 
 .biny-chat-scroll .permission-actions button:hover:not(:disabled) {
   background: var(--biny-surface-hover);
+}
+
+.biny-chat-scroll .permission-actions button.is-danger {
+  border-color: color-mix(in srgb, var(--biny-danger) 45%, var(--biny-border));
+  color: var(--biny-danger);
+}
+
+.biny-chat-scroll .permission-actions button.is-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--biny-danger) 10%, var(--biny-surface));
 }
 
 .biny-chat-scroll .permission-actions button.is-primary {

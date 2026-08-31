@@ -1,7 +1,7 @@
 import type { AgentRunMode, AgentSessionInfo } from "../agent/AgentSession.js";
 import type { AgentSessionUpdate, AgentTurnStopReason, BlockedReason } from "../agent/types.js";
 import type { ContextStatus } from "../agent/context/types.js";
-import type { PermissionGrantScope, PermissionMode } from "../permission/PermissionManager.js";
+import type { PermissionAction, PermissionGrantScope, PermissionMode } from "../permission/PermissionManager.js";
 import type { SessionUsage } from "../session/metadata.js";
 
 export type AgentRunStatus =
@@ -59,7 +59,7 @@ export type AgentHostEvent =
   | (AgentEventBase & { type: "message.user"; messageId: string; content: string; delivery?: "steer" | "followUp" })
   | (AgentEventBase & AgentSessionUpdate)
   | (AgentEventBase & { type: "permission.requested"; requestId: string; toolCallId: string; request: AgentPermissionEventRequest })
-  | (AgentEventBase & { type: "permission.resolved"; requestId: string; toolCallId: string; tool: string; approved: boolean; scope?: PermissionGrantScope; message?: string })
+  | (AgentEventBase & { type: "permission.resolved"; requestId: string; toolCallId: string; tool: string; approved: boolean; action?: PermissionAction; scope?: PermissionGrantScope; message?: string })
   | (AgentEventBase & { type: "context.updated"; context: ContextStatus })
   | (AgentEventBase & { type: "compact.started"; hint?: string })
   | (AgentEventBase & { type: "compact.completed"; summary: string; context: ContextStatus })

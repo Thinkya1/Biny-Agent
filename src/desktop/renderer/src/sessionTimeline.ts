@@ -12,6 +12,7 @@
 import { parseMemoryCitations, type MemoryCitation } from "../../../agent/context/memoryCitations.js";
 import type { ToolInputDisplay, ToolUpdate } from "../../../tools/types.js";
 import type { AgentPermissionEventRequest, AgentRunModel, AgentHostEvent } from "../../../runtime/agentEvents.js";
+import type { PermissionAction } from "../../../permission/PermissionManager.js";
 import { activitySummaryText } from "../../../runtime/activitySummary.js";
 import { activeSessionEventsForPath } from "../../../session/messageTree.js";
 import type { SessionEvent } from "../../../session/recorder.js";
@@ -35,6 +36,7 @@ export interface TimelinePermission {
   request: AgentPermissionEventRequest;
   resolved: boolean;
   approved?: boolean;
+  action?: PermissionAction;
   message?: string;
 }
 
@@ -839,6 +841,7 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
         request: tool.permission?.request ?? permissionFallback(event.toolCallId, event.tool),
         resolved: true,
         approved: event.approved,
+        action: event.action,
         message: event.message
       };
       if (!event.approved) tool.status = "denied";

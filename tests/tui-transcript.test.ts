@@ -240,45 +240,52 @@ function testPermissionConfirmationContract(): void {
   assert.equal(isFullYesConfirmation("y"), false);
   assert.equal(isFullYesConfirmation(""), false);
 
-  assert.deepEqual(permissionResultFromAnswer("", false), { approved: true, scope: "once" });
-  assert.deepEqual(permissionResultFromAnswer("y", false), { approved: true, scope: "once" });
-  assert.deepEqual(permissionResultFromAnswer("c", false), { approved: true, scope: "command" });
-  assert.equal(permissionResultFromAnswer("", true).approved, false);
-  assert.equal(permissionResultFromAnswer("y", true).approved, false);
-  assert.equal(permissionResultFromAnswer("c", true).approved, false);
-  assert.deepEqual(permissionResultFromAnswer("yes", true), { approved: true, scope: "once", confirmation: "yes" });
-  assert.deepEqual(permissionResultFromAnswer("YES   COMMAND", true), { approved: true, scope: "command", confirmation: "yes" });
-  assert.equal(permissionChoiceToResult("approve_once", false).confirmation, undefined);
-  assert.equal(permissionChoiceToResult("approve_once", true).confirmation, "yes");
-  assert.equal(permissionChoiceToResult("approve_command", true).confirmation, "yes");
-
-  assert.equal(confirmedPermissionChoice(0, true, ""), undefined);
-  assert.equal(confirmedPermissionChoice(0, true, "y"), undefined);
-  assert.equal(confirmedPermissionChoice(0, true, "yes"), "approve_once");
-  assert.equal(confirmedPermissionChoice(1, true, ""), "reject");
-  assert.equal(confirmedPermissionChoice(2, true, "yes"), "approve_command");
-  assert.equal(confirmedPermissionChoice(0, false, ""), "approve_once");
-
   const baseRequest = {
     tool: "run_command",
     title: "Command execution request",
     details: "sudo example",
     actionType: "shell",
     riskLevel: "critical",
-    requireFullYes: true
+    requireFullYes: true,
+    command: "sudo example"
   };
+
+  assert.deepEqual(permissionResultFromAnswer("", false), { approved: true, action: "allow_once", scope: "once", confirmation: undefined });
+  assert.deepEqual(permissionResultFromAnswer("y", false), { approved: true, action: "allow_once", scope: "once", confirmation: undefined });
+  assert.deepEqual(permissionResultFromAnswer("c", false), { approved: true, action: "allow_always", scope: "command", confirmation: undefined });
+  assert.deepEqual(permissionResultFromAnswer("r Check the target", false), { approved: false, action: "deny_with_reason", scope: "once", message: "Check the target", confirmation: undefined });
+  assert.equal(permissionResultFromAnswer("", true).approved, false);
+  assert.equal(permissionResultFromAnswer("y", true).approved, false);
+  assert.equal(permissionResultFromAnswer("c", true).approved, false);
+  assert.deepEqual(permissionResultFromAnswer("yes", true), { approved: true, action: "allow_once", scope: "once", confirmation: "yes" });
+  assert.deepEqual(permissionResultFromAnswer("YES   COMMAND", true), { approved: true, action: "allow_always", scope: "command", confirmation: "yes" });
+  assert.deepEqual(permissionChoiceToResult("allow_once", { ...baseRequest, requireFullYes: false }), { approved: true, action: "allow_once", scope: "once", confirmation: undefined });
+  assert.equal(permissionChoiceToResult("allow_once", baseRequest).confirmation, "yes");
+  assert.equal(permissionChoiceToResult("allow_always", baseRequest).confirmation, "yes");
+  assert.equal(permissionChoiceToResult("deny_with_reason", baseRequest, "not ready").message, "not ready");
+
+  assert.equal(confirmedPermissionChoice(0, true, ""), "deny");
+  assert.equal(confirmedPermissionChoice(1, true, ""), undefined);
+  assert.equal(confirmedPermissionChoice(1, true, "", "not ready"), "deny_with_reason");
+  assert.equal(confirmedPermissionChoice(2, true, ""), undefined);
+  assert.equal(confirmedPermissionChoice(2, true, "yes"), "allow_once");
+  assert.equal(confirmedPermissionChoice(3, true, "yes"), "allow_always");
+  assert.equal(confirmedPermissionChoice(2, false, ""), "allow_once");
+
   const enteredState = {
     ...createPermissionPromptInteractionState(baseRequest),
-    selectedIndex: 2,
+    selectedIndex: 3,
     confirmation: "yes",
     confirmationAttempted: true
   };
   assert.equal(permissionPromptStateForRequest(enteredState, baseRequest), enteredState);
   assert.deepEqual(permissionPromptStateForRequest(enteredState, { ...baseRequest, title: "Next request" }), {
     request: { ...baseRequest, title: "Next request" },
-    selectedIndex: 0,
+    selectedIndex: 2,
     confirmation: "",
-    confirmationAttempted: false
+    confirmationAttempted: false,
+    denialReason: "",
+    denialReasonAttempted: false
   });
 
 }
@@ -1461,9 +1468,9 @@ function testPermissionDialogRequiresFullYes(): void {
     actionType: "shell",
     riskLevel: "critical"
   };
-  const answers: PermissionChoice[] = [];
+  const answers: Array<{ choice: PermissionChoice; denialReason?: string }> = [];
   let detailsToggled = 0;
-  const dialog = new PermissionDialog(request, (choice) => answers.push(choice), () => { detailsToggled += 1; });
+  const dialog = new PermissionDialog(request, (choice, denialReason) => answers.push({ choice, denialReason }), () => { detailsToggled += 1; });
 
   const rendered = plainLines(dialog.render(60)).join("\n");
   assert.match(rendered, /Command execution request/u);
@@ -1476,7 +1483,7 @@ function testPermissionDialogRequiresFullYes(): void {
   assert.match(plainLines(dialog.render(60)).join("\n"), /must be the full word yes/u);
   for (const char of "yes") dialog.handleInput(char);
   dialog.handleInput("\r");
-  assert.deepEqual(answers, ["approve_once"]);
+  assert.deepEqual(answers, [{ choice: "allow_once", denialReason: undefined }]);
 
   dialog.handleInput("\u000F");
   assert.equal(detailsToggled, 1);
@@ -1485,7 +1492,14 @@ function testPermissionDialogRequiresFullYes(): void {
   const rejectAnswers: PermissionChoice[] = [];
   const rejectDialog = new PermissionDialog(request, (choice) => rejectAnswers.push(choice), () => undefined);
   rejectDialog.handleInput("\u001B");
-  assert.deepEqual(rejectAnswers, ["reject"]);
+  assert.deepEqual(rejectAnswers, ["deny"]);
+
+  const reasonAnswers: Array<{ choice: PermissionChoice; denialReason?: string }> = [];
+  const reasonDialog = new PermissionDialog(request, (choice, denialReason) => reasonAnswers.push({ choice, denialReason }), () => undefined);
+  reasonDialog.handleInput("\u001B[A");
+  for (const char of "not ready") reasonDialog.handleInput(char);
+  reasonDialog.handleInput("\r");
+  assert.deepEqual(reasonAnswers, [{ choice: "deny_with_reason", denialReason: "not ready" }]);
 
   const normalAnswers: PermissionChoice[] = [];
   const normalDialog = new PermissionDialog(
@@ -1494,7 +1508,7 @@ function testPermissionDialogRequiresFullYes(): void {
     () => undefined
   );
   normalDialog.handleInput("\r");
-  assert.deepEqual(normalAnswers, ["approve_once"]);
+  assert.deepEqual(normalAnswers, ["allow_once"]);
 
   const compactDialog = new PermissionDialog(
     { ...request, details: Array.from({ length: 30 }, (_, index) => `preview line ${String(index)}`).join("\n") },

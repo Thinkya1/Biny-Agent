@@ -16,9 +16,12 @@ import {
 } from "@earendil-works/pi-tui";
 import { selectListTheme, theme } from "../theme/index.js";
 import {
+  appendPermissionReason,
   appendPermissionConfirmation,
   confirmedPermissionChoice,
+  DEFAULT_PERMISSION_SELECTION,
   movePermissionSelection,
+  permissionChoiceAt,
   permissionOptions
 } from "../permissionOptions.js";
 import type { PermissionChoice, TuiPermissionRequest } from "../types.js";
@@ -127,15 +130,17 @@ export class TextViewerDialog extends Container {
 
 /** 权限确认：选项列表 + 强确认输入行。 */
 export class PermissionDialog extends Container {
-  private selectedIndex = 0;
+  private selectedIndex = DEFAULT_PERMISSION_SELECTION;
   private confirmation = "";
   private confirmationAttempted = false;
+  private denialReason = "";
+  private denialReasonAttempted = false;
   private detailsExpanded = false;
   private readonly body: Text;
 
   constructor(
     private request: TuiPermissionRequest,
-    private readonly onAnswer: (choice: PermissionChoice) => void,
+    private readonly onAnswer: (choice: PermissionChoice, denialReason?: string) => void,
     private readonly onToggleDetails: () => void,
     private readonly maxBodyLines = Number.POSITIVE_INFINITY
   ) {
@@ -153,9 +158,11 @@ export class PermissionDialog extends Container {
 
   setRequest(request: TuiPermissionRequest): void {
     this.request = request;
-    this.selectedIndex = 0;
+    this.selectedIndex = DEFAULT_PERMISSION_SELECTION;
     this.confirmation = "";
     this.confirmationAttempted = false;
+    this.denialReason = "";
+    this.denialReasonAttempted = false;
     this.refresh();
   }
 
@@ -180,26 +187,34 @@ export class PermissionDialog extends Container {
       return;
     }
     if (matchesKey(data, "escape")) {
-      this.onAnswer("reject");
+      this.onAnswer("deny");
       return;
     }
     if (matchesKey(data, "enter")) {
-      const choice = confirmedPermissionChoice(this.selectedIndex, this.request.requireFullYes, this.confirmation);
+      const choice = confirmedPermissionChoice(this.selectedIndex, this.request.requireFullYes, this.confirmation, this.denialReason);
       if (choice) {
-        this.onAnswer(choice);
+        this.onAnswer(choice, choice === "deny_with_reason" ? this.denialReason.trim() : undefined);
         return;
       }
-      this.confirmationAttempted = true;
+      if (permissionChoiceAt(this.selectedIndex) === "deny_with_reason") this.denialReasonAttempted = true;
+      else this.confirmationAttempted = true;
       this.refresh();
       return;
     }
     if (matchesKey(data, "backspace")) {
-      this.confirmation = this.confirmation.slice(0, -1);
+      if (permissionChoiceAt(this.selectedIndex) === "deny_with_reason") this.denialReason = this.denialReason.slice(0, -1);
+      else this.confirmation = this.confirmation.slice(0, -1);
       this.refresh();
       return;
     }
-    // 强确认时把单个可打印字符收进确认行，控制键和组合键忽略。
-    if (this.request.requireFullYes && isPrintableChar(data)) {
+    const choice = permissionChoiceAt(this.selectedIndex);
+    // 只有审批动作收确认词，拒绝并说明理由收单行理由；控制键和组合键忽略。
+    if (choice === "deny_with_reason" && isPrintableChar(data)) {
+      this.denialReason = appendPermissionReason(this.denialReason, data);
+      this.refresh();
+      return;
+    }
+    if (this.request.requireFullYes && (choice === "allow_once" || choice === "allow_always") && isPrintableChar(data)) {
       this.confirmation = appendPermissionConfirmation(this.confirmation, data);
       this.refresh();
     }
@@ -211,6 +226,7 @@ export class PermissionDialog extends Container {
     if (this.detailsExpanded && this.request.preview) details.push(...this.request.preview.split(/\r?\n/u));
 
     const actionLines: string[] = [];
+    const selectedChoice = permissionChoiceAt(this.selectedIndex);
     if (this.request.riskLevel === "critical") {
       actionLines.push(theme.fg("error", "Critical or sensitive operation: review before accepting."));
     }
@@ -224,7 +240,14 @@ export class PermissionDialog extends Container {
         + theme.fg("muted", `  ${option.description}`)
       );
     });
-    if (this.request.requireFullYes) {
+    if (selectedChoice === "deny_with_reason") {
+      actionLines.push("");
+      actionLines.push(theme.fg("warning", "Enter a reason, then press enter, to reject with context."));
+      actionLines.push(`${theme.fg("muted", "> ")}${this.denialReason}${theme.fg("warning", "█")}`);
+      if (this.denialReasonAttempted) {
+        actionLines.push(theme.fg("error", "A denial reason is required."));
+      }
+    } else if (this.request.requireFullYes && (selectedChoice === "allow_once" || selectedChoice === "allow_always")) {
       actionLines.push("");
       actionLines.push(theme.fg("warning", "Type yes, then press enter, to approve the selected action."));
       actionLines.push(`${theme.fg("muted", "> ")}${this.confirmation}${theme.fg("warning", "█")}`);
