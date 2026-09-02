@@ -1,9 +1,8 @@
-/** 通用设置：主题、字体与 Agent 身份资料。 */
+/** 通用设置：主题与界面字体。 */
 import { useEffect, useState } from "react";
-import type { DesktopFontPreference, DesktopIdentityOverview, DesktopThemePreference } from "../../../../protocol.js";
+import type { DesktopFontPreference, DesktopThemePreference } from "../../../../protocol.js";
 import { clampFontSize, MAX_FONT_SIZE, MIN_FONT_SIZE, SYSTEM_FONT_FAMILY } from "../../../../fontPreference.js";
 import { Icon, type IconName } from "../Icon.js";
-import { IdentitySection } from "./IdentitySection.js";
 
 const fontFamilyOptions: Array<{ value: string; title: string }> = [
   { value: SYSTEM_FONT_FAMILY, title: "系统默认" },
@@ -15,14 +14,11 @@ const fontFamilyOptions: Array<{ value: string; title: string }> = [
   { value: "Yuanti SC", title: "圆体" }
 ];
 
-export function SettingsAppearance({ theme, onThemeChange, font, onFontChange, projectId, onLoadIdentityOverview, onNotify }: {
+export function SettingsAppearance({ theme, onThemeChange, font, onFontChange }: {
   theme: DesktopThemePreference;
   onThemeChange(theme: DesktopThemePreference): void;
   font: DesktopFontPreference;
   onFontChange(font: DesktopFontPreference): void;
-  projectId?: string;
-  onLoadIdentityOverview(): Promise<DesktopIdentityOverview>;
-  onNotify(message: string): void;
 }): React.JSX.Element {
   const options: Array<{ value: DesktopThemePreference; title: string; icon: IconName }> = [
     { value: "light", title: "浅色", icon: "sun" },
@@ -117,12 +113,6 @@ export function SettingsAppearance({ theme, onThemeChange, font, onFontChange, p
           </div>
         </div>
       </section>
-      <IdentitySection
-        active
-        onLoad={onLoadIdentityOverview}
-        onNotify={onNotify}
-        projectId={projectId}
-      />
     </div>
   );
 }

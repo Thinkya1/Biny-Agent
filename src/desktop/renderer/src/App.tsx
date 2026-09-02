@@ -351,7 +351,6 @@ function DesktopApp(): React.JSX.Element {
     fetchModelCatalog,
     fetchModelCatalogCandidate,
     loadCookieJarStatus,
-    loadIdentityOverview,
     loadMemoryStats,
     loadMemoryEntries,
     loadMemoryEmbeddingStatus,
@@ -1432,7 +1431,6 @@ function DesktopApp(): React.JSX.Element {
             onLoadCookieJarStatus={loadCookieJarStatus}
             onLoadMemoryStats={loadMemoryStats}
             onLoadMemoryEntries={loadMemoryEntries}
-            onLoadIdentityOverview={loadIdentityOverview}
             onLoadMemoryEmbeddingStatus={loadMemoryEmbeddingStatus}
             onDownloadMemoryEmbeddingModel={downloadMemoryEmbeddingModel}
             onDeleteMemoryEmbeddingModel={deleteMemoryEmbeddingModel}

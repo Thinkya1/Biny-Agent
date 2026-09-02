@@ -10,7 +10,7 @@ import type { ModelProfile } from "../../../../../config/schema.js";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
 import type { MemorySleepRun } from "../../../../../agent/context/memoryTypes.js";
-import type { DesktopCookieJarStatus, DesktopFontPreference, DesktopIdentityOverview, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntriesPage, DesktopMemoryEntry, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryStats, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntriesPage, DesktopMemoryEntry, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryStats, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
   apiFormatForConnection,
   apiFormatOption,
@@ -84,7 +84,6 @@ interface SettingsOverlayProps {
   onCancelMemorySleep(): Promise<{ cancelled: boolean }>;
   onClearMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryStats>;
   onCompactMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
-  onLoadIdentityOverview(): Promise<DesktopIdentityOverview>;
   onOpenChatDraft(input: string): void;
   onLoadMemoryEmbeddingStatus(): Promise<DesktopMemoryEmbeddingStatus>;
   onDownloadMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
@@ -128,6 +127,12 @@ const settingsNavGroups: Array<{ label: string; items: typeof settingsNav }> = [
   { label: "系统", items: settingsNav.filter((item) => item.group === "system") }
 ];
 
+const settingsTabValues = new Set<SettingsTab>(settingsNav.map((item) => item.tab));
+
+function normalizeSettingsTab(value: SettingsTab | string | undefined): SettingsTab {
+  return value !== undefined && settingsTabValues.has(value as SettingsTab) ? value as SettingsTab : "通用";
+}
+
 const settingsTitles: Record<SettingsTab, string> = {
   通用: "通用",
   聊天: "聊天",
@@ -145,7 +150,7 @@ const settingsTitles: Record<SettingsTab, string> = {
 
 const settingsSubtitles: Record<SettingsTab, string> = {
   模型: "模型连接、API key 与默认模型管理。",
-  通用: "主题、背景、界面字体和 Agent 身份资料。",
+  通用: "主题、背景和界面字体。",
   "MCP 服务器": "管理可供 Agent 使用的 MCP 扩展服务。",
   技能: "管理本机可用的 Agent Skills，并按需查看技能内容。",
   插件: "管理当前项目的 Plugin，并从官方市场安装。",
@@ -217,7 +222,6 @@ function SettingsOverlayContent({
   onCancelMemorySleep,
   onClearMemory: _onClearMemory,
   onCompactMemory: _onCompactMemory,
-  onLoadIdentityOverview,
   onOpenChatDraft: _onOpenChatDraft,
   onLoadMemoryEmbeddingStatus: _onLoadMemoryEmbeddingStatus,
   onDownloadMemoryEmbeddingModel: _onDownloadMemoryEmbeddingModel,
@@ -245,7 +249,14 @@ function SettingsOverlayContent({
   const [dismissedLoadError, setDismissedLoadError] = useState<string>();
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
   const [defaultModelSaving, setDefaultModelSaving] = useState(false);
-  const activeTabRef = useRef<SettingsTab>(tab);
+  const activeTab = normalizeSettingsTab(tab);
+  const activeTabRef = useRef<SettingsTab>(activeTab);
+  useEffect(() => {
+    if (activeTab !== tab) {
+      activeTabRef.current = activeTab;
+      setTab(activeTab);
+    }
+  }, [activeTab, tab]);
   const notifyForTab = (sourceTab: SettingsTab, nextMessage: string | undefined): void => {
     if (activeTabRef.current === sourceTab) setMessage(nextMessage);
   };
@@ -262,9 +273,10 @@ function SettingsOverlayContent({
     if (!open) return;
     setMessage(undefined);
     if (targetTab) {
-      activeTabRef.current = targetTab;
-      setTab(targetTab);
-      if (targetTab === "记忆") setMemoryVisited(true);
+      const nextTab = normalizeSettingsTab(targetTab);
+      activeTabRef.current = nextTab;
+      setTab(nextTab);
+      if (nextTab === "记忆") setMemoryVisited(true);
     }
   }, [open, targetTab]);
   const settingsModels = stagedModelChoices(
@@ -277,7 +289,7 @@ function SettingsOverlayContent({
     ?? settingsDraft.snapshot?.models.defaultModel;
   const searchResults = searchSettings(searchQuery);
   const selectTab = (nextTab: SettingsTab): void => {
-    if (nextTab === tab) return;
+    if (nextTab === activeTab) return;
     activeTabRef.current = nextTab;
     setTab(nextTab);
     setMessage(undefined);
@@ -305,7 +317,7 @@ function SettingsOverlayContent({
     setCloseGuardOpen(false);
     if (closeRequest) await onResolveCloseRequest(closeRequest.requestId, "cancelled");
   };
-  const extensionSettings = tab === "MCP 服务器" || tab === "技能" || tab === "插件";
+  const extensionSettings = activeTab === "MCP 服务器" || activeTab === "技能" || activeTab === "插件";
   // 设置页提示统一走顶部药丸 toast：loadError 带警告图标优先展示，其余为纯文字提示。
   const visibleLoadError = settingsDraft.loadError && settingsDraft.loadError !== dismissedLoadError ? settingsDraft.loadError : undefined;
   const settingsToast = visibleLoadError ?? message;
@@ -346,7 +358,7 @@ function SettingsOverlayContent({
                 <div className="settings-nav-section" key={group.label}>
                   <h3 className="settings-nav-group">{group.label}</h3>
                   {group.items.map((item) => (
-                    <button aria-current={tab === item.tab ? "page" : undefined} className={tab === item.tab ? "is-selected" : ""} key={item.tab} onClick={() => selectTab(item.tab)} type="button">
+                    <button aria-current={activeTab === item.tab ? "page" : undefined} className={activeTab === item.tab ? "is-selected" : ""} key={item.tab} onClick={() => selectTab(item.tab)} type="button">
                       <Icon name={item.icon} size={17} />
                       <span>{item.label}</span>
                       {item.badge ? <em className="settings-nav-badge">{item.badge}</em> : null}
@@ -360,15 +372,15 @@ function SettingsOverlayContent({
           <main className={`settings-content${extensionSettings ? " is-extension-settings" : ""}`}>
           <header>
             <div className="settings-heading">
-              <h2>{settingsTitles[tab]}</h2>
-              <p>{settingsSubtitles[tab]}</p>
+              <h2>{settingsTitles[activeTab]}</h2>
+              <p>{settingsSubtitles[activeTab]}</p>
             </div>
             {settingsDraft.dirtyCount > 0 ? <span aria-live="polite" className="settings-header-unsaved" role="status">
               <span>未保存的更改</span>
               <span aria-hidden="true" className="settings-unsaved-dot" />
             </span> : null}
           </header>
-          {tab === "模型" ? <SettingsModels
+          {activeTab === "模型" ? <SettingsModels
             active={open}
             loading={!settingsDraft.snapshot && !settingsDraft.loadError}
             models={settingsModels}
@@ -475,21 +487,19 @@ function SettingsOverlayContent({
               }
             }}
           /> : null}
-          {tab === "通用" ? <SettingsAppearance
+          {activeTab === "通用" ? <SettingsAppearance
             theme={settingsDraft.draft?.themePreference ?? themePreference}
             onThemeChange={settingsDraft.setThemePreference}
             font={settingsDraft.draft?.fontPreference ?? fontPreference}
             onFontChange={settingsDraft.setFontPreference}
-            onLoadIdentityOverview={onLoadIdentityOverview}
-            onNotify={(nextMessage) => notifyForTab("通用", nextMessage)}
           /> : null}
-          {tab === "活动记录" ? <SettingsActivity /> : null}
-          {tab === "聊天" ? (<><SettingsChatParams /><SettingsCapabilityDefaults /><SettingsCompaction /></>) : null}
-          {tab === "权限" ? <SettingsPermissions /> : null}
-          {tab === "快速对话" ? <SettingsQuickChat /> : null}
+          {activeTab === "活动记录" ? <SettingsActivity /> : null}
+          {activeTab === "聊天" ? (<><SettingsChatParams /><SettingsCapabilityDefaults /><SettingsCompaction /></>) : null}
+          {activeTab === "权限" ? <SettingsPermissions /> : null}
+          {activeTab === "快速对话" ? <SettingsQuickChat /> : null}
           {memoryVisited ? <SettingsMemory
             models={settingsModels}
-            hidden={tab !== "记忆"}
+            hidden={activeTab !== "记忆"}
             workspaceAvailable={workspace !== undefined}
             onLoadStats={onLoadMemoryStats}
             onLoadEntries={onLoadMemoryEntries}
@@ -507,11 +517,11 @@ function SettingsOverlayContent({
             onNotify={(nextMessage) => notifyForTab("记忆", nextMessage)}
             sessionRunning={runtimeBusy}
           /> : null}
-          {tab === "MCP 服务器" ? <McpServersView onError={_onNotify} onSuccess={(nextMessage) => notifyForTab("MCP 服务器", nextMessage)} projectId={workspace?.project.id} /> : null}
-          {tab === "技能" ? <SettingsExtensionsView kind="skills" onError={_onNotify} projectId={workspace?.project.id} /> : null}
-          {tab === "插件" ? <SettingsExtensionsView kind="plugins" onError={_onNotify} projectId={workspace?.project.id} /> : null}
-          {tab === "关于" ? <SettingsAbout version={version} /> : null}
-          {tab === "联网搜索" ? <SettingsWebSearch
+          {activeTab === "MCP 服务器" ? <McpServersView onError={_onNotify} onSuccess={(nextMessage) => notifyForTab("MCP 服务器", nextMessage)} projectId={workspace?.project.id} /> : null}
+          {activeTab === "技能" ? <SettingsExtensionsView kind="skills" onError={_onNotify} projectId={workspace?.project.id} /> : null}
+          {activeTab === "插件" ? <SettingsExtensionsView kind="plugins" onError={_onNotify} projectId={workspace?.project.id} /> : null}
+          {activeTab === "关于" ? <SettingsAbout version={version} /> : null}
+          {activeTab === "联网搜索" ? <SettingsWebSearch
             onNotify={(nextMessage) => notifyForTab("联网搜索", nextMessage)}
             onOpenExternal={onOpenExternal}
             onLoadCookieJarStatus={onLoadCookieJarStatus}

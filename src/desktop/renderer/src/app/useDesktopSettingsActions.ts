@@ -150,12 +150,6 @@ export function useDesktopSettingsActions({
     return await memoryEntries(requireProject(projectIdRef.current), filter, offset, limit);
   }, [projectIdRef]);
 
-  const loadIdentityOverview = useCallback(async () => {
-    const load = window.biny.identityOverview;
-    if (typeof load !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await load(requireProject(projectIdRef.current));
-  }, [projectIdRef]);
-
   const searchMemory = useCallback(async (filter: DesktopMemoryOriginFilter, query: string, includeArchived = false) => {
     return await window.biny.searchMemory(requireProject(projectIdRef.current), filter, query, includeArchived);
   }, [projectIdRef]);
@@ -233,7 +227,6 @@ export function useDesktopSettingsActions({
     loadMemoryOverview,
     loadMemoryStats,
     loadMemoryEntries,
-    loadIdentityOverview,
     openBrowser,
     rebuildMemoryEmbeddingIndex,
     searchMemory,
