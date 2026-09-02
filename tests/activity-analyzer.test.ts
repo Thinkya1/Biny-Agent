@@ -47,7 +47,12 @@ testReportRangeParsing();
 /** 心跳/零星 session（事件数 < 阈值）不调用模型，直接落低置信度占位记录。 */
 async function testTrivialSessionSkipsModel(): Promise<void> {
   await withStore(async (store) => {
-    const sessionId = seedEndedSession(store, todayAt(9), todayAt(10), 2);
+    const sessionId = seedEndedSession(
+      store,
+      todayAt(9),
+      new Date(Date.parse(todayAt(9)) + 10_000).toISOString(),
+      2
+    );
     const { model, calls } = scriptedModel([ANALYSIS_JSON]);
     const outcome = await analyzeActivitySession(deps(store, localPolicy(), model), sessionId);
     assert.equal(outcome.status, "trivial");

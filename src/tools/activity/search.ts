@@ -3,11 +3,11 @@
  *
  * 两条检索路径合并暴露、内部分开实现（分开实现更便于调节排序）：
  * - mode=keyword（默认）：走现有 FTS5，搜的是脱敏事件行（粒度细，能命中「某条操作」）。
- * - mode=semantic：本地嵌入 analysis 行（project+summary+topics+highlights）做
- *   cosine top N，适合「那个讲 XX 的页面/那件事」这类模糊指向；本地嵌入模型不可用或尚无
- *   向量时返回友好提示，由模型回退到 keyword 模式，不抛给调用方。
+ * - mode=semantic：优先对截图 OCR frame 做本地 embedding，再以 analysis 行补充，做 cosine
+ *   top N，适合「那个讲 XX 的页面/那件事」这类模糊指向；本地嵌入模型不可用或尚无向量时
+ *   返回友好提示，由模型回退到 keyword 模式，不抛给调用方。
  *
- * 两侧都只接触 store 查询层提供的脱敏数据；快照路径、OCR 原文不进结果文本。
+ * 两侧都只接触 store 查询层提供的脱敏数据；语义结果只显示脱敏 OCR 短摘录，不暴露快照路径。
  */
 import { z } from "zod";
 import { searchActivitySemantic, type ActivitySemanticSearchResult } from "../../activity/semanticSearch.js";
@@ -41,9 +41,9 @@ export function createActivitySearchTool(deps: ActivitySearchToolDeps): Tool<Act
     description: [
       "Search the user's recorded on-device activity (redacted summaries, applications, windows).",
       "mode=keyword (default) full-text-searches individual event lines for explicit keyword lookups;",
-      "mode=semantic finds whole analyzed sessions about a topic even when wording differs — use it for vague references to past work.",
-      "Semantic mode embeds only redacted analysis summaries locally on-device and reports a friendly message when the local embedding model is unavailable.",
-      "Screenshots and OCR text never leave the device."
+      "mode=semantic finds OCR-backed activity sessions about a topic even when wording differs — use it for vague references to past work.",
+      "Semantic mode embeds redacted OCR and analysis text locally on-device and reports a friendly message when the local embedding model is unavailable.",
+      "Screenshots stay on-device; semantic results contain only redacted text excerpts."
     ].join(" "),
     promptSnippet: "Search recorded activity events (keyword) or analyzed sessions (semantic)",
     promptGuidelines: [
@@ -123,7 +123,11 @@ function renderSemanticSearchResult(query: string, result: ActivitySemanticSearc
     const project = hit.project?.trim() ? ` [${hit.project.trim()}]` : "";
     const topics = hit.topics.length ? `\n  - 主题：${hit.topics.join("；")}` : "";
     const highlights = hit.highlights.length ? `\n  - 亮点：${hit.highlights.join("；")}` : "";
-    return `- ${formatLocalTime(hit.startedAt)}${project} 相似度 ${hit.similarity.toFixed(3)}\n  ${hit.summary.trim()}${topics}${highlights}`;
+    const source = hit.source === "ocr" ? "OCR" : "分析";
+    const excerpt = hit.excerpt?.trim() && hit.excerpt.trim() !== hit.summary.trim()
+      ? `\n  - OCR 摘录：${hit.excerpt.trim()}`
+      : "";
+    return `- ${formatLocalTime(hit.occurredAt ?? hit.startedAt)}${project} 相似度 ${hit.similarity.toFixed(3)}（${source}）\n  ${hit.summary.trim()}${excerpt}${topics}${highlights}`;
   });
   const note = result.embedded > 0 ? `\n（本次补嵌入 ${String(result.embedded)} 个会话）` : "";
   return [head, "", ...sections, "", `模型：${result.model}${note}`].join("\n");

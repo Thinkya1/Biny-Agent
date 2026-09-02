@@ -1,8 +1,9 @@
 /**
  * Activity 与模型之间共享的最小数据契约。
  *
- * 这里不放截图、OCR 原文或输入事件类型。模型只通过主动调用 activity_report 工具读取脱敏后的
- * 事件摘要聚合结果；是否放行由 ActivityPrivacyPolicy 统一决定，原始截图/OCR 任何策略下都不出设备。
+ * 这里不放截图、OCR 原文或输入事件类型。模型只能读取脱敏后的事件、OCR 和分析投影：来源可以是
+ * 用户主动调用 activity_report、后台 session 分析或每日叙事摘要；是否放行由
+ * ActivityPrivacyPolicy 统一决定，原始截图/OCR 任何策略下都不出设备。
  */
 import type { ActivityDataResidency } from "./settings.js";
 
@@ -24,22 +25,20 @@ export interface ActivityModelIdentity {
  */
 export type ActivityStorageTier = "ephemeral" | "standard" | "important";
 
+/** 截图文件的物理保留档位，与分析结果的 storageTier 不是同一套枚举。 */
+export type ActivitySnapshotStorageTier = "hot" | "warm" | "cold";
+
 export type ActivitySource = "event" | "screenshot_fallback";
 
 export type ActivityEventType =
-  | "frontmost_application_changed"
-  | "window_changed"
-  | "focus_changed"
-  | "title_changed"
-  | "value_changed"
-  | "selection_changed"
-  | "mouse_down"
-  | "mouse_up"
-  | "mouse_drag"
-  | "scroll"
-  | "key_burst"
-  | "browser_tab_changed"
-  | "fallback_capture";
+  | "click"
+  | "keypress"
+  | "app_focus"
+  | "browser_visit"
+  | "window_title"
+  | "lock"
+  | "unlock"
+  | "system";
 
 export type ActivityServiceState =
   | "stopped"
@@ -55,9 +54,10 @@ export interface ActivityRuntimeSnapshot {
   collectorAvailable: boolean;
   screenRecordingGranted: boolean;
   accessibilityGranted: boolean;
-  inputMonitoringGranted: boolean;
   axAvailable: boolean;
   fallbackAvailable: boolean;
+  /** macOS 当前是否处于锁屏；锁屏期间不采集截图，解锁后恢复。 */
+  screenLocked: boolean;
   sessions: number;
   events: number;
   fallbackCaptures: number;

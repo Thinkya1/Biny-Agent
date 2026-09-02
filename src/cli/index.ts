@@ -21,6 +21,18 @@ import { planCommand } from "./commands/plan.js";
 import { tuiCommand } from "./commands/tui.js";
 import { runtimeHostCommand } from "./commands/runtimeHost.js";
 import {
+  activityClearCommand,
+  activityConfigCommand,
+  activityDigestCommand,
+  activityReportCommand,
+  activitySearchCommand,
+  activityServeCommand,
+  activitySessionsCommand,
+  activityStatusCommand,
+  activitySuggestionsCommand,
+  activitySummaryCommand
+} from "./commands/activity.js";
+import {
   automationCreateCommand,
   automationDeleteCommand,
   automationListCommand,
@@ -167,6 +179,51 @@ session
     const format: SessionTransferFormat | undefined = options.format === "biny" || options.format === "claude" || options.format === "codex" ? options.format : undefined;
     return wrap(() => sessionImportCommand(workspaceRoot, file, { format, json: options.json }))();
   });
+const activity = program.command("activity").description("Inspect and serve local Activity Recorder data");
+activity.command("status").option("--json", "print JSON").action((options: { json?: boolean }) => wrap(() => activityStatusCommand(workspaceRoot, options))());
+activity.command("config").option("--json", "print JSON").action((options: { json?: boolean }) => wrap(() => activityConfigCommand(workspaceRoot, options))());
+activity
+  .command("search")
+  .argument("<query...>", "keyword query")
+  .option("--limit <count>", "maximum results", parsePositiveInteger)
+  .option("--json", "print JSON")
+  .action((query: string[], options: { limit?: number; json?: boolean }) => wrap(() => activitySearchCommand(workspaceRoot, query.join(" "), options))());
+activity
+  .command("sessions")
+  .option("--limit <count>", "maximum sessions", parsePositiveInteger)
+  .option("--since <timestamp>", "ISO lower bound")
+  .option("--json", "print JSON")
+  .action((options: { limit?: number; since?: string; json?: boolean }) => wrap(() => activitySessionsCommand(workspaceRoot, options))());
+activity
+  .command("digest")
+  .option("--lookback-min <minutes>", "minutes to include", parsePositiveInteger)
+  .option("--json", "print JSON")
+  .action((options: { lookbackMin?: number; json?: boolean }) => wrap(() => activityDigestCommand(workspaceRoot, options))());
+activity
+  .command("report")
+  .argument("[date]", "today, yesterday, or YYYY-MM-DD", "today")
+  .option("--json", "print JSON")
+  .action((date: string, options: { json?: boolean }) => wrap(() => activityReportCommand(workspaceRoot, date, options))());
+activity
+  .command("summary")
+  .argument("[date]", "YYYY-MM-DD", localDateKey())
+  .option("--json", "print JSON")
+  .action((date: string, options: { json?: boolean }) => wrap(() => activitySummaryCommand(workspaceRoot, date, options))());
+activity
+  .command("suggestions")
+  .option("--force", "ignore the ten-minute cache")
+  .option("--json", "print JSON")
+  .action((options: { force?: boolean; json?: boolean }) => wrap(() => activitySuggestionsCommand(workspaceRoot, options))());
+activity
+  .command("clear")
+  .requiredOption("--yes", "confirm deletion of local Activity data")
+  .option("--json", "print JSON")
+  .action((options: { yes?: boolean; json?: boolean }) => wrap(() => activityClearCommand(workspaceRoot, options))());
+activity
+  .command("serve")
+  .description("Run the loopback Activity REST API and recorder")
+  .option("--port <port>", "TCP port; 0 chooses a free port", parseNonNegativeInteger, 0)
+  .action((options: { port?: number }) => wrap(() => activityServeCommand(workspaceRoot, options))());
 program
   .command("plan")
   .description("Create a plan without executing write, edit, or command tools")
@@ -242,4 +299,11 @@ function parseNonNegativeInteger(value: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) throw new InvalidArgumentError(`Expected a non-negative integer, got: ${value}`);
   return parsed;
+}
+
+function localDateKey(now = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${String(year)}-${month}-${day}`;
 }

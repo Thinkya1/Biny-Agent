@@ -6,15 +6,30 @@ import { redactSecrets } from "../utils/redaction.js";
  */
 export function redactActivityText(value: string | undefined): string | undefined {
   if (!value?.trim()) return undefined;
-  const redacted = redactSecrets(value)
+  const redacted = redactSensitiveText(value)
+    .replace(/\s+/gu, " ")
+    .trim();
+  return redacted ? redacted.slice(0, 2_000) : undefined;
+}
+
+/** OCR 是逐行文本；保留换行，避免代码、表格和多语言界面在落库时变成一行。 */
+export function redactActivityOcrText(value: string | undefined): string | undefined {
+  if (!value?.trim()) return undefined;
+  const redacted = redactSensitiveText(value)
+    .replace(/[^\S\r\n]+/gu, " ")
+    .replace(/\r\n?/gu, "\n")
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
+  return redacted ? redacted.slice(0, 2_000) : undefined;
+}
+
+function redactSensitiveText(value: string): string {
+  return redactSecrets(value)
     .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/gu, "[redacted email]")
     .replace(/https?:\/\/[^\s]+/giu, "[redacted url]")
     .replace(/(?:\/Users\/|\/private\/var\/folders\/)[^\s]+/gu, "[redacted path]")
     .replace(/\b(?:\d[ -]?){13,19}\b/gu, "[redacted number]")
-    .replace(/\b(password|passwd|token|secret|api[-_ ]?key|access[-_ ]?token)\s*([:=：])\s*[^\s,;，；]+/giu, "$1$2[redacted]")
-    .replace(/\s+/gu, " ")
-    .trim();
-  return redacted ? redacted.slice(0, 2_000) : undefined;
+    .replace(/\b(password|passwd|token|secret|api[-_ ]?key|access[-_ ]?token)\s*([:=：])\s*[^\s,;，；]+/giu, "$1$2[redacted]");
 }
 
 export interface ActivitySummaryDetails {
@@ -46,19 +61,18 @@ export function activitySummary(application: string | undefined, text: string | 
 
 function activityEventLabel(value: string): string {
   const labels: Record<string, string> = {
-    frontmost_application_changed: "前台应用变化",
-    window_changed: "窗口变化",
-    focus_changed: "焦点变化",
-    title_changed: "标题变化",
-    value_changed: "控件值变化",
-    selection_changed: "选区变化",
-    mouse_down: "鼠标按下",
-    mouse_up: "鼠标释放",
-    mouse_drag: "鼠标拖拽",
-    scroll: "滚轮",
-    key_burst: "键盘活动",
-    browser_tab_changed: "浏览器标签变化",
+    click: "点击",
+    keypress: "键盘活动",
+    app_focus: "应用切换",
+    browser_visit: "浏览器访问",
+    window_title: "窗口标题",
+    lock: "锁屏",
+    unlock: "解锁",
+    system: "系统事件",
     fallback_capture: "截图 fallback",
+    typing_pause: "输入停顿",
+    visual_change: "画面变化",
+    heartbeat: "心跳",
     accessibility_unavailable: "辅助功能不可用",
     ax_connection_failed: "AX 连接失败",
     missing_window_or_focus_semantics: "缺少窗口或焦点语义",

@@ -2,16 +2,28 @@
  * Activity 的全局 SQLite/FTS5 存储。
  *
  * 事件本身不依赖截图即可落盘；只有视觉 fallback 才会写 JPEG。所有进入数据库的文本
- * 都先经过规则脱敏，原始截图和 SQLite 继续保存在全局 0700 目录，不进入项目 Session、
- * LocalMemory 或 TELOS。
+ * 都先经过规则脱敏，原始截图和 SQLite 继续保存在全局 0700 目录，不进入项目 Session 或 LocalMemory。
  */
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import type { ActivityEventType, ActivitySource, ActivityStorageTier } from "./types.js";
-import { activitySummary, redactActivityText } from "./redaction.js";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
+import sharp from "sharp";
+import type {
+  ActivityEventType,
+  ActivitySnapshotStorageTier,
+  ActivitySource,
+  ActivityStorageTier
+} from "./types.js";
+import type {
+  ActivitySummaryKind,
+  ActivitySummaryRecord,
+  ActivitySummarySource,
+  ActivitySummaryStats
+} from "./summary.js";
+import { ACTIVITY_FTS_INDEX_VERSION, activityFtsMatch, segmentActivityText } from "./ftsText.js";
+import { activitySummary, redactActivityOcrText, redactActivityText } from "./redaction.js";
 
 export interface ActivityEventInput {
   sessionId: string;
@@ -28,13 +40,26 @@ export interface ActivityEventInput {
   /** 结构化 URL 列（浏览器标签采集 P4）：只清理控制字符并限长，不做内容脱敏。 */
   url?: string;
   mouseEventType?: string;
-  mouseButton?: number;
+  mouseButton?: string;
+  /** 全局输入监听只保留 keyCode/modifier，不保存字符内容。 */
+  keyCode?: number;
+  keyModifiers?: number;
+  mouseX?: number;
+  mouseY?: number;
+  /** keypress 聚合的首个 keyDown 时间；occurredAt 保留最后一个 keyDown 时间。 */
+  inputEventFirstAt?: string;
   fallbackReason?: string;
   inputEventCount?: number;
 }
 
 export interface ActivityFallbackCaptureInput extends ActivityEventInput {
   jpeg: Uint8Array;
+  width?: number;
+  height?: number;
+  captureTrigger?: string;
+  contentHash?: string;
+  histogramChange?: number;
+  pixelDiff?: number;
 }
 
 export interface ActivitySessionRecord {
@@ -65,17 +90,100 @@ export interface ActivitySearchResult {
   axRole?: string;
   axTitle?: string;
   summary: string;
+  /** 已脱敏的 OCR 投影；只在主动搜索/回看时返回，原始截图不会进入工具结果。 */
+  ocrText?: string;
   url?: string;
   fallbackReason?: string;
   snapshotPath?: string;
+  mouseButton?: string;
+  keyCode?: number;
+  keyModifiers?: number;
+  mouseX?: number;
+  mouseY?: number;
+  inputEventFirstAt?: string;
 }
 
 export interface ActivityStoredEvent extends ActivitySearchResult {
   inputEventCount: number;
+  snapshotId?: number;
+}
+
+/** 回看界面使用的截图元数据；绝不把磁盘路径暴露给 renderer。 */
+export interface ActivitySnapshotRecord {
+  id: number;
+  sessionId: string;
+  eventId: number;
+  capturedAt: string;
+  bytes: number;
+  width?: number;
+  height?: number;
+  trigger?: string;
+  contentHash?: string;
+  histogramChange?: number;
+  pixelDiff?: number;
+  storageTier: ActivitySnapshotStorageTier;
+}
+
+/** 单个 session 的可回看事件；文本已经在写入时完成脱敏。 */
+export type ActivitySessionEvent = ActivityStoredEvent;
+
+export interface ActivityOcrFrame {
+  id: number;
+  sessionId: string;
+  snapshotId: number;
+  occurredAt: string;
+  text: string;
+  application?: string;
+  windowTitle?: string;
+}
+
+export interface ActivityOcrEmbeddingSource {
+  id: number;
+  sessionId: string;
+  text: string;
+}
+
+export interface ActivityOcrEmbeddingRow extends ActivityOcrEmbeddingSource {
+  occurredAt: string;
+  startedAt: string;
+  application?: string;
+  windowTitle?: string;
+  embedding: Float32Array;
+}
+
+export interface ActivityAnalysisCommit {
+  label?: string;
+  ref?: string;
+  repo?: string;
+  hash?: string;
+  message?: string;
+  url?: string;
+}
+
+export interface ActivityMemoryCandidate {
+  type: "project" | "feedback" | "reference" | "user";
+  content: string;
+  why: string;
+}
+
+/** entities 分组；顶层兼容字段仍保留，便于旧报告和语义索引继续工作。 */
+export interface ActivityAnalysisEntityDetails {
+  prs: ActivityAnalysisReference[];
+  issues: ActivityAnalysisReference[];
+  commits: ActivityAnalysisCommit[];
+  people: string[];
+  identifiers: string[];
+  repos: string[];
+  versions: string[];
+  events: string[];
+  decisions: string[];
+  urls: string[];
 }
 
 /** 分析结果里的结构化引用（PR / issue）。字段全部可选，由模型按可见证据填写。 */
 export interface ActivityAnalysisReference {
+  label?: string;
+  ref?: string;
   repo?: string;
   number?: number;
   url?: string;
@@ -88,6 +196,9 @@ export interface ActivitySessionAnalysis {
   analyzedAt: string;
   analyzerModel: string;
   project?: string;
+  /** session card 的短标题和详细描述；旧分析行可能没有这两列。 */
+  title?: string;
+  description?: string;
   summary: string;
   topics: string[];
   prs: ActivityAnalysisReference[];
@@ -99,6 +210,15 @@ export interface ActivitySessionAnalysis {
   entities: string[];
   /** 值得记住的高光/产出，短句列表；worthMemory 为真时优先写进记忆。 */
   highlights: string[];
+  /** entities 中额外抽取的提交、标识符、仓库、事件和 URL。 */
+  commits?: ActivityAnalysisCommit[];
+  identifiers?: string[];
+  repos?: string[];
+  events?: string[];
+  urls?: string[];
+  entityDetails?: ActivityAnalysisEntityDetails;
+  /** 只有这些候选真正存在时，worthMemory 才能为 true。 */
+  memoryCandidates?: ActivityMemoryCandidate[];
   /** 该 session 是否值得写入长期记忆。 */
   worthMemory: boolean;
   /** 该 session 是否值得沉淀为知识（报告/摘要里单独标注，供知识层消费）。 */
@@ -123,16 +243,22 @@ export interface ActivityPendingAnalysisSession {
   startedAt: string;
   endedAt: string;
   eventCount: number;
+  durationMs: number;
+  snapshotCount: number;
 }
 
 /**
- * 组装分析输入时只读取这三个字段。快照路径、OCR 原文、输入事件计数都不在这条查询里，
- * 从源头保证敏感列不会进入送给分析模型的文本。
+ * 组装分析输入时只读取已脱敏的事件摘要与 OCR 文本。快照路径、输入事件计数都不在这条
+ * 查询里；OCR 文本在写入时已脱敏，并由分析层按预算裁剪。
  */
 export interface ActivityEventSummary {
   occurredAt: string;
   summary: string;
   application?: string;
+  windowTitle?: string;
+  eventType?: string;
+  ocrText?: string;
+  url?: string;
 }
 
 /** digest / sessions 工具的近期 session 行：session 元数据 + 已落库的分析（可缺）。 */
@@ -150,7 +276,8 @@ export interface ActivitySessionDetail {
   startedAt: string;
   endedAt?: string;
   eventCount: number;
-  events: ActivityEventSummary[];
+  events: ActivitySessionEvent[];
+  snapshots: ActivitySnapshotRecord[];
   analysis?: ActivitySessionAnalysis;
 }
 
@@ -200,9 +327,12 @@ export class ActivityStore {
           id TEXT PRIMARY KEY,
           started_at TEXT NOT NULL,
           ended_at TEXT,
+          duration_ms INTEGER,
+          updated_at TEXT,
           event_count INTEGER NOT NULL DEFAULT 0
         );
       `);
+      this.ensureSessionColumns(database);
       this.migrateLegacyEvents(database);
       database.exec(`
         CREATE TABLE IF NOT EXISTS activity_events (
@@ -219,10 +349,15 @@ export class ActivityStore {
           url TEXT,
           redacted_text TEXT,
           mouse_event_type TEXT,
-          mouse_button INTEGER,
+          mouse_button TEXT,
+          key_code INTEGER,
+          key_modifiers INTEGER,
+          mouse_x REAL,
+          mouse_y REAL,
           summary TEXT NOT NULL,
           ocr_text TEXT,
           input_event_count INTEGER NOT NULL DEFAULT 0,
+          input_event_first_at TEXT,
           fallback_reason TEXT,
           snapshot_path TEXT,
           snapshot_bytes INTEGER NOT NULL DEFAULT 0
@@ -235,6 +370,58 @@ export class ActivityStore {
       if (!tableColumns(database, "activity_events").has("url")) {
         database.exec("ALTER TABLE activity_events ADD COLUMN url TEXT;");
       }
+      this.ensureEventColumns(database);
+      // 将截图与事件分开存储：事件是时间线元数据，snapshot 是可轮转的原图索引，
+      // OCR frame 再作为截图的文本投影。保留 activity_events.snapshot_* 是为了兼容已有库，
+      // 新写入同时维护两份引用，旧库在这里一次性回填独立索引。
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS activity_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES activity_sessions(id) ON DELETE CASCADE,
+          event_id INTEGER NOT NULL UNIQUE REFERENCES activity_events(id) ON DELETE CASCADE,
+          captured_at TEXT NOT NULL,
+          file_path TEXT,
+          bytes INTEGER NOT NULL DEFAULT 0,
+          width INTEGER,
+          height INTEGER,
+          trigger TEXT,
+          content_hash TEXT,
+          histogram_change REAL,
+          pixel_diff REAL,
+          storage_tier TEXT NOT NULL DEFAULT 'hot'
+        );
+        CREATE INDEX IF NOT EXISTS activity_snapshots_time_idx ON activity_snapshots(captured_at);
+        CREATE INDEX IF NOT EXISTS activity_snapshots_session_idx ON activity_snapshots(session_id);
+        CREATE TABLE IF NOT EXISTS activity_ocr_frames (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES activity_sessions(id) ON DELETE CASCADE,
+          snapshot_id INTEGER NOT NULL UNIQUE REFERENCES activity_snapshots(id) ON DELETE CASCADE,
+          occurred_at TEXT NOT NULL,
+          text TEXT NOT NULL,
+          application TEXT,
+          window_title TEXT,
+          model_fingerprint TEXT,
+          embedding BLOB,
+          embedded_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS activity_ocr_frames_time_idx ON activity_ocr_frames(occurred_at);
+        CREATE INDEX IF NOT EXISTS activity_ocr_frames_session_idx ON activity_ocr_frames(session_id);
+        CREATE INDEX IF NOT EXISTS activity_ocr_frames_fp_idx ON activity_ocr_frames(model_fingerprint);
+        CREATE TABLE IF NOT EXISTS activity_summaries (
+          kind TEXT NOT NULL,
+          date_key TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          stats_json TEXT NOT NULL DEFAULT '{}',
+          model TEXT,
+          is_partial INTEGER NOT NULL DEFAULT 0,
+          generated_at TEXT NOT NULL,
+          PRIMARY KEY (kind, date_key)
+        );
+        CREATE INDEX IF NOT EXISTS activity_summaries_date_idx ON activity_summaries(date_key);
+      `);
+      this.ensureSummaryColumns(database);
+      this.ensureSnapshotColumns(database);
+      this.ensureSnapshotRows(database);
       // 分析层输出表：一个 session 一行的结构化分析结果，与原始事件分表存放。
       database.exec(`
         CREATE TABLE IF NOT EXISTS activity_session_analysis (
@@ -255,6 +442,15 @@ export class ActivityStore {
           worth_knowledge INTEGER NOT NULL DEFAULT 0,
           is_meeting INTEGER NOT NULL DEFAULT 0,
           storage_tier TEXT NOT NULL DEFAULT 'standard',
+          title TEXT,
+          description TEXT,
+          commits_json TEXT NOT NULL DEFAULT '[]',
+          identifiers_json TEXT NOT NULL DEFAULT '[]',
+          repos_json TEXT NOT NULL DEFAULT '[]',
+          events_json TEXT NOT NULL DEFAULT '[]',
+          urls_json TEXT NOT NULL DEFAULT '[]',
+          memory_candidates_json TEXT NOT NULL DEFAULT '[]',
+          entity_details_json TEXT NOT NULL DEFAULT '{}',
           confidence   REAL NOT NULL DEFAULT 0,
           source_event_count INTEGER NOT NULL DEFAULT 0,
           input_hash   TEXT NOT NULL
@@ -293,24 +489,46 @@ export class ActivityStore {
   startSession(startedAt: string): string {
     const database = this.requireDatabase();
     const id = randomUUID();
-    database.prepare("INSERT INTO activity_sessions (id, started_at) VALUES (?, ?)").run(id, startedAt);
+    database.prepare("INSERT INTO activity_sessions (id, started_at, updated_at) VALUES (?, ?, ?)")
+      .run(id, startedAt, new Date().toISOString());
     return id;
   }
 
   endSession(sessionId: string, endedAt: string): void {
-    this.requireDatabase().prepare("UPDATE activity_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL").run(endedAt, sessionId);
+    const database = this.requireDatabase();
+    const row = database.prepare("SELECT started_at FROM activity_sessions WHERE id = ? AND ended_at IS NULL").get(sessionId) as { started_at: string } | undefined;
+    if (!row) return;
+    database.prepare("UPDATE activity_sessions SET ended_at = ?, duration_ms = ?, updated_at = ? WHERE id = ? AND ended_at IS NULL")
+      .run(endedAt, durationBetween(row.started_at, endedAt), new Date().toISOString(), sessionId);
+  }
+
+  /** 启动时收口上次异常退出遗留的 open session，避免它们继续被日报当作进行中记录。 */
+  closeOpenSessions(endedAt: string): void {
+    this.requireDatabase().prepare(`
+      UPDATE activity_sessions
+      SET ended_at = ?,
+          duration_ms = MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000.0 AS INTEGER)),
+          updated_at = ?
+      WHERE ended_at IS NULL
+    `).run(endedAt, endedAt, new Date().toISOString());
   }
 
   recordEvent(input: ActivityEventInput): ActivityStoredEvent {
     return this.insertEvent(input, undefined);
   }
 
-  async recordFallbackCapture(input: ActivityFallbackCaptureInput, maxStorageMb: number): Promise<ActivityStoredEvent> {
+  async recordFallbackCapture(input: ActivityFallbackCaptureInput): Promise<ActivityStoredEvent> {
     const root = this.requireRoot();
-    const filename = `${input.occurredAt.replace(/[^0-9]/gu, "").slice(0, 17)}-${randomUUID()}.jpg`;
-    const relativeSnapshotPath = path.join("snapshots", filename);
+    const timestamp = safeSnapshotTimestamp(input.occurredAt);
+    const dateKey = snapshotDateKey(input.occurredAt);
+    // 文件名后缀是随机 ID；内容 hash 只放在 snapshot 元数据里，避免同一毫秒内
+    // 相同画面因 hash 相同而发生文件路径碰撞。
+    const relativeSnapshotPath = path.join("snapshots", dateKey, `${timestamp}-${randomUUID().slice(0, 8)}.jpg`);
     const snapshotPath = path.join(root, relativeSnapshotPath);
-    const temporaryPath = `${snapshotPath}.${randomUUID()}.tmp`;
+    await mkdir(path.dirname(snapshotPath), { recursive: true, mode: 0o700 });
+    const temporaryDirectory = path.join(root, ".capture-tmp");
+    await mkdir(temporaryDirectory, { recursive: true, mode: 0o700 });
+    const temporaryPath = path.join(temporaryDirectory, `${randomUUID()}.tmp`);
     await writeFile(temporaryPath, input.jpeg, { mode: 0o600 });
     try {
       await rename(temporaryPath, snapshotPath);
@@ -319,8 +537,16 @@ export class ActivityStore {
         ...input,
         source: "screenshot_fallback",
         eventType: input.eventType || "fallback_capture"
-      }, { relativeSnapshotPath, bytes: input.jpeg.byteLength });
-      await this.enforceStorageLimit(maxStorageMb);
+      }, {
+        relativeSnapshotPath,
+        bytes: input.jpeg.byteLength,
+        width: input.width,
+        height: input.height,
+        trigger: input.captureTrigger ?? input.fallbackReason ?? input.eventType,
+        contentHash: input.contentHash,
+        histogramChange: input.histogramChange,
+        pixelDiff: input.pixelDiff
+      });
       const current = this.requireDatabase().prepare("SELECT snapshot_path FROM activity_events WHERE id = ?").get(stored.id) as { snapshot_path: string | null } | undefined;
       return { ...stored, snapshotPath: current?.snapshot_path ?? undefined };
     } catch (error) {
@@ -335,16 +561,17 @@ export class ActivityStore {
     const counts = database.prepare(`
       SELECT
         (SELECT COUNT(*) FROM activity_sessions) AS sessions,
-        (SELECT COUNT(*) FROM activity_events) AS events,
-        (SELECT COUNT(*) FROM activity_events WHERE source = 'screenshot_fallback' AND snapshot_path IS NOT NULL) AS fallback_captures,
-        COALESCE((SELECT SUM(snapshot_bytes) FROM activity_events), 0) AS storage_bytes
+        (SELECT COUNT(*) FROM activity_events WHERE source <> 'screenshot_fallback') AS events,
+        (SELECT COUNT(*) FROM activity_snapshots WHERE file_path IS NOT NULL) AS fallback_captures,
+        COALESCE((SELECT SUM(bytes) FROM activity_snapshots), 0) AS storage_bytes
     `).get() as { sessions: number; events: number; fallback_captures: number; storage_bytes: number };
     const rows = database.prepare(`
       SELECT s.id, s.started_at, s.ended_at, s.event_count,
-        COUNT(CASE WHEN e.source = 'screenshot_fallback' THEN 1 END) AS snapshot_count,
+        COUNT(DISTINCT snap.id) AS snapshot_count,
         GROUP_CONCAT(DISTINCT e.application) AS applications
       FROM activity_sessions s
       LEFT JOIN activity_events e ON e.session_id = s.id
+      LEFT JOIN activity_snapshots snap ON snap.session_id = s.id
       GROUP BY s.id
       ORDER BY s.started_at DESC
       LIMIT ?
@@ -368,11 +595,13 @@ export class ActivityStore {
   search(query: string, limit = 20): ActivitySearchResult[] {
     const normalized = query.trim();
     if (!normalized) return [];
-    const match = normalized.split(/\s+/u).map((token) => `"${token.replaceAll('"', '""')}"*`).join(" AND ");
+    const match = activityFtsMatch(normalized);
+    if (!match) return [];
     const rows = this.requireDatabase().prepare(`
       SELECT e.id, e.session_id, e.occurred_at, e.source, e.event_type,
         e.application, e.window_title, e.ax_role, e.ax_title, e.summary,
-        e.url, e.fallback_reason, e.snapshot_path
+        e.ocr_text, e.url, e.fallback_reason, e.snapshot_path, e.mouse_button, e.key_code, e.key_modifiers,
+        e.mouse_x, e.mouse_y, e.input_event_first_at
       FROM activity_fts f
       JOIN activity_events e ON e.id = CAST(f.event_id AS INTEGER)
       WHERE activity_fts MATCH ?
@@ -390,19 +619,30 @@ export class ActivityStore {
       axRole: nullableString(row.ax_role),
       axTitle: nullableString(row.ax_title),
       summary: String(row.summary),
+      ocrText: nullableString(row.ocr_text),
       url: nullableString(row.url),
       fallbackReason: nullableString(row.fallback_reason),
-      snapshotPath: nullableString(row.snapshot_path)
+      snapshotPath: nullableString(row.snapshot_path),
+      mouseButton: nullableString(row.mouse_button),
+      keyCode: nullableInteger(row.key_code),
+      keyModifiers: nullableInteger(row.key_modifiers),
+      mouseX: nullableNumber(row.mouse_x),
+      mouseY: nullableNumber(row.mouse_y),
+      inputEventFirstAt: nullableString(row.input_event_first_at)
     }));
   }
 
   /** 兜底 sweep：列出已结束但还没有分析行的 session，按结束时间升序。 */
   listSessionsPendingAnalysis(limit = 50): ActivityPendingAnalysisSession[] {
     const rows = this.requireDatabase().prepare(`
-      SELECT s.id, s.started_at, s.ended_at, s.event_count
+      SELECT s.id, s.started_at, s.ended_at, s.event_count,
+        COALESCE(s.duration_ms, MAX(0, CAST((julianday(s.ended_at) - julianday(s.started_at)) * 86400000.0 AS INTEGER))) AS duration_ms,
+        COUNT(DISTINCT snap.id) AS snapshot_count
       FROM activity_sessions s
+      LEFT JOIN activity_snapshots snap ON snap.session_id = s.id
       LEFT JOIN activity_session_analysis a ON a.session_id = s.id
       WHERE s.ended_at IS NOT NULL AND a.session_id IS NULL
+      GROUP BY s.id
       ORDER BY s.ended_at ASC, s.id ASC
       LIMIT ?
     `).all(limit) as Array<Record<string, unknown>>;
@@ -410,39 +650,471 @@ export class ActivityStore {
       id: String(row.id),
       startedAt: String(row.started_at),
       endedAt: String(row.ended_at),
-      eventCount: Number(row.event_count)
+      eventCount: Number(row.event_count),
+      durationMs: Number(row.duration_ms),
+      snapshotCount: Number(row.snapshot_count)
     }));
+  }
+
+  /** 指定 session 开始时间范围内的待分析行，日报补分析不能被全局 LIMIT 截断。 */
+  listSessionsPendingAnalysisForDateRange(
+    startIso: string,
+    endIso: string,
+    limit = 200
+  ): ActivityPendingAnalysisSession[] {
+    const rows = this.requireDatabase().prepare(`
+      SELECT s.id, s.started_at, s.ended_at, s.event_count,
+        COALESCE(s.duration_ms, MAX(0, CAST((julianday(s.ended_at) - julianday(s.started_at)) * 86400000.0 AS INTEGER))) AS duration_ms,
+        COUNT(DISTINCT snap.id) AS snapshot_count
+      FROM activity_sessions s
+      LEFT JOIN activity_snapshots snap ON snap.session_id = s.id
+      LEFT JOIN activity_session_analysis a ON a.session_id = s.id
+      WHERE s.ended_at IS NOT NULL
+        AND a.session_id IS NULL
+        AND s.started_at >= ?
+        AND s.started_at < ?
+      GROUP BY s.id
+      ORDER BY s.ended_at ASC, s.id ASC
+      LIMIT ?
+    `).all(startIso, endIso, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: String(row.id),
+      startedAt: String(row.started_at),
+      endedAt: String(row.ended_at),
+      eventCount: Number(row.event_count),
+      durationMs: Number(row.duration_ms),
+      snapshotCount: Number(row.snapshot_count)
+    }));
+  }
+
+  /** 原始事件/分析输入的轻量版本，用于让日报缓存随新数据和分析变更失效。 */
+  activityRevision(): string {
+    const row = this.requireDatabase().prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM activity_sessions) AS session_count,
+        (SELECT COUNT(*) FROM activity_events) AS event_count,
+        (SELECT COALESCE(MAX(id), 0) FROM activity_events) AS last_event_id,
+        (SELECT COUNT(*) FROM activity_session_analysis) AS analysis_count,
+        (SELECT COALESCE(MAX(input_hash), '') FROM activity_session_analysis) AS last_input_hash
+    `).get() as Record<string, unknown>;
+    return [
+      row.session_count,
+      row.event_count,
+      row.last_event_id,
+      row.analysis_count,
+      row.last_input_hash
+    ].map(String).join(":");
   }
 
   /** 分析前的 session 元数据；未找到或尚未结束（进行中）时返回 undefined。 */
   getEndedSession(sessionId: string): ActivityPendingAnalysisSession | undefined {
     const row = this.requireDatabase().prepare(`
-      SELECT id, started_at, ended_at, event_count
-      FROM activity_sessions
-      WHERE id = ? AND ended_at IS NOT NULL
+      SELECT s.id, s.started_at, s.ended_at, s.event_count,
+        COALESCE(s.duration_ms, MAX(0, CAST((julianday(s.ended_at) - julianday(s.started_at)) * 86400000.0 AS INTEGER))) AS duration_ms,
+        COUNT(DISTINCT snap.id) AS snapshot_count
+      FROM activity_sessions s
+      LEFT JOIN activity_snapshots snap ON snap.session_id = s.id
+      WHERE s.id = ? AND s.ended_at IS NOT NULL
+      GROUP BY s.id
     `).get(sessionId) as Record<string, unknown> | undefined;
     if (!row) return undefined;
     return {
       id: String(row.id),
       startedAt: String(row.started_at),
       endedAt: String(row.ended_at),
-      eventCount: Number(row.event_count)
+      eventCount: Number(row.event_count),
+      durationMs: Number(row.duration_ms),
+      snapshotCount: Number(row.snapshot_count)
     };
   }
 
-  /** 只读 occurred_at/summary/application 三列；快照路径与 OCR 原文不进入分析输入。 */
+  /** 读取语义事件，并把独立 OCR frame 作为单独输入；截图 event 本身不重复计入事件流。 */
   listSessionEventSummaries(sessionId: string): ActivityEventSummary[] {
-    const rows = this.requireDatabase().prepare(`
-      SELECT occurred_at, summary, application
+    const database = this.requireDatabase();
+    const eventRows = database.prepare(`
+      SELECT id, occurred_at, summary, application, window_title, event_type, ocr_text, url
       FROM activity_events
+      WHERE session_id = ? AND source <> 'screenshot_fallback'
+      ORDER BY occurred_at ASC, id ASC
+    `).all(sessionId) as Array<Record<string, unknown>>;
+    const ocrRows = database.prepare(`
+      SELECT id, occurred_at, application, window_title, text
+      FROM activity_ocr_frames
       WHERE session_id = ?
       ORDER BY occurred_at ASC, id ASC
     `).all(sessionId) as Array<Record<string, unknown>>;
-    return rows.map((row) => ({
+    const events = eventRows.map((row) => ({
+      id: Number(row.id),
       occurredAt: String(row.occurred_at),
       summary: String(row.summary),
-      application: nullableString(row.application)
+      application: nullableString(row.application),
+      windowTitle: nullableString(row.window_title),
+      eventType: nullableString(row.event_type),
+      ocrText: nullableString(row.ocr_text),
+      url: nullableString(row.url)
     }));
+    const ocr = ocrRows.map((row) => ({
+      id: Number(row.id),
+      occurredAt: String(row.occurred_at),
+      summary: "屏幕文字识别",
+      application: nullableString(row.application),
+      windowTitle: nullableString(row.window_title),
+      eventType: "screenshot_ocr",
+      ocrText: String(row.text),
+      url: undefined
+    }));
+    return [...events, ...ocr]
+      .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt) || left.id - right.id)
+      .map(({ id: _id, ...event }) => event);
+  }
+
+  /** 读取设置页回看所需的事件、OCR 摘要和截图元数据；原始路径只留在主进程内部。 */
+  getSessionDetail(sessionId: string, limit = 200): ActivitySessionDetail | undefined {
+    const record = this.getSessionRecord(sessionId);
+    if (!record) return undefined;
+    const database = this.requireDatabase();
+    const eventRows = database.prepare(`
+      SELECT e.id, e.session_id, e.occurred_at, e.source, e.event_type,
+        e.application, e.window_title, e.ax_role, e.ax_title, e.summary,
+        e.ocr_text, e.url, e.fallback_reason, e.mouse_button, e.key_code, e.key_modifiers,
+        e.mouse_x, e.mouse_y, e.input_event_count, e.input_event_first_at, snap.id AS snapshot_id
+      FROM activity_events e
+      LEFT JOIN activity_snapshots snap ON snap.event_id = e.id
+      WHERE e.session_id = ? AND e.source <> 'screenshot_fallback'
+      ORDER BY e.occurred_at ASC, e.id ASC
+      LIMIT ?
+    `).all(sessionId, limit) as Array<Record<string, unknown>>;
+    const snapshotRows = database.prepare(`
+      SELECT id, session_id, event_id, captured_at, bytes, width, height,
+        trigger, content_hash, histogram_change, pixel_diff, storage_tier
+      FROM activity_snapshots
+      WHERE session_id = ?
+      ORDER BY captured_at ASC, id ASC
+      LIMIT ?
+    `).all(sessionId, limit) as Array<Record<string, unknown>>;
+    return {
+      ...record,
+      events: eventRows.map((row) => ({
+        id: Number(row.id),
+        sessionId: String(row.session_id),
+        occurredAt: String(row.occurred_at),
+        source: row.source === "screenshot_fallback" ? "screenshot_fallback" : "event",
+        eventType: String(row.event_type),
+        application: nullableString(row.application),
+        windowTitle: nullableString(row.window_title),
+        axRole: nullableString(row.ax_role),
+        axTitle: nullableString(row.ax_title),
+        summary: String(row.summary),
+        ocrText: nullableString(row.ocr_text),
+        url: nullableString(row.url),
+        fallbackReason: nullableString(row.fallback_reason),
+        mouseButton: nullableString(row.mouse_button),
+        keyCode: nullableInteger(row.key_code),
+        keyModifiers: nullableInteger(row.key_modifiers),
+        mouseX: nullableNumber(row.mouse_x),
+        mouseY: nullableNumber(row.mouse_y),
+        inputEventCount: Number(row.input_event_count),
+        inputEventFirstAt: nullableString(row.input_event_first_at),
+        snapshotId: nullableInteger(row.snapshot_id)
+      })),
+      snapshots: snapshotRows.map((row) => ({
+        id: Number(row.id),
+        sessionId: String(row.session_id),
+        eventId: Number(row.event_id),
+        capturedAt: String(row.captured_at),
+        bytes: Number(row.bytes),
+        width: nullableInteger(row.width),
+        height: nullableInteger(row.height),
+        trigger: nullableString(row.trigger),
+        contentHash: nullableString(row.content_hash),
+        histogramChange: nullableNumber(row.histogram_change),
+        pixelDiff: nullableNumber(row.pixel_diff),
+        storageTier: parseSnapshotStorageTier(row.storage_tier)
+      })),
+      analysis: this.getAnalysis(sessionId)
+    };
+  }
+
+  getSummary(kind: ActivitySummaryKind, dateKey: string): ActivitySummaryRecord | undefined {
+    const row = this.requireDatabase().prepare(`
+      SELECT kind, date_key, summary, stats_json, model, is_partial, generated_at
+      FROM activity_summaries
+      WHERE kind = ? AND date_key = ?
+    `).get(kind, dateKey) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      kind: row.kind === "weekly" ? "weekly" : "daily",
+      dateKey: String(row.date_key),
+      summary: String(row.summary),
+      model: nullableString(row.model),
+      stats: parseSummaryStats(row.stats_json, String(row.date_key)),
+      isPartial: Number(row.is_partial) === 1,
+      generatedAt: String(row.generated_at)
+    };
+  }
+
+  upsertSummary(summary: ActivitySummaryRecord): void {
+    this.requireDatabase().prepare(`
+      INSERT INTO activity_summaries (kind, date_key, summary, stats_json, model, is_partial, generated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(kind, date_key) DO UPDATE SET
+        summary = excluded.summary,
+        stats_json = excluded.stats_json,
+        model = excluded.model,
+        is_partial = excluded.is_partial,
+        generated_at = excluded.generated_at
+    `).run(
+      summary.kind,
+      summary.dateKey,
+      summary.summary,
+      JSON.stringify(summary.stats),
+      summary.model ?? null,
+      summary.isPartial ? 1 : 0,
+      summary.generatedAt
+    );
+  }
+
+  /**
+   * 提供给 summary.ts 的聚合源。
+   *
+   * 日报按 session.started_at 选取 session，再读取该 session 的完整时长、appNames、
+   * app_focus、截图和 OCR；不能按事件时间或 session 与日期的重叠区间裁剪。
+   */
+  getActivitySummarySource(startIso: string, endIso: string): ActivitySummarySource {
+    const database = this.requireDatabase();
+    const sessionRows = database.prepare(`
+      SELECT id, started_at, ended_at
+      FROM activity_sessions
+      WHERE started_at >= ? AND started_at < ?
+      ORDER BY started_at ASC, id ASC
+    `).all(startIso, endIso) as Array<Record<string, unknown>>;
+    const sessions = sessionRows.map((row) => ({
+      id: String(row.id),
+      startedAt: String(row.started_at),
+      endedAt: row.ended_at === null ? undefined : String(row.ended_at),
+      snapshotCount: 0,
+      ocrCharCount: 0,
+      appNames: [] as string[],
+      applicationEvents: [] as Array<{ occurredAt: string; application?: string }>,
+      analysis: undefined as ActivitySummarySource["sessions"][number]["analysis"]
+    }));
+    if (sessions.length === 0) return { sessions };
+    const byId = new Map(sessions.map((session) => [session.id, session]));
+    const sessionPlaceholders = sessions.map(() => "?").join(", ");
+    const sessionIds = sessions.map((session) => session.id);
+    const focusRows = database.prepare(`
+      SELECT session_id, occurred_at, application
+      FROM activity_events
+      WHERE event_type = 'app_focus' AND session_id IN (${sessionPlaceholders})
+      ORDER BY occurred_at ASC, id ASC
+    `).all(...sessionIds) as Array<Record<string, unknown>>;
+    for (const row of focusRows) {
+      const session = byId.get(String(row.session_id));
+      if (!session) continue;
+      session.applicationEvents.push({
+        occurredAt: String(row.occurred_at),
+        application: nullableString(row.application)
+      });
+    }
+    const appRows = database.prepare(`
+      SELECT session_id, application
+      FROM activity_events
+      WHERE application IS NOT NULL AND application <> '' AND session_id IN (${sessionPlaceholders})
+      ORDER BY occurred_at ASC, id ASC
+    `).all(...sessionIds) as Array<Record<string, unknown>>;
+    for (const row of appRows) {
+      const session = byId.get(String(row.session_id));
+      const application = nullableString(row.application)?.trim();
+      if (!session || !application || session.appNames.includes(application)) continue;
+      session.appNames.push(application);
+    }
+    const snapshotRows = database.prepare(`
+      SELECT session_id, COUNT(*) AS count
+      FROM activity_snapshots
+      WHERE session_id IN (${sessionPlaceholders})
+      GROUP BY session_id
+    `).all(...sessionIds) as Array<Record<string, unknown>>;
+    for (const row of snapshotRows) {
+      const session = byId.get(String(row.session_id));
+      if (session) session.snapshotCount = Number(row.count);
+    }
+    const ocrRows = database.prepare(`
+      SELECT session_id, text
+      FROM (
+        SELECT session_id, text,
+          ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY occurred_at ASC, id ASC) AS frame_number
+        FROM activity_ocr_frames
+        WHERE session_id IN (${sessionPlaceholders})
+      )
+      WHERE frame_number <= 500
+    `).all(...sessionIds) as Array<Record<string, unknown>>;
+    for (const row of ocrRows) {
+      const session = byId.get(String(row.session_id));
+      if (session) session.ocrCharCount += String(row.text ?? "").length;
+    }
+    const analysisRows = database.prepare(`
+      SELECT a.*, s.id AS activity_session_id
+      FROM activity_sessions s
+      LEFT JOIN activity_session_analysis a ON a.session_id = s.id
+      WHERE s.id IN (${sessionPlaceholders})
+      ORDER BY s.started_at ASC, s.id ASC
+    `).all(...sessionIds) as Array<Record<string, unknown>>;
+    for (const row of analysisRows) {
+      const session = byId.get(String(row.activity_session_id));
+      if (session && row.analyzed_at !== null && row.analyzed_at !== undefined) {
+        session.analysis = parseAnalysisRow(row);
+      }
+    }
+    return { sessions };
+  }
+
+  /** 只给主进程读取截图；相对路径经过根目录约束，renderer 不接触文件系统路径。 */
+  getSnapshotPath(snapshotId: number): string | undefined {
+    const row = this.requireDatabase().prepare(
+      "SELECT file_path FROM activity_snapshots WHERE id = ?"
+    ).get(snapshotId) as { file_path: string | null } | undefined;
+    const relativePath = row?.file_path;
+    if (!relativePath) return undefined;
+    const root = this.requireRoot();
+    const absolutePath = path.resolve(root, relativePath);
+    if (absolutePath !== root && !absolutePath.startsWith(`${root}${path.sep}`)) return undefined;
+    return absolutePath;
+  }
+
+  /**
+   * 把 sidecar 异步返回的 OCR 投影写回已落库 snapshot。
+   *
+   * 截图和 OCR 必须分开提交：Vision 可能耗时，不能让它决定截图是否存在；这里仍复用
+   * 与首次写入相同的脱敏、摘要和 FTS 更新逻辑，保证搜索与分析看到一致的数据。
+   */
+  updateSnapshotOcr(snapshotId: number, rawOcrText: string | undefined): void {
+    const database = this.requireDatabase();
+    const row = database.prepare(`
+      SELECT s.session_id, s.event_id, s.captured_at,
+        e.application, e.window_title, e.event_type, e.ax_role, e.ax_title,
+        e.mouse_event_type, e.fallback_reason, e.redacted_text
+      FROM activity_snapshots s
+      JOIN activity_events e ON e.id = s.event_id
+      WHERE s.id = ?
+    `).get(snapshotId) as Record<string, unknown> | undefined;
+    if (!row) return;
+
+    const application = nullableString(row.application);
+    const windowTitle = nullableString(row.window_title);
+    const axRole = nullableString(row.ax_role);
+    const axTitle = nullableString(row.ax_title);
+    const eventType = nullableString(row.event_type) ?? "fallback_capture";
+    const mouseEventType = nullableString(row.mouse_event_type);
+    const fallbackReason = nullableString(row.fallback_reason);
+    const ocrText = redactActivityOcrText(rawOcrText);
+    const redactedText = nullableString(row.redacted_text);
+    const summaryText = [redactedText, ocrText].filter((value): value is string => value !== undefined).join("；") || undefined;
+    const summary = activitySummary(application, summaryText, {
+      eventType,
+      windowTitle,
+      axRole,
+      axTitle,
+      mouseEventType,
+      fallbackReason
+    });
+    const eventId = Number(row.event_id);
+    const sessionId = String(row.session_id);
+    const occurredAt = String(row.captured_at);
+
+    database.exec("BEGIN IMMEDIATE;");
+    try {
+      database.prepare("UPDATE activity_events SET summary = ?, ocr_text = ? WHERE id = ?")
+        .run(summary, ocrText ?? null, eventId);
+      database.prepare("DELETE FROM activity_ocr_frames WHERE snapshot_id = ?").run(snapshotId);
+      if (ocrText) {
+        database.prepare(`
+          INSERT INTO activity_ocr_frames (
+            session_id, snapshot_id, occurred_at, text, application, window_title
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `).run(sessionId, snapshotId, occurredAt, ocrText, application ?? null, windowTitle ?? null);
+      }
+      // activity_fts 是独立 FTS5 表，更新事件正文时必须同步替换对应索引行。
+      database.prepare("DELETE FROM activity_fts WHERE event_id = ?").run(eventId);
+      this.insertSearchIndexRow(database, eventId);
+      database.prepare("UPDATE activity_sessions SET updated_at = ? WHERE id = ?")
+        .run(new Date().toISOString(), sessionId);
+      database.exec("COMMIT;");
+    } catch (error) {
+      database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  /** 最近的独立 OCR 帧，供普通聊天上下文和 Activity 分析按预算读取。 */
+  listRecentOcrFrames(sinceIso: string, limit = 400): ActivityOcrFrame[] {
+    const rows = this.requireDatabase().prepare(`
+      SELECT id, session_id, snapshot_id, occurred_at, text, application, window_title
+      FROM activity_ocr_frames
+      WHERE occurred_at >= ?
+      ORDER BY occurred_at DESC, id DESC
+      LIMIT ?
+    `).all(sinceIso, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: Number(row.id),
+      sessionId: String(row.session_id),
+      snapshotId: Number(row.snapshot_id),
+      occurredAt: String(row.occurred_at),
+      text: String(row.text),
+      application: nullableString(row.application),
+      windowTitle: nullableString(row.window_title)
+    }));
+  }
+
+  /** 当前 embedding 指纹下尚未向量化的 OCR 帧。 */
+  listOcrEmbeddingSources(fingerprint: string, limit = 400): ActivityOcrEmbeddingSource[] {
+    const rows = this.requireDatabase().prepare(`
+      SELECT id, session_id, text
+      FROM activity_ocr_frames
+      WHERE text <> '' AND (model_fingerprint IS NULL OR model_fingerprint <> ?)
+      ORDER BY occurred_at ASC, id ASC
+      LIMIT ?
+    `).all(fingerprint, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({ id: Number(row.id), sessionId: String(row.session_id), text: String(row.text) }));
+  }
+
+  upsertOcrEmbedding(frameId: number, fingerprint: string, embedding: Float32Array, embeddedAt: string): void {
+    this.requireDatabase().prepare(`
+      UPDATE activity_ocr_frames
+      SET model_fingerprint = ?, embedding = ?, embedded_at = ?
+      WHERE id = ?
+    `).run(
+      fingerprint,
+      Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength),
+      embeddedAt,
+      frameId
+    );
+  }
+
+  listOcrEmbeddingRows(fingerprint: string, limit = 2_000): ActivityOcrEmbeddingRow[] {
+    const rows = this.requireDatabase().prepare(`
+      SELECT f.id, f.session_id, f.occurred_at, f.text, f.application, f.window_title,
+        s.started_at AS session_started_at, f.embedding
+      FROM activity_ocr_frames f
+      JOIN activity_sessions s ON s.id = f.session_id
+      WHERE f.model_fingerprint = ? AND f.embedding IS NOT NULL
+      ORDER BY f.occurred_at DESC, f.id DESC
+      LIMIT ?
+    `).all(fingerprint, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => {
+      const blob = row.embedding as Uint8Array | undefined;
+      return {
+        id: Number(row.id),
+        sessionId: String(row.session_id),
+        occurredAt: String(row.occurred_at),
+        startedAt: String(row.session_started_at),
+        text: String(row.text),
+        application: nullableString(row.application),
+        windowTitle: nullableString(row.window_title),
+        embedding: blob === undefined
+          ? new Float32Array(0)
+          : new Float32Array(blob.buffer, blob.byteOffset, Math.floor(blob.byteLength / 4))
+      };
+    });
   }
 
   getAnalysis(sessionId: string): ActivitySessionAnalysis | undefined {
@@ -454,13 +1126,20 @@ export class ActivityStore {
 
   /** 幂等写入：同一 session 重复分析时按主键覆盖。 */
   recordAnalysis(analysis: ActivitySessionAnalysis): void {
-    this.requireDatabase().prepare(`
+    const database = this.requireDatabase();
+    database.prepare(`
       INSERT INTO activity_session_analysis (
         session_id, analyzed_at, analyzer_model, project, summary,
         topics_json, prs_json, issues_json, people_json, versions_json, decisions_json,
         entities_json, highlights_json, worth_memory, worth_knowledge, is_meeting, storage_tier,
+        title, description, commits_json, identifiers_json, repos_json, events_json, urls_json,
+        memory_candidates_json, entity_details_json,
         confidence, source_event_count, input_hash
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?
+      )
       ON CONFLICT(session_id) DO UPDATE SET
         analyzed_at = excluded.analyzed_at,
         analyzer_model = excluded.analyzer_model,
@@ -478,6 +1157,15 @@ export class ActivityStore {
         worth_knowledge = excluded.worth_knowledge,
         is_meeting = excluded.is_meeting,
         storage_tier = excluded.storage_tier,
+        title = excluded.title,
+        description = excluded.description,
+        commits_json = excluded.commits_json,
+        identifiers_json = excluded.identifiers_json,
+        repos_json = excluded.repos_json,
+        events_json = excluded.events_json,
+        urls_json = excluded.urls_json,
+        memory_candidates_json = excluded.memory_candidates_json,
+        entity_details_json = excluded.entity_details_json,
         confidence = excluded.confidence,
         source_event_count = excluded.source_event_count,
         input_hash = excluded.input_hash
@@ -499,10 +1187,23 @@ export class ActivityStore {
       analysis.worthKnowledge ? 1 : 0,
       analysis.isMeeting ? 1 : 0,
       analysis.storageTier,
+      analysis.title ?? null,
+      analysis.description ?? null,
+      JSON.stringify(analysis.commits ?? []),
+      JSON.stringify(analysis.identifiers ?? []),
+      JSON.stringify(analysis.repos ?? []),
+      JSON.stringify(analysis.events ?? []),
+      JSON.stringify(analysis.urls ?? []),
+      JSON.stringify(analysis.memoryCandidates ?? []),
+      JSON.stringify(analysis.entityDetails ?? {}),
       analysis.confidence,
       analysis.sourceEventCount,
       analysis.inputHash
     );
+    // analysis embedding 是摘要内容的派生缓存；覆盖分析结果后旧向量不能继续命中。
+    database.prepare("DELETE FROM activity_analysis_embeddings WHERE session_id = ?").run(analysis.sessionId);
+    database.prepare("UPDATE activity_sessions SET updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), analysis.sessionId);
   }
 
   /** 指定时间范围（按 session 开始时间）内的分析行，按时间升序，供报告渲染。 */
@@ -647,16 +1348,33 @@ export class ActivityStore {
   async clear(): Promise<void> {
     const database = this.requireDatabase();
     const root = this.requireRoot();
-    const paths = database.prepare("SELECT snapshot_path FROM activity_events WHERE snapshot_path IS NOT NULL").all() as Array<{ snapshot_path: string }>;
-    database.exec("DELETE FROM activity_fts; DELETE FROM activity_analysis_embeddings; DELETE FROM activity_session_analysis; DELETE FROM activity_events; DELETE FROM activity_sessions;");
-    for (const row of paths) await unlink(path.join(root, row.snapshot_path)).catch(() => undefined);
+    const paths = database.prepare(`
+      SELECT file_path AS snapshot_path FROM activity_snapshots WHERE file_path IS NOT NULL
+      UNION
+      SELECT snapshot_path FROM activity_events WHERE snapshot_path IS NOT NULL
+    `).all() as Array<{ snapshot_path: string }>;
+    database.exec("DELETE FROM activity_fts; DELETE FROM activity_summaries; DELETE FROM activity_analysis_embeddings; DELETE FROM activity_session_analysis; DELETE FROM activity_ocr_frames; DELETE FROM activity_snapshots; DELETE FROM activity_events; DELETE FROM activity_sessions;");
+    for (const row of paths) {
+      const snapshotPath = safeStoredSnapshotPath(root, row.snapshot_path);
+      if (snapshotPath) await unlink(snapshotPath).catch(() => undefined);
+    }
     const snapshots = path.join(root, "snapshots");
     await rm(snapshots, { recursive: true, force: true });
     await mkdir(snapshots, { recursive: true, mode: 0o700 });
     await chmod(snapshots, 0o700);
+    await rm(path.join(root, ".capture-tmp"), { recursive: true, force: true });
   }
 
-  private insertEvent(input: ActivityEventInput, snapshot: { relativeSnapshotPath: string; bytes: number } | undefined): ActivityStoredEvent {
+  private insertEvent(input: ActivityEventInput, snapshot: {
+    relativeSnapshotPath: string;
+    bytes: number;
+    width?: number;
+    height?: number;
+    trigger?: string;
+    contentHash?: string;
+    histogramChange?: number;
+    pixelDiff?: number;
+  } | undefined): ActivityStoredEvent {
     const database = this.requireDatabase();
     const application = redactActivityText(input.application);
     const windowTitle = redactActivityText(input.windowTitle);
@@ -666,13 +1384,20 @@ export class ActivityStore {
     // [redacted url]，那会毁掉「刚才看了什么」这类查询；这里只清理控制字符并限长。
     const url = normalizeStructuredUrl(input.url);
     const redactedText = redactActivityText(input.rawText);
-    const ocrText = redactActivityText(input.rawOcrText);
+    const ocrText = redactActivityOcrText(input.rawOcrText);
     const summaryText = [redactedText, ocrText].filter((value): value is string => value !== undefined).join("；") || undefined;
     const eventType = normalizeShortText(input.eventType) ?? "activity";
     const source = input.source === "screenshot_fallback" ? "screenshot_fallback" : "event";
     const mouseEventType = normalizeShortText(input.mouseEventType);
     const fallbackReason = normalizeShortText(input.fallbackReason);
-    const mouseButton = input.mouseButton !== undefined && Number.isInteger(input.mouseButton) ? input.mouseButton : null;
+    const mouseButton = normalizeShortText(input.mouseButton);
+    const keyCode = input.keyCode !== undefined && Number.isSafeInteger(input.keyCode) && input.keyCode >= 0 ? input.keyCode : null;
+    const keyModifiers = input.keyModifiers !== undefined && Number.isSafeInteger(input.keyModifiers) && input.keyModifiers >= 0
+      ? input.keyModifiers
+      : null;
+    const mouseX = input.mouseX !== undefined && Number.isFinite(input.mouseX) ? input.mouseX : null;
+    const mouseY = input.mouseY !== undefined && Number.isFinite(input.mouseY) ? input.mouseY : null;
+    const inputEventFirstAt = normalizeEventTimestamp(input.inputEventFirstAt);
     const summary = activitySummary(application, summaryText, {
       eventType,
       windowTitle,
@@ -686,14 +1411,15 @@ export class ActivityStore {
     // FTS 与事件表永久不一致——FTS 只在缺列时重建，没有针对数据不一致的自愈入口。
     database.exec("BEGIN IMMEDIATE;");
     let eventId: number;
+    let snapshotId: number | undefined;
     try {
       const result = database.prepare(`
         INSERT INTO activity_events (
           session_id, occurred_at, source, event_type, application, bundle_id,
           window_title, ax_role, ax_title, url, redacted_text, mouse_event_type,
-          mouse_button, summary, ocr_text, input_event_count, fallback_reason,
+          mouse_button, key_code, key_modifiers, mouse_x, mouse_y, summary, ocr_text, input_event_count, input_event_first_at, fallback_reason,
           snapshot_path, snapshot_bytes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         input.sessionId,
         input.occurredAt,
@@ -707,31 +1433,67 @@ export class ActivityStore {
         url ?? null,
         redactedText ?? null,
         mouseEventType ?? null,
-        mouseButton,
+        mouseButton ?? null,
+        keyCode,
+        keyModifiers,
+        mouseX,
+        mouseY,
         summary,
         ocrText ?? null,
         inputEventCount,
+        inputEventFirstAt ?? null,
         fallbackReason ?? null,
         snapshot?.relativeSnapshotPath ?? null,
         snapshot?.bytes ?? 0
       );
       eventId = Number(result.lastInsertRowid);
+      if (snapshot) {
+        const snapshotResult = database.prepare(`
+          INSERT INTO activity_snapshots (
+            session_id, event_id, captured_at, file_path, bytes, width, height,
+            trigger, content_hash, histogram_change, pixel_diff
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          input.sessionId,
+          eventId,
+          input.occurredAt,
+          snapshot.relativeSnapshotPath,
+          snapshot.bytes,
+          normalizeDimension(snapshot.width),
+          normalizeDimension(snapshot.height),
+          normalizeShortText(snapshot.trigger) ?? null,
+          normalizeShortText(snapshot.contentHash) ?? null,
+          normalizeRatio(snapshot.histogramChange),
+          normalizeRatio(snapshot.pixelDiff)
+        );
+        snapshotId = Number(snapshotResult.lastInsertRowid);
+        if (ocrText) {
+          database.prepare(`
+            INSERT INTO activity_ocr_frames (
+              session_id, snapshot_id, occurred_at, text, application, window_title
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            input.sessionId,
+            snapshotId,
+            input.occurredAt,
+            ocrText,
+            application ?? null,
+            windowTitle ?? null
+          );
+        }
+      }
       // url 进 FTS：浏览器标签 URL 是结构化列（不做内容脱敏），纳入全文索引后可按
       // 站点/路径关键字检索；行内容只在用户主动 search() 时可见。
-      database.prepare("INSERT INTO activity_fts (event_id, summary, application, window_title, event_type, ax_role, ax_title, redacted_text, ocr_text, url, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-        eventId,
-        summary,
-        application ?? "",
-        windowTitle ?? "",
-        eventType,
-        axRole ?? "",
-        axTitle ?? "",
-        redactedText ?? "",
-        ocrText ?? "",
-        url ?? "",
-        input.occurredAt
-      );
-      database.prepare("UPDATE activity_sessions SET event_count = event_count + 1 WHERE id = ?").run(input.sessionId);
+      this.insertSearchIndexRow(database, eventId);
+      // 截图是独立的时间锚点，不应伪装成语义输入事件；event_count 与 snapshot_count
+      // 分开统计。截图 event 仍保留在事件表/FTS 中，便于回看和兼容旧库。
+      const updatedAt = new Date().toISOString();
+      if (source !== "screenshot_fallback") {
+        database.prepare("UPDATE activity_sessions SET event_count = event_count + 1, updated_at = ? WHERE id = ?")
+          .run(updatedAt, input.sessionId);
+      } else {
+        database.prepare("UPDATE activity_sessions SET updated_at = ? WHERE id = ?").run(updatedAt, input.sessionId);
+      }
       database.exec("COMMIT;");
     } catch (error) {
       database.exec("ROLLBACK;");
@@ -749,28 +1511,160 @@ export class ActivityStore {
       axTitle,
       url,
       summary,
+      ocrText,
       fallbackReason,
       snapshotPath: snapshot?.relativeSnapshotPath,
-      inputEventCount
+      inputEventCount,
+      mouseButton,
+      keyCode: keyCode ?? undefined,
+      keyModifiers: keyModifiers ?? undefined,
+      mouseX: mouseX ?? undefined,
+      mouseY: mouseY ?? undefined,
+      inputEventFirstAt,
+      snapshotId
     };
   }
 
-  private async enforceStorageLimit(maxStorageMb: number): Promise<void> {
+  /**
+   * 按 hot/warm/cold 策略维护截图文件。降级和容量淘汰都限制单轮处理量，避免新图
+   * 写入时被一轮大清理阻塞；超过 cold 保留期时删除 snapshot 行，让 OCR 按外键级联删除。
+   */
+  async rotateSnapshots(maxStorageMb: number, now = new Date()): Promise<void> {
     const database = this.requireDatabase();
-    const maxBytes = Math.max(1, maxStorageMb) * 1024 * 1024;
-    while (true) {
-      const row = database.prepare("SELECT COALESCE(SUM(snapshot_bytes), 0) AS bytes FROM activity_events").get() as { bytes: number };
-      if (Number(row.bytes) <= maxBytes) return;
-      const oldest = database.prepare(`
-        SELECT id, snapshot_path FROM activity_events
-        WHERE snapshot_path IS NOT NULL AND snapshot_bytes > 0
-        ORDER BY occurred_at ASC, id ASC LIMIT 1
-      `).get() as { id: number; snapshot_path: string } | undefined;
-      if (!oldest) return;
-      // 容量限制只淘汰 JPEG；事件语义和会话计数必须保留，避免“有图才算活动”。
-      database.prepare("UPDATE activity_events SET snapshot_path = NULL, snapshot_bytes = 0 WHERE id = ?").run(oldest.id);
-      await unlink(path.join(this.requireRoot(), oldest.snapshot_path)).catch(() => undefined);
+    const root = this.requireRoot();
+    const processTier = async (
+      tier: ActivitySnapshotStorageTier,
+      nextTier: ActivitySnapshotStorageTier,
+      thresholdMs: number,
+      target: { width: number; height: number; quality: number }
+    ): Promise<void> => {
+      const rows = database.prepare(`
+        SELECT id, event_id, file_path, bytes, storage_tier, captured_at
+        FROM activity_snapshots
+        WHERE storage_tier = ?
+        ORDER BY captured_at ASC, id ASC
+        LIMIT 500
+      `).all(tier) as Array<Record<string, unknown>>;
+      for (const row of rows) {
+        const capturedAt = Date.parse(String(row.captured_at));
+        const ageMs = Number.isFinite(capturedAt) ? now.getTime() - capturedAt : 0;
+        if (ageMs <= thresholdMs) continue;
+        const snapshotId = Number(row.id);
+        const eventId = Number(row.event_id);
+        const relativePath = nullableString(row.file_path);
+        const originalBytes = Number(row.bytes);
+        if (!relativePath || originalBytes <= 0) {
+          this.updateSnapshotTier(snapshotId, nextTier);
+          continue;
+        }
+        const absolutePath = safeStoredSnapshotPath(root, relativePath);
+        if (!absolutePath) {
+          this.updateSnapshotTier(snapshotId, nextTier);
+          continue;
+        }
+        try {
+          const encoded = await sharp(absolutePath)
+            .resize({ width: target.width, height: target.height, fit: "inside", withoutEnlargement: true })
+            .jpeg({ quality: target.quality })
+            .toBuffer({ resolveWithObject: true });
+          // 只有在新 JPEG 更小的时候替换文件；否则仍然完成 tier 降级，避免反复重压缩。
+          if (encoded.data.byteLength >= originalBytes) {
+            this.updateSnapshotTier(snapshotId, nextTier);
+            continue;
+          }
+          const temporaryPath = path.join(path.dirname(absolutePath), `.${path.basename(absolutePath)}.${randomUUID()}.tmp`);
+          await writeFile(temporaryPath, encoded.data, { mode: 0o600 });
+          try {
+            await rename(temporaryPath, absolutePath);
+            await chmod(absolutePath, 0o600);
+          } catch (error) {
+            await unlink(temporaryPath).catch(() => undefined);
+            throw error;
+          }
+          this.updateSnapshotStorage(
+            snapshotId,
+            eventId,
+            encoded.data.byteLength,
+            encoded.info.width,
+            encoded.info.height,
+            nextTier
+          );
+        } catch {
+          // 旧库里可能存在损坏/非 JPEG 文件；仍标记降级，下一轮不会重复尝试该档位。
+          this.updateSnapshotTier(snapshotId, nextTier);
+        }
+      }
+    };
+
+    await processTier("hot", "warm", SNAPSHOT_WARM_AGE_MS, SNAPSHOT_WARM_SIZE);
+    await processTier("warm", "cold", SNAPSHOT_COLD_AGE_MS, SNAPSHOT_COLD_SIZE);
+
+    const coldRows = database.prepare(`
+      SELECT id, event_id, file_path, bytes
+      FROM activity_snapshots
+      WHERE storage_tier = 'cold' AND captured_at < ?
+      ORDER BY captured_at ASC, id ASC
+      LIMIT 1000
+    `).all(new Date(now.getTime() - SNAPSHOT_COLD_DELETE_AGE_MS).toISOString()) as Array<Record<string, unknown>>;
+    for (const row of coldRows) {
+      await this.deleteSnapshot(
+        Number(row.id),
+        Number(row.event_id),
+        nullableString(row.file_path)
+      );
     }
+
+    const maxBytes = Math.max(1, Math.trunc(maxStorageMb)) * 1024 * 1024;
+    const targetBytes = Math.floor(maxBytes * SNAPSHOT_TARGET_STORAGE_RATIO);
+    const currentBytes = database.prepare("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM activity_snapshots").get() as { bytes: number };
+    if (Number(currentBytes.bytes) <= maxBytes) return;
+    const candidates = ( ["cold", "warm", "hot"] as const).flatMap((tier) => database.prepare(`
+      SELECT id, event_id, file_path, bytes, captured_at
+      FROM activity_snapshots
+      WHERE storage_tier = ? AND file_path IS NOT NULL AND bytes > 0
+      ORDER BY captured_at ASC, id ASC
+      LIMIT 2000
+    `).all(tier) as Array<Record<string, unknown>>).sort((left, right) => {
+      const time = Date.parse(String(left.captured_at)) - Date.parse(String(right.captured_at));
+      return time || Number(left.id) - Number(right.id);
+    });
+    let remainingBytes = Number(currentBytes.bytes);
+    for (const row of candidates) {
+      if (remainingBytes <= targetBytes) break;
+      const bytes = Math.max(0, Number(row.bytes));
+      await this.deleteSnapshot(Number(row.id), Number(row.event_id), nullableString(row.file_path));
+      remainingBytes -= bytes;
+    }
+  }
+
+  private updateSnapshotTier(snapshotId: number, tier: ActivitySnapshotStorageTier): void {
+    this.requireDatabase().prepare("UPDATE activity_snapshots SET storage_tier = ? WHERE id = ?").run(tier, snapshotId);
+  }
+
+  private updateSnapshotStorage(
+    snapshotId: number,
+    eventId: number,
+    bytes: number,
+    width: number | undefined,
+    height: number | undefined,
+    tier: ActivitySnapshotStorageTier
+  ): void {
+    const database = this.requireDatabase();
+    database.prepare("UPDATE activity_snapshots SET bytes = ?, width = ?, height = ?, storage_tier = ? WHERE id = ?")
+      .run(bytes, width ?? null, height ?? null, tier, snapshotId);
+    database.prepare("UPDATE activity_events SET snapshot_bytes = ? WHERE id = ?").run(bytes, eventId);
+    database.prepare("UPDATE activity_sessions SET updated_at = ? WHERE id = (SELECT session_id FROM activity_snapshots WHERE id = ?)")
+      .run(new Date().toISOString(), snapshotId);
+  }
+
+  private async deleteSnapshot(snapshotId: number, eventId: number, relativePath: string | undefined): Promise<void> {
+    if (relativePath) {
+      const absolutePath = safeStoredSnapshotPath(this.requireRoot(), relativePath);
+      if (absolutePath) await unlink(absolutePath).catch(() => undefined);
+    }
+    const database = this.requireDatabase();
+    database.prepare("UPDATE activity_events SET snapshot_path = NULL, snapshot_bytes = 0 WHERE id = ?").run(eventId);
+    database.prepare("DELETE FROM activity_snapshots WHERE id = ?").run(snapshotId);
   }
 
   private migrateLegacyEvents(database: DatabaseSync): void {
@@ -794,10 +1688,15 @@ export class ActivityStore {
           ax_title TEXT,
           redacted_text TEXT,
           mouse_event_type TEXT,
-          mouse_button INTEGER,
+          mouse_button TEXT,
+          key_code INTEGER,
+          key_modifiers INTEGER,
+          mouse_x REAL,
+          mouse_y REAL,
           summary TEXT NOT NULL,
           ocr_text TEXT,
           input_event_count INTEGER NOT NULL DEFAULT 0,
+          input_event_first_at TEXT,
           fallback_reason TEXT,
           snapshot_path TEXT,
           snapshot_bytes INTEGER NOT NULL DEFAULT 0
@@ -819,6 +1718,42 @@ export class ActivityStore {
     }
   }
 
+  /** Activity session 持久化结束时长和更新时间；旧库在打开时补列并回填已结束行。 */
+  private ensureSessionColumns(database: DatabaseSync): void {
+    const columns = tableColumns(database, "activity_sessions");
+    if (!columns.has("duration_ms")) {
+      database.exec("ALTER TABLE activity_sessions ADD COLUMN duration_ms INTEGER;");
+    }
+    if (!columns.has("updated_at")) {
+      database.exec("ALTER TABLE activity_sessions ADD COLUMN updated_at TEXT;");
+    }
+    database.exec(`
+      UPDATE activity_sessions
+      SET duration_ms = MAX(0, CAST((julianday(ended_at) - julianday(started_at)) * 86400000.0 AS INTEGER))
+      WHERE ended_at IS NOT NULL AND duration_ms IS NULL;
+      UPDATE activity_sessions
+      SET updated_at = COALESCE(ended_at, started_at)
+      WHERE updated_at IS NULL;
+    `);
+  }
+
+  /** Activity 输入元数据是增量列；旧库保留原事件文本与截图，只补上空列。 */
+  private ensureEventColumns(database: DatabaseSync): void {
+    const columns = tableColumns(database, "activity_events");
+    const additions: ReadonlyArray<readonly [string, string]> = [
+      ["mouse_button", "TEXT"],
+      ["key_code", "INTEGER"],
+      ["key_modifiers", "INTEGER"],
+      ["mouse_x", "REAL"],
+      ["mouse_y", "REAL"],
+      ["input_event_first_at", "TEXT"]
+    ];
+    for (const [column, definition] of additions) {
+      if (columns.has(column)) continue;
+      database.exec(`ALTER TABLE activity_events ADD COLUMN ${column} ${definition};`);
+    }
+  }
+
   /**
    * P2 分析字段的向后兼容迁移：P1 建的表没有 entities/highlights/worthMemory 等列，
    * 逐列 ALTER 补齐（幂等），只在确实缺某列时执行，不重建表、不动其它列。
@@ -832,6 +1767,15 @@ export class ActivityStore {
       && columns.has("worth_knowledge")
       && columns.has("is_meeting")
       && columns.has("storage_tier")
+      && columns.has("title")
+      && columns.has("description")
+      && columns.has("commits_json")
+      && columns.has("identifiers_json")
+      && columns.has("repos_json")
+      && columns.has("events_json")
+      && columns.has("urls_json")
+      && columns.has("memory_candidates_json")
+      && columns.has("entity_details_json")
     ) return;
     const additions: ReadonlyArray<readonly [string, string]> = [
       ["entities_json", "TEXT NOT NULL DEFAULT '[]'"],
@@ -839,7 +1783,16 @@ export class ActivityStore {
       ["worth_memory", "INTEGER NOT NULL DEFAULT 0"],
       ["worth_knowledge", "INTEGER NOT NULL DEFAULT 0"],
       ["is_meeting", "INTEGER NOT NULL DEFAULT 0"],
-      ["storage_tier", "TEXT NOT NULL DEFAULT 'standard'"]
+      ["storage_tier", "TEXT NOT NULL DEFAULT 'standard'"],
+      ["title", "TEXT"],
+      ["description", "TEXT"],
+      ["commits_json", "TEXT NOT NULL DEFAULT '[]'"],
+      ["identifiers_json", "TEXT NOT NULL DEFAULT '[]'"],
+      ["repos_json", "TEXT NOT NULL DEFAULT '[]'"],
+      ["events_json", "TEXT NOT NULL DEFAULT '[]'"],
+      ["urls_json", "TEXT NOT NULL DEFAULT '[]'"],
+      ["memory_candidates_json", "TEXT NOT NULL DEFAULT '[]'"],
+      ["entity_details_json", "TEXT NOT NULL DEFAULT '{}'" ]
     ];
     for (const [column, definition] of additions) {
       if (columns.has(column)) continue;
@@ -847,38 +1800,131 @@ export class ActivityStore {
     }
   }
 
+  /** 截图物理保留档位是独立增量列；旧库里的 JPEG 默认仍视为 hot。 */
+  private ensureSnapshotColumns(database: DatabaseSync): void {
+    const columns = tableColumns(database, "activity_snapshots");
+    if (columns.has("storage_tier")) return;
+    database.exec("ALTER TABLE activity_snapshots ADD COLUMN storage_tier TEXT NOT NULL DEFAULT 'hot';");
+  }
+
+  /** 日结会记录生成 narrative 所用的模型；旧版 Biny 日结表没有这列。 */
+  private ensureSummaryColumns(database: DatabaseSync): void {
+    if (tableColumns(database, "activity_summaries").has("model")) return;
+    database.exec("ALTER TABLE activity_summaries ADD COLUMN model TEXT;");
+  }
+
+  /** 把旧版事件表里已有的 JPEG 转成独立 snapshot 索引，重复打开时幂等。 */
+  private ensureSnapshotRows(database: DatabaseSync): void {
+    database.exec(`
+      INSERT OR IGNORE INTO activity_snapshots (
+        session_id, event_id, captured_at, file_path, bytes, trigger
+      )
+      SELECT e.session_id, e.id, e.occurred_at, e.snapshot_path, e.snapshot_bytes, e.fallback_reason
+      FROM activity_events e
+      WHERE e.source = 'screenshot_fallback' AND e.snapshot_path IS NOT NULL;
+    `);
+    database.exec(`
+      INSERT OR IGNORE INTO activity_ocr_frames (
+        session_id, snapshot_id, occurred_at, text, application, window_title
+      )
+      SELECT e.session_id, s.id, e.occurred_at, e.ocr_text, e.application, e.window_title
+      FROM activity_events e
+      JOIN activity_snapshots s ON s.event_id = e.id
+      WHERE e.ocr_text IS NOT NULL AND e.ocr_text <> '';
+    `);
+  }
+
   private ensureSearchIndex(database: DatabaseSync): void {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS activity_fts_metadata (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+    `);
     const columns = tableColumns(database, "activity_fts");
     const requiredColumns = ["event_id", "summary", "application", "window_title", "event_type", "ax_role", "ax_title", "redacted_text", "ocr_text", "url", "occurred_at"];
-    if (requiredColumns.every((column) => columns.has(column))) return;
+    const metadata = database.prepare("SELECT version FROM activity_fts_metadata WHERE id = 1").get() as { version?: number } | undefined;
+    if (requiredColumns.every((column) => columns.has(column)) && metadata?.version === ACTIVITY_FTS_INDEX_VERSION) return;
     this.rebuildSearchIndex(database);
   }
 
   private rebuildSearchIndex(database: DatabaseSync): void {
-    database.exec("DROP TABLE IF EXISTS activity_fts;");
-    database.exec(`
-      CREATE VIRTUAL TABLE activity_fts USING fts5(
-        event_id UNINDEXED,
-        summary,
-        application,
-        window_title,
-        event_type,
-        ax_role,
-        ax_title,
-        redacted_text,
-        ocr_text,
-        url,
-        occurred_at
-      );
+    database.exec("BEGIN IMMEDIATE;");
+    try {
+      database.exec("DROP TABLE IF EXISTS activity_fts;");
+      database.exec(`
+        CREATE VIRTUAL TABLE activity_fts USING fts5(
+          event_id UNINDEXED,
+          summary,
+          application,
+          window_title,
+          event_type,
+          ax_role,
+          ax_title,
+          redacted_text,
+          ocr_text,
+          url,
+          occurred_at
+        );
+      `);
+      const rows = database.prepare(`
+        SELECT id, summary, application, window_title, event_type, ax_role, ax_title,
+          redacted_text, ocr_text, url, occurred_at
+        FROM activity_events
+        ORDER BY id ASC
+      `).all() as Array<Record<string, unknown>>;
+      const insert = database.prepare(`
+        INSERT INTO activity_fts (
+          event_id, summary, application, window_title, event_type,
+          ax_role, ax_title, redacted_text, ocr_text, url, occurred_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const row of rows) this.insertSearchIndexValues(insert, row);
+      database.prepare(`
+        INSERT INTO activity_fts_metadata (id, version) VALUES (1, ?)
+        ON CONFLICT(id) DO UPDATE SET version = excluded.version
+      `).run(ACTIVITY_FTS_INDEX_VERSION);
+      database.exec("COMMIT;");
+    } catch (error) {
+      database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  private insertSearchIndexRow(database: DatabaseSync, eventId: number): void {
+    const row = database.prepare(`
+      SELECT id, summary, application, window_title, event_type, ax_role, ax_title,
+        redacted_text, ocr_text, url, occurred_at
+      FROM activity_events
+      WHERE id = ?
+    `).get(eventId) as Record<string, unknown> | undefined;
+    if (!row) return;
+    const insert = database.prepare(`
       INSERT INTO activity_fts (
         event_id, summary, application, window_title, event_type,
         ax_role, ax_title, redacted_text, ocr_text, url, occurred_at
-      )
-      SELECT id, summary, COALESCE(application, ''), COALESCE(window_title, ''),
-        event_type, COALESCE(ax_role, ''), COALESCE(ax_title, ''),
-        COALESCE(redacted_text, ''), COALESCE(ocr_text, ''), COALESCE(url, ''), occurred_at
-      FROM activity_events;
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    this.insertSearchIndexValues(insert, row);
+  }
+
+  private insertSearchIndexValues(
+    insert: StatementSync,
+    row: Record<string, unknown>
+  ): void {
+    insert.run(
+      Number(row.id),
+      segmentActivityText(nullableString(row.summary)),
+      segmentActivityText(nullableString(row.application)),
+      segmentActivityText(nullableString(row.window_title)),
+      segmentActivityText(nullableString(row.event_type)),
+      segmentActivityText(nullableString(row.ax_role)),
+      segmentActivityText(nullableString(row.ax_title)),
+      segmentActivityText(nullableString(row.redacted_text)),
+      segmentActivityText(nullableString(row.ocr_text)),
+      segmentActivityText(nullableString(row.url)),
+      segmentActivityText(nullableString(row.occurred_at))
+    );
   }
 
   private requireDatabase(): DatabaseSync {
@@ -903,6 +1949,17 @@ function normalizeShortText(value: string | undefined, fallback?: string): strin
   return fallback;
 }
 
+function durationBetween(startedAt: string, endedAt: string): number {
+  const duration = Date.parse(endedAt) - Date.parse(startedAt);
+  return Number.isFinite(duration) ? Math.max(0, Math.trunc(duration)) : 0;
+}
+
+function normalizeEventTimestamp(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
+
 /** URL 结构化列：只清理控制字符并限长，不做内容脱敏（参见 insertEvent 的注释）。 */
 function normalizeStructuredUrl(value: string | undefined): string | undefined {
   const normalized = value?.replace(/[\u0000-\u001F\u007F]/gu, " ").replace(/\s+/gu, " ").trim();
@@ -910,8 +1967,39 @@ function normalizeStructuredUrl(value: string | undefined): string | undefined {
   return undefined;
 }
 
+function snapshotDateKey(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "unknown-date";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function safeSnapshotTimestamp(value: string): string {
+  const date = new Date(value);
+  const iso = Number.isNaN(date.getTime()) ? value : date.toISOString();
+  return iso.replace(/[/:]/gu, "-").replace(/[^0-9A-Za-z._-]/gu, "-");
+}
+
+function normalizeDimension(value: number | undefined): number | null {
+  return value !== undefined && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function normalizeRatio(value: number | undefined): number | null {
+  return value !== undefined && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
+}
+
 function nullableString(value: unknown): string | undefined {
   return value === null || value === undefined ? undefined : String(value);
+}
+
+function nullableInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+}
+
+function nullableNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function parseAnalysisRow(row: Record<string, unknown>): ActivitySessionAnalysis {
@@ -920,6 +2008,8 @@ function parseAnalysisRow(row: Record<string, unknown>): ActivitySessionAnalysis
     analyzedAt: String(row.analyzed_at),
     analyzerModel: String(row.analyzer_model),
     project: nullableString(row.project),
+    title: nullableString(row.title),
+    description: nullableString(row.description),
     summary: String(row.summary),
     topics: parseJsonArray<string>(row.topics_json),
     prs: parseJsonArray<ActivityAnalysisReference>(row.prs_json),
@@ -929,6 +2019,13 @@ function parseAnalysisRow(row: Record<string, unknown>): ActivitySessionAnalysis
     decisions: parseJsonArray<string>(row.decisions_json),
     entities: parseJsonArray<string>(row.entities_json),
     highlights: parseJsonArray<string>(row.highlights_json),
+    commits: parseJsonArray<ActivityAnalysisCommit>(row.commits_json),
+    identifiers: parseJsonArray<string>(row.identifiers_json),
+    repos: parseJsonArray<string>(row.repos_json),
+    events: parseJsonArray<string>(row.events_json),
+    urls: parseJsonArray<string>(row.urls_json),
+    memoryCandidates: parseJsonArray<ActivityMemoryCandidate>(row.memory_candidates_json),
+    entityDetails: parseJsonObject<ActivityAnalysisEntityDetails>(row.entity_details_json),
     worthMemory: Number(row.worth_memory) === 1,
     worthKnowledge: Number(row.worth_knowledge) === 1,
     isMeeting: Number(row.is_meeting) === 1,
@@ -943,6 +2040,10 @@ function parseStorageTier(value: unknown): ActivityStorageTier {
   return value === "ephemeral" || value === "important" ? value : "standard";
 }
 
+function parseSnapshotStorageTier(value: unknown): ActivitySnapshotStorageTier {
+  return value === "warm" || value === "cold" ? value : "hot";
+}
+
 function parseJsonArray<T>(value: unknown): T[] {
   if (typeof value !== "string" || !value) return [];
   try {
@@ -951,4 +2052,90 @@ function parseJsonArray<T>(value: unknown): T[] {
   } catch {
     return [];
   }
+}
+
+function parseJsonObject<T extends object>(value: unknown): T | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as T : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseSummaryStats(value: unknown, dateKey: string): ActivitySummaryStats {
+  const fallback: ActivitySummaryStats = {
+    dateKey,
+    sessionCount: 0,
+    totalActiveMs: 0,
+    analyzedCount: 0,
+    notWorthCount: 0,
+    snapshotCount: 0,
+    ocrCharCount: 0,
+    apps: [],
+    hours: Array.from({ length: 24 }, (_, hour) => ({ hour, count: 0 })),
+    keyMoments: []
+  };
+  if (typeof value !== "string" || !value) return fallback;
+  try {
+    const parsed = JSON.parse(value) as Partial<ActivitySummaryStats>;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return fallback;
+    return {
+      ...fallback,
+      ...parsed,
+      dateKey,
+      apps: Array.isArray(parsed.apps)
+        ? parsed.apps.flatMap((app) => {
+            if (typeof app !== "object" || app === null || Array.isArray(app)) return [];
+            const value = app as Partial<{ app: unknown; durationMs: unknown; application: unknown; activeMs: unknown }>;
+            const name = typeof value.app === "string" ? value.app : value.application;
+            const duration = typeof value.durationMs === "number" ? value.durationMs : value.activeMs;
+            return typeof name === "string" && typeof duration === "number"
+              ? [{ app: name, durationMs: duration }]
+              : [];
+          })
+        : [],
+      hours: Array.isArray(parsed.hours)
+        ? parsed.hours.flatMap((hour, index) => {
+            if (typeof hour === "number") return [{ hour: index, count: hour }];
+            if (typeof hour !== "object" || hour === null || Array.isArray(hour)) return [];
+            const value = hour as Partial<{ hour: unknown; count: unknown }>;
+            return typeof value.hour === "number" && typeof value.count === "number"
+              ? [{ hour: value.hour, count: value.count }]
+              : [];
+          })
+        : fallback.hours,
+      keyMoments: Array.isArray(parsed.keyMoments)
+        ? parsed.keyMoments.flatMap((moment) => {
+            if (typeof moment === "string") return [];
+            if (typeof moment !== "object" || moment === null || Array.isArray(moment)) return [];
+            const value = moment as Partial<ActivitySummaryStats["keyMoments"][number]>;
+            return typeof value.sessionId === "string"
+              && typeof value.title === "string"
+              && typeof value.startedAt === "string"
+              && typeof value.durationMs === "number"
+              ? [value as ActivitySummaryStats["keyMoments"][number]]
+              : [];
+          })
+        : []
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+const DAY_MS = 24 * 60 * 60 * 1_000;
+const SNAPSHOT_WARM_AGE_MS = DAY_MS;
+const SNAPSHOT_COLD_AGE_MS = 7 * DAY_MS;
+const SNAPSHOT_COLD_DELETE_AGE_MS = 30 * DAY_MS;
+const SNAPSHOT_TARGET_STORAGE_RATIO = 0.75;
+const SNAPSHOT_WARM_SIZE = { width: 1_280, height: 720, quality: 40 } as const;
+const SNAPSHOT_COLD_SIZE = { width: 640, height: 360, quality: 30 } as const;
+
+function safeStoredSnapshotPath(root: string, relativePath: string): string | undefined {
+  const absoluteRoot = path.resolve(root);
+  const absolutePath = path.resolve(absoluteRoot, relativePath);
+  if (absolutePath === absoluteRoot || absolutePath.startsWith(`${absoluteRoot}${path.sep}`)) return absolutePath;
+  return undefined;
 }

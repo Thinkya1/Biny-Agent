@@ -1,10 +1,10 @@
 /**
  * activity_report 工具模块。
  *
- * 这是 Activity 进入模型的唯一入口，取代了旧的「把脱敏事件被动注入每个回合」做法：模型只在
+ * 这是 Activity 进入主动报告模型的入口，取代旧的「把脱敏事件被动注入每个回合」做法：模型只在
  * 用户明确询问「我今天/某天做了什么」时主动拉取一份按项目分组的打工日记。读取的是分析层已
- * 落库的结构化结果，必要时才补分析——整条链路只接触 store 查询层提供的脱敏 occurredAt/
- * summary/application，截图、OCR 原文和输入键值从查询层就不在这条链路上。
+ * 落库的结构化结果，必要时才补分析——整条链路只接触脱敏的 occurredAt/summary/application
+ * 和受控的 OCR 投影，截图文件、原始 OCR 和输入键值从查询层就不在模型输入里。
  *
  * 是否用当前聊天模型补分析由 ActivityPrivacyPolicy 的 analysis 维度决定：外部模型默认需要
  * 用户在设置页确认，未放行时报告只渲染已分析的部分并说明原因，绝不降级到别的模型。
@@ -12,11 +12,9 @@
 import { z } from "zod";
 import type { AgentModel } from "../../agent/core/types.js";
 import { buildActivityReport, resolveActivityReportRange, type ActivityReportResult } from "../../activity/analyzer.js";
-import { syncWorthwhileActivityMemories } from "../../activity/memorySync.js";
 import { ActivityPrivacyPolicy } from "../../activity/privacyPolicy.js";
 import { ActivityStore } from "../../activity/store.js";
 import type { ActivitySettings } from "../../activity/settings.js";
-import type { LocalMemory } from "../../agent/context/LocalMemory.js";
 import { ToolAccesses } from "../access.js";
 import type { Tool } from "../types.js";
 
@@ -37,8 +35,6 @@ export interface ActivityReportToolDeps {
   loadSettings(): Promise<ActivitySettings>;
   /** 报告结果缓存；缺省时用进程内 10 分钟 TTL 的默认缓存。 */
   cache?: ActivityReportCache;
-  /** worthMemory 同步的目标记忆库；缺省时只生成报告、不同步记忆。 */
-  getMemory?(): LocalMemory | undefined;
   /** 可注入时钟，便于测试固定「今天」。 */
   now?: () => Date;
 }
@@ -73,7 +69,7 @@ export function createActivityReportTool(deps: ActivityReportToolDeps): Tool<Act
     description: [
       "Summarize the user's recorded on-device screen activity into a dated work diary, grouped by project.",
       "Use it when the user asks what they worked on, wants to recap a day, or recalls past activity.",
-      "It reads only redacted on-device event summaries (application, window, timestamp); screenshots and OCR text never leave the device.",
+      "It reads only redacted on-device event summaries (application, window, timestamp); original screenshots and unredacted OCR never leave the device.",
       "Analyzing sessions that have no result yet uses the current chat model only when the activity privacy policy allows it; otherwise the report covers what is already analyzed and explains why."
     ].join(" "),
     promptSnippet: "Summarize recorded on-device activity into a dated work diary",
@@ -107,33 +103,26 @@ export function createActivityReportTool(deps: ActivityReportToolDeps): Tool<Act
         async execute({ signal }) {
           const settings = await deps.loadSettings();
           const policy = new ActivityPrivacyPolicy(settings);
-          const cache = deps.cache ?? defaultActivityReportCache;
           const now = deps.now?.() ?? new Date();
-          // 报告是按「本地日」缓存的：today/yesterday 先解析成具体日期再查缓存，
-          // 同一自然日内的重复提问（同一会话里问两遍、或桌面页再拉一次）不重复补分析。
-          const dateLabel = resolveReportDateLabel(date, now);
-          const cached = cache.get(dateLabel);
           // 用独立连接读分析表并补分析，避免长时间模型调用占用采集器自己的那条写连接。
           const store = new ActivityStore();
           await store.open(settings.outputDirectory);
           try {
+            const cache = deps.cache ?? defaultActivityReportCache;
+            // 缓存必须同时受原始事件、分析输入、模型和策略影响；否则今天新增活动或模型切换后，
+            // 仍会返回旧日报。第一次补分析会改变 analysis revision，因此 set 使用补分析后的 key。
+            const dateLabel = resolveReportDateLabel(date, now);
+            const model = deps.getModel();
+            const cacheKey = reportCacheKey(dateLabel, settings, model, store.activityRevision());
+            const cached = cache.get(cacheKey);
             const result = cached ?? await buildActivityReport({
               store,
               policy,
-              model: deps.getModel(),
+              model,
               signal,
               now: deps.now
             }, dateLabel);
-            if (!cached) cache.set(dateLabel, result);
-            const memory = deps.getMemory?.();
-            if (memory) {
-              await syncWorthwhileActivityMemories({
-                store,
-                memory,
-                signal,
-                now: deps.now
-              }).catch(() => undefined);
-            }
+            if (!cached) cache.set(reportCacheKey(dateLabel, settings, model, store.activityRevision()), result);
             return formatReportToolResult(result);
           } finally {
             await store.close();
@@ -142,6 +131,25 @@ export function createActivityReportTool(deps: ActivityReportToolDeps): Tool<Act
       };
     }
   };
+}
+
+function reportCacheKey(
+  dateLabel: string,
+  settings: ActivitySettings,
+  model: AgentModel | undefined,
+  revision: string
+): string {
+  return [
+    dateLabel,
+    revision,
+    settings.analysisPolicy,
+    settings.analysisExternalConfirmed ? "confirmed" : "unconfirmed",
+    settings.analysisModel ?? "follow-current",
+    model?.provider ?? "no-model",
+    model?.modelId ?? "",
+    model?.runtime ?? "",
+    model?.dataResidency ?? ""
+  ].join("\u0000");
 }
 
 /** 工具模块级共享的默认缓存：未注入 cache 时所有 activity_report 调用共用同一个 10 分钟 TTL。 */
