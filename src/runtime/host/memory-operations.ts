@@ -44,7 +44,8 @@ export async function executeRuntimeHostMemoryOperation(
       origins: [readMemoryOriginSelector(payload.selector, true)],
       topic: optionalString(payload.topic),
       limit: optionalSafeInteger(payload.limit),
-      offset: optionalSafeInteger(payload.offset)
+      offset: optionalSafeInteger(payload.offset),
+      includeArchived: payload.includeArchived === true
     });
   }
   if (action === "search-v3") {
@@ -54,9 +55,39 @@ export async function executeRuntimeHostMemoryOperation(
       {
         origins: [readMemoryOriginSelector(payload.selector, true)],
         limit: optionalSafeInteger(payload.limit),
-        maxChars: optionalSafeInteger(payload.maxChars)
+        maxChars: optionalSafeInteger(payload.maxChars),
+        includeArchived: payload.includeArchived === true
       }
     );
+  }
+  if (action === "sleep-status") {
+    return memory.maintenanceStatus();
+  }
+  if (action === "sleep-runs") {
+    return memory.maintenanceStatus().sleepRuns ?? [];
+  }
+  if (action === "sleep-run-now") {
+    const state = await commands.agent.getPersonalizationState();
+    const policy = state.memory;
+    const result = await memory.processEligibleCandidates({
+      trigger: "manual",
+      archiveRetentionDays: policy.archiveRetentionDays,
+      temporaryTtl: policy.temporaryTtl,
+      useLlm: policy.useLlm,
+      llmMergeLow: policy.llmMergeLow,
+      llmBatchSize: policy.llmBatchSize
+    }, {
+      indexEntry: async (entry) => await commands.agent.indexMemoryEntry(entry),
+      requestRebuild: () => context.scheduleEmbeddingRebuild()
+    });
+    return { result, maintenance: memory.maintenanceStatus() };
+  }
+  if (action === "sleep-preview") {
+    const state = await commands.agent.getPersonalizationState();
+    return await memory.previewMaintenance({
+      temporaryTtl: state.memory.temporaryTtl,
+      archiveRetentionDays: state.memory.archiveRetentionDays
+    });
   }
   if (action === "write-v3") {
     const result = await memory.writeEntry(readMemoryEntryInput(payload.entry), {
@@ -73,6 +104,14 @@ export async function executeRuntimeHostMemoryOperation(
     );
     if (result.written && result.entry) await commands.agent.indexMemoryEntry(result.entry);
     return result;
+  }
+  if (action === "archive-list-v3") {
+    return await memory.listArchivedEntries();
+  }
+  if (action === "archive-v3") {
+    const id = requiredString(payload.id, "id");
+    const archived = payload.archived === true;
+    return await memory.archiveEntry(id, archived, { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") });
   }
   if (action === "delete-v3") {
     const id = requiredString(payload.id, "id");

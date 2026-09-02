@@ -5,7 +5,6 @@
  * and running tools live in active cells and are updated in place until one
  * completion event commits each cell exactly once.
  */
-import { parseMemoryCitations } from "../agent/context/memoryCitations.js";
 import type { AgentHostEvent } from "../runtime/agentEvents.js";
 import type { CommandCardData } from "../runtime/commandCard.js";
 import { activitySummaryText } from "../runtime/activitySummary.js";
@@ -209,8 +208,7 @@ export function tuiReducer(state: TuiState, event: TuiAction): TuiState {
     case "assistant.completed":
       return {
         ...state,
-        // 展示层剥离记忆引用块；session JSONL 保留原文供审计。
-        transcript: commitAssistant(commitReasoning(state.transcript), parseMemoryCitations(event.content).textWithoutBlock)
+        transcript: commitAssistant(commitReasoning(state.transcript), event.content)
       };
     case "tool.started":
       return {

@@ -24,7 +24,8 @@ const localMemory = {
     calls.push("process");
     derivedIndex.requestRebuild?.();
     return undefined;
-  }
+  },
+  listEligibleCandidates: async () => ({ candidates: [{ id: "candidate-1" }] })
 };
 const commands = {
   agent: {
@@ -43,6 +44,9 @@ await new Promise<void>((resolve) => setTimeout(resolve, 25));
 assert.deepEqual(calls, ["load", "process", "rebuild"]);
 
 maintenance.stop();
+const preview = await maintenance.preview();
+assert.deepEqual(preview, { available: true, candidates: 1, archived: 0, recentRuns: 0 });
+assert.equal(maintenance.cancel(), false);
 maintenance.scheduleEmbeddingRebuild();
 await new Promise<void>((resolve) => setTimeout(resolve, 10));
 assert.deepEqual(calls, ["load", "process", "rebuild"]);

@@ -145,8 +145,8 @@ assert.equal(protocolVersion, 5, "协议版本必须 bump 到 5");
   );
   assert.deepEqual(negotiateRuntimeHostCapabilities([], runtimeHostCapabilities), [], "空声明 → 空生效集");
   assert.deepEqual(
-    negotiateRuntimeHostCapabilities(["memory.v3", "memory.v3", "telos.v1"], runtimeHostCapabilities),
-    ["memory.v3", "telos.v1"],
+    negotiateRuntimeHostCapabilities(["memory.v3", "memory.v3", "runtime.authority"], runtimeHostCapabilities),
+    ["memory.v3", "runtime.authority"],
     "重复声明被去重"
   );
 }

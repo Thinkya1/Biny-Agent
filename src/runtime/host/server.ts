@@ -58,7 +58,6 @@ import {
   isRuntimeHostAdmissionOperation
 } from "./quota.js";
 import { executeRuntimeHostMemoryOperation } from "./memory-operations.js";
-import { executeRuntimeHostTelosOperation } from "./telos-operations.js";
 import {
   asRecord,
   optionalSafeInteger,
@@ -200,6 +199,18 @@ export class RuntimeHostServer {
    */
   startMemoryMaintenance(): void {
     this.businessComposition.startMemoryMaintenance();
+  }
+
+  async runMemorySleep(): Promise<unknown> {
+    return await this.businessComposition.runMemorySleep();
+  }
+
+  async previewMemorySleep(): Promise<unknown> {
+    return await this.businessComposition.previewMemorySleep();
+  }
+
+  cancelMemorySleep(): boolean {
+    return this.businessComposition.cancelMemorySleep();
   }
 
   async runAutomation(automationId: string): Promise<unknown> {
@@ -1031,7 +1042,7 @@ export class RuntimeHostServer {
         );
       case "memory": {
         // 普通读取允许看到短暂不一致的快照，不占用交互会话；写入与整理仍需独占。
-        if (payload.action === "overview-v3" || payload.action === "list-v3" || payload.action === "search-v3") {
+        if (payload.action === "overview-v3" || payload.action === "list-v3" || payload.action === "search-v3" || payload.action === "sleep-preview") {
           return await executeRuntimeHostMemoryOperation({
             getCommands: () => commands,
             scheduleEmbeddingRebuild: () => this.businessComposition.scheduleMemoryEmbeddingRebuild()
@@ -1045,14 +1056,8 @@ export class RuntimeHostServer {
           }, payload)
         );
       }
-      case "telos": {
-        // TELOS overview 是普通读取；写入和策略审核仍需独占。
-        if (payload.action === "overview-v1") return await executeRuntimeHostTelosOperation(commands, payload);
-        return await runtime.runExclusiveOperation(
-          "telos",
-          async () => await executeRuntimeHostTelosOperation(commands, payload)
-        );
-      }
+      case "memory.sleep.cancel":
+        return { cancelled: this.businessComposition.cancelMemorySleep() };
       case "memory.embedding.status-v3":
         return await commands.agent.memoryEmbeddingStatus();
       case "memory.embedding.download-v3":

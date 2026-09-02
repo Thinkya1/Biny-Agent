@@ -21,6 +21,9 @@ export interface RuntimeHostBusinessComposition {
   stop(): void;
   handleRuntimeUpdate(update: AgentRuntimeUpdate): void;
   scheduleMemoryEmbeddingRebuild(): void;
+  runMemorySleep(): Promise<unknown>;
+  previewMemorySleep(): Promise<unknown>;
+  cancelMemorySleep(): boolean;
   runAutomation(automationId: string): Promise<unknown>;
   recoverGraphs(): void;
 }
@@ -88,6 +91,15 @@ export function createRuntimeHostBusinessComposition(
     },
     scheduleMemoryEmbeddingRebuild(): void {
       memoryMaintenance.scheduleEmbeddingRebuild();
+    },
+    runMemorySleep(): Promise<unknown> {
+      return memoryMaintenance.runNow();
+    },
+    previewMemorySleep(): Promise<unknown> {
+      return memoryMaintenance.preview();
+    },
+    cancelMemorySleep(): boolean {
+      return memoryMaintenance.cancel();
     },
     async runAutomation(automationId: string): Promise<unknown> {
       if (!automationScheduler) throw new Error("Automation scheduler is unavailable.");

@@ -241,7 +241,7 @@ async function main(): Promise<void> {
   assert.equal(client.hostInfo?.hostEpoch, host.info.hostEpoch);
   assert.equal(client.hostInfo?.capabilities.includes("personalization"), true);
   assert.equal(client.hostInfo?.capabilities.includes("memory.v3"), true);
-  assert.equal(client.hostInfo?.capabilities.includes("telos.v1"), true);
+  assert.equal(client.hostInfo?.capabilities.includes("telos.v1"), false);
   assert.equal(client.hostInfo?.capabilities.includes("memory.v2"), false);
 
   const isolatedAgentRoot = path.join(workspace, "isolated-agent");
@@ -578,8 +578,13 @@ async function main(): Promise<void> {
   await reattached.close();
   if (previousReplacementAgentRoot === undefined) delete process.env.BINY_AGENT_DIR;
   else process.env.BINY_AGENT_DIR = previousReplacementAgentRoot;
-  const replacementRegistration = JSON.parse(await readFile(runtimeHostPaths(spawnedWorkspace).registrationPath, "utf8")) as { pid?: unknown };
-  if (typeof replacementRegistration.pid === "number") process.kill(replacementRegistration.pid, "SIGTERM");
+  const replacementRegistrationPath = runtimeHostPaths(spawnedWorkspace).registrationPath;
+  try {
+    const replacementRegistration = JSON.parse(await readFile(replacementRegistrationPath, "utf8")) as { pid?: unknown };
+    if (typeof replacementRegistration.pid === "number") process.kill(replacementRegistration.pid, "SIGTERM");
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
   const exited = new Promise<void>((resolve) => {
     if (spawned.process.exitCode !== null || spawned.process.signalCode !== null) {
       resolve();

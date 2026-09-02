@@ -7,7 +7,6 @@ import { randomUUID } from "node:crypto";
 import type { AgentAttachment, AgentRunMode } from "../../agent/AgentSession.js";
 import { agentCapabilitySelectionSchema, type AgentCapabilitySelection } from "../../agent/capabilitySelection.js";
 import type { AgentRunOutcome, RuntimeRequestIds } from "../InteractiveAgentRuntime.js";
-import type { BehaviorPatternReviewAction, TelosDocumentInput, TelosDriftResolutionAction, TelosScope } from "../../agent/context/telosTypes.js";
 import type { MemoryEntryInput, MemoryEntryPatch, MemoryKind, MemoryLineage, MemoryLineageSource, MemoryOriginSelector } from "../../agent/context/memoryTypes.js";
 import { thinkingLevelSchema } from "../../config/schema.js";
 import type { PermissionAction, PermissionMode, PermissionResult } from "../../permission/PermissionManager.js";
@@ -70,61 +69,6 @@ export function optionalSafeInteger(value: unknown): number | undefined {
 export function readStringArray(value: unknown, name: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`Runtime Host field ${name} must be a string array.`);
   return value;
-}
-
-export function readTelosDocumentInput(value: unknown): TelosDocumentInput {
-  const record = asRecord(value);
-  return {
-    scope: readTelosScope(record.scope),
-    mission: requiredString(record.mission, "input.mission"),
-    goals: record.goals === undefined ? undefined : readTelosGoals(record.goals),
-    principles: record.principles === undefined ? undefined : readTelosRules(record.principles, "input.principles"),
-    constraints: record.constraints === undefined ? undefined : readTelosRules(record.constraints, "input.constraints"),
-    antiGoals: record.antiGoals === undefined ? undefined : readTelosRules(record.antiGoals, "input.antiGoals")
-  };
-}
-
-export function readTelosScope(value: unknown): TelosScope {
-  if (value === "universal" || value === "workspace") return value;
-  throw new Error("Runtime Host TELOS scope is invalid.");
-}
-
-export function readTelosGoals(value: unknown): TelosDocumentInput["goals"] {
-  if (!Array.isArray(value)) throw new Error("Runtime Host TELOS goals must be an array.");
-  return value.map((item, index) => {
-    const record = asRecord(item);
-    const status = record.status;
-    if (status !== "active" && status !== "paused" && status !== "completed") {
-      throw new Error(`Runtime Host TELOS goal ${String(index)} status is invalid.`);
-    }
-    return {
-      id: requiredString(record.id, `input.goals[${String(index)}].id`),
-      text: requiredString(record.text, `input.goals[${String(index)}].text`),
-      status,
-      horizon: optionalString(record.horizon)
-    };
-  });
-}
-
-export function readTelosRules(value: unknown, name: string): TelosDocumentInput["principles"] {
-  if (!Array.isArray(value)) throw new Error(`Runtime Host ${name} must be an array.`);
-  return value.map((item, index) => {
-    const record = asRecord(item);
-    return {
-      id: requiredString(record.id, `${name}[${String(index)}].id`),
-      text: requiredString(record.text, `${name}[${String(index)}].text`)
-    };
-  });
-}
-
-export function readTelosPatternAction(value: unknown): BehaviorPatternReviewAction {
-  if (value === "confirm" || value === "reject" || value === "expire") return value;
-  throw new Error("Runtime Host TELOS pattern action is invalid.");
-}
-
-export function readTelosDriftAction(value: unknown): TelosDriftResolutionAction {
-  if (value === "adjust_telos" || value === "adjust_behavior" || value === "dismiss" || value === "resolve") return value;
-  throw new Error("Runtime Host TELOS drift action is invalid.");
 }
 
 export function readMemoryEntryInput(value: unknown): MemoryEntryInput {

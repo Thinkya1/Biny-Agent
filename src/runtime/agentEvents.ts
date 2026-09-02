@@ -25,7 +25,6 @@ export type RuntimeOperation =
   | "mcp"
   | "permission"
   | "memory"
-  | "telos"
   | "personalization"
   | "model_catalog"
   | "checkpoint"

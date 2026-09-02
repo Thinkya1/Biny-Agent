@@ -4,7 +4,6 @@ export * from "./credentials.js";
 export * from "./composition.js";
 export * from "./maintenance.js";
 export * from "./memory-operations.js";
-export * from "./telos-operations.js";
 export * from "./lifecycle.js";
 export * from "./bootstrap.js";
 export * from "./connection.js";

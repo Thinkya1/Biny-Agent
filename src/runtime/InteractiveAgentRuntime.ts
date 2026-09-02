@@ -1601,7 +1601,6 @@ function publicOperationName(operation: RuntimeOperation): string {
   if (operation === "compact") return "conversation compaction";
   if (operation === "mcp") return "MCP reconnection";
   if (operation === "memory") return "a memory command";
-  if (operation === "telos") return "a TELOS update";
   if (operation === "personalization") return "personalization settings";
   if (operation === "checkpoint") return "checkpoint restore";
   if (operation === "message_version") return "message version switching";

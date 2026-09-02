@@ -36,8 +36,7 @@ export const runtimeHostCapabilities = [
   "agent.graph",
   "capability.channel",
   "personalization",
-  "memory.v3",
-  "telos.v1"
+  "memory.v3"
 ] as const;
 
 /**

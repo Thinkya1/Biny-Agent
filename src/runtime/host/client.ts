@@ -858,10 +858,29 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     );
   }
 
-  async telos<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
-    return await this.request<T>("telos", { action, ...payload });
+  async runMemorySleep(): Promise<unknown> {
+    return await this.memory("sleep-run-now", {});
   }
 
+  async listArchivedMemory(): Promise<unknown> {
+    return await this.memory("archive-list-v3", {});
+  }
+
+  async memorySleepStatus(): Promise<{ state: string; lastRun?: unknown; sleepRuns?: unknown[] }> {
+    return await this.memory("sleep-status", {});
+  }
+
+  async memorySleepRuns(): Promise<unknown[]> {
+    return await this.memory("sleep-runs", {});
+  }
+
+  async previewMemorySleep(): Promise<{ available: boolean; candidates: number; temporaryToArchive: number; archivedToDelete: number; recentRuns: number; lastRun?: unknown }> {
+    return await this.memory("sleep-preview", {});
+  }
+
+  async cancelMemorySleep(): Promise<boolean> {
+    return await this.request("memory.sleep.cancel", {});
+  }
 
   async memoryEmbeddingStatus(): Promise<MemoryEmbeddingRuntimeStatus> {
     return await this.request("memory.embedding.status-v3", {});

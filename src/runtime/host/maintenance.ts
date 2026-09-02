@@ -15,6 +15,9 @@ export interface RuntimeHostMemoryMaintenance {
   stop(): void;
   handleRuntimeUpdate(update: AgentRuntimeUpdate): void;
   scheduleEmbeddingRebuild(): void;
+  runNow(): Promise<unknown>;
+  preview(): Promise<unknown>;
+  cancel(): boolean;
 }
 
 export interface RuntimeHostMemoryMaintenanceOptions {
@@ -31,11 +34,29 @@ export function createRuntimeHostMemoryMaintenance(
   let embeddingRebuildTimer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
 
-  const run = async (): Promise<void> => {
+  const run = async (force = false): Promise<void> => {
     if (stopped || maintenancePromise || options.getRuntime().getSnapshot().state.kind !== "idle") return;
+    const commands = options.getCommands();
+    const agent = commands.agent as CommandRuntime["agent"] & {
+      getPersonalizationState?: () => Promise<{ memory?: { sleepEnabled?: boolean; sleepTime?: string; archiveRetentionDays?: number; temporaryTtl?: number; useLlm?: boolean; llmMergeLow?: number; llmBatchSize?: number } }>;
+    };
+    if (!agent) return;
+    const state = agent.getPersonalizationState
+      ? await agent.getPersonalizationState().catch(() => undefined)
+      : undefined;
+    const sleep = state?.memory;
+    const now = new Date();
+    const localMemory = typeof agent.getLocalMemory === "function" ? agent.getLocalMemory() : undefined;
+    if (sleep && !localMemory) return;
+    const [hour = 3, minute = 0] = (sleep?.sleepTime ?? "03:00").split(":").map(Number);
+    const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const due = now.getHours() > hour || now.getHours() === hour && now.getMinutes() >= minute;
+    if (!force && sleep?.sleepEnabled === false) return;
+    if (!force && !due) return;
+    const hasMaintenanceStatus = localMemory !== undefined && typeof (localMemory as { maintenanceStatus?: unknown }).maintenanceStatus === "function";
+    if (!force && sleep && localMemory && hasMaintenanceStatus && localMemory.maintenanceStatus().lastRun?.finishedAt?.startsWith(dateKey)) return;
     const controller = new AbortController();
     maintenanceAbort = controller;
-    const commands = options.getCommands();
     const promise = (async () => {
       await commands.agent.getLocalMemory().loadMaintenanceStatus({ signal: controller.signal });
       controller.signal.throwIfAborted();
@@ -45,7 +66,14 @@ export function createRuntimeHostMemoryMaintenance(
       let rebuildRequested = false;
       try {
         await commands.agent.getLocalMemory().processEligibleCandidates(
-          { signal: controller.signal },
+          {
+            signal: controller.signal,
+            archiveRetentionDays: sleep?.archiveRetentionDays,
+            temporaryTtl: sleep?.temporaryTtl,
+            useLlm: sleep?.useLlm,
+            llmMergeLow: sleep?.llmMergeLow,
+            llmBatchSize: sleep?.llmBatchSize
+          },
           {
             indexEntry: async (entry) => await commands.agent.indexMemoryEntry(entry),
             requestRebuild: () => { rebuildRequested = true; }
@@ -70,6 +98,28 @@ export function createRuntimeHostMemoryMaintenance(
   };
 
   const api: RuntimeHostMemoryMaintenance = {
+    runNow(): Promise<unknown> {
+      return run(true);
+    },
+    preview: async (): Promise<unknown> => {
+      const agent = options.getCommands().agent as CommandRuntime["agent"] & { getLocalMemory?: () => { listEligibleCandidates: (options?: { limit?: number }) => Promise<{ candidates: unknown[] }> } };
+      if (typeof agent.getLocalMemory !== "function") return { available: false, candidates: 0 };
+      const result = await agent.getLocalMemory().listEligibleCandidates({ limit: 32 });
+      const status = typeof (agent.getLocalMemory() as { maintenanceStatus?: unknown }).maintenanceStatus === "function"
+        ? agent.getLocalMemory().maintenanceStatus()
+        : undefined;
+      return {
+        available: true,
+        candidates: result.candidates.length,
+        archived: status?.lastRun?.archived ?? 0,
+        recentRuns: status?.sleepRuns?.length ?? 0
+      };
+    },
+    cancel(): boolean {
+      if (!maintenanceAbort) return false;
+      maintenanceAbort.abort();
+      return true;
+    },
     start(): void {
       if (stopped || maintenanceTimer) return;
       void run();

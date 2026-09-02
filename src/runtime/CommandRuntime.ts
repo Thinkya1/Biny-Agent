@@ -14,6 +14,9 @@ import { ensureAgentDirs } from "../session/store.js";
 import { createToolRegistry } from "../tools/registry.js";
 import { createTodoTool } from "../tools/todo.js";
 import type { ActivitySettings } from "../activity/settings.js";
+import { ActivityPrivacyPolicy } from "../activity/privacyPolicy.js";
+import { ActivityStore } from "../activity/store.js";
+import { buildActivityChatContext } from "../activity/context.js";
 
 import { TodoStore } from "../session/todoStore.js";
 import { CheckpointStore } from "../session/checkpointStore.js";
@@ -218,28 +221,47 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
         getFatigue: () => agent?.getFatigue() ?? 0
       }));
     }
-    // Activity 回忆改为主动工具集：模型按需生成打工日记/时间线/搜索，而不是把脱敏事件
-    // 注入每个回合。模型、策略、记忆库与嵌入运行时都在调用时现取（当前聊天模型 + 最新
-    // activity 设置），不沿用装配时的快照；report/digest 执行后会顺手把 worth_memory=1
-    // 的分析行同步成记忆条目（幂等）。
+    // Activity 回忆改为主动工具集：模型按需生成打工日记、时间线或搜索，而不是把脱敏事件
+    // 注入每个回合。模型、策略与嵌入运行时都在调用时现取，不沿用装配时的快照。
     const loadActivitySettings = async (): Promise<ActivitySettings> =>
       (await configStore.load(workspaceRoot)).activity;
 
-    const activityMemoryDeps = {
-      getMemory: () => agent?.getLocalMemory()
-    } as const;
+    const activityContext = async (
+      input: string,
+      model: import("../agent/core/types.js").AgentModel | undefined,
+      signal?: AbortSignal
+    ): Promise<string | undefined> => {
+      if (!model) return undefined;
+      const settings = await loadActivitySettings();
+      if (!settings.enabled) return undefined;
+      const policy = new ActivityPrivacyPolicy(settings);
+      const decision = await policy.run(model, async () => {
+        const store = new ActivityStore();
+        await store.open(settings.outputDirectory);
+        try {
+          return await buildActivityChatContext(input, {
+            settings,
+            store,
+            getEmbeddingRuntime: async () => await agent?.getActivityEmbeddingRuntime(),
+            signal
+          });
+        } finally {
+          await store.close();
+        }
+      });
+      return decision.value;
+    };
+
     toolRegistry.registerBuiltinTool(createActivityReportTool({
       getModel: () => modelManager?.getModel(),
-      loadSettings: loadActivitySettings,
-      ...activityMemoryDeps
+      loadSettings: loadActivitySettings
     }));
     toolRegistry.registerBuiltinTool(createActivityDigestTool({
-      loadSettings: loadActivitySettings,
-      ...activityMemoryDeps
+      loadSettings: loadActivitySettings
     }));
     toolRegistry.registerBuiltinTool(createActivitySearchTool({
       loadSettings: loadActivitySettings,
-      getEmbeddingRuntime: async () => await agent?.getEmbeddingRuntime()
+      getEmbeddingRuntime: async () => await agent?.getActivityEmbeddingRuntime()
     }));
     toolRegistry.registerBuiltinTool(createActivitySessionsTool({ loadSettings: loadActivitySettings }));
     // MCP/Plugin 仍由 Host 持有连接和执行权，但先把工具能力注册进统一 envelope，
@@ -270,7 +292,8 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
       createCheckpoint: checkpoints ? async (label) => await checkpoints.create(label) : undefined,
       attachmentRoot: projectAttachmentRoot,
       runtimeEventSink: runtimeAuthority.asSink(),
-      capabilities
+      capabilities,
+      activityContext
     });
     await agent.initialize();
   } catch (error) {
