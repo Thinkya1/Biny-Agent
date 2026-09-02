@@ -411,7 +411,7 @@ async function testExtensibleProviderRuntime(): Promise<void> {
   const liveModels = [catalogEntry("visible", "Live Visible"), catalogEntry("live-only", "Live Only")];
   const runtime = new ModelRuntime(config, [["custom", liveModels]], ai);
   const choices = runtime.listModels();
-  assert.equal(choices.find((choice) => choice.alias === "custom/visible")?.displayName, "Extension Visible");
+  assert.equal(choices.find((choice) => choice.alias === "custom/visible")?.displayName, "Live Visible");
   assert.equal(choices.some((choice) => choice.alias === "custom/hidden"), false);
   assert.equal(choices.some((choice) => choice.alias === "custom/live-only"), true);
 
@@ -592,9 +592,9 @@ async function testProviderRuntimeMetadata(): Promise<void> {
     reasoningEfforts: ["high", "max"]
   }]]]);
   const catalogResolved = catalogRuntime.forModel("gpt-alias").model;
-  assert.equal(catalogResolved.contextWindow, 400_000);
-  assert.equal(catalogResolved.maxInputTokens, 272_000);
-  assert.equal(catalogResolved.maxOutputTokens, 128_000);
+  assert.equal(catalogResolved.contextWindow, 128_000);
+  assert.equal(catalogResolved.maxInputTokens, 120_000);
+  assert.equal(catalogResolved.maxOutputTokens, 16_384);
   const catalogChoice = new ModelRuntime(config, [["openai", [{
     id: "gpt-5.2",
     displayName: "GPT-5.2 (目录)",
@@ -605,8 +605,8 @@ async function testProviderRuntimeMetadata(): Promise<void> {
     capabilities: { reasoning: true },
     reasoningEfforts: ["high", "max"]
   }]]]).listModels().find((choice) => choice.alias === "gpt-alias");
-  assert.equal(catalogChoice?.maxInputTokens, 272_000);
-  assert.ok((catalogChoice?.inputBudgetTokens ?? 0) < 400_000);
+  assert.equal(catalogChoice?.maxInputTokens, 120_000);
+  assert.ok((catalogChoice?.inputBudgetTokens ?? 0) < 128_000);
 
   const openaiSettings = providers.require("openai").createModelSettings({ ...config, defaultModel: "gpt-alias", thinking: { enabled: true, effort: "high" } }, config.models["gpt-alias"]!);
   assert.deepEqual(openaiSettings.providerOptions, { openai: { reasoningEffort: "high" } });

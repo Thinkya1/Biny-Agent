@@ -31,6 +31,8 @@ export interface ModelRuntimeInfo {
   reasoningLabel: string;
   thinking: ThinkingSelection;
   contextWindow?: number;
+  /** 上下文窗口未由模型元数据声明时为 true。 */
+  contextWindowIsFallback?: boolean;
   effectiveContextWindow?: number;
   effectiveContextWindowPercent?: number;
   contextReserveTokens?: number;
@@ -253,6 +255,7 @@ function modelRuntimeInfoFromRuntime(config: AgentConfig, runtime: ModelRuntime)
     reasoningLabel: thinking === "off" ? "Off" : formatReasoningLabel(thinking),
     thinking,
     contextWindow: contextBudget.contextWindow,
+    contextWindowIsFallback: contextBudget.contextWindowIsFallback,
     effectiveContextWindow: contextBudget.effectiveContextWindow,
     effectiveContextWindowPercent: contextBudget.effectiveContextWindowPercent,
     contextReserveTokens: contextBudget.contextReserveTokens,

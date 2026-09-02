@@ -34,6 +34,8 @@ export interface ModelChoice {
   supportsTools?: boolean;
   capabilities?: ReturnType<typeof modelCapabilities>;
   contextWindow?: number;
+  /** 上下文窗口未由模型元数据声明时为 true；展示层不得把该数值称为官方窗口。 */
+  contextWindowIsFallback?: boolean;
   effectiveContextWindow?: number;
   effectiveContextWindowPercent?: number;
   contextReserveTokens?: number;
@@ -193,13 +195,11 @@ export class ModelRegistry {
     const capabilities = modelCapabilities(normalized);
     const reasoning = modelReasoningConfig(normalized);
     const thinkingLevelMap = modelThinkingLevelMap(normalized);
-    // 动态目录允许暂时缺少窗口元数据；这类候选仍可展示，但不能伪造预算。
-    // 已配置模型仍交给 modelContextBudget 明确报错，要求配置或目录提供真实窗口。
-    const contextBudget = normalized.contextWindow === undefined
-      ? undefined
-      : modelContextBudget(normalized, this.config.context.maxInputTokens, alias, {
-          reasoning: effectiveThinkingSelection(normalized, this.config.thinking)
-        });
+    // 动态目录缺少窗口时也继续展示；modelContextBudget 会给出可执行的保守预算并保留
+    // fallback 标记，避免把推导出的 32K 误称为模型官方元数据。
+    const contextBudget = modelContextBudget(normalized, this.config.context.maxInputTokens, alias, {
+      reasoning: effectiveThinkingSelection(normalized, this.config.thinking)
+    });
     return {
       alias,
       displayName: normalized.displayName ?? normalized.model,
@@ -211,6 +211,7 @@ export class ModelRegistry {
       supportsTools: capabilities.tools,
       capabilities,
       contextWindow: contextBudget?.contextWindow,
+      contextWindowIsFallback: contextBudget?.contextWindowIsFallback,
       effectiveContextWindow: contextBudget?.effectiveContextWindow,
       effectiveContextWindowPercent: contextBudget?.effectiveContextWindowPercent,
       contextReserveTokens: contextBudget?.contextReserveTokens,

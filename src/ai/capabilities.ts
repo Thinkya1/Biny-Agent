@@ -238,13 +238,14 @@ export function modelContextBudget(
   const capabilities = modelCapabilities(model);
   const maxOutputTokens = model.maxOutputTokens;
   const modelLimits = model.limits;
-  const contextWindow = model.contextWindow;
-  if (contextWindow === undefined) {
-    const modelReference = modelAlias
-      ? `${modelAlias} (${model.provider}/${model.model})`
-      : `${model.provider}/${model.model}`;
-    throw new Error(`Model ${modelReference} is missing contextWindow metadata; fallback is disabled.`);
-  }
+  const contextWindowIsFallback = model.contextWindow === undefined;
+  // 网关常常只返回 max input。把它按 95% 有效窗口反推原始窗口，既能容纳已声明的
+  // 输入上限，又不会把模型 ID 启发式误当成官方上下文元数据；两者都缺失时保持 32K
+  // 的保守下限。
+  const contextWindow = model.contextWindow ?? Math.max(
+    defaultModelContextWindow,
+    Math.ceil((model.maxInputTokens ?? configuredMaxInputTokens ?? 0) * 100 / defaultEffectiveContextWindowPercent)
+  );
   const outputReserveTokens = Math.min(
     maxOutputTokens ?? defaultModelOutputTokens,
     Math.max(2_048, Math.floor(contextWindow * 0.25))
@@ -292,6 +293,7 @@ export function modelContextBudget(
   return {
     modelAlias,
     contextWindow,
+    contextWindowIsFallback,
     effectiveContextWindow,
     effectiveContextWindowPercent,
     contextReserveTokens,

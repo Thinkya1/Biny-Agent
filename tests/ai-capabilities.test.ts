@@ -113,10 +113,83 @@ assert.deepEqual(customReasoningRuntime.forModel("custom-deepseek").model.thinki
   max: "max"
 });
 assert.deepEqual(customReasoningRuntime.forModel("custom-kimi").model.reasoning?.efforts, ["low", "high", "max"]);
-assert.throws(
-  () => modelContextBudget(customReasoningRuntime.forModel("custom-deepseek").model, 64_000, "custom-deepseek"),
-  /contextWindow metadata.*fallback is disabled/u
-);
+const customFallbackBudget = modelContextBudget(customReasoningRuntime.forModel("custom-deepseek").model, 64_000, "custom-deepseek");
+assert.equal(customFallbackBudget.contextWindow, 67_369);
+assert.equal(customFallbackBudget.effectiveContextWindow, 64_000);
+assert.equal(customFallbackBudget.maxInputTokens, 64_000);
+assert.equal(customFallbackBudget.contextWindowIsFallback, true);
+
+const profiledGatewayConfig = configSchema.parse({
+  ...customReasoningConfig,
+  providers: {
+    relay: {
+      ...customReasoningConfig.providers.relay,
+      modelProfiles: {
+        "deepseek-v4-flash": {
+          contextWindow: 512_000,
+          maxInputTokens: 480_000,
+          thinkingLevelMap: { off: "none", high: "gateway-high" }
+        }
+      }
+    }
+  },
+  models: {
+    "custom-deepseek": {
+      ...customReasoningConfig.models["custom-deepseek"],
+      contextWindow: 128_000,
+      maxInputTokens: 100_000,
+      thinkingLevelMap: { off: "none", high: "alias-high", max: "alias-max" }
+    },
+    "custom-kimi": customReasoningConfig.models["custom-kimi"]
+  }
+});
+const profiledGatewayModel = new ProviderRegistry(profiledGatewayConfig, [[
+  "relay",
+  [{
+    id: "deepseek-v4-flash",
+    displayName: "Gateway DeepSeek",
+    provider: "relay",
+    contextWindow: 256_000,
+    maxInputTokens: 240_000,
+    capabilities: { reasoning: true, streaming: true },
+    reasoningEfforts: ["low", "max"],
+    thinkingLevelMap: { off: "none", low: "live-low", max: "live-max" }
+  }]
+]]).forModel("custom-deepseek").model;
+assert.equal(profiledGatewayModel.contextWindow, 512_000);
+assert.equal(profiledGatewayModel.maxInputTokens, 480_000);
+assert.deepEqual(modelThinkingLevelMap(profiledGatewayModel), { off: "none", high: "gateway-high" });
+assert.deepEqual(modelReasoningConfig(profiledGatewayModel)?.efforts, ["high"]);
+
+const profileDisablesThinkingConfig = configSchema.parse({
+  ...customReasoningConfig,
+  providers: {
+    relay: {
+      ...customReasoningConfig.providers.relay,
+      modelProfiles: { "deepseek-v4-flash": { thinkingLevelMap: { off: "none" } } }
+    }
+  }
+});
+const profileDisablesThinkingModel = new ProviderRegistry(profileDisablesThinkingConfig)
+  .forModel("custom-deepseek").model;
+assert.deepEqual(modelThinkingLevelMap(profileDisablesThinkingModel), { off: "none" });
+assert.equal(modelCapabilities(profileDisablesThinkingModel).reasoning, false);
+assert.equal(modelReasoningConfig(profileDisablesThinkingModel), undefined);
+
+const profileEnablesThinkingOverFalseAliasConfig = configSchema.parse({
+  ...profiledGatewayConfig,
+  models: {
+    ...profiledGatewayConfig.models,
+    "custom-deepseek": {
+      ...profiledGatewayConfig.models["custom-deepseek"],
+      capabilities: { reasoning: false }
+    }
+  }
+});
+const profileEnablesThinkingOverFalseAliasModel = new ProviderRegistry(profileEnablesThinkingOverFalseAliasConfig)
+  .forModel("custom-deepseek").model;
+assert.equal(modelCapabilities(profileEnablesThinkingOverFalseAliasModel).reasoning, true);
+assert.deepEqual(modelReasoningConfig(profileEnablesThinkingOverFalseAliasModel)?.efforts, ["high"]);
 
 // 自定义（非 OpenCode）relay 对托管模型误报 reasoning:false 且不给任何档位时，也应按模型 ID 恢复。
 const customRelayFalseConfig = configSchema.parse({
@@ -451,6 +524,25 @@ assert.equal(completeCatalog[0]?.baseUrl, undefined);
 assert.equal(completeCatalog[0]?.apiBackend, undefined);
 assert.equal(completeCatalog[0]?.headers, undefined);
 assert.equal(completeCatalog[0]?.compatibility, undefined);
+
+const nestedCatalog = parseModelCatalog({
+  data: [{
+    id: "nested-model",
+    metadata: { contextWindow: 200_000, maxInputTokens: 180_000 },
+    reasoning: { thinkingLevelMap: { off: "none", high: "deep" } },
+    capabilities: { supportsReasoning: true, supportsReasoningStream: true }
+  }, {
+    id: "input-only-model",
+    limits: { input_token_limit: 90_000 }
+  }]
+}, "gateway", "openai-compatible", false);
+assert.equal(nestedCatalog[0]?.contextWindow, 200_000);
+assert.equal(nestedCatalog[0]?.maxInputTokens, 180_000);
+assert.deepEqual(nestedCatalog[0]?.thinkingLevelMap, { off: "none", high: "deep" });
+assert.equal(nestedCatalog[0]?.capabilities.reasoning, true);
+assert.equal(nestedCatalog[0]?.capabilities.reasoningStream, true);
+assert.equal(nestedCatalog[1]?.contextWindow, undefined);
+assert.equal(nestedCatalog[1]?.maxInputTokens, 90_000);
 
 let attempts = 0;
 const retryMetrics: Array<{ attempt: number; status?: number; willRetry: boolean }> = [];

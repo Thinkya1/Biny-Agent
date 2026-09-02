@@ -10,7 +10,7 @@ import { fetchModelCatalogSnapshot } from "../ai/modelCatalog.js";
 import { accessPathThinkingLevelMap, inferThinkingLevelMap, lookupModelMetadata, thinkingLevelMapForEfforts, type ModelMetadata } from "../ai/modelMetadata.js";
 import { providerDefinition, providerProtocol } from "../ai/provider.js";
 import type { ModelCatalogEntry, ProviderDefinition } from "../ai/types.js";
-import type { AgentConfig, ModelAliasConfig, ModelApiBackend, ModelCompatibility, ProviderConfig, ThinkingLevelMap } from "../config/schema.js";
+import type { AgentConfig, ModelAliasConfig, ModelApiBackend, ModelCompatibility, ModelProfile, ProviderConfig, ThinkingLevelMap } from "../config/schema.js";
 import { createNativeModel } from "./nativeModel.js";
 import { openAiCodexHeaders, refreshSubscriptionOAuthTokens } from "./subscriptionAuth.js";
 import { AiRegistry } from "./AiRegistry.js";
@@ -156,7 +156,9 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       ? mergeModelMetadata(generatedModel, catalogModel)
       : catalogModel ?? generatedModel;
     const merged = catalogBase ? mergeModelMetadata(catalogBase, model) : model;
-    const accessPathModel = recoverKnownReasoningModel(merged, generatedModel);
+    const profile = this.config.modelProfiles?.[model.model];
+    const profiled = profile === undefined ? merged : applyModelProfile(merged, profile);
+    const accessPathModel = recoverKnownReasoningModel(profiled, generatedModel, profile?.thinkingLevelMap !== undefined);
     return normalizeModelMetadata(
       { ...accessPathModel, compatibility: mergeCompatibility(this.config.compatibility, accessPathModel.compatibility) },
       this.definition.modelDefaults
@@ -308,7 +310,9 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
     const generated = lookupModelMetadata(this.config.type, model.model, this.config.baseUrl);
     const generatedModel = generated ? metadataToModel(this.id, this.config.type, model.model, generated) : undefined;
     const metadataModel = generatedModel ? mergeModelMetadata(generatedModel, model) : model;
-    const accessPathModel = recoverKnownReasoningModel(metadataModel, generatedModel);
+    const profile = this.config.modelProfiles?.[model.model];
+    const profiled = profile === undefined ? metadataModel : applyModelProfile(metadataModel, profile);
+    const accessPathModel = recoverKnownReasoningModel(profiled, generatedModel, profile?.thinkingLevelMap !== undefined);
     const normalized = normalizeModelMetadata(accessPathModel, this.definition.modelDefaults);
     const reasoning = modelReasoningConfig(normalized);
     return {
@@ -337,7 +341,9 @@ export class ConfiguredProviderRuntime implements ProviderRuntime {
       : this.baselineModels).map((model) => [model.id, model]));
     for (const model of this.liveModels) {
       const existing = combined.get(model.id);
-      combined.set(model.id, existing ? mergeCatalogMetadata(existing, model) : model);
+      // mergeCatalogMetadata 的 base 参数优先；把实时目录放在 base，确保它覆盖静态
+      // models.dev/内置元数据，而本地 transport 字段仍由静态基线保留。
+      combined.set(model.id, existing ? mergeCatalogMetadata(model, existing) : model);
     }
     return [...combined.values()];
   }
@@ -506,8 +512,10 @@ function resolveSimpleThinking(
  */
 function recoverKnownReasoningModel(
   model: ModelAliasConfig,
-  generatedModel: ModelAliasConfig | undefined
+  generatedModel: ModelAliasConfig | undefined,
+  hasExplicitThinkingLevelMap = false
 ): ModelAliasConfig {
+  if (hasExplicitThinkingLevelMap) return model;
   const hasThinkingLevels = Object.entries(model.thinkingLevelMap ?? {})
     .some(([level, native]) => level !== "off" && native !== null);
   if (hasThinkingLevels) return model;
@@ -523,6 +531,28 @@ function recoverKnownReasoningModel(
     },
     thinkingLevelMap
   };
+}
+
+function applyModelProfile(model: ModelAliasConfig, profile: ModelProfile): ModelAliasConfig {
+  const thinkingLevelMap = profile.thinkingLevelMap;
+  const hasEnabledThinkingLevel = thinkingLevelMap !== undefined
+    && Object.entries(thinkingLevelMap).some(([level, native]) => level !== "off" && native !== null);
+  const disablesThinking = thinkingLevelMap !== undefined
+    && !hasEnabledThinkingLevel;
+  return mergeModelMetadata(model, {
+    provider: model.provider,
+    model: model.model,
+    contextWindow: profile.contextWindow,
+    maxInputTokens: profile.maxInputTokens,
+    thinkingLevelMap,
+    // profile 是最低层目录和旧 alias 之后的最终用户声明；有可用档位时必须解除
+    // 低优先级来源的 reasoning:false，否则 map 虽然保存了，实际请求仍永远不会带思考参数。
+    capabilities: thinkingLevelMap === undefined
+      ? undefined
+      : disablesThinking
+        ? { reasoning: false, reasoningStream: false, reasoningSummary: false }
+        : { reasoning: true }
+  });
 }
 
 function catalogEntryToModel(entry: ModelCatalogEntry, preferGeneratedReasoning = false): ModelAliasConfig {

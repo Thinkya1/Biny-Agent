@@ -114,74 +114,63 @@ export function parseModelCatalog(
   // 用 flatMap 而不是 map+filter：无效条目直接返回空数组丢弃。
   return items.flatMap((item) => {
     if (!isRecord(item)) return [];
+    const sources = modelMetadataSources(item);
     const visibility = stringValue(item.visibility)?.toLowerCase();
     if (visibility === "hide" || visibility === "hidden") return [];
     const slug = stringValue(item.slug);
     // Google 风格的目录只给资源名（name: "models/gemini-x"）；从 name 取 id 时剥掉资源段，
     // 让模型 id 保持可直接用于请求的形状。
     const resourceName = stringValue(item.name)?.replace(/^models\//u, "");
-    const id = stringValue(item.id) ?? stringValue(item.model) ?? resourceName ?? slug;
+    const id = firstString(sources, ["id", "model", "name", "slug"])?.replace(/^models\//u, "") ?? resourceName ?? slug;
     if (!id) return [];
-    const contextWindow = numberValue(item.context_window)
-      ?? numberValue(item.contextWindow)
-      ?? numberValue(item.context_length)
-      ?? numberValue(item.contextLength)
-      ?? numberValue(item.input_token_limit)
-      ?? numberValue(item.inputTokenLimit);
-    const maxInputTokens = numberValue(item.max_input_tokens)
-      ?? numberValue(item.maxInputTokens)
-      ?? numberValue(item.input_token_limit)
-      ?? numberValue(item.inputTokenLimit);
-    const maxOutputTokens = numberValue(item.max_tokens)
-      ?? numberValue(item.maxOutputTokens)
-      ?? numberValue(item.max_output_tokens)
-      ?? numberValue(item.output_token_limit)
-      ?? numberValue(item.outputTokenLimit)
-      ?? numberValue(item.max_completion_tokens)
-      ?? numberValue(item.maxCompletionTokens);
-    const declaredThinkingLevelMap = parseThinkingLevelMap(item.thinkingLevelMap ?? item.thinking_level_map);
+    const contextWindow = firstNumber(sources, [
+      "context_window", "contextWindow", "context_length", "contextLength", "max_context_tokens", "maxContextTokens",
+      "max_context_length", "maxContextLength"
+    ]);
+    const maxInputTokens = firstNumber(sources, [
+      "max_input_tokens", "maxInputTokens", "input_token_limit", "inputTokenLimit", "max_input_length", "maxInputLength"
+    ]);
+    const maxOutputTokens = firstNumber(sources, [
+      "max_tokens", "maxOutputTokens", "max_output_tokens", "output_token_limit", "outputTokenLimit",
+      "max_completion_tokens", "maxCompletionTokens"
+    ]);
+    const declaredThinkingLevelMap = parseThinkingLevelMap(firstValue(sources, ["thinkingLevelMap", "thinking_level_map"]));
+    const rawReasoningEfforts = firstArray(sources, [
+      "reasoning_efforts", "reasoningEfforts", "thinking_levels", "thinkingLevels", "efforts"
+    ]);
     const declaredReasoningEfforts = declaredThinkingLevelMap
       ? Object.keys(declaredThinkingLevelMap)
         .filter((level) => level !== "off" && declaredThinkingLevelMap[level] !== null)
         .filter(isReasoningEffort)
-      : Array.isArray(item.reasoning_efforts)
-      ? item.reasoning_efforts.filter(isReasoningEffort)
-      : Array.isArray(item.reasoningEfforts)
-        ? item.reasoningEfforts.filter(isReasoningEffort)
-        : undefined;
-    const supportsReasoning = booleanValue(item.supports_reasoning) ?? booleanValue(item.supportsReasoning);
+      : rawReasoningEfforts?.filter(isReasoningEffort);
+    const supportsReasoning = firstBoolean(sources, ["supports_reasoning", "supportsReasoning", "reasoning"]);
     const reasoningEfforts = supportsReasoning === false
       ? []
       : declaredReasoningEfforts ?? (inferReasoningFromId ? inferReasoningEfforts(id) : []);
-    const modalities = Array.isArray(item.modalities) ? item.modalities : [];
-    const supportsThinking = booleanValue(item.thinking)
-      ?? booleanValue(item.supports_thinking)
-      ?? booleanValue(item.supportsThinking);
+    const modalities = firstArray(sources, ["modalities", "input_modalities", "inputModalities"]) ?? [];
+    const supportsThinking = firstBoolean(sources, ["thinking", "supports_thinking", "supportsThinking"]);
     const capabilities: Partial<ModelCapabilities> = {
-      tools: booleanValue(item.supports_tools) ?? booleanValue(item.supportsTools),
+      tools: firstBoolean(sources, ["supports_tools", "supportsTools", "tools"]),
       reasoning: supportsReasoning ?? supportsThinking,
-      vision: booleanValue(item.supports_vision) ?? booleanValue(item.supportsVision) ?? modalityCapability(modalities, "image"),
-      audio: booleanValue(item.supports_audio) ?? booleanValue(item.supportsAudio) ?? modalityCapability(modalities, "audio"),
-      streaming: booleanValue(item.supports_streaming) ?? booleanValue(item.supportsStreaming) ?? true
+      vision: firstBoolean(sources, ["supports_vision", "supportsVision", "vision"]) ?? modalityCapability(modalities, "image"),
+      audio: firstBoolean(sources, ["supports_audio", "supportsAudio", "audio"]) ?? modalityCapability(modalities, "audio"),
+      streaming: firstBoolean(sources, ["supports_streaming", "supportsStreaming", "streaming"]) ?? true
     };
-    const parallelToolCalls = booleanValue(item.parallel_tool_calls)
-      ?? booleanValue(item.parallelToolCalls)
-      ?? booleanValue(item.supports_parallel_tool_calls)
-      ?? booleanValue(item.supportsParallelToolCalls);
-    const reasoningStream = booleanValue(item.reasoning_stream)
-      ?? booleanValue(item.reasoningStream)
-      ?? booleanValue(item.supports_reasoning_stream)
-      ?? booleanValue(item.supportsReasoningStream);
-    const reasoningSummary = booleanValue(item.reasoning_summary)
-      ?? booleanValue(item.reasoningSummary)
-      ?? booleanValue(item.supports_reasoning_summary)
-      ?? booleanValue(item.supportsReasoningSummary);
+    const parallelToolCalls = firstBoolean(sources, [
+      "parallel_tool_calls", "parallelToolCalls", "supports_parallel_tool_calls", "supportsParallelToolCalls"
+    ]);
+    const reasoningStream = firstBoolean(sources, [
+      "reasoning_stream", "reasoningStream", "supports_reasoning_stream", "supportsReasoningStream"
+    ]);
+    const reasoningSummary = firstBoolean(sources, [
+      "reasoning_summary", "reasoningSummary", "supports_reasoning_summary", "supportsReasoningSummary"
+    ]);
     if (parallelToolCalls !== undefined) capabilities.parallelToolCalls = parallelToolCalls;
     if (reasoningStream !== undefined) capabilities.reasoningStream = reasoningStream;
     if (reasoningSummary !== undefined) capabilities.reasoningSummary = reasoningSummary;
     const entry: ModelCatalogEntry = {
       id,
-      displayName: stringValue(item.display_name) ?? stringValue(item.displayName) ?? stringValue(item.name) ?? (slug ? formatCodexModelName(id) : id),
+      displayName: firstString(sources, ["display_name", "displayName", "name"]) ?? (slug ? formatCodexModelName(id) : id),
       provider,
       contextWindow,
       maxOutputTokens,
@@ -192,7 +181,7 @@ export function parseModelCatalog(
         : reasoningEfforts.length ? "inferred" : undefined
     };
     if (maxInputTokens !== undefined) entry.maxInputTokens = maxInputTokens;
-    const limits = parseLimits(item);
+    const limits = parseLimits(sources);
     if (limits) entry.limits = limits;
     if (declaredThinkingLevelMap) entry.thinkingLevelMap = declaredThinkingLevelMap;
     return [entry];
@@ -235,6 +224,63 @@ function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function modelMetadataSources(item: Record<string, unknown>): Record<string, unknown>[] {
+  const sources = [item];
+  for (const key of ["metadata", "model_info", "modelInfo", "limits", "capabilities", "reasoning", "model"]) {
+    const nested = item[key];
+    if (isRecord(nested)) sources.push(nested);
+  }
+  return sources;
+}
+
+function firstValue(sources: readonly Record<string, unknown>[], keys: readonly string[]): unknown {
+  for (const source of sources) {
+    for (const key of keys) {
+      if (source[key] !== undefined) return source[key];
+    }
+  }
+  return undefined;
+}
+
+function firstString(sources: readonly Record<string, unknown>[], keys: readonly string[]): string | undefined {
+  for (const source of sources) {
+    for (const key of keys) {
+      const value = stringValue(source[key]);
+      if (value !== undefined) return value;
+    }
+  }
+  return undefined;
+}
+
+function firstNumber(sources: readonly Record<string, unknown>[], keys: readonly string[]): number | undefined {
+  for (const source of sources) {
+    for (const key of keys) {
+      const value = numberValue(source[key]);
+      if (value !== undefined) return value;
+    }
+  }
+  return undefined;
+}
+
+function firstBoolean(sources: readonly Record<string, unknown>[], keys: readonly string[]): boolean | undefined {
+  for (const source of sources) {
+    for (const key of keys) {
+      const value = booleanValue(source[key]);
+      if (value !== undefined) return value;
+    }
+  }
+  return undefined;
+}
+
+function firstArray(sources: readonly Record<string, unknown>[], keys: readonly string[]): unknown[] | undefined {
+  for (const source of sources) {
+    for (const key of keys) {
+      if (Array.isArray(source[key])) return source[key];
+    }
+  }
+  return undefined;
+}
+
 function parseThinkingLevelMap(value: unknown): ThinkingLevelMap | undefined {
   if (!isRecord(value)) return undefined;
   const map: ThinkingLevelMap = {};
@@ -246,16 +292,19 @@ function parseThinkingLevelMap(value: unknown): ThinkingLevelMap | undefined {
   return Object.keys(map).length ? map : undefined;
 }
 
-function parseLimits(value: Record<string, unknown>): ModelLimits | undefined {
-  const limits = isRecord(value.limits) ? value.limits : value;
+function parseLimits(sources: readonly Record<string, unknown>[]): ModelLimits | undefined {
   const parsed: ModelLimits = {
-    maxInputTokens: numberValue(limits.maxInputTokens) ?? numberValue(limits.max_input_tokens),
-    reasoningReserveTokens: nonNegativeInteger(limits.reasoningReserveTokens) ?? nonNegativeInteger(limits.reasoning_reserve_tokens),
-    toolSchemaReserveTokens: nonNegativeInteger(limits.toolSchemaReserveTokens) ?? nonNegativeInteger(limits.tool_schema_reserve_tokens),
-    systemPromptReserveTokens: nonNegativeInteger(limits.systemPromptReserveTokens) ?? nonNegativeInteger(limits.system_prompt_reserve_tokens),
-    protocolSafetyMarginTokens: nonNegativeInteger(limits.protocolSafetyMarginTokens) ?? nonNegativeInteger(limits.protocol_safety_margin_tokens)
+    maxInputTokens: firstNumber(sources, ["maxInputTokens", "max_input_tokens"]),
+    reasoningReserveTokens: firstNonNegativeInteger(sources, ["reasoningReserveTokens", "reasoning_reserve_tokens"]),
+    toolSchemaReserveTokens: firstNonNegativeInteger(sources, ["toolSchemaReserveTokens", "tool_schema_reserve_tokens"]),
+    systemPromptReserveTokens: firstNonNegativeInteger(sources, ["systemPromptReserveTokens", "system_prompt_reserve_tokens"]),
+    protocolSafetyMarginTokens: firstNonNegativeInteger(sources, ["protocolSafetyMarginTokens", "protocol_safety_margin_tokens"])
   };
   return Object.values(parsed).some((item) => item !== undefined) ? parsed : undefined;
+}
+
+function firstNonNegativeInteger(sources: readonly Record<string, unknown>[], keys: readonly string[]): number | undefined {
+  return nonNegativeInteger(firstValue(sources, keys));
 }
 
 /**
