@@ -25,6 +25,8 @@ export function migrateGlobalConfigDocument(value: unknown): ConfigMigrationResu
   // 嵌入字段曾在配置已版本化之后短暂写进 activity.*，版本门内的迁移够不到这批文件；
   // 严格 schema 不认识这两个键，所以这段清理必须对所有版本无条件执行。
   migrateActivityEmbeddingPolicy(document);
+  // 已移除的记忆策略仍可能存在于已版本化的配置；严格 schema 解析前必须无条件清理。
+  migrateRemovedMemoryPolicyFields(document);
   // 人格预设与自定义指令已下线（改由 SOUL/USER 承载）。顶层 personalization 块不再属于
   // 严格 schema，无条件剥离以兼容任何版本的存量配置文件。
   delete document.personalization;
@@ -109,6 +111,12 @@ function migrateActivityEmbeddingPolicy(document: Record<string, unknown>): void
   }
   delete activity.embeddingModel;
   delete activity.embeddingConsents;
+}
+
+function migrateRemovedMemoryPolicyFields(document: Record<string, unknown>): void {
+  const context = isRecord(document.context) ? document.context : undefined;
+  const memory = context && isRecord(context.memory) ? context.memory : undefined;
+  if (memory) delete memory.telos;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

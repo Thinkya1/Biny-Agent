@@ -33,6 +33,7 @@ await testProjectCredentialFieldsAreRejected();
 await testProjectModelAliasMustBeGlobal();
 await testLegacyProjectConfigIsIgnored();
 await testVersionedActivityEmbeddingFieldsMigrateToMemory();
+await testRemovedMemoryPolicyFieldsAreIgnored();
 await testVersionedGlobalConfigRejectsStaleWriters();
 await testInlineCredentialsRequirePersistentStorage();
 await testMcpCredentialReferencesStayOutOfConfig();
@@ -718,6 +719,29 @@ async function testVersionedActivityEmbeddingFieldsMigrateToMemory(): Promise<vo
     assert.equal("embeddingConsents" in (loaded.activity as Record<string, unknown>), false, "activity 段的嵌入字段必须被清除");
     assert.deepEqual(loaded.context.memory.cloudEmbeddingConsents, consents, "已版本化文档的 embeddingConsents 也要迁回 memory.*");
     assert.deepEqual(loaded.context.memory.embeddingModel, { kind: "local", model: "paraphrase-multilingual-MiniLM-L12-v2" });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testRemovedMemoryPolicyFieldsAreIgnored(): Promise<void> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "biny-config-removed-memory-fields-"));
+  try {
+    const document = JSON.parse(JSON.stringify(defaultConfig)) as Record<string, any>;
+    document.format = "biny-config";
+    document.configVersion = 1;
+    document.context.memory.telos = {
+      enabled: true,
+      autoObserve: false,
+      driftDetection: true,
+      proactivePrompts: false
+    };
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(path.join(root, "config.json"), JSON.stringify(document, null, 2) + "\n", "utf8");
+
+    const loaded = await loadConfigFile(root);
+    assert.equal("telos" in (loaded.context.memory as Record<string, unknown>), false);
+    assert.equal(loaded.context.memory.enabled, defaultConfig.context.memory.enabled);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
