@@ -14,6 +14,7 @@ import {
   Menu,
   nativeTheme,
   shell,
+  systemPreferences,
   type MenuItemConstructorOptions,
   type MessageBoxOptions,
   type OpenDialogOptions,
@@ -48,6 +49,7 @@ import { QuickChatContextService } from "./QuickChatContextService.js";
 import type { QuickChatWindowController } from "./quickChatWindow.js";
 import { runtimeMutationStartsWork } from "./settingsRuntimeGate.js";
 import { exportSessionBundle, exportSessionClaudeCode } from "../../../session/transfer.js";
+import { activitySettingsPatchSchema } from "../../../activity/settings.js";
 
 interface IpcContext {
   state: DesktopStateStore;
@@ -91,7 +93,7 @@ const sessionTreePageOptionsSchema = z.object({
 }).optional();
 const permissionModeSchema = z.enum(["ask", "read-only", "auto", "full-access"]);
 const activeViewSchema = z.enum(["chat", "runtime", "extensions"]);
-const systemSettingsPaneSchema = z.enum(["screen-recording", "accessibility", "input-monitoring"]);
+const systemSettingsPaneSchema = z.enum(["screen-recording", "accessibility"]);
 /** QuickChat 三开关的入参边界：逐字段布尔，额外字段拒绝，与 DesktopStateStore 归一化逻辑对齐。 */
 const quickChatSettingsSchema = z.object({
   autoHideOnBlur: z.boolean(),
@@ -102,6 +104,8 @@ const terminalSizeSchema = z.number().int().min(2).max(1_000);
 const terminalDataSchema = z.string().max(1_000_000);
 const activityQuerySchema = z.string().trim().max(500);
 const activityLimitSchema = z.number().int().min(1).max(100).optional();
+const activitySessionIdSchema = z.string().trim().min(1).max(128);
+const activitySnapshotIdSchema = z.number().int().positive();
 const activityReportDateSchema = z.string().trim().min(1).max(40).optional();
 const modelLoginProviderSchema = z.enum(["claude-code", "openai-codex"]);
 const settingsCredentialScopeSchema = z.object({
@@ -141,25 +145,6 @@ const memoryQuerySchema = z.string().trim().min(1).max(2_000);
 const memoryEntryIdSchema = z.string().min(1).max(512);
 const localEmbeddingModelSchema = z.enum(["multilingual-e5-small", "paraphrase-multilingual-MiniLM-L12-v2"]);
 const memoryRevisionSchema = z.number().int().nonnegative();
-const telosScopeSchema = z.enum(["universal", "workspace"]);
-const telosGoalSchema = z.object({
-  id: idSchema,
-  text: z.string().trim().max(1_000),
-  status: z.enum(["active", "paused", "completed"]),
-  horizon: z.string().trim().max(120).optional()
-}).strict();
-const telosRuleSchema = z.object({ id: idSchema, text: z.string().trim().max(1_000) }).strict();
-const telosDocumentInputSchema = z.object({
-  scope: telosScopeSchema,
-  mission: z.string().max(2_000),
-  goals: z.array(telosGoalSchema).max(32).optional(),
-  principles: z.array(telosRuleSchema).max(32).optional(),
-  constraints: z.array(telosRuleSchema).max(32).optional(),
-  antiGoals: z.array(telosRuleSchema).max(32).optional()
-}).strict();
-const telosPatternActionSchema = z.enum(["confirm", "reject", "expire"]);
-const telosDriftActionSchema = z.enum(["adjust_telos", "adjust_behavior", "dismiss", "resolve"]);
-const telosDateSchema = z.string().datetime();
 const memorySettingsInputSchema = z.object({
   expectedRevision: configRevisionSchema,
   settings: memorySettingsSchema
@@ -718,12 +703,13 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handleRecoveryGated(desktopIpc.memoryEntries, async (_event, projectId: unknown, filter: unknown, offset: unknown, limit: unknown) => {
+  handleRecoveryGated(desktopIpc.memoryEntries, async (_event, projectId: unknown, filter: unknown, offset: unknown, limit: unknown, includeArchived: unknown) => {
     return await context.agents.memoryEntries(
       idSchema.parse(projectId),
       memoryOriginFilterSchema.parse(filter),
       typeof offset === "number" && Number.isInteger(offset) && offset >= 0 ? offset : 0,
-      typeof limit === "number" && Number.isInteger(limit) && limit > 0 ? limit : 20
+      typeof limit === "number" && Number.isInteger(limit) && limit > 0 ? limit : 20,
+      includeArchived === true
     );
   });
 
@@ -763,12 +749,33 @@ export function registerDesktopIpc(context: IpcContext): void {
 
   handle(desktopIpc.activitySettings, async () => context.activity.settingsSnapshot());
 
+  handle(desktopIpc.activityUpdateSettings, async (_event, patch: unknown, expectedConfigRevision: unknown) => (
+    await context.activity.updateSettings(
+      activitySettingsPatchSchema.parse(patch),
+      configRevisionSchema.parse(expectedConfigRevision)
+    )
+  ));
+
   handle(desktopIpc.activityRequestPermission, async (_event, pane: unknown) => {
-    await context.activity.requestPermission(systemSettingsPaneSchema.parse(pane) as DesktopSystemSettingsPane);
+    const selected = systemSettingsPaneSchema.parse(pane) as DesktopSystemSettingsPane;
+    if (selected === "accessibility" && process.platform === "darwin") {
+      // TCC 要把授权归到真正的 Biny.app；不能让独立 sidecar 代替 Electron 主进程发起请求。
+      systemPreferences.isTrustedAccessibilityClient(true);
+      return;
+    }
+    await context.activity.requestPermission(selected);
   });
 
   handle(desktopIpc.activitySearch, async (_event, query: unknown, limit: unknown) => (
     await context.activity.search(activityQuerySchema.parse(query), activityLimitSchema.parse(limit))
+  ));
+
+  handle(desktopIpc.activitySessionDetail, async (_event, sessionId: unknown) => (
+    await context.activity.sessionDetail(activitySessionIdSchema.parse(sessionId))
+  ));
+
+  handle(desktopIpc.activitySnapshotPreview, async (_event, snapshotId: unknown) => (
+    await context.activity.snapshotPreview(activitySnapshotIdSchema.parse(snapshotId))
   ));
 
   handle(desktopIpc.activityReport, async (_event, date: unknown) => (
@@ -838,11 +845,12 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handleRecoveryGated(desktopIpc.searchMemory, async (_event, projectId: unknown, filter: unknown, query: unknown) => {
+  handleRecoveryGated(desktopIpc.searchMemory, async (_event, projectId: unknown, filter: unknown, query: unknown, includeArchived: unknown) => {
     return await context.agents.searchMemory(
       idSchema.parse(projectId),
       memoryOriginFilterSchema.parse(filter),
-      memoryQuerySchema.parse(query)
+      memoryQuerySchema.parse(query),
+      includeArchived === true
     );
   });
 
@@ -861,6 +869,34 @@ export function registerDesktopIpc(context: IpcContext): void {
       memoryEntryPatchSchema.parse(patch),
       memoryRevisionSchema.parse(expectedRevision)
     );
+  });
+
+  handleRecoveryGated(desktopIpc.runMemorySleep, async (_event, projectId: unknown) => {
+    return await context.agents.runMemorySleep(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.memorySleepStatus, async (_event, projectId: unknown) => {
+    return await context.agents.memorySleepStatus(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.memorySleepRuns, async (_event, projectId: unknown) => {
+    return await context.agents.memorySleepRuns(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.previewMemorySleep, async (_event, projectId: unknown) => {
+    return await context.agents.previewMemorySleep(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.cancelMemorySleep, async (_event, projectId: unknown) => {
+    return await context.agents.cancelMemorySleep(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.archivedMemoryEntries, async (_event, projectId: unknown) => {
+    return await context.agents.archivedMemoryEntries(idSchema.parse(projectId));
+  });
+
+  handleRecoveryGated(desktopIpc.archiveMemoryEntry, async (_event, projectId: unknown, entryId: unknown, archived: unknown, expectedRevision: unknown) => {
+    return await context.agents.archiveMemoryEntry(idSchema.parse(projectId), memoryEntryIdSchema.parse(entryId), archived === true, memoryRevisionSchema.parse(expectedRevision));
   });
 
   handleRecoveryGated(desktopIpc.deleteMemoryEntry, async (_event, projectId: unknown, entryId: unknown, expectedRevision: unknown) => {
@@ -885,45 +921,6 @@ export function registerDesktopIpc(context: IpcContext): void {
       memoryOriginFilterSchema.parse(filter),
       memoryRevisionSchema.parse(expectedRevision),
       topic === undefined ? undefined : memoryTopicSchema.parse(topic)
-    );
-  });
-
-  handleRecoveryGated(desktopIpc.telosOverview, async (_event, projectId: unknown) => {
-    return await context.agents.telosOverview(idSchema.parse(projectId));
-  });
-
-  handleRecoveryGated(desktopIpc.saveTelos, async (_event, projectId: unknown, input: unknown, expectedRevision: unknown) => {
-    return await context.agents.saveTelos(
-      idSchema.parse(projectId),
-      telosDocumentInputSchema.parse(input),
-      memoryRevisionSchema.parse(expectedRevision)
-    );
-  });
-
-  handleRecoveryGated(desktopIpc.reviewBehaviorPattern, async (_event, projectId: unknown, patternId: unknown, action: unknown, expectedRevision: unknown) => {
-    return await context.agents.reviewBehaviorPattern(
-      idSchema.parse(projectId),
-      idSchema.parse(patternId),
-      telosPatternActionSchema.parse(action),
-      memoryRevisionSchema.parse(expectedRevision)
-    );
-  });
-
-  handleRecoveryGated(desktopIpc.resolveTelosDrift, async (_event, projectId: unknown, driftId: unknown, action: unknown, expectedRevision: unknown) => {
-    return await context.agents.resolveTelosDrift(
-      idSchema.parse(projectId),
-      idSchema.parse(driftId),
-      telosDriftActionSchema.parse(action),
-      memoryRevisionSchema.parse(expectedRevision)
-    );
-  });
-
-  handleRecoveryGated(desktopIpc.snoozeTelosDrift, async (_event, projectId: unknown, driftId: unknown, until: unknown, expectedRevision: unknown) => {
-    return await context.agents.snoozeTelosDrift(
-      idSchema.parse(projectId),
-      idSchema.parse(driftId),
-      telosDateSchema.parse(until),
-      memoryRevisionSchema.parse(expectedRevision)
     );
   });
 
@@ -1139,8 +1136,7 @@ export function registerDesktopIpc(context: IpcContext): void {
     if (process.platform !== "darwin") return;
     const urls: Record<DesktopSystemSettingsPane, string> = {
       "screen-recording": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-      accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-      "input-monitoring": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+      accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
     };
     await shell.openExternal(urls[selected]);
   });

@@ -276,7 +276,6 @@ function optimisticRewriteTurn(turn: TimelineTurn, user: string): TimelineTurn {
     ...turn,
     user,
     assistant: "",
-    memoryCitations: undefined,
     reasoning: "",
     reasoningStatus: undefined,
     reasoningDurationMs: undefined,
@@ -490,12 +489,6 @@ const Turn = memo(function Turn({
         ) : null}
         {!executionSteps.some((step) => step.kind === "assistant") && turn.assistant ? <TypewriterMarkdown active={running} content={turn.assistant} onOpenExternal={onOpenExternal} onPreviewFile={onPreviewFile} projectId={projectId} /> : null}
 
-        {turn.memoryCitations?.length ? (
-          <div className="memory-citation-badge" title={turn.memoryCitations.map(({ id, note }) => note ? `${id} — ${note}` : id).join("\n")}>
-            <Icon name="brain" size={12} />
-            <span>引用 {String(turn.memoryCitations.length)} 条记忆</span>
-          </div>
-        ) : null}
 
         {turn.assistant ? (
           <AssistantActions

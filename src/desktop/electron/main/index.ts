@@ -106,17 +106,6 @@ async function startDesktopApplication(): Promise<void> {
     // QuickChat 隐藏时渲染层不消费事件；窗口已创建则无论显隐都推，让它在下次唤醒前攒好状态。
     quickChatWindow?.send(channel, payload);
   };
-  const activity = new ActivityRecorderService({
-    configStore,
-    sidecarPath: defaultActivitySidecarPath({
-      packaged: app.isPackaged,
-      resourcesPath: process.resourcesPath,
-      appPath: app.getAppPath()
-    }),
-    emit: (snapshot) => {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(desktopIpc.activityEvent, snapshot);
-    }
-  });
   const settingsClose = new DesktopSettingsCloseCoordinator();
   const agents = new DesktopAgentManager(state, projects, configStore, (projectId, update, meta) => {
     broadcastToWindows(desktopIpc.event, { projectId, ...update, ...meta });
@@ -136,11 +125,22 @@ async function startDesktopApplication(): Promise<void> {
     agents,
     net.fetch.bind(net) as unknown as typeof globalThis.fetch
   );
+  const activity = new ActivityRecorderService({
+    configStore,
+    sidecarPath: defaultActivitySidecarPath({
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath()
+    }),
+    getEmbeddingRuntime: async () => await agents.getActivityEmbeddingRuntime(),
+    emit: (snapshot) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(desktopIpc.activityEvent, snapshot);
+    }
+  });
   const settings = new DesktopSettingsTransaction(state, agents);
   // 恢复检查必须早于 IPC 注册和窗口开放；无法自动恢复时保留应用可用来展示设置错误，
   // 但同一个 transaction 实例会阻止所有新工作入口。
   await settings.recoverAtStartup();
-  await activity.initialize();
   const prepareHandoff = async (handoff: DesktopLaunchHandoff): Promise<DesktopSessionHandoff> => {
     const project = await projects.createProject(handoff.workspaceRoot);
     await state.commitSelection(project.id, handoff.sessionId, "chat");
@@ -150,6 +150,7 @@ async function startDesktopApplication(): Promise<void> {
   const terminals = new DesktopTerminalManager((event) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(desktopIpc.terminalEvent, event);
   });
+  await activity.initialize();
   // 内嵌浏览器把 cookie 同步到这份共享 jar，agent 的 web 工具默认读同一个位置。
   const defaultCookieJarPath = path.join(desktopRoot, "cookies.json");
   const browser = new DesktopBrowserService(

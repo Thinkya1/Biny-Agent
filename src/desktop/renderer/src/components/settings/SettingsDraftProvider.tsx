@@ -1,13 +1,15 @@
 /**
  * 设置中心的跨分页草稿。
  *
- * 打开时只读取一次脱敏快照；各分页只改这里的内存状态。主题和字体通过 preview 回调即时
- * 预览，但只有 saveAll 会进入主进程事务。即时动作不经过本 Provider。
+ * 打开时只读取一次脱敏快照；普通分页改这里的内存状态。主题和字体通过 preview 回调即时
+ * 预览，Activity 则通过独立 CAS 通道即时落盘，其余设置仍由 saveAll 进入主进程事务。
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ThinkingSelection } from "../../../../../llm/ModelManager.js";
+import type { ModelProfile } from "../../../../../config/schema.js";
 import type {
   DesktopActivitySettingsInput,
+  DesktopActivitySettingsPatch,
   DesktopChatParamsSettings,
   DesktopChatPersonalizationOverride,
   DesktopCompactionSettings,
@@ -54,8 +56,11 @@ export function SettingsDraftProvider({
   const [loadError, setLoadError] = useState<string>();
   const [saveState, setSaveState] = useState<SettingsSaveState>("clean");
   const credentialHandlesRef = useRef(new Set<string>());
+  const snapshotRef = useRef<DesktopSettingsSnapshot | undefined>(undefined);
+  const activityUpdateTailRef = useRef(Promise.resolve());
 
   const adoptSnapshot = useCallback((next: DesktopSettingsSnapshot): void => {
+    snapshotRef.current = next;
     setSnapshot(next);
     setDraft(draftFromSnapshot(next));
     setSaveState(next.pendingRecovery ? "recovery_required" : "clean");
@@ -69,6 +74,7 @@ export function SettingsDraftProvider({
    * 清掉已即时生效的 defaultModel 项，upserts/removes/凭据句柄照常保留。
    */
   const adoptExternalSnapshot = useCallback((next: DesktopSettingsSnapshot): void => {
+    snapshotRef.current = next;
     setSnapshot(next);
     setSaveState(next.pendingRecovery ? "recovery_required" : "clean");
     setDraft((current) => current ? {
@@ -81,6 +87,7 @@ export function SettingsDraftProvider({
     if (!active || !projectId) return;
     let cancelled = false;
     setSnapshot(undefined);
+    snapshotRef.current = undefined;
     setDraft(undefined);
     setLoadError(undefined);
     setSaveState("clean");
@@ -103,8 +110,25 @@ export function SettingsDraftProvider({
   }, [onFontPreview]);
 
 
-  const setActivity = useCallback((value: DesktopActivitySettingsInput): void => {
-    setDraft((current) => current ? { ...current, activity: value } : current);
+  const updateActivityImmediately = useCallback((patch: DesktopActivitySettingsPatch): Promise<void> => {
+    const operation = activityUpdateTailRef.current.then(async () => {
+      const current = snapshotRef.current;
+      if (!current) throw new Error("Activity 设置尚未加载完成。");
+      const result = await window.biny.updateActivitySettings(patch, current.configRevision);
+      const nextSnapshot: DesktopSettingsSnapshot = {
+        ...current,
+        activity: result.activity,
+        configRevision: result.configRevision
+      };
+      snapshotRef.current = nextSnapshot;
+      setSnapshot(nextSnapshot);
+      setDraft((draftCurrent) => draftCurrent ? {
+        ...draftCurrent,
+        activity: activityInputFromSnapshot(result.activity)
+      } : draftCurrent);
+    });
+    activityUpdateTailRef.current = operation.then(() => undefined, () => undefined);
+    return operation;
   }, []);
 
   const setIdentity = useCallback((value: DesktopIdentitySettings): void => {
@@ -181,6 +205,23 @@ export function SettingsDraftProvider({
       ...current,
       models: { ...current.models, defaultModel: { alias, thinking } }
     } : current);
+  }, []);
+
+  const setModelProfile = useCallback((providerAlias: string, modelId: string, profile: ModelProfile | undefined): void => {
+    setDraft((current) => {
+      if (!current) return current;
+      const providerProfiles = { ...(current.models.modelProfiles[providerAlias] ?? {}) };
+      if (profile === undefined) delete providerProfiles[modelId];
+      else providerProfiles[modelId] = profile;
+      const modelProfiles = { ...current.models.modelProfiles };
+      // 空对象是「清空该连接全部 profile」的显式值；如果删掉 provider 键，后端会按
+      // 未列出的 provider 保持现状，最后一个 profile 就无法真正删除。
+      modelProfiles[providerAlias] = providerProfiles;
+      return {
+        ...current,
+        models: { ...current.models, modelProfiles }
+      };
+    });
   }, []);
 
   const stageCredential = useCallback(async (secret: string, scope: DesktopSettingsCredentialScope): Promise<DesktopStagedSettingsCredential> => {
@@ -280,6 +321,7 @@ export function SettingsDraftProvider({
       } else if (result.status === "rolled_back") {
         // 后端已验证补偿完成；只更新 CAS 基线，用户的草稿值继续保留以便处理冲突后重试。
         setSnapshot(result.snapshot);
+        snapshotRef.current = result.snapshot;
         // 主题和字体是未落盘的即时预览。补偿完成后 UI 必须先恢复权威值，
         // 但不能丢掉草稿本身，用户仍可修正冲突后再次保存。
         onThemePreview(result.snapshot.themePreference);
@@ -310,7 +352,7 @@ export function SettingsDraftProvider({
     saveState,
     setThemePreference,
     setFontPreference,
-    setActivity,
+    updateActivityImmediately,
     setIdentity,
     setMemory,
     setCompaction,
@@ -322,6 +364,7 @@ export function SettingsDraftProvider({
     upsertModel,
     removeModel,
     setDefaultModel,
+    setModelProfile,
     stageCredential,
     addOauthCredentialHandle,
     releaseCredential,
@@ -345,10 +388,11 @@ export function SettingsDraftProvider({
     setChatParams,
     setCompaction,
     setDefaultModel,
+    setModelProfile,
     setFontPreference,
     setMemory,
     setPermission,
-    setActivity,
+    updateActivityImmediately,
     setIdentity,
     setThemePreference,
     setWebSearch,
@@ -373,7 +417,13 @@ function draftFromSnapshot(snapshot: DesktopSettingsSnapshot): DesktopSettingsDr
     permission: structuredClone(snapshot.permission),
     webSearch: webSearchInput(snapshot.webSearch),
     chat: snapshot.chat ? structuredClone(snapshot.chat.personalization) : undefined,
-    models: { upserts: [], removeAliases: [], defaultModel: undefined, oauthCredentialHandles: [] },
+    models: {
+      upserts: [],
+      removeAliases: [],
+      defaultModel: undefined,
+      oauthCredentialHandles: [],
+      modelProfiles: structuredClone(snapshot.models.modelProfiles ?? {})
+    },
     skills: skillInputFromSnapshot(snapshot.skills)
   };
 }
@@ -406,7 +456,8 @@ function countNonPreferenceDirtyFields(snapshot: DesktopSettingsSnapshot, draft:
   if (!sameJson(draft.chatParams, snapshot.chatParams)) count += 1;
   if (!sameJson(draft.permission, snapshot.permission)) count += 1;
   if (!sameWebSearch(draft.webSearch, snapshot.webSearch)) count += 1;
-  if (draft.models.upserts.length || draft.models.removeAliases.length || draft.models.defaultModel || draft.models.oauthCredentialHandles.length) count += 1;
+  if (draft.models.upserts.length || draft.models.removeAliases.length || draft.models.defaultModel || draft.models.oauthCredentialHandles.length
+    || !sameJson(draft.models.modelProfiles, snapshot.models.modelProfiles ?? {})) count += 1;
   if (snapshot.chat && draft.chat && !sameJson(draft.chat, snapshot.chat.personalization)) count += 1;
   if (!sameJson(draft.skills, skillInputFromSnapshot(snapshot.skills))) count += 1;
   return count;
@@ -423,9 +474,15 @@ function validDraft(draft: DesktopSettingsDraft): boolean {
   if (chatParams.temperature !== undefined && (chatParams.temperature < 0 || chatParams.temperature > 2)) return false;
   if (chatParams.maxOutputTokens !== undefined && (!Number.isInteger(chatParams.maxOutputTokens) || chatParams.maxOutputTokens < 256 || chatParams.maxOutputTokens > 131_072)) return false;
   const activity = draft.activity;
-  if (activity.captureDebounceMs < 250 || activity.heartbeatMs < 1_000 || activity.idleTimeoutMs < 1_000
-    || activity.inputPauseMs < 0 || activity.visualPollMs < 0 || activity.jpegQuality < 1 || activity.jpegQuality > 100
-    || activity.ocrEveryNFrames < 1 || activity.ocrLanguages.length === 0 || activity.maxStorageMb < 256
+  if (activity.captureDebounceMs < 0 || activity.captureDebounceMs > 30_000
+    || activity.heartbeatMs < 0 || activity.heartbeatMs > 300_000
+    || activity.idleTimeoutMs < 0 || activity.idleTimeoutMs > 600_000
+    || activity.inputPauseMs < 0 || activity.inputPauseMs > 5_000
+    || activity.visualPollMs < 0 || activity.visualPollMs > 30_000
+    || activity.browserPollIntervalMs < 0 || activity.browserPollIntervalMs > 30_000
+    || activity.jpegQuality < 0 || activity.jpegQuality > 100
+    || activity.ocrEveryNFrames < 0 || activity.ocrEveryNFrames > 20
+    || activity.ocrLanguages.length === 0 || activity.maxStorageMb < 256
     || activity.outputDirectory.trim() === ""
     || (activity.analysisModel !== undefined && activity.analysisModel.trim().length > 200)) return false;
   // v3 移除了记忆向量阈值；这里只保留技能抽取参数的范围校验。
@@ -436,7 +493,8 @@ function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraf
   const modelsDirty = draft.models.upserts.length > 0
     || draft.models.removeAliases.length > 0
     || draft.models.defaultModel !== undefined
-    || draft.models.oauthCredentialHandles.length > 0;
+    || draft.models.oauthCredentialHandles.length > 0
+    || !sameJson(draft.models.modelProfiles, snapshot.models.modelProfiles ?? {});
   return {
     expectedPreferenceRevision: snapshot.preferenceRevision,
     expectedConfigRevision: snapshot.configRevision,
@@ -454,7 +512,8 @@ function saveInput(snapshot: DesktopSettingsSnapshot, draft: DesktopSettingsDraf
       upserts: draft.models.upserts,
       removeAliases: draft.models.removeAliases,
       defaultModel: draft.models.defaultModel,
-      oauthCredentialHandles: draft.models.oauthCredentialHandles
+      oauthCredentialHandles: draft.models.oauthCredentialHandles,
+      modelProfiles: draft.models.modelProfiles
     } : undefined,
     chat: snapshot.chat && draft.chat && !sameJson(draft.chat, snapshot.chat.personalization) ? {
       sessionId: snapshot.chat.sessionId,

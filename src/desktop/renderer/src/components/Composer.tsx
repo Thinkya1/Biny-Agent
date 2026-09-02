@@ -32,6 +32,8 @@ import { useTypedPlaceholder } from "./composer/useTypedPlaceholder.js";
 import { isSkillSlashCommand, normalizeSkillSlashCommand } from "./composer/desktopSlashCommands.js";
 import { createDesktopSlashTrigger } from "./composer/desktopSlashTrigger.js";
 
+export type ComposerMemoryState = "unknown" | "enabled" | "disabled";
+
 interface ComposerProps {
   project?: DesktopProject;
   runtimeInfo?: AgentSessionInfo;
@@ -39,7 +41,7 @@ interface ComposerProps {
   models: ModelChoice[];
   /** 已解析好的上下文用量；取不到真实数字时为空，此时不展示用量。 */
   contextUsage?: ContextUsage;
-  memoryEnabled: boolean;
+  memoryState: ComposerMemoryState;
   memoryToggleBusy: boolean;
   memoryToggleDisabled: boolean;
   memoryToggleDisabledReason?: string;
@@ -89,7 +91,7 @@ export const Composer = memo(function Composer({
   permissionMode,
   models,
   contextUsage,
-  memoryEnabled,
+  memoryState,
   memoryToggleBusy,
   memoryToggleDisabled,
   memoryToggleDisabledReason,
@@ -653,17 +655,21 @@ export const Composer = memo(function Composer({
           <div className="biny-composer-footer-end">
             <div className="composer-menu-anchor">
               <ComposerActionButton
-                aria-pressed={memoryEnabled}
+                aria-pressed={memoryState === "unknown" ? undefined : memoryState === "enabled"}
                 className="biny-memory-toggle"
-                data-memory-enabled={memoryEnabled ? "true" : "false"}
+                data-memory-enabled={memoryState === "unknown" ? undefined : memoryState === "enabled" ? "true" : "false"}
                 disabled={memoryToggleDisabled}
                 disabledReason={memoryToggleDisabledReason}
-                label={memoryEnabled ? "关闭当前聊天记忆" : "开启当前聊天记忆"}
+                label={memoryState === "unknown"
+                  ? "当前聊天记忆状态确认中"
+                  : memoryState === "enabled" ? "关闭当前聊天记忆" : "开启当前聊天记忆"}
                 loading={memoryToggleBusy}
                 onClick={() => { void onToggleMemory(); }}
-                tooltip={memoryEnabled ? "当前聊天会使用记忆 - 点击关闭" : "当前聊天未使用记忆 - 点击开启"}
+                tooltip={memoryState === "unknown"
+                  ? undefined
+                  : memoryState === "enabled" ? "当前聊天会使用记忆 - 点击关闭" : "当前聊天未使用记忆 - 点击开启"}
               >
-                <Icon name={memoryEnabled ? "brain-spark" : "brain-off"} size={20} />
+                <Icon name={memoryState === "unknown" ? "brain" : memoryState === "enabled" ? "brain-spark" : "brain-off"} size={20} />
               </ComposerActionButton>
             </div>
             {usage ? (
@@ -673,7 +679,9 @@ export const Composer = memo(function Composer({
                   <span>上下文使用量</span>
                   <strong>{usage.percent}% 已占用</strong>
                   <strong>{usage.used} / {usage.max} tokens</strong>
-                  {usage.reserved ? (
+                  {usage.contextWindowIsFallback ? (
+                    <span>上下文窗口未声明，当前按保守预算</span>
+                  ) : usage.reserved ? (
                     <span>模型窗口 {usage.window}，其中 {usage.reserved} 为输出等预留</span>
                   ) : null}
                 </span>

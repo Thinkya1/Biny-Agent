@@ -25,6 +25,8 @@ export interface CatalogModel {
   supportsVision?: boolean;
   supportsAudio?: boolean;
   contextWindow?: number;
+  /** 目录没有声明 contextWindow 时为 true；UI 不应把 fallback 数值当成官方窗口。 */
+  contextWindowIsFallback?: boolean;
   maxInputTokens?: number;
   maxOutputTokens?: number;
   limits?: ModelLimits;
@@ -96,6 +98,7 @@ function apiProvider(definition: ApiProviderDefinition): ProviderCatalogItem {
       supportsVision,
       supportsAudio,
       contextWindow,
+      contextWindowIsFallback: contextWindow === undefined,
       maxInputTokens,
       maxOutputTokens,
       thinkingLevelMap
@@ -214,7 +217,8 @@ export const providerCatalog: ProviderCatalogItem[] = [
       displayName: model.displayName,
       supportsThinking: true,
       supportsVision: true,
-      contextWindow: model.contextWindow
+      contextWindow: model.contextWindow,
+      contextWindowIsFallback: model.contextWindow === undefined
     }))
   },
 ];
@@ -379,6 +383,7 @@ export function customCatalogEntry(
       supportsVision: model.capabilities?.vision,
       supportsAudio: model.capabilities?.audio,
       contextWindow: model.contextWindow,
+      contextWindowIsFallback: model.contextWindowIsFallback,
       maxInputTokens: model.maxInputTokens,
       maxOutputTokens: model.maxOutputTokens,
       limits: model.limits

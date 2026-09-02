@@ -6,9 +6,11 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Dialog } from "@astryxdesign/core/Dialog";
+import type { ModelProfile } from "../../../../../config/schema.js";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
-import type { DesktopBehaviorPatternReviewAction, DesktopCookieJarStatus, DesktopFontPreference, DesktopIdentityOverview, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntriesPage, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryStats, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopTelosDocumentInput, DesktopTelosDriftResolutionAction, DesktopTelosOverview, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { MemorySleepRun } from "../../../../../agent/context/memoryTypes.js";
+import type { DesktopCookieJarStatus, DesktopFontPreference, DesktopIdentityOverview, DesktopMemoryCompactionResult, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntriesPage, DesktopMemoryEntry, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryStats, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
   apiFormatForConnection,
   apiFormatOption,
@@ -73,14 +75,16 @@ interface SettingsOverlayProps {
   onAddMemoryEntry(input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryStats>;
   onUpdateMemoryEntry(entryId: string, patch: DesktopMemoryEntryPatch, expectedRevision: number): Promise<DesktopMemoryStats>;
   onDeleteMemoryEntry(entryId: string, expectedRevision: number): Promise<DesktopMemoryStats>;
+  onArchiveMemoryEntry(entryId: string, archived: boolean, expectedRevision: number): Promise<DesktopMemoryStats>;
+  onLoadArchivedMemory(): Promise<DesktopMemoryEntry[]>;
+  onRunMemorySleep(): Promise<DesktopMemoryStats>;
+  onSleepStatus(): Promise<DesktopMemoryStats["maintenance"]>;
+  onSleepRuns(): Promise<MemorySleepRun[]>;
+  onPreviewMemorySleep(): Promise<import("../../../../protocol.js").DesktopMemorySleepPreview>;
+  onCancelMemorySleep(): Promise<{ cancelled: boolean }>;
   onClearMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryStats>;
   onCompactMemory(filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
   onLoadIdentityOverview(): Promise<DesktopIdentityOverview>;
-  onLoadTelosOverview(): Promise<DesktopTelosOverview>;
-  onSaveTelos(input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
-  onReviewBehaviorPattern(patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
-  onResolveTelosDrift(driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number): Promise<DesktopTelosOverview>;
-  onSnoozeTelosDrift(driftId: string, until: string, expectedRevision: number): Promise<DesktopTelosOverview>;
   onOpenChatDraft(input: string): void;
   onLoadMemoryEmbeddingStatus(): Promise<DesktopMemoryEmbeddingStatus>;
   onDownloadMemoryEmbeddingModel(model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingStatus>;
@@ -204,21 +208,23 @@ function SettingsOverlayContent({
   onAddMemoryEntry,
   onUpdateMemoryEntry,
   onDeleteMemoryEntry,
-  onClearMemory,
-  onCompactMemory,
+  onArchiveMemoryEntry,
+  onLoadArchivedMemory,
+  onRunMemorySleep,
+  onSleepStatus,
+  onSleepRuns,
+  onPreviewMemorySleep,
+  onCancelMemorySleep,
+  onClearMemory: _onClearMemory,
+  onCompactMemory: _onCompactMemory,
   onLoadIdentityOverview,
-  onLoadTelosOverview,
-  onSaveTelos,
-  onReviewBehaviorPattern,
-  onResolveTelosDrift,
-  onSnoozeTelosDrift,
-  onOpenChatDraft,
-  onLoadMemoryEmbeddingStatus,
-  onDownloadMemoryEmbeddingModel,
-  onCancelMemoryEmbeddingDownload,
-  onDeleteMemoryEmbeddingModel,
-  onRebuildMemoryEmbeddingIndex,
-  onCancelMemoryEmbeddingRebuild,
+  onOpenChatDraft: _onOpenChatDraft,
+  onLoadMemoryEmbeddingStatus: _onLoadMemoryEmbeddingStatus,
+  onDownloadMemoryEmbeddingModel: _onDownloadMemoryEmbeddingModel,
+  onCancelMemoryEmbeddingDownload: _onCancelMemoryEmbeddingDownload,
+  onDeleteMemoryEmbeddingModel: _onDeleteMemoryEmbeddingModel,
+  onRebuildMemoryEmbeddingIndex: _onRebuildMemoryEmbeddingIndex,
+  onCancelMemoryEmbeddingRebuild: _onCancelMemoryEmbeddingRebuild,
   onOpenExternal,
   onLoadCookieJarStatus,
   onOpenBrowser,
@@ -261,7 +267,12 @@ function SettingsOverlayContent({
       if (targetTab === "记忆") setMemoryVisited(true);
     }
   }, [open, targetTab]);
-  const settingsModels = stagedModelChoices(settingsDraft.snapshot?.models.configured ?? workspace?.models ?? [], settingsDraft.draft?.models.upserts ?? [], settingsDraft.draft?.models.removeAliases ?? []);
+  const settingsModels = stagedModelChoices(
+    settingsDraft.snapshot?.models.configured ?? workspace?.models ?? [],
+    settingsDraft.draft?.models.upserts ?? [],
+    settingsDraft.draft?.models.removeAliases ?? [],
+    settingsDraft.draft?.models.modelProfiles ?? settingsDraft.snapshot?.models.modelProfiles ?? {}
+  );
   const defaultModelAlias = settingsDraft.draft?.models.defaultModel?.alias
     ?? settingsDraft.snapshot?.models.defaultModel;
   const searchResults = searchSettings(searchQuery);
@@ -362,7 +373,9 @@ function SettingsOverlayContent({
             loading={!settingsDraft.snapshot && !settingsDraft.loadError}
             models={settingsModels}
             connections={settingsDraft.snapshot?.models.connections ?? workspace?.connections ?? []}
+            modelProfiles={settingsDraft.draft?.models.modelProfiles ?? settingsDraft.snapshot?.models.modelProfiles ?? {}}
             defaultModelAlias={defaultModelAlias}
+            onModelProfile={settingsDraft.setModelProfile}
             onFetchCatalog={onFetchModelCatalog}
             onFetchCatalogCandidate={onFetchModelCatalogCandidate}
             onOpenExternal={onOpenExternal}
@@ -467,7 +480,6 @@ function SettingsOverlayContent({
             onThemeChange={settingsDraft.setThemePreference}
             font={settingsDraft.draft?.fontPreference ?? fontPreference}
             onFontChange={settingsDraft.setFontPreference}
-            projectId={workspace?.project.id}
             onLoadIdentityOverview={onLoadIdentityOverview}
             onNotify={(nextMessage) => notifyForTab("通用", nextMessage)}
           /> : null}
@@ -477,7 +489,6 @@ function SettingsOverlayContent({
           {tab === "快速对话" ? <SettingsQuickChat /> : null}
           {memoryVisited ? <SettingsMemory
             models={settingsModels}
-            projectId={workspace?.project.id}
             hidden={tab !== "记忆"}
             workspaceAvailable={workspace !== undefined}
             onLoadStats={onLoadMemoryStats}
@@ -486,22 +497,13 @@ function SettingsOverlayContent({
             onAdd={onAddMemoryEntry}
             onUpdate={onUpdateMemoryEntry}
             onDeleteEntry={onDeleteMemoryEntry}
-            onClear={onClearMemory}
-            onCompact={onCompactMemory}
-            onLoadTelosOverview={onLoadTelosOverview}
-            onSaveTelos={onSaveTelos}
-            onReviewBehaviorPattern={onReviewBehaviorPattern}
-            onResolveTelosDrift={onResolveTelosDrift}
-            onSnoozeTelosDrift={onSnoozeTelosDrift}
-            onOpenChatDraft={onOpenChatDraft}
-            embeddingModels={settingsDraft.snapshot?.models.embeddingModels ?? []}
-            onLoadEmbeddingStatus={onLoadMemoryEmbeddingStatus}
-            onDownloadEmbeddingModel={onDownloadMemoryEmbeddingModel}
-            onCancelEmbeddingDownload={onCancelMemoryEmbeddingDownload}
-            onDeleteEmbeddingModel={onDeleteMemoryEmbeddingModel}
-            onRebuildEmbeddingIndex={onRebuildMemoryEmbeddingIndex}
-            onCancelEmbeddingRebuild={onCancelMemoryEmbeddingRebuild}
-            onTestModelConfiguration={onTestModelConfiguration}
+            onArchiveEntry={onArchiveMemoryEntry}
+            onLoadArchived={onLoadArchivedMemory}
+            onRunSleep={onRunMemorySleep}
+            onSleepStatus={onSleepStatus}
+            onSleepRuns={onSleepRuns}
+            onPreviewSleep={onPreviewMemorySleep}
+            onCancelSleep={onCancelMemorySleep}
             onNotify={(nextMessage) => notifyForTab("记忆", nextMessage)}
             sessionRunning={runtimeBusy}
           /> : null}
@@ -572,12 +574,19 @@ function connectionLabel(models: ModelChoice[]): Array<{ provider: string; provi
 function stagedModelChoices(
   saved: ModelChoice[],
   upserts: DesktopModelConfigurationInput[],
-  removeAliases: string[]
+  removeAliases: string[],
+  modelProfiles: Record<string, Record<string, ModelProfile>>
 ): ModelChoice[] {
   const choices = new Map(saved.map((model) => [model.alias, model] as const));
   for (const alias of removeAliases) choices.delete(alias);
+  for (const [alias, model] of choices) {
+    const profile = modelProfiles[model.provider]?.[model.model];
+    if (profile !== undefined) choices.set(alias, applyModelProfileToChoice(model, profile));
+  }
   for (const input of upserts) {
     const existing = choices.get(input.alias);
+    const profile = modelProfiles[input.providerAlias]?.[input.model];
+    const profileThinkingLevelMap = profile?.thinkingLevelMap;
     choices.set(input.alias, {
       alias: input.alias,
       displayName: input.displayName,
@@ -596,13 +605,20 @@ function stagedModelChoices(
         audio: input.supportsAudio ?? false,
         streaming: true
       },
-      contextWindow: input.contextWindow,
-      maxInputTokens: input.maxInputTokens,
+      contextWindow: profile?.contextWindow ?? input.contextWindow,
+      contextWindowIsFallback: profile?.contextWindow === undefined
+        ? existing?.contextWindowIsFallback ?? (input.contextWindow === undefined)
+        : false,
+      maxInputTokens: profile?.maxInputTokens ?? input.maxInputTokens,
       maxOutputTokens: input.maxOutputTokens,
       limits: input.limits,
-      efforts: existing?.efforts ?? (input.supportsThinking ? ["low", "medium", "high"] : []),
-      defaultThinking: existing?.defaultThinking ?? (input.supportsThinking ? "high" : "off"),
-      thinkingLevelMap: input.thinkingLevelMap ?? existing?.thinkingLevelMap ?? {},
+      efforts: profileThinkingLevelMap
+        ? Object.keys(profileThinkingLevelMap).filter((level): level is ModelChoice["efforts"][number] => level !== "off" && profileThinkingLevelMap[level] !== null)
+        : existing?.efforts ?? (input.supportsThinking ? ["low", "medium", "high"] : []),
+      defaultThinking: profileThinkingLevelMap
+        ? (Object.keys(profileThinkingLevelMap).find((level) => level !== "off" && profileThinkingLevelMap[level] !== null) as ModelChoice["defaultThinking"] | undefined) ?? "off"
+        : existing?.defaultThinking ?? (input.supportsThinking ? "high" : "off"),
+      thinkingLevelMap: profileThinkingLevelMap ?? input.thinkingLevelMap ?? existing?.thinkingLevelMap ?? {},
       apiBackend: input.apiBackend,
       baseUrl: input.baseUrl,
       compatibility: input.compatibility,
@@ -612,6 +628,44 @@ function stagedModelChoices(
     });
   }
   return [...choices.values()];
+}
+
+function applyModelProfileToChoice(choice: ModelChoice, profile: ModelProfile): ModelChoice {
+  const thinkingLevelMap = profile.thinkingLevelMap;
+  if (thinkingLevelMap === undefined) {
+    return {
+      ...choice,
+      contextWindow: profile.contextWindow ?? choice.contextWindow,
+      contextWindowIsFallback: profile.contextWindow === undefined ? choice.contextWindowIsFallback : false,
+      maxInputTokens: profile.maxInputTokens ?? choice.maxInputTokens
+    };
+  }
+  const efforts = Object.keys(thinkingLevelMap)
+    .filter((level): level is ModelChoice["efforts"][number] => level !== "off" && thinkingLevelMap[level] !== null);
+  const defaultThinking = efforts.includes(choice.defaultThinking as ModelChoice["efforts"][number])
+    ? choice.defaultThinking
+    : efforts.includes("high") ? "high" : efforts[0] ?? "off";
+  const reasoning = efforts.length > 0;
+  return {
+    ...choice,
+    contextWindow: profile.contextWindow ?? choice.contextWindow,
+    contextWindowIsFallback: profile.contextWindow === undefined ? choice.contextWindowIsFallback : false,
+    maxInputTokens: profile.maxInputTokens ?? choice.maxInputTokens,
+    capabilities: {
+      ...choice.capabilities,
+      tools: choice.capabilities?.tools ?? choice.supportsTools ?? false,
+      parallelToolCalls: choice.capabilities?.parallelToolCalls ?? false,
+      reasoning,
+      reasoningStream: reasoning && choice.capabilities?.reasoningStream !== false,
+      reasoningSummary: reasoning && choice.capabilities?.reasoningSummary === true,
+      vision: choice.capabilities?.vision ?? false,
+      audio: choice.capabilities?.audio ?? false,
+      streaming: choice.capabilities?.streaming ?? true
+    },
+    efforts,
+    defaultThinking,
+    thinkingLevelMap
+  };
 }
 
 /**
@@ -632,6 +686,7 @@ function mergeAvailableModels(
     if (seen.has(model.model)) continue;
     seen.add(model.model);
     const live = liveById.get(model.model);
+    const liveContextIsBetter = model.contextWindowIsFallback === true && live?.contextWindow !== undefined;
     merged.push({
       id: model.model,
       displayName: live?.displayName ?? model.displayName,
@@ -641,7 +696,8 @@ function mergeAvailableModels(
       reasoningSummary: model.capabilities?.reasoningSummary ?? live?.reasoningSummary,
       supportsVision: model.capabilities?.vision ?? live?.supportsVision,
       supportsAudio: model.capabilities?.audio ?? live?.supportsAudio,
-      contextWindow: model.contextWindow ?? live?.contextWindow,
+      contextWindow: liveContextIsBetter ? live.contextWindow : model.contextWindow ?? live?.contextWindow,
+      contextWindowIsFallback: liveContextIsBetter ? live.contextWindowIsFallback : model.contextWindowIsFallback ?? live?.contextWindowIsFallback,
       maxInputTokens: model.maxInputTokens,
       maxOutputTokens: model.maxOutputTokens ?? live?.maxOutputTokens,
       limits: model.limits ?? live?.limits,
@@ -670,6 +726,7 @@ function catalogModelFromEntry(entry: DesktopModelCatalogResult["models"][number
     supportsVision: entry.capabilities.vision,
     supportsAudio: entry.capabilities.audio,
     contextWindow: entry.contextWindow,
+    contextWindowIsFallback: entry.contextWindow === undefined,
     maxInputTokens: entry.maxInputTokens,
     maxOutputTokens: entry.maxOutputTokens,
     limits: entry.limits,
@@ -734,13 +791,15 @@ function isManualEndpoint(provider: ProviderCatalogItem): boolean {
   return provider.id === "openai-compatible" || !provider.baseUrl.trim();
 }
 
-export function SettingsModels({ active, loading, models, connections: connectionInfos, defaultModelAlias, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onFetchCatalogCandidate, onStartLogin, onCompleteLogin, onCancelLogin }: {
+export function SettingsModels({ active, loading, models, connections: connectionInfos, modelProfiles, defaultModelAlias, onModelProfile, onChange, onSave, onTest, onRemove, onNotify, onOpenExternal, onFetchCatalog, onFetchCatalogCandidate, onStartLogin, onCompleteLogin, onCancelLogin }: {
   active: boolean;
   /** 设置快照尚未返回时为 true：连接区显示骨架行而不是闪一下空状态。 */
   loading?: boolean;
   models: ModelChoice[];
   connections: DesktopModelConnection[];
+  modelProfiles: Record<string, Record<string, ModelProfile>>;
   defaultModelAlias?: string;
+  onModelProfile(providerAlias: string, modelId: string, profile: ModelProfile | undefined): void;
   onChange(alias: string, thinking: ThinkingSelection): void;
   onSave(configuration: DesktopModelConfigurationInput): Promise<void>;
   onTest(configuration: DesktopModelConfigurationInput): Promise<DesktopModelConnectionTestResult>;
@@ -1394,8 +1453,8 @@ export function SettingsModels({ active, loading, models, connections: connectio
   };
 
   // 按手填 ID 直接启用：能力元数据全部留空，由 ProviderRuntime 按 provider 默认值补齐，
-  // 渲染层不替未知模型猜 reasoning 参数（与 buildProviderConfiguration 的手填路径一致）。
-  const enableManualModel = async (modelId: string): Promise<void> => {
+  // 渲染层不替未知模型猜 reasoning 参数；profile 仍单独写入 provider 级配置。
+  const enableManualModel = async (modelId: string, modelProfile?: ModelProfile): Promise<void> => {
     if (!detailGroup || !detailCatalog) return;
     const id = modelId.trim();
     if (!id) return;
@@ -1417,6 +1476,7 @@ export function SettingsModels({ active, loading, models, connections: connectio
         apiKeyEnv: undefined,
         supportsTools: true
       });
+      if (modelProfile !== undefined) onModelProfile(detailGroup.provider, id, modelProfile);
       onNotify(`已添加 ${id}`);
     } finally {
       setSaving(false);
@@ -1669,6 +1729,7 @@ export function SettingsModels({ active, loading, models, connections: connectio
             catalog={detailCatalog}
             connection={detailConnection}
             availableModels={detailAvailableModels}
+            modelProfiles={modelProfiles}
             defaultAlias={detailDefaultAlias}
             apiKey={detailApiKey}
             baseUrl={detailBaseUrl}
@@ -1689,6 +1750,7 @@ export function SettingsModels({ active, loading, models, connections: connectio
             onSaveApiFormat={(id) => void saveApiFormat(id)}
             onEnableModel={(model) => enableModel(model)}
             onEnableManualModel={enableManualModel}
+            onModelProfile={onModelProfile}
             onDisableModel={(alias) => disableModel(alias)}
             onDeleteConnection={() => void deleteConnection()}
             canDeleteConnection={models.length > detailGroup.models.length}
@@ -1809,6 +1871,7 @@ function ConnectionDetailDialog({
   catalog,
   connection,
   availableModels,
+  modelProfiles,
   defaultAlias,
   apiKey,
   baseUrl,
@@ -1829,6 +1892,7 @@ function ConnectionDetailDialog({
   onSaveApiFormat,
   onEnableModel,
   onEnableManualModel,
+  onModelProfile,
   onDisableModel,
   onDeleteConnection,
   canDeleteConnection,
@@ -1841,6 +1905,7 @@ function ConnectionDetailDialog({
   catalog: ProviderCatalogItem;
   connection?: DesktopModelConnection;
   availableModels: CatalogModel[];
+  modelProfiles: Record<string, Record<string, ModelProfile>>;
   defaultAlias?: string;
   apiKey: string;
   baseUrl: string;
@@ -1860,7 +1925,8 @@ function ConnectionDetailDialog({
   apiFormat: ApiFormatId;
   onSaveApiFormat(id: ApiFormatId): void;
   onEnableModel(model: CatalogModel): Promise<void> | void;
-  onEnableManualModel(modelId: string): Promise<void>;
+  onEnableManualModel(modelId: string, profile?: ModelProfile): Promise<void>;
+  onModelProfile(providerAlias: string, modelId: string, profile: ModelProfile | undefined): void;
   onDisableModel(alias: string): Promise<void> | void;
   onDeleteConnection(): void;
   canDeleteConnection: boolean;
@@ -1871,6 +1937,7 @@ function ConnectionDetailDialog({
 }): React.JSX.Element {
   const [manualModelOpen, setManualModelOpen] = useState(false);
   const [manualModelId, setManualModelId] = useState("");
+  const [manualModelProfile, setManualModelProfile] = useState<ModelProfile>();
   // 凭据、服务地址与 API 格式采用「行式读取 + 点击展开编辑」：这些值设一次之后就是被读取的，
   // 常驻输入框等于一直让用户填一个已经填好的东西。
   // 一次只展开一行；展开或取消时把各行输入灌回已保存值，未提交的编辑不跨行残留。
@@ -1899,6 +1966,17 @@ function ConnectionDetailDialog({
   const usesOAuth = connection?.authMode === "oauth-bearer";
   const status = connectionStatus(connection);
   const busy = saving || testing || fetchingCatalog;
+  const closeManualModel = (): void => {
+    setManualModelOpen(false);
+    setManualModelId("");
+    setManualModelProfile(undefined);
+  };
+  const submitManualModel = async (): Promise<void> => {
+    const modelId = manualModelId.trim();
+    if (!modelId || busy) return;
+    await onEnableManualModel(modelId, manualModelProfile);
+    closeManualModel();
+  };
   return (
     <section className="connect-dialog connection-detail-dialog" role="dialog" aria-label={`${catalog.label} 连接设置`}>
       <header>
@@ -2066,34 +2144,46 @@ function ConnectionDetailDialog({
           onDisableModel={onDisableModel}
           onEnableModel={onEnableModel}
         />
-            {manualModelOpen ? (
-              <div className="manual-model-row">
-                <input
-                  autoFocus
-                  onChange={(event) => setManualModelId(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" || !manualModelId.trim() || busy) return;
-                    event.preventDefault();
-                    void onEnableManualModel(manualModelId.trim());
-                    setManualModelId("");
-                    setManualModelOpen(false);
-                  }}
-                  placeholder="deepseek-v4-pro-beta"
-                  value={manualModelId}
-                />
-                <button
-                  className="ghost-button"
-                  disabled={busy || !manualModelId.trim()}
-                  onClick={() => {
-                    void onEnableManualModel(manualModelId.trim());
-                    setManualModelId("");
-                    setManualModelOpen(false);
-                  }}
-                  type="button"
-                >添加</button>
-                <button className="text-button" onClick={() => { setManualModelOpen(false); setManualModelId(""); }} type="button">取消</button>
-              </div>
-            ) : null}
+        <ModelProfileEditorList
+          busy={busy}
+          models={group.models}
+          onChange={onModelProfile}
+          profiles={modelProfiles[group.provider] ?? {}}
+          providerAlias={group.provider}
+        />
+        {manualModelOpen ? (
+          <div className="manual-model-editor">
+            <div className="manual-model-row">
+              <input
+                autoFocus
+                onChange={(event) => setManualModelId(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || !manualModelId.trim() || busy) return;
+                  event.preventDefault();
+                  void submitManualModel();
+                }}
+                placeholder="deepseek-v4-pro-beta"
+                value={manualModelId}
+              />
+              <button
+                className="ghost-button"
+                disabled={busy || !manualModelId.trim()}
+                onClick={() => { void submitManualModel(); }}
+                type="button"
+              >添加</button>
+              <button className="text-button" onClick={closeManualModel} type="button">取消</button>
+            </div>
+            <div className="manual-model-profile-heading">
+              <strong>模型元数据（可选）</strong>
+              <span>可直接补充上下文窗口、最大输入 token 和思考参数；全部留空则使用保守 fallback。</span>
+            </div>
+            <ModelProfileEditorFields
+              busy={busy}
+              onChange={setManualModelProfile}
+              profile={manualModelProfile}
+            />
+          </div>
+        ) : null}
             {/* 模型区动作行：测试 secondary 在前，更新目录 /
                 添加模型 ghost 在后。中转站常先透传新模型、目录还没更新，手动添加是按 ID
                 直接启用的逃生通道。 */}
@@ -2101,7 +2191,7 @@ function ConnectionDetailDialog({
               <button className="settings-secondary-button" disabled={busy || !configuration} onClick={onTest} type="button">{testing ? "测试中…" : "测试连接"}</button>
               <button className="ghost-button" disabled={busy} onClick={onRefreshCatalog} type="button">{fetchingCatalog ? "更新中…" : "更新模型目录"}</button>
               {!manualModelOpen ? (
-                <button className="ghost-button" disabled={busy} onClick={() => setManualModelOpen(true)} type="button">添加模型</button>
+                <button className="ghost-button" disabled={busy} onClick={() => { setManualModelId(""); setManualModelProfile(undefined); setManualModelOpen(true); }} type="button">添加模型</button>
               ) : null}
             </div>
             {testResult ? <ConnectionTestResult result={testResult} /> : null}
@@ -2119,6 +2209,163 @@ function ConnectionDetailDialog({
       </section>
     </section>
   );
+}
+
+const modelProfileThinkingLevels: Array<{ level: ModelProfileThinkingLevel; label: string }> = [
+  { level: "off", label: "关闭 / off" },
+  { level: "minimal", label: "最小 / minimal" },
+  { level: "low", label: "低 / low" },
+  { level: "medium", label: "中 / medium" },
+  { level: "high", label: "高 / high" },
+  { level: "xhigh", label: "超高 / xhigh" },
+  { level: "max", label: "最大 / max" }
+];
+
+type ModelProfileThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * 连接级模型元数据覆盖编辑器。profile 按原始模型 ID 保存，目录刷新只改变旁边的
+ * 运行时候选，不会把这里的用户声明重新推断或覆盖掉。
+ */
+function ModelProfileEditorList({ busy, models, profiles, providerAlias, onChange }: {
+  busy: boolean;
+  models: ModelChoice[];
+  profiles: Record<string, ModelProfile>;
+  providerAlias: string;
+  onChange(providerAlias: string, modelId: string, profile: ModelProfile | undefined): void;
+}): React.JSX.Element | null {
+  if (!models.length) return null;
+  return (
+    <div className="model-profile-editor-list">
+      <div className="model-profile-editor-heading">
+        <strong>模型元数据覆盖</strong>
+        <span>给中转站或自定义网关补充上下文窗口、输入上限和思考参数。</span>
+      </div>
+      <div className="model-profile-editor-hint">留空使用目录元数据；目录没有上下文窗口时按保守预算运行。模型 ID 必须与网关返回的原始 ID 完全一致。</div>
+      {models.map((model) => (
+        <ModelProfileEditorRow
+          busy={busy}
+          key={model.model}
+          model={model}
+          onChange={onChange}
+          profile={profiles[model.model]}
+          providerAlias={providerAlias}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ModelProfileEditorRow({ busy, model, profile, providerAlias, onChange }: {
+  busy: boolean;
+  model: ModelChoice;
+  profile?: ModelProfile;
+  providerAlias: string;
+  onChange(providerAlias: string, modelId: string, profile: ModelProfile | undefined): void;
+}): React.JSX.Element {
+  const [open, setOpen] = useState(profile !== undefined);
+  return (
+    <details className="model-profile-editor-row" onToggle={(event) => setOpen(event.currentTarget.open)} open={open}>
+      <summary>
+        <span className="model-profile-editor-model">
+          <strong>{model.displayName}</strong>
+          {model.model !== model.displayName ? <small>{model.model}</small> : null}
+        </span>
+        <span className={`model-profile-editor-status${profile ? " is-set" : ""}`}>{profile ? "已配置" : "未声明"}</span>
+      </summary>
+      <ModelProfileEditorFields
+        busy={busy}
+        onChange={(next) => onChange(providerAlias, model.model, next)}
+        profile={profile}
+      />
+    </details>
+  );
+}
+
+function ModelProfileEditorFields({ busy, profile, onChange }: {
+  busy: boolean;
+  profile?: ModelProfile;
+  onChange(profile: ModelProfile | undefined): void;
+}): React.JSX.Element {
+  const updateField = (field: "contextWindow" | "maxInputTokens", value: string): void => {
+    onChange(updateModelProfile(profile, field, value));
+  };
+  const updateThinkingLevel = (level: ModelProfileThinkingLevel, value: string): void => {
+    onChange(updateModelProfile(profile, "thinkingLevelMap", value, level));
+  };
+  return (
+    <div className="model-profile-editor-fields">
+      <label>
+        <span>上下文窗口</span>
+        <input
+          disabled={busy}
+          min={4096}
+          onChange={(event) => updateField("contextWindow", event.target.value)}
+          placeholder="例如 1000000"
+          step={1}
+          type="number"
+          value={profile?.contextWindow ?? ""}
+        />
+      </label>
+      <label>
+        <span>最大输入 token</span>
+        <input
+          disabled={busy}
+          min={2048}
+          onChange={(event) => updateField("maxInputTokens", event.target.value)}
+          placeholder="例如 950000"
+          step={1}
+          type="number"
+          value={profile?.maxInputTokens ?? ""}
+        />
+      </label>
+      <div className="model-profile-thinking-fields">
+        <span className="model-profile-field-label">思考档位对应的网关参数</span>
+        {modelProfileThinkingLevels.map(({ level, label }) => (
+          <label key={level}>
+            <span>{label}</span>
+            <input
+              disabled={busy}
+              onChange={(event) => updateThinkingLevel(level, event.target.value)}
+              placeholder={level === "off" ? "none 可明确关闭" : "留空不声明"}
+              type="text"
+              value={profile?.thinkingLevelMap?.[level] ?? ""}
+            />
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function updateModelProfile(
+  profile: ModelProfile | undefined,
+  field: "contextWindow" | "maxInputTokens" | "thinkingLevelMap",
+  value: string,
+  level?: ModelProfileThinkingLevel
+): ModelProfile | undefined {
+  const next: ModelProfile = {
+    contextWindow: profile?.contextWindow,
+    maxInputTokens: profile?.maxInputTokens,
+    thinkingLevelMap: profile?.thinkingLevelMap === undefined ? undefined : { ...profile.thinkingLevelMap }
+  };
+  if (field === "contextWindow") next.contextWindow = parseProfileInteger(value);
+  else if (field === "maxInputTokens") next.maxInputTokens = parseProfileInteger(value);
+  else if (level !== undefined) {
+    const thinkingLevelMap = next.thinkingLevelMap ?? {};
+    const nativeValue = value.trim();
+    if (nativeValue) thinkingLevelMap[level] = nativeValue;
+    else delete thinkingLevelMap[level];
+    next.thinkingLevelMap = Object.keys(thinkingLevelMap).length ? thinkingLevelMap : undefined;
+  }
+  return next.contextWindow !== undefined || next.maxInputTokens !== undefined || next.thinkingLevelMap !== undefined ? next : undefined;
+}
+
+function parseProfileInteger(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 /**
@@ -2313,7 +2560,8 @@ function modelCapabilityHint(model: CatalogModel): string | undefined {
     .map(([level]) => level);
   if (thinkingLevels.length) parts.push(thinkingLevels.join("/"));
   else if (model.supportsThinking) parts.push("思考");
-  if (model.contextWindow) parts.push(formatContextWindow(model.contextWindow));
+  if (model.contextWindowIsFallback) parts.push("上下文窗口未声明，当前按保守预算");
+  else if (model.contextWindow) parts.push(formatContextWindow(model.contextWindow));
   return parts.length ? parts.join(" · ") : undefined;
 }
 

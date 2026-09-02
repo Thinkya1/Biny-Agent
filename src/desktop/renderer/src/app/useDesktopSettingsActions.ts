@@ -12,9 +12,6 @@ import type {
   DesktopMemoryEntryInput,
   DesktopMemoryEntryPatch,
   DesktopMemoryOriginFilter,
-  DesktopBehaviorPatternReviewAction,
-  DesktopTelosDocumentInput,
-  DesktopTelosDriftResolutionAction,
   DesktopModelConfigurationInput,
   DesktopModelLoginProvider,
   DesktopWorkspaceSnapshot
@@ -147,7 +144,7 @@ export function useDesktopSettingsActions({
     return await memoryStats(requireProject(projectIdRef.current), filter);
   }, [projectIdRef]);
 
-  const loadMemoryEntries = useCallback(async (filter: DesktopMemoryOriginFilter, offset: number, limit: number) => {
+  const loadMemoryEntries = useCallback(async (filter: DesktopMemoryOriginFilter, offset: number, limit: number, _includeArchived = false) => {
     const memoryEntries = window.biny.memoryEntries;
     if (typeof memoryEntries !== "function") throw new Error(desktopApiVersionMismatchMessage);
     return await memoryEntries(requireProject(projectIdRef.current), filter, offset, limit);
@@ -159,8 +156,8 @@ export function useDesktopSettingsActions({
     return await load(requireProject(projectIdRef.current));
   }, [projectIdRef]);
 
-  const searchMemory = useCallback(async (filter: DesktopMemoryOriginFilter, query: string) => {
-    return await window.biny.searchMemory(requireProject(projectIdRef.current), filter, query);
+  const searchMemory = useCallback(async (filter: DesktopMemoryOriginFilter, query: string, includeArchived = false) => {
+    return await window.biny.searchMemory(requireProject(projectIdRef.current), filter, query, includeArchived);
   }, [projectIdRef]);
 
   const addMemoryEntry = useCallback(async (input: DesktopMemoryEntryInput, expectedRevision: number) => {
@@ -175,6 +172,34 @@ export function useDesktopSettingsActions({
     return await window.biny.deleteMemoryEntry(requireProject(projectIdRef.current), entryId, expectedRevision);
   }, [projectIdRef]);
 
+  const archiveMemoryEntry = useCallback(async (entryId: string, archived: boolean, expectedRevision: number) => {
+    return await window.biny.archiveMemoryEntry(requireProject(projectIdRef.current), entryId, archived, expectedRevision);
+  }, [projectIdRef]);
+
+  const loadArchivedMemory = useCallback(async () => {
+    return await window.biny.archivedMemoryEntries(requireProject(projectIdRef.current));
+  }, [projectIdRef]);
+
+  const runMemorySleep = useCallback(async () => {
+    return await window.biny.runMemorySleep(requireProject(projectIdRef.current));
+  }, [projectIdRef]);
+
+  const memorySleepStatus = useCallback(async () => {
+    return await window.biny.memorySleepStatus(requireProject(projectIdRef.current));
+  }, [projectIdRef]);
+
+  const memorySleepRuns = useCallback(async () => {
+    return await window.biny.memorySleepRuns(requireProject(projectIdRef.current));
+  }, [projectIdRef]);
+
+  const previewMemorySleep = useCallback(async () => {
+    return await window.biny.previewMemorySleep(requireProject(projectIdRef.current));
+  }, [projectIdRef]);
+
+  const cancelMemorySleep = useCallback(async () => {
+    return await window.biny.cancelMemorySleep(requireProject(projectIdRef.current));
+  }, [projectIdRef]);
+
   const clearMemory = useCallback(async (filter: DesktopMemoryOriginFilter, expectedRevision: number) => {
     return await window.biny.clearMemory(requireProject(projectIdRef.current), filter, expectedRevision);
   }, [projectIdRef]);
@@ -183,39 +208,16 @@ export function useDesktopSettingsActions({
     return await window.biny.compactMemory(requireProject(projectIdRef.current), filter, expectedRevision, topic);
   }, [projectIdRef]);
 
-  const loadTelosOverview = useCallback(async () => {
-    const load = window.biny.telosOverview;
-    if (typeof load !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await load(requireProject(projectIdRef.current));
-  }, [projectIdRef]);
-
-  const saveTelos = useCallback(async (input: DesktopTelosDocumentInput, expectedRevision: number) => {
-    const save = window.biny.saveTelos;
-    if (typeof save !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await save(requireProject(projectIdRef.current), input, expectedRevision);
-  }, [projectIdRef]);
-
-  const reviewBehaviorPattern = useCallback(async (patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number) => {
-    const review = window.biny.reviewBehaviorPattern;
-    if (typeof review !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await review(requireProject(projectIdRef.current), patternId, action, expectedRevision);
-  }, [projectIdRef]);
-
-  const resolveTelosDrift = useCallback(async (driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number) => {
-    const resolve = window.biny.resolveTelosDrift;
-    if (typeof resolve !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await resolve(requireProject(projectIdRef.current), driftId, action, expectedRevision);
-  }, [projectIdRef]);
-
-  const snoozeTelosDrift = useCallback(async (driftId: string, until: string, expectedRevision: number) => {
-    const snooze = window.biny.snoozeTelosDrift;
-    if (typeof snooze !== "function") throw new Error(desktopApiVersionMismatchMessage);
-    return await snooze(requireProject(projectIdRef.current), driftId, until, expectedRevision);
-  }, [projectIdRef]);
-
 
   return {
     addMemoryEntry,
+    archiveMemoryEntry,
+    loadArchivedMemory,
+    runMemorySleep,
+    memorySleepStatus,
+    memorySleepRuns,
+    previewMemorySleep,
+    cancelMemorySleep,
     cancelMemoryEmbeddingDownload,
     cancelMemoryEmbeddingRebuild,
     cancelModelLogin,
@@ -232,14 +234,9 @@ export function useDesktopSettingsActions({
     loadMemoryStats,
     loadMemoryEntries,
     loadIdentityOverview,
-    loadTelosOverview,
     openBrowser,
-    resolveTelosDrift,
     rebuildMemoryEmbeddingIndex,
-    reviewBehaviorPattern,
-    saveTelos,
     searchMemory,
-    snoozeTelosDrift,
     startModelLogin,
     switchModel,
     testModelConfiguration,

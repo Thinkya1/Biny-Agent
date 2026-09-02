@@ -555,6 +555,11 @@ button:disabled { opacity: 0.42; }
 }
 .manual-model-row input:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .manual-model-row .ghost-button { flex: 0 0 auto; }
+.manual-model-editor { display: grid; gap: 10px; margin-top: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-soft); }
+.manual-model-profile-heading { display: grid; gap: 2px; }
+.manual-model-profile-heading strong { font-size: calc(11.5px * var(--font-scale)); font-weight: 560; }
+.manual-model-profile-heading span { color: var(--text-tertiary); font-size: calc(10.5px * var(--font-scale)); line-height: 1.5; }
+.manual-model-editor > .model-profile-editor-fields { padding: 0; }
 
 /* ===== 连接详情布局 ===== */
 /* 区块：标题 + supporting 说明 + hairline，区块间 32px。 */
@@ -600,6 +605,34 @@ button:disabled { opacity: 0.42; }
 
 /* 模型区按钮行：测试连接 secondary 在前，更新目录 / 添加模型 ghost 在后，gap 8px。 */
 .connection-model-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.model-profile-editor-list { display: grid; gap: 6px; margin-top: 16px; }
+.model-profile-editor-heading { display: grid; gap: 2px; }
+.model-profile-editor-heading strong { font-size: calc(12px * var(--font-scale)); font-weight: 600; }
+.model-profile-editor-heading span,
+.model-profile-editor-hint { color: var(--text-secondary); font-size: calc(11px * var(--font-scale)); line-height: 1.5; }
+.model-profile-editor-hint { color: var(--text-tertiary); }
+.model-profile-editor-row { border: 1px solid var(--border); border-radius: 10px; background: var(--surface-soft); }
+.model-profile-editor-row > summary { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px; cursor: pointer; list-style: none; }
+.model-profile-editor-row > summary::-webkit-details-marker { display: none; }
+.model-profile-editor-row > summary::after { color: var(--text-tertiary); content: "⌄"; font-size: 13px; }
+.model-profile-editor-row[open] > summary { border-bottom: 1px solid var(--border); }
+.model-profile-editor-row[open] > summary::after { content: "⌃"; }
+.model-profile-editor-model { display: grid; min-width: 0; gap: 2px; }
+.model-profile-editor-model strong { overflow: hidden; font-size: calc(12px * var(--font-scale)); font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
+.model-profile-editor-model small { overflow: hidden; color: var(--text-tertiary); font-family: var(--font-mono); font-size: calc(10px * var(--font-scale)); text-overflow: ellipsis; white-space: nowrap; }
+.model-profile-editor-status { flex: 0 0 auto; color: var(--text-tertiary); font-size: calc(10.5px * var(--font-scale)); }
+.model-profile-editor-status.is-set { color: var(--accent); }
+.model-profile-editor-fields { display: grid; gap: 12px; padding: 12px 10px; }
+.model-profile-editor-fields > label,
+.model-profile-thinking-fields > label { display: grid; grid-template-columns: 145px minmax(0, 1fr); align-items: center; gap: 10px; }
+.model-profile-editor-fields label > span,
+.model-profile-field-label { color: var(--text-secondary); font-size: calc(11px * var(--font-scale)); }
+.model-profile-editor-fields input { width: 100%; min-width: 0; height: 32px; padding: 0 9px; border: 1px solid var(--border); border-radius: 8px; outline: 0; color: var(--text); background: var(--surface); font-size: calc(11.5px * var(--font-scale)); }
+.model-profile-editor-fields input:focus { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+.model-profile-thinking-fields { display: grid; gap: 7px; padding-top: 4px; }
+.model-profile-field-label { padding-bottom: 1px; font-weight: 560; }
+.model-profile-thinking-fields > label { grid-template-columns: 145px minmax(0, 1fr); }
+.model-profile-thinking-fields input::placeholder { color: var(--text-tertiary); }
 .settings-secondary-button {
   min-height: 30px;
   padding: 0 12px;

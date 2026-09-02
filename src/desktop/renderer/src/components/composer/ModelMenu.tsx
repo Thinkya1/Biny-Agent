@@ -165,6 +165,7 @@ export function ModelMenu({
                       <span className="model-option-copy">
                         <strong>{model.displayName}</strong>
                         {model.model !== model.displayName ? <small>{model.model}</small> : null}
+                        {model.contextWindowIsFallback ? <small>上下文窗口未声明，当前按保守预算</small> : null}
                       </span>
                     </span>
                     <span className="model-option-check">{selected ? <Icon name="check" size={14} /> : null}</span>

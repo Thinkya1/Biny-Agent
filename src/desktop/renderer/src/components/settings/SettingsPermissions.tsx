@@ -91,7 +91,7 @@ function SystemPermissions(): React.JSX.Element {
   const refresh = (): void => {
     void window.biny.activitySnapshot().then(setRuntime).catch(() => undefined);
   };
-  const open = (pane: "screen-recording" | "accessibility" | "input-monitoring"): void => {
+  const open = (pane: "screen-recording" | "accessibility"): void => {
     void window.biny.requestActivityPermission(pane)
       .catch(() => undefined)
       .then(() => window.biny.openSystemSettings(pane))
@@ -100,7 +100,6 @@ function SystemPermissions(): React.JSX.Element {
   const permissions = [
     { detail: "隐私与安全性 → 屏幕录制", granted: runtime?.screenRecordingGranted, label: "屏幕录制", pane: "screen-recording" as const },
     { detail: "隐私与安全性 → 辅助功能", granted: runtime?.accessibilityGranted, label: "辅助功能", pane: "accessibility" as const },
-    { detail: "隐私与安全性 → 输入监控", granted: runtime?.inputMonitoringGranted, label: "输入监控", pane: "input-monitoring" as const }
   ];
 
   return (

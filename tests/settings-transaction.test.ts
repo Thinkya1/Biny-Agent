@@ -88,7 +88,11 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
         connections: [],
         embeddingModels: [],
         defaultModel: this.config.defaultModel,
-        thinking: this.config.thinking.enabled ? this.config.thinking.effort : "off"
+        thinking: this.config.thinking.enabled ? this.config.thinking.effort : "off",
+        modelProfiles: Object.fromEntries(Object.entries(this.config.providers).map(([providerAlias, provider]) => [
+          providerAlias,
+          structuredClone(provider.modelProfiles ?? {})
+        ]))
       }
     };
   }
@@ -130,6 +134,13 @@ class FakeSettingsAgents implements DesktopSettingsTransactionAgents {
         "fake-project": structuredClone(input.skills.projectOverrides)
       };
       after.extensions.skillExtraction = structuredClone(input.skills.extraction);
+    }
+    if (input.models?.modelProfiles !== undefined) {
+      for (const [providerAlias, profiles] of Object.entries(input.models.modelProfiles)) {
+        const provider = after.providers[providerAlias];
+        if (!provider) throw new Error(`unknown provider: ${providerAlias}`);
+        provider.modelProfiles = structuredClone(profiles);
+      }
     }
     const included = input.activity !== undefined
       || input.memory !== undefined
@@ -335,6 +346,7 @@ await testActivitySettingsUseConfigCas();
 await testChatParamsOnlySaveCommits();
 await testPermissionOnlySaveCommits();
 await testSkillSettingsOnlySaveCommits();
+await testModelProfilesCommitAndRollback();
 await testPostCommitHookCannotRollbackSettings();
 await testPreflightConflictsAreZeroWrite();
 await testSegmentFailureCompensation();
@@ -420,6 +432,47 @@ async function testSkillSettingsOnlySaveCommits(): Promise<void> {
     assert.deepEqual(agents.config.extensions.skillDefaults, { "demo-skill": false });
     assert.deepEqual(agents.config.extensions.skillProjectOverrides["fake-project"], { "demo-skill": true });
     assert.deepEqual(agents.config.extensions.skillExtraction, { enabled: false, minToolCalls: 7 });
+  });
+}
+
+async function testModelProfilesCommitAndRollback(): Promise<void> {
+  await withFixture(async ({ state, agents }) => {
+    const transaction = new DesktopSettingsTransaction(state, agents);
+    const initial = await transaction.snapshot("project");
+    const profile = {
+      contextWindow: 1_000_000,
+      maxInputTokens: 950_000,
+      thinkingLevelMap: { off: "none", high: "high", max: "max" }
+    };
+    const committed = await transaction.save("project", {
+      expectedPreferenceRevision: initial.preferenceRevision,
+      expectedConfigRevision: initial.configRevision,
+      models: { upserts: [], removeAliases: [], modelProfiles: { deepseek: { "deepseek-v4-flash": profile } } }
+    });
+    assert.equal(committed.status, "committed", JSON.stringify(committed));
+    assert.deepEqual(agents.config.providers.deepseek?.modelProfiles, { "deepseek-v4-flash": profile });
+    assert.deepEqual(committed.snapshot.models.modelProfiles.deepseek, { "deepseek-v4-flash": profile });
+
+    const after = await transaction.snapshot("project");
+    const prepared = await agents.prepareSettingsConfig("project", {
+      expectedPreferenceRevision: after.preferenceRevision,
+      expectedConfigRevision: after.configRevision,
+      models: { upserts: [], removeAliases: [], modelProfiles: { deepseek: {} } }
+    });
+    assert.deepEqual(prepared.after.providers.deepseek?.modelProfiles, {});
+    await agents.commitSettingsConfig(prepared, "profile-rollback");
+    assert.equal(await agents.rollbackSettingsConfig(prepared, "profile-rollback"), "completed");
+    assert.deepEqual(agents.config.providers.deepseek?.modelProfiles, { "deepseek-v4-flash": profile });
+
+    const invalidProfile = {
+      contextWindow: 1_000_000,
+      unknownField: true
+    };
+    assert.throws(() => settingsSaveInputSchema.parse({
+      expectedPreferenceRevision: 0,
+      expectedConfigRevision: "config:0",
+      models: { upserts: [], removeAliases: [], modelProfiles: { deepseek: { model: invalidProfile } } }
+    }));
   });
 }
 

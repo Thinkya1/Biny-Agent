@@ -18,17 +18,16 @@ import type { AgentCapabilitySelection } from "../../../agent/capabilitySelectio
 import type {
   MemoryEntriesResult,
   MemoryMaintenanceStatus,
+  MemoryEntry,
   MemoryOverview,
   MemorySearchResult
 } from "../../../agent/context/memoryTypes.js";
 import { MemoryStorage } from "../../../agent/context/memoryStorage.js";
 import { IdentityStorage } from "../../../agent/context/identityStorage.js";
-import { TelosStorage } from "../../../agent/context/telosStorage.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { thinkingLevelMapForModel } from "../../../ai/capabilities.js";
 import type { ModelCatalogEntry } from "../../../ai/types.js";
 import { providerDefinition } from "../../../ai/provider.js";
 import { builtinProviderModels } from "../../../ai/builtinModels.js";
@@ -43,7 +42,7 @@ import { createNativeModelSettings, validateModelConfiguration } from "../../../
 import { ModelRuntime } from "../../../llm/ModelRuntime.js";
 import { listLocalEmbeddingModels } from "../../../llm/embedding/LocalEmbeddingRuntime.js";
 import { listProviderEmbeddingModels } from "../../../llm/embedding/ProviderEmbeddingRuntime.js";
-import type { EmbeddingModelDescriptor, LocalEmbeddingModelId } from "../../../llm/embedding/types.js";
+import type { EmbeddingModelDescriptor, EmbeddingModelRuntime, LocalEmbeddingModelId } from "../../../llm/embedding/types.js";
 import type { MemoryEmbeddingRuntimeStatus } from "../../../agent/context/MemoryEmbeddingService.js";
 import { FileModelsStore, restoreProviderCatalogs, type ModelsStore } from "../../../llm/ModelsStore.js";
 import { listConfiguredModelChoices, listPickerModelChoices, modelRuntimeInfo, type ModelRuntimeInfo, type ThinkingSelection } from "../../../llm/ModelManager.js";
@@ -93,8 +92,8 @@ import type {
   DesktopMemoryEmbeddingCancellationResult,
   DesktopMemoryEmbeddingDeleteResult,
   DesktopMemoryEmbeddingStatus,
-  DesktopMemoryEntryInput,
-  DesktopMemoryEntryPatch,
+  DesktopMemoryEntry,
+  DesktopMemoryEntryInput,  DesktopMemoryEntryPatch,
   DesktopMemoryEntriesPage,
   DesktopMemoryOverview,
   DesktopMemoryOriginFilter,
@@ -131,10 +130,6 @@ import type {
   DesktopSettingsSaveInput,
   DesktopStagedModelLoginResult,
   DesktopStagedSettingsCredential,
-  DesktopBehaviorPatternReviewAction,
-  DesktopTelosDocumentInput,
-  DesktopTelosDriftResolutionAction,
-  DesktopTelosOverview,
   DesktopWorkspaceSnapshot
 } from "../../protocol.js";
 import type { McpServerDetails, McpServerStatus } from "../../../extensions/mcp.js";
@@ -237,6 +232,14 @@ export class DesktopAgentManager {
     }), this.fetcher);
   }
 
+  /** Activity 后台索引只复用已经驻留的本地 AgentSession，不因采集器启动而偷偷下载模型。 */
+  async getActivityEmbeddingRuntime(): Promise<EmbeddingModelRuntime | undefined> {
+    for (const managed of this.runtimes.values()) {
+      if (managed.commands) return await managed.commands.agent.getActivityEmbeddingRuntime();
+    }
+    return undefined;
+  }
+
   async workspaceSnapshot(projectId: string): Promise<DesktopWorkspaceSnapshot> {
     const storedProject = this.projects.requireProject(projectId);
     const project = await this.projects.inspectProject(storedProject);
@@ -265,6 +268,7 @@ export class DesktopAgentManager {
       runtime: runtime?.getSnapshot(),
       sessionRuntimes: Object.fromEntries(runtimeSnapshots.map((snapshot) => [snapshot.info.sessionId, snapshot])),
       runtimeError: this.runtimeErrors.get(projectId),
+      memory: config?.context.memory,
       permissionMode,
       capabilityDefaults: {
         tools: config?.chat.defaultToolSelection ?? "auto",
@@ -431,10 +435,16 @@ export class DesktopAgentManager {
   async openSession(projectId: string, sessionId: string): Promise<DesktopSessionDocument> {
     const project = this.projects.requireProject(projectId);
     if (this.draftSessionIds.get(projectId) !== sessionId) this.draftSessionIds.delete(projectId);
-    const managed = await this.ensureRuntime(projectId);
-    const remote = managed.runtime instanceof RuntimeHostClient ? managed.runtime : undefined;
+    // 会话正文属于磁盘历史，不应依赖模型配置、凭据或 Runtime Host 是否能启动。
+    // 先用空的 runtime/live 投影读取一次，确保 Runtime 失败时仍能打开历史会话。
+    const historicalDocument = await this.projects.openSession(project, sessionId, [], new Map());
+    let document = historicalDocument;
+    let managed: ManagedRuntime | undefined;
+    let runtimeError: string | undefined;
     let writerConflict: DesktopSessionWriterConflict | undefined;
     try {
+      managed = await this.ensureRuntime(projectId);
+      const remote = managed.runtime instanceof RuntimeHostClient ? managed.runtime : undefined;
       if (remote) {
         await remote.focusSession(sessionId);
       } else if (managed.runtime.getSnapshot().info.sessionId !== sessionId) {
@@ -445,41 +455,54 @@ export class DesktopAgentManager {
         }
       }
     } catch (error) {
-      if (!isSessionWriterConflictError(error)) throw error;
-      writerConflict = {
-        sessionId,
-        ownerSurface: error.ownerSurface === "desktop" || error.ownerSurface === "tui" || error.ownerSurface === "cli"
-          ? error.ownerSurface
-          : undefined
-      };
-    }
-    const document = await this.projects.openSession(project, sessionId, this.runtimeSnapshots(projectId), this.projectEvents(projectId));
-    // 已读标记只影响侧栏状态，不应阻塞会话正文首屏。后续元数据写入会先等待这次
-    // 后台更新，并把同一份 revision 传给 catalog CAS，避免用户紧接着置顶/改名时误冲突。
-    this.scheduleSessionRead(project, sessionId, document.session.metadataRevision);
-    // 打开会话时只在目标 runtime 空闲时取得 writer claim；Host 负责记录 claim owner，
-    // Desktop 不再维护一份会随 runtime 池漂移的本地镜像。
-    const targetSnapshot = remote?.getSnapshot() ?? managed.runtime.getSnapshot();
-    if (writerConflict === undefined && targetSnapshot.info.sessionId === sessionId && !runtimeIsBusy(targetSnapshot)) {
-      try {
-        await managed.runtime.claimSession(sessionId);
-      } catch (error) {
-        if (!isSessionWriterConflictError(error)) throw error;
+      if (isSessionWriterConflictError(error)) {
         writerConflict = {
           sessionId,
           ownerSurface: error.ownerSurface === "desktop" || error.ownerSurface === "tui" || error.ownerSurface === "cli"
             ? error.ownerSurface
             : undefined
         };
+      } else {
+        runtimeError = formatRuntimeInitializationError(error);
+        this.runtimeErrors.set(projectId, runtimeError);
       }
     }
+    if (managed !== undefined && runtimeError === undefined) {
+      // focus/resume 成功后再读一次，把当前 Runtime 的实时事件和状态接到历史正文后面。
+      document = await this.projects.openSession(project, sessionId, this.runtimeSnapshots(projectId), this.projectEvents(projectId));
+      const remote = managed.runtime instanceof RuntimeHostClient ? managed.runtime : undefined;
+      const targetSnapshot = remote?.getSnapshot() ?? managed.runtime.getSnapshot();
+      if (writerConflict === undefined && targetSnapshot.info.sessionId === sessionId && !runtimeIsBusy(targetSnapshot)) {
+        try {
+          await managed.runtime.claimSession(sessionId);
+        } catch (error) {
+          if (isSessionWriterConflictError(error)) {
+            writerConflict = {
+              sessionId,
+              ownerSurface: error.ownerSurface === "desktop" || error.ownerSurface === "tui" || error.ownerSurface === "cli"
+                ? error.ownerSurface
+                : undefined
+            };
+          } else {
+            runtimeError = formatRuntimeInitializationError(error);
+            this.runtimeErrors.set(projectId, runtimeError);
+            document = historicalDocument;
+          }
+        }
+      }
+    }
+    if (runtimeError === undefined) this.runtimeErrors.delete(projectId);
+    // 已读标记只影响侧栏状态，不应阻塞会话正文首屏。后续元数据写入会先等待这次
+    // 后台更新，并把同一份 revision 传给 catalog CAS，避免用户紧接着置顶/改名时误冲突。
+    this.scheduleSessionRead(project, sessionId, document.session.metadataRevision);
     return {
       ...document,
       session: {
         ...document.session,
         unread: false
       },
-      writerConflict
+      writerConflict,
+      runtimeError
     };
   }
 
@@ -1069,6 +1092,22 @@ export class DesktopAgentManager {
           models: Object.fromEntries(remaining)
         });
       }
+      if (input.models.modelProfiles !== undefined) {
+        for (const [providerAlias, profiles] of Object.entries(input.models.modelProfiles)) {
+          const provider = next.providers[providerAlias];
+          if (!provider) throw new Error(`未知服务商：${providerAlias}`);
+          next = configSchema.parse({
+            ...next,
+            providers: {
+              ...next.providers,
+              [providerAlias]: {
+                ...provider,
+                modelProfiles: profiles
+              }
+            }
+          });
+        }
+      }
       if (input.models.defaultModel !== undefined) {
         const alias = resolveConfiguredModelAlias(next, input.models.defaultModel.alias);
         if (!alias) throw new Error(`未知模型：${input.models.defaultModel.alias}`);
@@ -1388,10 +1427,11 @@ export class DesktopAgentManager {
     projectId: string,
     filter: DesktopMemoryOriginFilter,
     offset: number,
-    limit: number
+    limit: number,
+    includeArchived = false
   ): Promise<DesktopMemoryEntriesPage> {
     this.projects.requireProject(projectId);
-    const store = await this.readMemoryStorePaged(projectId, filter, offset, limit);
+    const store = await this.readMemoryStorePaged(projectId, filter, offset, limit, includeArchived);
     return {
       filter,
       revision: store.storeRevision,
@@ -1518,12 +1558,12 @@ export class DesktopAgentManager {
     return await this.identityStorage.saveDocument(document, content, expectedRevision, reason);
   }
 
-  async searchMemory(projectId: string, filter: DesktopMemoryOriginFilter, query: string): Promise<DesktopMemorySearchMatch[]> {
+  async searchMemory(projectId: string, filter: DesktopMemoryOriginFilter, query: string, includeArchived = false): Promise<DesktopMemorySearchMatch[]> {
     this.projects.requireProject(projectId);
     const { runtime, commands } = await this.ensureRuntime(projectId);
     const result = commands
-      ? await commands.agent.searchMemory(query, [], { origins: [filter], limit: 8 })
-      : await requireRemoteRuntime(runtime).memory<MemorySearchResult>("search-v3", { selector: filter, query, limit: 8 });
+      ? await commands.agent.searchMemory(query, [], { origins: [filter], limit: 8, includeArchived })
+      : await requireRemoteRuntime(runtime).memory<MemorySearchResult>("search-v3", { selector: filter, query, limit: 8, includeArchived });
     return result.matches.map((match) => ({
       id: match.entry.id,
       origin: match.entry.origin,
@@ -1537,7 +1577,9 @@ export class DesktopAgentManager {
       excerpt: match.excerpt,
       score: match.score,
       recallCount: match.entry.recallCount,
-      lastRecalledAt: match.entry.lastRecalledAt
+      lastRecalledAt: match.entry.lastRecalledAt,
+      archivedAt: match.entry.archivedAt,
+      archivedReason: match.entry.archivedReason
     }));
   }
 
@@ -1612,6 +1654,86 @@ export class DesktopAgentManager {
     return await this.memoryStats(projectId);
   }
 
+  async memorySleepStatus(projectId: string): Promise<MemoryMaintenanceStatus> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    if (commands) return await commands.agent.getLocalMemory().loadMaintenanceStatus();
+    return await requireRemoteRuntime(runtime).memory<MemoryMaintenanceStatus>("sleep-status", {});
+  }
+
+  async memorySleepRuns(projectId: string): Promise<import("../../../agent/context/memoryTypes.js").MemorySleepRun[]> {
+    const status = await this.memorySleepStatus(projectId);
+    return status.sleepRuns ?? [];
+  }
+
+  async previewMemorySleep(projectId: string): Promise<import("../../protocol.js").DesktopMemorySleepPreview> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    if (commands) {
+      const policy = (await commands.agent.getPersonalizationState()).memory;
+      return await commands.agent.getLocalMemory().previewMaintenance(policy);
+    }
+    return await requireRemoteRuntime(runtime).memory("sleep-preview", {});
+  }
+
+  async cancelMemorySleep(projectId: string): Promise<{ cancelled: boolean }> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    if (commands) return { cancelled: commands.agent.cancelMemoryMaintenance() };
+    return { cancelled: await requireRemoteRuntime(runtime).cancelMemorySleep() };
+  }
+
+  async runMemorySleep(projectId: string): Promise<DesktopMemoryStats> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(projectId, "任务运行期间不能立即整理记忆。");
+    const memoryPolicy = (await this.currentPersonalizationState(projectId)).memory;
+    const maintenanceOptions = {
+      trigger: "manual" as const,
+      archiveRetentionDays: memoryPolicy.archiveRetentionDays,
+      temporaryTtl: memoryPolicy.temporaryTtl,
+      useLlm: memoryPolicy.useLlm,
+      llmMergeLow: memoryPolicy.llmMergeLow,
+      llmBatchSize: memoryPolicy.llmBatchSize
+    };
+    if (commands) {
+      await runtime.runExclusiveOperation("memory", async () => {
+        await commands.agent.getLocalMemory().processEligibleCandidates(maintenanceOptions, {
+          indexEntry: async (entry) => await commands.agent.indexMemoryEntry(entry),
+          requestRebuild: () => this.scheduleIdleManagedRuntimeRebuild()
+        });
+      });
+    } else {
+      await requireRemoteRuntime(runtime).memory("sleep-run-now", maintenanceOptions);
+    }
+    return await this.memoryStats(projectId);
+  }
+
+  async archivedMemoryEntries(projectId: string): Promise<DesktopMemoryEntry[]> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.ensureRuntime(projectId);
+    const result = commands
+      ? await commands.agent.getLocalMemory().listArchivedEntries()
+      : await requireRemoteRuntime(runtime).memory<{ entries: MemoryEntry[] }>("archive-list-v3", {});
+    return result.entries as DesktopMemoryEntry[];
+  }
+
+  async archiveMemoryEntry(
+    projectId: string,
+    entryId: string,
+    archived: boolean,
+    expectedRevision: number
+  ): Promise<DesktopMemoryStats> {
+    this.projects.requireProject(projectId);
+    const { runtime, commands } = await this.runtimeForGlobalWrite(projectId, archived ? "任务运行期间不能归档记忆。" : "任务运行期间不能恢复记忆。");
+    const result = commands
+      ? await runtime.runExclusiveOperation("memory", async () => await requireLocalMemory(commands).archiveEntry(entryId, archived, { expectedRevision }))
+      : await requireRemoteRuntime(runtime).memory<{ archived: boolean }>("archive-v3", { id: entryId, archived, expectedRevision });
+    if (!result.archived) throw new Error("未找到该记忆条目，可能已被其他操作改变。");
+    if (archived) commands?.agent.removeMemoryEmbeddingEntries([entryId]);
+    else this.scheduleIdleManagedRuntimeRebuild();
+    return await this.memoryStats(projectId);
+  }
+
   async deleteMemoryEntry(
     projectId: string,
     entryId: string,
@@ -1677,126 +1799,6 @@ export class DesktopAgentManager {
       revision: result.revision,
       error: result.error
     };
-  }
-
-  async telosOverview(projectId: string): Promise<DesktopTelosOverview> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.ensureRuntime(projectId);
-    if (commands) {
-      return await requireLocalTelos(commands).overview();
-    }
-    const remote = requireRemoteRuntime(runtime);
-    if (supportsTelos(remote)) return await remote.telos<DesktopTelosOverview>("overview-v1");
-    return await requireProjectTelos(this.projects.requireProject(projectId)).overview();
-  }
-
-  async saveTelos(
-    projectId: string,
-    input: DesktopTelosDocumentInput,
-    expectedRevision: number
-  ): Promise<DesktopTelosOverview> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.runtimeForGlobalWrite(
-      projectId,
-      "任务运行期间不能保存 TELOS。"
-    );
-    if (commands) {
-      await runtime.runExclusiveOperation(
-        "telos",
-        async () => await requireLocalTelos(commands).saveDocument(input, expectedRevision)
-      );
-    } else if (supportsTelos(requireRemoteRuntime(runtime))) {
-      await requireRemoteRuntime(runtime).telos("save-v1", { input, expectedRevision });
-    } else {
-      await requireProjectTelos(this.projects.requireProject(projectId)).saveDocument(input, expectedRevision);
-    }
-    return await this.telosOverview(projectId);
-  }
-
-  async reviewBehaviorPattern(
-    projectId: string,
-    patternId: string,
-    action: DesktopBehaviorPatternReviewAction,
-    expectedRevision: number
-  ): Promise<DesktopTelosOverview> {
-    this.projects.requireProject(projectId);
-    const detectDrift = (await this.currentPersonalizationState(projectId)).resolved.telos.driftDetection;
-    const { runtime, commands } = await this.runtimeForGlobalWrite(
-      projectId,
-      "任务运行期间不能审核行为模式。"
-    );
-    if (commands) {
-      return await runtime.runExclusiveOperation(
-        "telos",
-        async () => await requireLocalTelos(commands).reviewPattern(patternId, action, expectedRevision, { detectDrift })
-      );
-    }
-    const remote = requireRemoteRuntime(runtime);
-    if (supportsTelos(remote)) {
-      return await remote.telos<DesktopTelosOverview>("review-pattern-v1", {
-        patternId,
-        reviewAction: action,
-        detectDrift,
-        expectedRevision
-      });
-    }
-    return await requireProjectTelos(this.projects.requireProject(projectId)).reviewPattern(patternId, action, expectedRevision, { detectDrift });
-  }
-
-  async resolveTelosDrift(
-    projectId: string,
-    driftId: string,
-    action: DesktopTelosDriftResolutionAction,
-    expectedRevision: number
-  ): Promise<DesktopTelosOverview> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.runtimeForGlobalWrite(
-      projectId,
-      "任务运行期间不能处理策略偏差。"
-    );
-    if (commands) {
-      return await runtime.runExclusiveOperation(
-        "telos",
-        async () => await requireLocalTelos(commands).resolveDrift(driftId, action, expectedRevision)
-      );
-    }
-    const remote = requireRemoteRuntime(runtime);
-    if (supportsTelos(remote)) {
-      return await remote.telos<DesktopTelosOverview>("resolve-drift-v1", {
-        driftId,
-        driftAction: action,
-        expectedRevision
-      });
-    }
-    return await requireProjectTelos(this.projects.requireProject(projectId)).resolveDrift(driftId, action, expectedRevision);
-  }
-
-  async snoozeTelosDrift(
-    projectId: string,
-    driftId: string,
-    until: string,
-    expectedRevision: number
-  ): Promise<DesktopTelosOverview> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.runtimeForGlobalWrite(
-      projectId,
-      "任务运行期间不能稍后处理策略偏差。"
-    );
-    if (commands) {
-      return await runtime.runExclusiveOperation(
-        "telos",
-        async () => await requireLocalTelos(commands).snoozeDrift(driftId, until, expectedRevision)
-      );
-    }
-    const remote = requireRemoteRuntime(runtime);
-    if (supportsTelos(remote)) {
-      return await remote.telos<DesktopTelosOverview>("snooze-drift-v1", {
-        driftId,
-        until,
-        expectedRevision
-      });
-    }
-    return await requireProjectTelos(this.projects.requireProject(projectId)).snoozeDrift(driftId, until, expectedRevision);
   }
 
   /** 设置事务不再触发索引动作；记忆没有派生向量索引，只需在配置变更时重建运行时。 */
@@ -1958,6 +1960,9 @@ export class DesktopAgentManager {
     const existingProvider = current.providers[input.providerAlias];
     const profile = providerDefinition(input.providerType);
     const sameProvider = existingProvider?.type === input.providerType;
+    const modelProfiles = input.modelProfile === undefined
+      ? (sameProvider ? existingProvider?.modelProfiles : undefined)
+      : Object.assign({}, sameProvider ? existingProvider?.modelProfiles : undefined, { [input.model]: input.modelProfile });
     const provider = {
       type: input.providerType,
       protocol: input.protocol,
@@ -1975,7 +1980,8 @@ export class DesktopAgentManager {
       // 模型级保留逐模型覆盖的逃生门。显式选择优先；未带格式时保留既有连接级设置。
       apiBackend: input.apiBackend ?? (sameProvider ? existingProvider.apiBackend : undefined),
       compatibility: sameProvider ? existingProvider.compatibility : undefined,
-      embeddingModels: sameProvider ? existingProvider.embeddingModels : undefined
+      embeddingModels: sameProvider ? existingProvider.embeddingModels : undefined,
+      modelProfiles
     };
     const existingModel = current.models[input.alias];
     const sameModel = existingModel?.provider === input.providerAlias && existingModel.model === input.model;
@@ -1987,11 +1993,6 @@ export class DesktopAgentManager {
     // the de-dup above can still strip the previous default out from under us.
     const keepsCurrentDefault = input.alias === current.defaultModel || Boolean(models[current.defaultModel]);
     const defaultModel = input.makeDefault || !keepsCurrentDefault ? input.alias : current.defaultModel;
-    const thinkingLevelMap = input.supportsThinking
-      ? input.thinkingLevelMap && Object.entries(input.thinkingLevelMap).some(([level, native]) => level !== "off" && native !== null)
-        ? input.thinkingLevelMap
-        : thinkingLevelMapForModel(input.model)
-      : input.thinkingLevelMap;
     const parsed = configSchema.parse({
       ...current,
       defaultModel,
@@ -2003,25 +2004,19 @@ export class DesktopAgentManager {
           model: input.model,
           displayName: input.displayName,
           supportsTools: input.supportsTools,
-          capabilities: {
-            tools: input.supportsTools,
-            reasoning: input.supportsThinking,
-            parallelToolCalls: input.parallelToolCalls,
-            reasoningStream: input.reasoningStream,
-            reasoningSummary: input.reasoningSummary,
-            vision: input.supportsVision,
-            audio: input.supportsAudio
-          },
-          // 目录元数据只参与当前运行时解析，不自动写成用户覆盖；已有同模型配置中的
-          // 限制字段则继续保留，用户可以在 config.json 中显式维护它们。
-          contextWindow: input.contextWindow ?? (sameModel ? existingModel.contextWindow : undefined),
+          // 目录元数据只参与当前运行时解析，不自动写成 alias 覆盖；已有 alias 元数据
+          // 继续保留，新的上下文/输入上限/思考映射应通过 provider.modelProfiles 声明。
+          capabilities: sameModel
+            ? { ...existingModel.capabilities, tools: input.supportsTools }
+            : { tools: input.supportsTools },
+          contextWindow: sameModel ? existingModel.contextWindow : undefined,
           maxInputTokens: sameModel ? existingModel.maxInputTokens : undefined,
           maxOutputTokens: sameModel ? existingModel.maxOutputTokens : undefined,
           limits: sameModel ? existingModel.limits : undefined,
           apiBackend: input.apiBackend,
           baseUrl: sameModel ? existingModel.baseUrl : undefined,
           headers: sameModel ? existingModel.headers : undefined,
-          thinkingLevelMap,
+          thinkingLevelMap: sameModel ? existingModel.thinkingLevelMap : undefined,
           compatibility: input.compatibility ?? (sameModel ? existingModel.compatibility : undefined),
           pricing: sameModel ? existingModel.pricing : undefined
         }
@@ -2727,7 +2722,7 @@ export class DesktopAgentManager {
         memory.getOverview(),
         memory.listMemoryEntries({ origins: [filter] }),
         memory.listMemoryEntries({ origins: ["all"] }),
-        memory.loadMaintenanceStatus()
+        memory.loadMaintenanceStatus().catch(() => ({ state: "idle" as const, eligible: 0, processed: 0, written: 0, failed: 0 }))
       ]);
       return { overview, entries, allEntries, maintenance };
     }
@@ -2764,21 +2759,22 @@ export class DesktopAgentManager {
     projectId: string,
     filter: DesktopMemoryOriginFilter,
     offset: number,
-    limit: number
+    limit: number,
+    includeArchived = false
   ): Promise<{ entries: MemoryEntriesResult["entries"]; total: number; storeRevision: number }> {
     const managed = this.runtimes.get(projectId);
     if (managed?.commands) {
       const memory = requireLocalMemory(managed.commands);
-      const result = await memory.listMemoryEntries({ origins: [filter], offset, limit });
+      const result = await memory.listMemoryEntries({ origins: [filter], offset, limit, includeArchived });
       return { entries: result.entries, total: result.total, storeRevision: result.storeRevision };
     }
     if (managed) {
-      const result = await requireRemoteRuntime(managed.runtime).memory<MemoryEntriesResult>("list-v3", { selector: filter, offset, limit });
+      const result = await requireRemoteRuntime(managed.runtime).memory<MemoryEntriesResult>("list-v3", { selector: filter, offset, limit, includeArchived });
       return { entries: result.entries, total: result.total, storeRevision: result.storeRevision };
     }
     const project = this.projects.requireProject(projectId);
     const storage = new MemoryStorage(project.path);
-    const result = await storage.listEntries({ origins: [filter], offset, limit });
+    const result = await storage.listEntries({ origins: [filter], offset, limit, includeArchived });
     return { entries: result.entries, total: result.total, storeRevision: result.storeRevision };
   }
 
@@ -2861,7 +2857,8 @@ export class DesktopAgentManager {
             expiresAt: authenticated.expiresAt,
             accountId: authenticated.accountId
           },
-          timeoutMs: existingProvider?.timeoutMs
+          timeoutMs: existingProvider?.timeoutMs,
+          modelProfiles: existingProvider?.modelProfiles
         }
       },
       models: { ...models, ...Object.fromEntries(configuredModels) },
@@ -2986,7 +2983,11 @@ function describeSettingsConfigSnapshot(
       connections: describeModelConnections(config),
       embeddingModels: describeEmbeddingModels(config),
       defaultModel: config.defaultModel,
-      thinking: config.thinking.enabled ? config.thinking.effort : "off"
+      thinking: config.thinking.enabled ? config.thinking.effort : "off",
+      modelProfiles: Object.fromEntries(Object.entries(config.providers).map(([providerAlias, provider]) => [
+        providerAlias,
+        structuredClone(provider.modelProfiles ?? {})
+      ]))
     },
     skills: {
       projectId,
@@ -3078,18 +3079,6 @@ function describeCredentialSource(provider: ProviderConfig, apiKeyEnv: string | 
 
 function requireLocalMemory(services: CommandRuntime) {
   return services.agent.getLocalMemory();
-}
-
-function requireLocalTelos(services: CommandRuntime): TelosStorage {
-  return services.agent.getTelosStorage();
-}
-
-function requireProjectTelos(project: DesktopProject): TelosStorage {
-  return new TelosStorage(project.path);
-}
-
-function supportsTelos(runtime: RuntimeHostClient): boolean {
-  return runtime.hostInfo?.capabilities.includes("telos.v1") === true;
 }
 
 function requireRemoteRuntime(runtime: InteractiveRuntimeHandle): RuntimeHostClient {

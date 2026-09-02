@@ -11,12 +11,12 @@ import type { AgentCapabilitySelection } from "../../../agent/capabilitySelectio
 import type { ContextBudgetStatus } from "../../../agent/context/types.js";
 import { defaultEffectiveContextWindowPercent } from "../../../ai/capabilities.js";
 import type { PermissionMode, PermissionResult } from "../../../permission/PermissionManager.js";
+import { defaultChatPersonalizationOverride, resolveChatPersonalization } from "../../../personalization/index.js";
 import { activeRun, pendingPermission } from "../../../runtime/agentEvents.js";
 import type {
   DesktopActiveView,
   DesktopAttachment,
   DesktopChatPersonalizationOverride,
-  DesktopPersonalizationOverview,
   DesktopFontPreference,
   DesktopGitBranch,
   DesktopMenuAction,
@@ -63,7 +63,7 @@ import type { SkillDraftNotice } from "./app/useDesktopEventBridge.js";
 import { useSessionTimeline } from "./app/useSessionTimeline.js";
 import { useDesktopSettingsActions } from "./app/useDesktopSettingsActions.js";
 import { useSidebarLayout } from "./app/useSidebarLayout.js";
-import { Composer } from "./components/Composer.js";
+import { Composer, type ComposerMemoryState } from "./components/Composer.js";
 import { WorkspaceContextBar } from "./components/project/WorkspaceContextBar.js";
 import { type ContextUsage } from "./usagePresentation.js";
 import { DesktopShell } from "./components/DesktopShell.js";
@@ -128,7 +128,6 @@ function DesktopApp(): React.JSX.Element {
   const [runtimePanelOpen, setRuntimePanelOpen] = useState(false);
   const [page, setPage] = useState<DesktopPage>("chat");
   const [contextBudget, setContextBudget] = useState<ContextBudgetStatus>();
-  const [personalizationOverview, setPersonalizationOverview] = useState<DesktopPersonalizationOverview>();
   const [draftMemoryOverride, setDraftMemoryOverride] = useState<boolean>();
   const [memoryToggleBusy, setMemoryToggleBusy] = useState(false);
   const [pendingPermissionMode, setPendingPermissionMode] = useState<PermissionMode>();
@@ -216,26 +215,8 @@ function DesktopApp(): React.JSX.Element {
     setSkillDraftNotices([]);
   }, [selectedSessionId]);
 
-  const selectedSession = workspace?.sessions.find((session) => session.id === selectedSessionId);
-  const selectedSessionMetadataRevision = selectedSession?.metadataRevision;
-
-  useEffect(() => {
-    let active = true;
-    const projectId = workspace?.project.id;
-    if (!projectId) {
-      setPersonalizationOverview(undefined);
-      return () => { active = false; };
-    }
-    void window.biny.personalizationOverview(projectId, selectedSessionId)
-      .then((overview) => {
-        if (active) setPersonalizationOverview(overview);
-      })
-      .catch(() => {
-        // 记忆开关是聊天的辅助状态，读取失败不应遮挡主聊天界面；点击时会再次给出具体错误。
-        if (active) setPersonalizationOverview(undefined);
-      });
-    return () => { active = false; };
-  }, [selectedSessionId, selectedSessionMetadataRevision, workspace?.project.id]);
+  const selectedSession = workspace?.sessions.find((session) => session.id === selectedSessionId)
+    ?? (document?.session.id === selectedSessionId ? document?.session : undefined);
 
   useEffect(() => {
     let active = true;
@@ -352,6 +333,13 @@ function DesktopApp(): React.JSX.Element {
 
   const {
     addMemoryEntry,
+    archiveMemoryEntry,
+    loadArchivedMemory,
+    runMemorySleep,
+    memorySleepStatus,
+    memorySleepRuns,
+    previewMemorySleep,
+    cancelMemorySleep,
     cancelMemoryEmbeddingDownload,
     cancelMemoryEmbeddingRebuild,
     cancelModelLogin,
@@ -367,14 +355,9 @@ function DesktopApp(): React.JSX.Element {
     loadMemoryStats,
     loadMemoryEntries,
     loadMemoryEmbeddingStatus,
-    loadTelosOverview,
     openBrowser,
-    resolveTelosDrift,
-    reviewBehaviorPattern,
     rebuildMemoryEmbeddingIndex,
-    saveTelos,
     searchMemory,
-    snoozeTelosDrift,
     startModelLogin,
     switchModel,
     testModelConfiguration,
@@ -420,6 +403,7 @@ function DesktopApp(): React.JSX.Element {
       setContextBudget(undefined);
       setDocument(nextDocument);
       setWriterConflict(nextDocument.writerConflict);
+      if (nextDocument.runtimeError) setWarning(nextDocument.runtimeError);
       setSidebarSessions((current) => mergeProjectSessionPage(current, projectId, [nextDocument.session]));
       setWorkspace((current) => current?.project.id === projectId
         ? {
@@ -1004,9 +988,6 @@ function DesktopApp(): React.JSX.Element {
     void window.biny.refreshProject(snapshot.projectId)
       .then(mergeProjectSnapshot)
       .catch((error: unknown) => setWarning(errorMessage(error)));
-    void window.biny.personalizationOverview(snapshot.projectId, selectedRef.current)
-      .then(setPersonalizationOverview)
-      .catch((error: unknown) => setWarning(errorMessage(error)));
   }, [mergeProjectSnapshot]);
 
   const toggleProjectPinned = useCallback(async (projectId: string, pinned: boolean): Promise<void> => {
@@ -1208,6 +1189,7 @@ function DesktopApp(): React.JSX.Element {
       if (projectRef.current !== projectId || selectedRef.current !== sessionId) return;
       setDocument(nextDocument);
       setWriterConflict(nextDocument.writerConflict);
+      if (nextDocument.runtimeError) setWarning(nextDocument.runtimeError);
     } catch (error) {
       setWarning(errorMessage(error));
     }
@@ -1230,6 +1212,10 @@ function DesktopApp(): React.JSX.Element {
     const models = workspace?.models ?? [];
     const selectedModel = models.find((model) => model.alias === info?.modelAlias) ?? models[0];
     const contextWindow = contextBudget?.contextWindow ?? info?.contextWindow ?? selectedModel?.contextWindow;
+    const contextWindowIsFallback = contextBudget?.contextWindowIsFallback
+      ?? info?.contextWindowIsFallback
+      ?? selectedModel?.contextWindowIsFallback
+      ?? false;
     const usedTokens = contextBudget?.usedTokens ?? lastReportedInputTokens(document);
     const displayContextWindow = contextWindow
       ?? contextBudget?.maxTokens
@@ -1255,6 +1241,7 @@ function DesktopApp(): React.JSX.Element {
     return {
       usedTokens,
       contextWindow: displayContextWindow,
+      contextWindowIsFallback,
       inputBudgetTokens,
       reservedTokens,
       toolTokens,
@@ -1280,15 +1267,22 @@ function DesktopApp(): React.JSX.Element {
   );
   const confirmedPermissionMode = workspace?.permissionMode ?? workspace?.runtime?.permissionMode ?? "ask";
   const permissionMode = pendingPermissionMode ?? confirmedPermissionMode;
-  const globalMemoryEnabled = personalizationOverview?.memory.enabled === true;
-  const confirmedChatMemoryEnabled = selectedSessionId === undefined
-    ? globalMemoryEnabled && personalizationOverview?.memory.useMemories === true
-    : globalMemoryEnabled && personalizationOverview?.chat?.effective.useMemories === true;
+  // 记忆开关只消费 workspace 的只读策略投影；真正的记忆概览和召回在发送回合内由 Runtime 完成。
+  const memoryPolicy = workspace?.memory;
+  const currentChatPersonalization = selectedSession?.personalization ?? defaultChatPersonalizationOverride;
+  const resolvedPersonalization = memoryPolicy === undefined
+    ? undefined
+    : resolveChatPersonalization(memoryPolicy, currentChatPersonalization);
+  const globalMemoryEnabled = resolvedPersonalization?.memoryEnabled === true;
+  const confirmedChatMemoryEnabled = resolvedPersonalization?.useMemories === true;
   const chatMemoryEnabled = globalMemoryEnabled && (draftMemoryOverride ?? confirmedChatMemoryEnabled);
+  const memoryState: ComposerMemoryState = resolvedPersonalization === undefined
+    ? "unknown"
+    : chatMemoryEnabled ? "enabled" : "disabled";
   const memoryToggleDisabledReason = !workspace?.project
     ? "请先打开一个项目。"
-    : !personalizationOverview
-      ? "正在读取当前聊天的记忆状态…"
+    : memoryPolicy === undefined
+      ? undefined
       : !globalMemoryEnabled
           ? "全局记忆已在设置中关闭，请先开启记忆功能。"
           : memoryToggleBusy
@@ -1296,18 +1290,26 @@ function DesktopApp(): React.JSX.Element {
             : runtimeBusy
               ? "当前运行或后台维护尚未结束，请稍后再切换记忆。"
               : undefined;
+  const memoryToggleDisabled = !workspace?.project
+    || memoryPolicy === undefined
+    || !globalMemoryEnabled
+    || memoryToggleBusy
+    || runtimeBusy;
   const toggleChatMemory = useCallback(async (): Promise<void> => {
     const projectId = projectRef.current;
     const sessionId = selectedRef.current;
-    const current = personalizationOverview?.chat;
-    if (!projectId || !personalizationOverview || !personalizationOverview.memory.enabled || memoryToggleBusy) return;
+    const current = selectedSession?.personalization ?? defaultChatPersonalizationOverride;
+    if (!projectId || !memoryPolicy || !memoryPolicy.enabled || memoryToggleBusy) return;
     if (!sessionId) {
-      const enabled = !(draftMemoryOverride ?? personalizationOverview.memory.useMemories);
+      const enabled = !(draftMemoryOverride ?? memoryPolicy.useMemories);
       setDraftMemoryOverride(enabled);
       setToast(enabled ? "当前新聊天已开启记忆" : "当前新聊天已关闭记忆");
       return;
     }
-    if (!current) return;
+    if (!selectedSession?.metadataRevision) {
+      setWarning("当前聊天状态尚未同步，请稍后再试。");
+      return;
+    }
     const enabled = !chatMemoryEnabled;
     const requestId = memoryToggleRequestRef.current + 1;
     memoryToggleRequestRef.current = requestId;
@@ -1320,33 +1322,14 @@ function DesktopApp(): React.JSX.Element {
     setMemoryToggleBusy(true);
     try {
       const nextOverride = {
-        ...current.override,
+        ...current,
         useMemories: enabled,
         contributeMemories: enabled
       };
-      const snapshot = await window.biny.saveChatPersonalization(projectId, sessionId, nextOverride, current.metadataRevision);
+      const snapshot = await window.biny.saveChatPersonalization(projectId, sessionId, nextOverride, selectedSession.metadataRevision);
       if (!isCurrentRequest()) return;
       mergeProjectSnapshot(snapshot);
       setToast(enabled ? "当前聊天已开启记忆" : "当前聊天已关闭记忆");
-      // saveChatPersonalization 已返回新的 session 快照；直接用确认过的覆盖更新本地读模型，
-      // 不再为了一个按钮额外等待第二次 Runtime RPC。metadata revision 变化后，effect 会在后台复读完整总览。
-      const savedSession = snapshot.sessions.find((candidate) => candidate.id === sessionId);
-      setPersonalizationOverview((overview) => {
-        if (!overview?.chat || overview.chat.sessionId !== sessionId) return overview;
-        return {
-          ...overview,
-          chat: {
-            ...overview.chat,
-            override: nextOverride,
-            effective: {
-              ...overview.chat.effective,
-              useMemories: enabled,
-              contributeMemories: enabled
-            },
-            metadataRevision: savedSession?.metadataRevision ?? overview.chat.metadataRevision
-          }
-        };
-      });
       setDraftMemoryOverride(undefined);
     } catch (error) {
       if (isCurrentRequest()) {
@@ -1356,7 +1339,7 @@ function DesktopApp(): React.JSX.Element {
     } finally {
       if (isCurrentRequest()) setMemoryToggleBusy(false);
     }
-  }, [chatMemoryEnabled, draftMemoryOverride, mergeProjectSnapshot, memoryToggleBusy, personalizationOverview]);
+  }, [chatMemoryEnabled, draftMemoryOverride, memoryPolicy, memoryToggleBusy, mergeProjectSnapshot, selectedSession]);
   const prefillComposer = useCallback((input: string): void => {
     setComposerDraft(input);
     setFocusToken((value) => value + 1);
@@ -1364,9 +1347,9 @@ function DesktopApp(): React.JSX.Element {
   const composer = (
     <Composer
       sessionWriterConflict={writerConflict !== undefined}
-      memoryEnabled={chatMemoryEnabled}
+      memoryState={memoryState}
       memoryToggleBusy={memoryToggleBusy}
-      memoryToggleDisabled={memoryToggleDisabledReason !== undefined}
+      memoryToggleDisabled={memoryToggleDisabled}
       memoryToggleDisabledReason={memoryToggleDisabledReason}
       contextUsage={contextUsage}
       focusToken={focusToken}
@@ -1430,6 +1413,13 @@ function DesktopApp(): React.JSX.Element {
             onClose={closeSettings}
             onCompactMemory={compactMemory}
             onDeleteMemoryEntry={deleteMemoryEntry}
+            onArchiveMemoryEntry={archiveMemoryEntry}
+            onLoadArchivedMemory={loadArchivedMemory}
+            onRunMemorySleep={runMemorySleep}
+            onSleepStatus={memorySleepStatus}
+            onSleepRuns={memorySleepRuns}
+            onPreviewMemorySleep={previewMemorySleep}
+            onCancelMemorySleep={cancelMemorySleep}
             onUpdateMemoryEntry={updateMemoryEntry}
             onExportCookies={async () => await window.biny.exportCookies()}
             onFetchModelCatalog={fetchModelCatalog}
@@ -1445,19 +1435,14 @@ function DesktopApp(): React.JSX.Element {
             onLoadIdentityOverview={loadIdentityOverview}
             onLoadMemoryEmbeddingStatus={loadMemoryEmbeddingStatus}
             onDownloadMemoryEmbeddingModel={downloadMemoryEmbeddingModel}
-            onCancelMemoryEmbeddingDownload={cancelMemoryEmbeddingDownload}
             onDeleteMemoryEmbeddingModel={deleteMemoryEmbeddingModel}
             onRebuildMemoryEmbeddingIndex={rebuildMemoryEmbeddingIndex}
             onCancelMemoryEmbeddingRebuild={cancelMemoryEmbeddingRebuild}
-            onLoadTelosOverview={loadTelosOverview}
+            onCancelMemoryEmbeddingDownload={cancelMemoryEmbeddingDownload}
             onOpenBrowser={openBrowser}
             onOpenChatDraft={(input) => { closeSettings(); prefillComposer(input); }}
             onOpenExternal={async (url) => await window.biny.openExternal(url)}
-            onResolveTelosDrift={resolveTelosDrift}
-            onReviewBehaviorPattern={reviewBehaviorPattern}
-            onSaveTelos={saveTelos}
             onSearchMemory={searchMemory}
-            onSnoozeTelosDrift={snoozeTelosDrift}
             onStartModelLogin={startModelLogin}
             onTestModelConfiguration={testModelConfiguration}
             onThemePreference={changeThemePreference}
@@ -1556,7 +1541,9 @@ function DesktopApp(): React.JSX.Element {
         onRuntimePanelOpenChange={changeRuntimePanelOpen}
         project={workspace?.project}
         projectId={workspace?.project.id}
-        runtimeError={workspace?.runtimeError}
+        // 历史正文可以在 Runtime 失败时正常展示；openSession 已将该错误放入 warning，
+        // 这里不能再把它传给 Workspace，否则 Workspace 会用错误页覆盖可读的聊天记录。
+        runtimeError={document === undefined && selectedSessionId === undefined ? workspace?.runtimeError : undefined}
         runtimePanelOpen={runtimePanelOpen}
         runtimeProjection={workspace?.runtimeProjection}
         sessionId={selectedSessionId}

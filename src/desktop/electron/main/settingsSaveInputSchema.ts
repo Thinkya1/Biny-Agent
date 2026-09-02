@@ -12,6 +12,7 @@ import {
   modelApiBackendSchema,
   modelCompatibilitySchema,
   modelLimitsSchema,
+  modelProfileSchema,
   modelProviderSchema,
   providerProtocolSchema,
   reasoningEffortSchema
@@ -47,6 +48,7 @@ export const modelConfigurationSchema = z.object({
   limits: modelLimitsSchema.optional(),
   apiBackend: modelApiBackendSchema.optional(),
   thinkingLevelMap: z.record(z.string().min(1), z.string().min(1).nullable()).optional(),
+  modelProfile: modelProfileSchema.optional(),
   compatibility: modelCompatibilitySchema.optional(),
   makeDefault: z.boolean().optional()
 });
@@ -100,7 +102,8 @@ export const settingsSaveInputSchema = z.object({
     upserts: z.array(modelConfigurationSchema).max(200),
     removeAliases: z.array(idSchema).max(200),
     defaultModel: z.object({ alias: idSchema, thinking: thinkingSchema }).strict().optional(),
-    oauthCredentialHandles: z.array(z.string().uuid()).max(20).optional()
+    oauthCredentialHandles: z.array(z.string().uuid()).max(20).optional(),
+    modelProfiles: z.record(idSchema, z.record(z.string().trim().min(1).max(240), modelProfileSchema)).optional()
   }).strict().optional(),
   skills: z.object({
     globalDefaults: z.record(z.boolean()).refine((value) => Object.keys(value).length <= 512, "技能全局开关不能超过 512 项。"),

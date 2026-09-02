@@ -12,6 +12,8 @@ export interface ContextUsage {
   usedTokens: number;
   /** 模型官方声明的完整上下文窗口（含预留），仅在 tooltip 里解释用，主展示分母用 inputBudgetTokens。 */
   contextWindow: number;
+  /** 上下文窗口未由模型元数据声明时为 true；此时界面不能把数值称为官方窗口。 */
+  contextWindowIsFallback?: boolean;
   /** 按模型有效窗口比例与 provider/用户上限收敛后的可用输入预算。 */
   inputBudgetTokens?: number;
   /** 原始窗口中的 Codex 风格 headroom；不计入已使用 token。 */
@@ -53,6 +55,7 @@ export function formatContextUsage(usage?: ContextUsage): {
   max: string;
   /** 模型原始窗口（含预留），仅作 tooltip 解释用。 */
   window: string;
+  contextWindowIsFallback?: boolean;
   actual: string;
   available: string;
   reserved?: string;
@@ -74,6 +77,7 @@ export function formatContextUsage(usage?: ContextUsage): {
     // 分母只算用户真实可用的输入额度；输出预留与 headroom 不摊开给用户看。
     max: inputBudgetTokens.toLocaleString("en-US"),
     window: usage.contextWindow.toLocaleString("en-US"),
+    contextWindowIsFallback: usage.contextWindowIsFallback,
     actual: usedTokens.toLocaleString("en-US"),
     available: Math.max(0, inputBudgetTokens - usedTokens).toLocaleString("en-US"),
     reserved: reservedTokens > 0 ? reservedTokens.toLocaleString("en-US") : undefined,

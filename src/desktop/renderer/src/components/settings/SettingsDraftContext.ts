@@ -1,11 +1,13 @@
 /** 设置草稿 Provider 与各分页共享的纯上下文契约。 */
 import { createContext, useContext } from "react";
 import type { ThinkingSelection } from "../../../../../llm/ModelManager.js";
+import type { ModelProfile } from "../../../../../config/schema.js";
 import type {
   DesktopChatParamsSettings,
   DesktopChatPersonalizationOverride,
   DesktopCompactionSettings,
   DesktopActivitySettingsInput,
+  DesktopActivitySettingsPatch,
   DesktopFontPreference,
   DesktopIdentitySettings,
   DesktopMemorySettings,
@@ -27,6 +29,7 @@ export interface SettingsModelDraft {
   removeAliases: string[];
   defaultModel?: { alias: string; thinking: ThinkingSelection };
   oauthCredentialHandles: string[];
+  modelProfiles: Record<string, Record<string, ModelProfile>>;
 }
 
 export interface DesktopSettingsDraft {
@@ -54,7 +57,7 @@ export interface SettingsDraftContextValue {
   saveState: SettingsSaveState;
   setThemePreference(value: DesktopThemePreference): void;
   setFontPreference(value: DesktopFontPreference): void;
-  setActivity(value: DesktopActivitySettingsInput): void;
+  updateActivityImmediately(patch: DesktopActivitySettingsPatch): Promise<void>;
   setIdentity(value: DesktopIdentitySettings): void;
   setMemory(value: DesktopMemorySettings): void;
   setCompaction(value: DesktopCompactionSettings): void;
@@ -66,6 +69,7 @@ export interface SettingsDraftContextValue {
   upsertModel(value: DesktopModelConfigurationInput): void;
   removeModel(alias: string): void;
   setDefaultModel(alias: string, thinking: ThinkingSelection): void;
+  setModelProfile(providerAlias: string, modelId: string, profile: ModelProfile | undefined): void;
   stageCredential(secret: string, scope: DesktopSettingsCredentialScope): Promise<DesktopStagedSettingsCredential>;
   addOauthCredentialHandle(handle: string): void;
   releaseCredential(handle: string): Promise<void>;

@@ -273,6 +273,7 @@ export function updateRuntimeInfo(
         reasoningLabel: info.reasoningLabel,
         thinking: info.thinking,
         contextWindow: info.contextWindow,
+        contextWindowIsFallback: info.contextWindowIsFallback,
         maxInputTokens: info.maxInputTokens,
         // 切模型后保留有效窗口/预留元数据，否则用量展示退回原始窗口，把输出预留摊进额度。
         effectiveContextWindow: info.effectiveContextWindow,

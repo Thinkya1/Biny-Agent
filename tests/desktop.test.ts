@@ -99,6 +99,7 @@ await testDesktopSafeStorageCredentialStore();
 await testDesktopRestoresPersistedTerminalStatus();
 await testDesktopPinAfterOpeningSessionUsesFreshRevision();
 await testDesktopOpenSessionSkipsGlobalSessionScan();
+await testDesktopOpenSessionReturnsHistoryWhenRuntimeFails();
 await testDesktopOpenSessionReturnsWriterConflictReadOnlyDocument();
 await testDesktopOpenSessionReturnsConsistentMetadataSnapshot();
 await testDesktopRuntimeInitializationIsShared();
@@ -894,6 +895,59 @@ async function testDesktopOpenSessionSkipsGlobalSessionScan(): Promise<void> {
     await agents.markSessionRead(project.id, recorder.sessionId, document.session.metadataRevision);
     await agents.closeAll();
   } finally {
+    await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+async function testDesktopOpenSessionReturnsHistoryWhenRuntimeFails(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-open-runtime-error-workspace-"));
+  const desktopRoot = await mkdtemp(path.join(os.tmpdir(), "biny-open-runtime-error-data-"));
+  let agents: DesktopAgentManager | undefined;
+  try {
+    const { configStore, projects, state } = await createDesktopTestServices(desktopRoot);
+    configStore.supportsDetachedRuntimeHost = false;
+    const project = await projects.createProject(workspaceRoot);
+    const dataRoot = await projects.dataRoot(project);
+    await ensureAgentDirs(dataRoot);
+    const first = new SessionRecorder(dataRoot, "runtime-error-first");
+    first.record({ type: "user_message", content: "历史请求一" });
+    first.record({ type: "assistant_message", content: "历史回复一" });
+    await first.close();
+    const second = new SessionRecorder(dataRoot, "runtime-error-second");
+    second.record({ type: "user_message", content: "历史请求二" });
+    second.record({ type: "assistant_message", content: "历史回复二" });
+    await second.close();
+
+    const brokenConfig = structuredClone(defaultConfig);
+    brokenConfig.defaultModel = "broken-model";
+    brokenConfig.providers = {
+      broken: { type: "openai-compatible", baseUrl: "https://broken.example/v1" }
+    };
+    brokenConfig.models = {
+      "broken-model": { provider: "broken", model: "broken-model", contextWindow: 128_000 }
+    };
+    brokenConfig.thinking = { enabled: false, effort: "high" };
+    await configStore.save(brokenConfig);
+
+    agents = new DesktopAgentManager(state, projects, configStore, () => undefined);
+    const firstDocument = await agents.openSession(project.id, first.sessionId);
+    assert.equal(firstDocument.events.some((event) => event.type === "assistant_message" && event.content === "历史回复一"), true);
+    assert.match(firstDocument.runtimeError ?? "", /credentials|credential|key|密钥/iu);
+
+    const secondDocument = await agents.openSession(project.id, second.sessionId);
+    assert.equal(secondDocument.events.some((event) => event.type === "assistant_message" && event.content === "历史回复二"), true);
+    assert.match(secondDocument.runtimeError ?? "", /credentials|credential|key|密钥/iu);
+
+    const workspace = await agents.workspaceSnapshot(project.id);
+    assert.equal(workspace.runtime, undefined);
+    assert.match(workspace.runtimeError ?? "", /credentials|credential|key|密钥/iu);
+    await assert.rejects(
+      agents.sendPrompt(project.id, second.sessionId, "继续", "chat", []),
+      /credentials|credential|key|密钥/iu
+    );
+  } finally {
+    await agents?.closeAll();
     await rm(workspaceRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(desktopRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
@@ -2120,18 +2174,29 @@ async function testDesktopModelConfiguration(): Promise<void> {
           model: "deepseek-v4-flash",
           baseUrl: "https://plan.example/v1",
           contextWindow: 128_000,
+          maxInputTokens: 120_000,
           apiKey: "plan-test-key",
           supportsTools: true,
-          supportsThinking: true
+          supportsThinking: true,
+          modelProfile: {
+            contextWindow: 512_000,
+            maxInputTokens: 480_000,
+            thinkingLevelMap: { off: "none", high: "gateway-high" }
+          }
         }],
         removeAliases: []
       }
     });
     const planConfig = await configStore.load();
-    assert.deepEqual(planConfig.models["plan-flash"]?.thinkingLevelMap, {
-      off: "none",
-      high: "high",
-      max: "max"
+    assert.equal(planConfig.models["plan-flash"]?.contextWindow, undefined, "catalog metadata is not copied into a new alias");
+    assert.equal(planConfig.models["plan-flash"]?.maxInputTokens, undefined, "catalog input limits are not copied into a new alias");
+    assert.equal(planConfig.models["plan-flash"]?.thinkingLevelMap, undefined, "catalog thinking metadata is not copied into a new alias");
+    assert.deepEqual(planConfig.providers.plan?.modelProfiles, {
+      "deepseek-v4-flash": {
+        contextWindow: 512_000,
+        maxInputTokens: 480_000,
+        thinkingLevelMap: { off: "none", high: "gateway-high" }
+      }
     });
     await projects.listSessions(project, undefined, new Map());
     const attachment = await projects.saveAttachment(project, "notes.txt", "text/plain", new TextEncoder().encode("desktop only"));
@@ -3600,6 +3665,7 @@ function testDesktopUsagePresentation(): void {
     // 主展示分母不含预留：显示可用输入额度 950,000，原始窗口只在 tooltip 解释字段里。
     max: "950,000",
     window: "1,000,000",
+    contextWindowIsFallback: undefined,
     actual: "5,561",
     available: "944,439",
     reserved: "50,000",

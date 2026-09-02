@@ -9,16 +9,16 @@
  */
 import type { InteractiveAgentRunMode } from "../agent/AgentSession.js";
 import type { AgentCapabilitySelection, CapabilitySelectionMode } from "../agent/capabilitySelection.js";
-import type { ActivitySettings, ActivitySettingsInput } from "../activity/settings.js";
+import type { ActivitySettings, ActivitySettingsInput, ActivitySettingsPatch } from "../activity/settings.js";
 import type { ActivityRuntimeSnapshot } from "../activity/types.js";
 import type { ActivityReportResult } from "../activity/analyzer.js";
-import type { ActivitySearchResult } from "../activity/store.js";
+import type { ActivitySearchResult, ActivitySessionDetail } from "../activity/store.js";
 import type { ModelCatalogEntry } from "../ai/types.js";
-import type { ChatParamsConfig, CompactionConfig, ModelApiBackend, ModelCompatibility, ModelLimits, ModelProvider, ThinkingLevelMap, WebSearchConfig } from "../config/schema.js";
+import type { ChatParamsConfig, CompactionConfig, ModelApiBackend, ModelCompatibility, ModelLimits, ModelProfile, ModelProvider, ThinkingLevelMap, WebSearchConfig } from "../config/schema.js";
 import type { EmbeddingModelDescriptor } from "../llm/embedding/types.js";
 import type { LocalEmbeddingModelId } from "../llm/embedding/types.js";
 import type { MemoryEmbeddingRuntimeStatus } from "../agent/context/MemoryEmbeddingService.js";
-import type { MemoryMaintenanceStatus } from "../agent/context/memoryTypes.js";
+import type { MemoryMaintenanceStatus, MemorySleepRun } from "../agent/context/memoryTypes.js";
 import type {
   IdentityDocumentKind
 } from "../agent/context/identityTypes.js";
@@ -32,26 +32,25 @@ import { slashCommandsForSurface, type SlashCommandDefinition } from "../runtime
 import type { SessionBranchPoint, SessionIsolation } from "../session/catalog.js";
 import type { SessionEvent } from "../session/recorder.js";
 import type { SessionRunStatus } from "../session/runLedger.js";
-import type {
-  BehaviorPattern,
-  BehaviorPatternReviewAction,
-  TelosEvidence,
-  TelosDocument,
-  TelosDocumentInput,
-  TelosDrift,
-  TelosDriftResolutionAction,
-  TelosOverview,
-  TelosScope
-} from "../agent/context/telosTypes.js";
 
 export type DesktopActivitySettings = ActivitySettings;
 export type DesktopActivitySettingsInput = ActivitySettingsInput;
+export type DesktopActivitySettingsPatch = ActivitySettingsPatch;
 export type DesktopIdentitySettings = IdentityPolicy;
 export type DesktopIdentityDocumentKind = IdentityDocumentKind;
 export type DesktopIdentityOverview = IdentityOverview;
 
 /** 指定日期的 Activity 打工日记；markdown 可直接渲染，blocked/message 说明补分析为何被跳过。 */
 export type DesktopActivityReport = ActivityReportResult;
+export interface DesktopActivitySettingsUpdate {
+  activity: DesktopActivitySettings;
+  configRevision: string;
+}
+/** renderer 可见的 Activity 回看类型；事件里的本地 snapshotPath 被刻意剥离。 */
+export type DesktopActivitySessionEvent = Omit<ActivitySessionDetail["events"][number], "snapshotPath">;
+export type DesktopActivitySessionDetail = Omit<ActivitySessionDetail, "events"> & {
+  events: DesktopActivitySessionEvent[];
+};
 
 export const desktopIpc = {
   bootstrap: "desktop:bootstrap",
@@ -127,8 +126,11 @@ export const desktopIpc = {
   settingsCloseResponse: "desktop:settings:close-response",
   activitySnapshot: "desktop:activity:snapshot",
   activitySettings: "desktop:activity:settings",
+  activityUpdateSettings: "desktop:activity:update-settings",
   activityRequestPermission: "desktop:activity:request-permission",
   activitySearch: "desktop:activity:search",
+  activitySessionDetail: "desktop:activity:session-detail",
+  activitySnapshotPreview: "desktop:activity:snapshot-preview",
   activityReport: "desktop:activity:report",
   activityClear: "desktop:activity:clear",
   activityEvent: "desktop:activity:event",
@@ -136,6 +138,13 @@ export const desktopIpc = {
   addMemoryEntry: "desktop:memory:add",
   updateMemoryEntry: "desktop:memory:update",
   deleteMemoryEntry: "desktop:memory:delete-entry",
+  archiveMemoryEntry: "desktop:memory:archive-entry",
+  archivedMemoryEntries: "desktop:memory:archived-entries",
+  runMemorySleep: "desktop:memory:sleep-run",
+  memorySleepStatus: "desktop:memory:sleep-status",
+  memorySleepRuns: "desktop:memory:sleep-runs",
+  previewMemorySleep: "desktop:memory:sleep-preview",
+  cancelMemorySleep: "desktop:memory:sleep-cancel",
   clearMemory: "desktop:memory:clear",
   compactMemory: "desktop:memory:compact",
   memoryEmbeddingStatus: "desktop:memory:embedding-status",
@@ -144,11 +153,6 @@ export const desktopIpc = {
   deleteMemoryEmbeddingModel: "desktop:memory:embedding-delete",
   rebuildMemoryEmbeddingIndex: "desktop:memory:embedding-rebuild",
   cancelMemoryEmbeddingRebuild: "desktop:memory:embedding-cancel-rebuild",
-  telosOverview: "desktop:telos:overview",
-  saveTelos: "desktop:telos:save",
-  reviewBehaviorPattern: "desktop:telos:review-pattern",
-  resolveTelosDrift: "desktop:telos:resolve-drift",
-  snoozeTelosDrift: "desktop:telos:snooze-drift",
   saveAttachment: "desktop:attachment:save",
   resolveDroppedFile: "desktop:attachment:resolve-path",
   listWorkspaceDirectory: "desktop:file:list-directory",
@@ -218,7 +222,7 @@ export const desktopIpc = {
 } as const;
 
 export type DesktopThemePreference = "system" | "light" | "dark";
-export type DesktopSystemSettingsPane = "screen-recording" | "accessibility" | "input-monitoring";
+export type DesktopSystemSettingsPane = "screen-recording" | "accessibility";
 export type DesktopActiveView = "chat" | "runtime" | "extensions";
 
 /** 界面字体偏好。`family` 为 CSS 字体族名，"system" 表示跟随操作系统；`size` 为基准字号（px）。 */
@@ -360,6 +364,8 @@ export interface DesktopSessionDocument {
   limits?: DesktopSessionLimits;
   /** session 仍可读，但当前 Desktop 没有 writer ownership 时的只读冲突。 */
   writerConflict?: DesktopSessionWriterConflict;
+  /** 历史正文已成功读取，但当前 Desktop Runtime 初始化/聚焦失败时返回。 */
+  runtimeError?: string;
 }
 
 /** 会话文件体量与事件数接近上限时的预警投影。 */
@@ -408,6 +414,8 @@ export interface DesktopWorkspaceSnapshot {
   /** 并行会话的运行时快照（sessionId → snapshot，含主 runtime 绑定的 session）；多 session 并行时渲染层按 session 取运行态。 */
   sessionRuntimes?: Record<string, InteractiveRuntimeSnapshot>;
   runtimeError?: string;
+  /** 首屏记忆开关使用的只读策略投影；读取它不应初始化或切换 Runtime。 */
+  memory?: DesktopMemorySettings;
   /** 跨 Desktop/TUI 共享的已保存权限模式；Runtime 启动时会先与这个持久化值对齐。 */
   permissionMode: PermissionMode;
   capabilityDefaults: DesktopCapabilityDefaults;
@@ -849,6 +857,8 @@ export interface DesktopModelConfigurationInput {
   limits?: ModelLimits;
   apiBackend?: ModelApiBackend;
   thinkingLevelMap?: ThinkingLevelMap;
+  /** 按 provider + 原始 model ID 保存的独立元数据覆盖，不写入 alias 元数据。 */
+  modelProfile?: ModelProfile;
   compatibility?: ModelCompatibility;
   /**
    * Whether this configuration should also become the active default model.
@@ -1047,6 +1057,8 @@ export interface DesktopMemoryEntry {
   lineage: DesktopMemoryLineage[];
   recallCount: number;
   lastRecalledAt?: string;
+  archivedAt?: string;
+  archivedReason?: "exact" | "expired" | "orphan" | "similarity" | "llm" | "manual";
 }
 
 export interface DesktopMemoryOverview {
@@ -1131,6 +1143,17 @@ export interface DesktopMemorySearchMatch {
   score: number;
   recallCount: number;
   lastRecalledAt?: string;
+  archivedAt?: string;
+  archivedReason?: "exact" | "expired" | "orphan" | "similarity" | "llm" | "manual";
+}
+
+export interface DesktopMemorySleepPreview {
+  available: boolean;
+  candidates: number;
+  temporaryToArchive: number;
+  archivedToDelete: number;
+  recentRuns: number;
+  lastRun?: import("../agent/context/memoryTypes.js").MemorySleepRun;
 }
 
 export interface DesktopMemoryCompactionResult {
@@ -1141,15 +1164,6 @@ export interface DesktopMemoryCompactionResult {
   error?: string;
 }
 
-export type DesktopTelosScope = TelosScope;
-export type DesktopTelosDocument = TelosDocument;
-export type DesktopTelosDocumentInput = TelosDocumentInput;
-export type DesktopBehaviorPattern = BehaviorPattern;
-export type DesktopBehaviorPatternReviewAction = BehaviorPatternReviewAction;
-export type DesktopTelosEvidence = TelosEvidence;
-export type DesktopTelosDrift = TelosDrift;
-export type DesktopTelosDriftResolutionAction = TelosDriftResolutionAction;
-export type DesktopTelosOverview = TelosOverview;
 
 /** Renderer 只接收主进程计算好的 endpoint 摘要，不能为了 SHA-256 引入 Node-only agent 模块。 */
 export interface DesktopEmbeddingModelDescriptor extends EmbeddingModelDescriptor {
@@ -1184,6 +1198,8 @@ export interface DesktopSettingsModelsSnapshot {
   embeddingModels: DesktopEmbeddingModelDescriptor[];
   defaultModel: string;
   thinking: ThinkingSelection;
+  /** provider alias -> 原始模型 ID -> 用户声明的元数据覆盖。 */
+  modelProfiles: Record<string, Record<string, ModelProfile>>;
 }
 
 export interface DesktopSettingsChatSnapshot {
@@ -1244,6 +1260,8 @@ export interface DesktopSettingsModelsInput {
     thinking: ThinkingSelection;
   };
   oauthCredentialHandles?: string[];
+  /** 只包含需要保留的 profile；未列出的 provider profile 保持现状。 */
+  modelProfiles?: Record<string, Record<string, ModelProfile>>;
 }
 
 export interface DesktopSettingsChatInput {
@@ -1500,7 +1518,7 @@ export interface DesktopApi {
   /** 记忆库统计（不含条目内容）；条目增删后用于刷新头部与翻页控件。 */
   memoryStats(projectId: string, filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryStats>;
   /** 记忆条目分页读取；offset 分页，revision 变化时调用方应回第 0 页。 */
-  memoryEntries(projectId: string, filter: DesktopMemoryOriginFilter, offset: number, limit: number): Promise<DesktopMemoryEntriesPage>;
+  memoryEntries(projectId: string, filter: DesktopMemoryOriginFilter, offset: number, limit: number, includeArchived?: boolean): Promise<DesktopMemoryEntriesPage>;
   saveMemorySettings(projectId: string, input: DesktopMemorySettingsInput): Promise<DesktopMemorySettingsSnapshot>;
   identityOverview(projectId: string): Promise<DesktopIdentityOverview>;
   saveIdentityDocument(projectId: string, document: DesktopIdentityDocumentKind, content: string, expectedRevision: number, reason?: string): Promise<DesktopIdentityOverview>;
@@ -1514,8 +1532,11 @@ export interface DesktopApi {
   setDefaultModel(projectId: string, alias: string, thinking: ThinkingSelection, expectedConfigRevision: string, sessionId?: string): Promise<DesktopSettingsSnapshot>;
   activitySnapshot(): Promise<ActivityRuntimeSnapshot>;
   activitySettings(): Promise<DesktopActivitySettings>;
+  updateActivitySettings(patch: DesktopActivitySettingsPatch, expectedConfigRevision: string): Promise<DesktopActivitySettingsUpdate>;
   requestActivityPermission(pane: DesktopSystemSettingsPane): Promise<void>;
   searchActivity(query: string, limit?: number): Promise<ActivitySearchResult[]>;
+  activitySessionDetail(sessionId: string): Promise<DesktopActivitySessionDetail | undefined>;
+  activitySnapshotPreview(snapshotId: number): Promise<string | undefined>;
   /** 生成指定日期（today/yesterday/YYYY-MM-DD，默认 today）的 Activity 打工日记。 */
   activityReport(date?: string): Promise<DesktopActivityReport>;
   clearActivity(): Promise<ActivityRuntimeSnapshot>;
@@ -1524,10 +1545,17 @@ export interface DesktopApi {
   releaseSettingsCredentials(handles: string[]): Promise<void>;
   updateSettingsDraftState(state: DesktopSettingsDraftState): Promise<void>;
   respondSettingsCloseRequest(requestId: string, response: DesktopSettingsCloseResponse): Promise<boolean>;
-  searchMemory(projectId: string, filter: DesktopMemoryOriginFilter, query: string): Promise<DesktopMemorySearchMatch[]>;
+  searchMemory(projectId: string, filter: DesktopMemoryOriginFilter, query: string, includeArchived?: boolean): Promise<DesktopMemorySearchMatch[]>;
   addMemoryEntry(projectId: string, input: DesktopMemoryEntryInput, expectedRevision: number): Promise<DesktopMemoryOverview>;
   updateMemoryEntry(projectId: string, entryId: string, patch: DesktopMemoryEntryPatch, expectedRevision: number): Promise<DesktopMemoryOverview>;
   deleteMemoryEntry(projectId: string, entryId: string, expectedRevision: number): Promise<DesktopMemoryOverview>;
+  archiveMemoryEntry(projectId: string, entryId: string, archived: boolean, expectedRevision: number): Promise<DesktopMemoryStats>;
+  archivedMemoryEntries(projectId: string): Promise<DesktopMemoryEntry[]>;
+  runMemorySleep(projectId: string): Promise<DesktopMemoryStats>;
+  memorySleepStatus(projectId: string): Promise<MemoryMaintenanceStatus>;
+  memorySleepRuns(projectId: string): Promise<MemorySleepRun[]>;
+  previewMemorySleep(projectId: string): Promise<DesktopMemorySleepPreview>;
+  cancelMemorySleep(projectId: string): Promise<{ cancelled: boolean }>;
   clearMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number): Promise<DesktopMemoryOverview>;
   compactMemory(projectId: string, filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string): Promise<DesktopMemoryCompactionResult>;
   memoryEmbeddingStatus(projectId: string): Promise<DesktopMemoryEmbeddingStatus>;
@@ -1535,12 +1563,7 @@ export interface DesktopApi {
   cancelMemoryEmbeddingDownload(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingCancellationResult>;
   deleteMemoryEmbeddingModel(projectId: string, model: LocalEmbeddingModelId): Promise<DesktopMemoryEmbeddingDeleteResult>;
   rebuildMemoryEmbeddingIndex(projectId: string): Promise<DesktopMemoryEmbeddingStatus>;
-  cancelMemoryEmbeddingRebuild(projectId: string): Promise<DesktopMemoryEmbeddingCancellationResult>;
-  telosOverview(projectId: string): Promise<DesktopTelosOverview>;
-  saveTelos(projectId: string, input: DesktopTelosDocumentInput, expectedRevision: number): Promise<DesktopTelosOverview>;
-  reviewBehaviorPattern(projectId: string, patternId: string, action: DesktopBehaviorPatternReviewAction, expectedRevision: number): Promise<DesktopTelosOverview>;
-  resolveTelosDrift(projectId: string, driftId: string, action: DesktopTelosDriftResolutionAction, expectedRevision: number): Promise<DesktopTelosOverview>;
-  snoozeTelosDrift(projectId: string, driftId: string, until: string, expectedRevision: number): Promise<DesktopTelosOverview>;  saveAttachment(projectId: string, name: string, mimeType: string, bytes: Uint8Array): Promise<DesktopAttachment>;
+  cancelMemoryEmbeddingRebuild(projectId: string): Promise<DesktopMemoryEmbeddingCancellationResult>;  saveAttachment(projectId: string, name: string, mimeType: string, bytes: Uint8Array): Promise<DesktopAttachment>;
   resolveDroppedFile(file: File): string;
   listWorkspaceDirectory(projectId: string, relativePath: string): Promise<DesktopWorkspaceDirectory>;
   readWorkspaceFile(projectId: string, relativePath: string): Promise<DesktopWorkspaceFilePreview>;

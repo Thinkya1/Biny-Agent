@@ -9,7 +9,6 @@
  *
  * 这里只做数据整形，不含任何渲染逻辑，方便单独测试。
  */
-import { parseMemoryCitations, type MemoryCitation } from "../../../agent/context/memoryCitations.js";
 import type { ToolInputDisplay, ToolUpdate } from "../../../tools/types.js";
 import type { AgentPermissionEventRequest, AgentRunModel, AgentHostEvent } from "../../../runtime/agentEvents.js";
 import type { PermissionAction } from "../../../permission/PermissionManager.js";
@@ -142,8 +141,6 @@ function executionToolLabel(tool: string): string {
 export interface TimelineTurn {
   id: string;
   user: string;
-  /** 回答末尾引用的记忆条目（已从展示正文剥离）；来自 <memory-citations> 协议块。 */
-  memoryCitations?: MemoryCitation[];
   userMessageIndex?: number;
   userMessageId?: string;
   assistant: string;
@@ -303,11 +300,9 @@ function buildHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
     }
     if (event.type === "assistant_message") {
       const turn = ensureTurn(event.time);
-      const parsed = event.content ? parseMemoryCitations(event.content) : undefined;
-      turn.memoryCitations = parsed?.citations.length ? parsed.citations : turn.memoryCitations;
-      turn.assistant = (parsed?.textWithoutBlock || event.content) || turn.assistant;
+      turn.assistant = event.content || turn.assistant;
       appendHistoricalReasoning(turn, event.reasoningContent);
-      appendHistoricalAssistant(turn, parsed?.textWithoutBlock || event.content);
+      appendHistoricalAssistant(turn, event.content);
       turn.durationMs = elapsedMs(turn.timestamp, event.time) ?? turn.durationMs;
       turn.timestamp = event.time ?? turn.timestamp;
       turn.status = "completed";
@@ -477,11 +472,9 @@ function buildVersionedHistoricalTurns(events: SessionEvent[]): TimelineTurn[] {
     if (event.type === "assistant_message") {
       if (!event.content && !event.reasoningContent) continue;
       const turn = turnForEvent(event, event.time);
-      const parsed = event.content ? parseMemoryCitations(event.content) : undefined;
-      turn.memoryCitations = parsed?.citations.length ? parsed.citations : turn.memoryCitations;
-      turn.assistant = (parsed?.textWithoutBlock || event.content) || turn.assistant;
+      turn.assistant = event.content || turn.assistant;
       appendHistoricalReasoning(turn, event.reasoningContent);
-      appendHistoricalAssistant(turn, parsed?.textWithoutBlock || event.content);
+      appendHistoricalAssistant(turn, event.content);
       turn.durationMs = elapsedMs(turn.timestamp, event.time) ?? turn.durationMs;
       turn.timestamp = event.time ?? turn.timestamp;
       turn.status = "completed";
@@ -762,16 +755,12 @@ function createLiveTimelineFold(initialUserMessageIndex: number): LiveTimelineFo
       appendAssistant(turn, event.content);
     } else if (event.type === "assistant.completed") {
       finishReasoning(event.runId, event.timestamp);
-      // 实时路径也在展示层剥离引用块；usage 回写在 owner 侧回合结束时统一完成。
-      const parsed = event.content ? parseMemoryCitations(event.content) : undefined;
-      const strippedContent = parsed?.textWithoutBlock || event.content;
-      if (parsed?.citations.length) turn.memoryCitations = parsed.citations;
       const active = activeAssistant.get(event.runId);
       if (active) {
-        if (strippedContent) active.content = strippedContent;
+        if (event.content) active.content = event.content;
         activeAssistant.delete(event.runId);
-      } else if (strippedContent && latestAssistantContent(turn) !== strippedContent) {
-        appendAssistant(turn, strippedContent);
+      } else if (event.content && latestAssistantContent(turn) !== event.content) {
+        appendAssistant(turn, event.content);
         activeAssistant.delete(event.runId);
       }
       turn.timestamp = event.timestamp;
