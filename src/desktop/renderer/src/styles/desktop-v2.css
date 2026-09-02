@@ -1228,6 +1228,7 @@ select {
   width: 100%;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
   border: 0;
   border-radius: 0;
   /* 设置页以侧栏为外层底板，右侧内容再浮一层；两块同色会让
@@ -1238,12 +1239,18 @@ select {
 
 .settings-modal-body {
   display: flex;
+  width: 100%;
   min-height: 0;
   flex: 1;
 }
 
 .settings-modal.is-full-page .settings-tabs {
-  width: 264px;
+  width: var(--settings-sidebar-width);
+  min-width: 0;
+  min-height: 0;
+  flex: 0 0 var(--settings-sidebar-width);
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 62px 24px 24px;
   border-inline-end: 1px solid var(--border);
   background: var(--sidebar);
@@ -1378,14 +1385,23 @@ select {
 }
 
 .settings-modal.is-full-page .settings-content {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
   margin: 0;
   padding: 0 0 40px;
+  overflow-x: hidden;
+  overflow-y: auto;
   border-radius: 0;
   background: var(--surface-soft);
 }
 
 .settings-modal.is-full-page .settings-content > header {
   display: flex;
+  width: 100%;
+  flex: 0 0 auto;
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
@@ -1420,6 +1436,8 @@ select {
 .settings-content > .settings-sections,
 .settings-content > .about-settings {
   width: min(var(--settings-content-max), calc(100% - 56px));
+  max-width: var(--settings-content-max);
+  margin-inline: auto;
 }
 
 .settings-page-footer {

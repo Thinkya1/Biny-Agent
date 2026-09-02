@@ -7878,7 +7878,7 @@
   --settings-extension-tabs-height: 36px;
 }
 
-.settings-content.is-extension-settings {
+.settings-modal.is-full-page .settings-content.is-extension-settings {
   display: flex;
   min-height: 0;
   flex-direction: column;
@@ -8738,7 +8738,7 @@
   line-height: 1.45;
 }
 
-/* MCP 应用市场和已安装区统一为单列；详情面板也顺序排在列表之后。 */
+/* MCP 应用市场保持单列，已安装区在宽屏把列表与运行详情并排展示。 */
 .settings-modal.is-extension-settings .biny-mcp-page {
   display: flex;
   width: min(var(--settings-content-max), calc(100% - 56px));
@@ -8762,12 +8762,15 @@
 }
 
 .settings-modal.is-extension-settings .biny-mcp-installed-layout {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.48fr);
+  align-items: start;
+  gap: var(--biny-space-4);
 }
 
 .settings-modal.is-extension-settings .biny-mcp-details {
-  position: static;
+  position: sticky;
+  top: 0;
 }
 
 .biny-mcp-install-dialog {
@@ -9060,6 +9063,19 @@
 
   .settings-plugin-action {
     flex: 1 1 auto;
+  }
+}
+
+/* 设置窗口有 800px 的最小宽度；在剩余内容空间不足时改为纵向，避免详情面板被挤出视口。 */
+@media (max-width: 920px) {
+  .settings-modal.is-extension-settings .biny-mcp-installed-layout {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .settings-modal.is-extension-settings .biny-mcp-details {
+    position: static;
+    width: 100%;
   }
 }
 
