@@ -27,6 +27,8 @@ import {
   type MemoryClearResult,
   type MemoryConsolidationOptions,
   type MemoryConsolidationResult,
+  type MemoryArchiveEntriesResult,
+  type MemoryArchiveResult,
   type MemoryDeleteResult,
   type MemoryEntriesResult,
   type MemoryEntry,
@@ -36,6 +38,8 @@ import {
   type MemoryMaintenanceOptions,
   type MemoryMaintenanceResult,
   type MemoryMaintenanceStatus,
+  type MemorySleepPreview,
+  type MemorySleepRun,
   type MemoryMutationOptions,
   type MemoryOverview,
   type MemoryOriginSelector,
@@ -91,6 +95,7 @@ export class LocalMemory {
     failed: 0
   };
   private maintenancePromise: Promise<MemoryMaintenanceResult> | undefined;
+  private maintenanceAbort: AbortController | undefined;
 
   constructor(
     private readonly workspaceRoot: string,
@@ -125,6 +130,16 @@ export class LocalMemory {
 
   async updateEntry(id: string, patch: MemoryEntryPatch, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
     return await this.storage.updateEntry(id, patch, options);
+  }
+
+  async archiveEntry(id: string, archived: boolean, options: MemoryMutationOptions): Promise<MemoryArchiveResult> {
+    return await this.storage.archiveEntry(id, archived, options);
+  }
+
+  async listArchivedEntries(options: MemoryReadOptions = {}): Promise<MemoryArchiveEntriesResult> {
+    const result = await this.storage.listEntries({ origins: ["all"], includeArchived: true, signal: options.signal });
+    const entries = result.entries.filter((entry) => entry.archivedAt !== undefined);
+    return { entries, storeRevision: result.storeRevision, total: entries.length };
   }
 
   async deleteEntryById(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
@@ -306,16 +321,56 @@ export class LocalMemory {
     derivedIndex?: MemoryDerivedIndexSink
   ): Promise<MemoryMaintenanceResult> {
     if (this.maintenancePromise) return this.maintenancePromise;
-    const promise = this.runEligibleCandidateMaintenance(options, derivedIndex).finally(() => {
+    const controller = new AbortController();
+    this.maintenanceAbort = controller;
+    const signal = options.signal === undefined
+      ? controller.signal
+      : AbortSignal.any([options.signal, controller.signal]);
+    const promise = this.runEligibleCandidateMaintenance({ ...options, signal }, derivedIndex).finally(() => {
       if (this.maintenancePromise === promise) this.maintenancePromise = undefined;
+      if (this.maintenanceAbort === controller) this.maintenanceAbort = undefined;
     });
     this.maintenancePromise = promise;
     return promise;
   }
 
   maintenanceStatus(): MemoryMaintenanceStatus {
-    return { ...this.maintenance };
+    return { ...this.maintenance, sleepRuns: this.maintenance.sleepRuns?.map((run) => ({ ...run })), lastRun: this.maintenance.lastRun ? { ...this.maintenance.lastRun } : undefined };
   }
+
+  cancelMaintenance(): boolean {
+    if (!this.maintenanceAbort) return false;
+    this.maintenanceAbort.abort();
+    return true;
+  }
+
+  async previewMaintenance(options: { temporaryTtl?: number; archiveRetentionDays?: number } = {}): Promise<MemorySleepPreview> {
+    const [entries, candidates, status] = await Promise.all([
+      this.storage.listEntries({ origins: ["all"], includeArchived: true }),
+      this.storage.scanEligibleCandidates({ limit: 32 }),
+      this.storage.readMaintenanceStatus().catch(() => undefined)
+    ]);
+    const now = Date.now();
+    const temporaryCutoff = options.temporaryTtl === undefined ? Number.NEGATIVE_INFINITY : now - Math.max(1, Math.trunc(options.temporaryTtl)) * 86_400_000;
+    const archiveCutoff = options.archiveRetentionDays === undefined ? Number.NEGATIVE_INFINITY : now - Math.max(1, Math.trunc(options.archiveRetentionDays)) * 86_400_000;
+    const temporaryToArchive = options.temporaryTtl === undefined ? 0 : entries.entries.filter((entry) => (
+      entry.archivedAt === undefined
+      && !["preference", "working_style"].includes(entry.kind)
+      && (Date.parse(entry.lastRecalledAt ?? entry.updatedAt) <= temporaryCutoff)
+    )).length;
+    const archivedToDelete = options.archiveRetentionDays === undefined ? 0 : entries.entries.filter((entry) => (
+      entry.archivedAt !== undefined && Date.parse(entry.archivedAt) <= archiveCutoff
+    )).length;
+    return {
+      available: true,
+      candidates: candidates.candidates.length,
+      temporaryToArchive,
+      archivedToDelete,
+      recentRuns: status?.sleepRuns?.length ?? 0,
+      lastRun: status?.lastRun
+    };
+  }
+
 
   async loadMaintenanceStatus(options: MemoryReadOptions = {}): Promise<MemoryMaintenanceStatus> {
     this.maintenance = await this.storage.readMaintenanceStatus(options);
@@ -343,9 +398,43 @@ export class LocalMemory {
     let processed = 0;
     let written = 0;
     let failed = 0;
+    let archived = 0;
+    const exact = 0;
+    let expired = 0;
+    let similarity = 0;
+    let llm = 0;
     let lastError: string | undefined;
     try {
-      const scan = await this.storage.scanEligibleCandidates({ now, limit: maintenanceCandidateLimit, signal: options.signal });
+      let overviewBeforeArchive = await this.storage.getOverview({ signal: options.signal });
+      if (options.temporaryTtl !== undefined) {
+        const cutoff = now.getTime() - Math.max(1, Math.trunc(options.temporaryTtl)) * 86_400_000;
+        const active = await this.storage.listEntries({ origins: ["all"], signal: options.signal });
+        for (const entry of active.entries) {
+          if (["preference", "working_style"].includes(entry.kind)) continue;
+          const lastUsed = entry.lastRecalledAt ? Date.parse(entry.lastRecalledAt) : Date.parse(entry.updatedAt);
+          if (!Number.isFinite(lastUsed) || lastUsed > cutoff) continue;
+          const result = await this.storage.archiveEntry(entry.id, true, {
+            expectedRevision: overviewBeforeArchive.storeRevision,
+            now,
+            signal: options.signal
+          }).catch(() => undefined);
+          if (result?.archived) {
+            archived += 1;
+            expired += 1;
+            overviewBeforeArchive = await this.storage.getOverview({ signal: options.signal });
+          }
+        }
+      }
+      if (options.archiveRetentionDays !== undefined) {
+        const purged = await this.storage.purgeArchivedEntries(options.archiveRetentionDays, {
+          expectedRevision: overviewBeforeArchive.storeRevision,
+          now,
+          signal: options.signal
+        });
+        archived += purged.deleted;
+        expired += purged.deleted;
+      }
+      const scan = await this.storage.scanEligibleCandidates({ now, limit: Math.max(1, Math.min(100, options.llmBatchSize ?? maintenanceCandidateLimit)), signal: options.signal });
       scanned = scan.candidates.length;
       this.maintenance.eligible = scanned;
       for (const candidate of scan.candidates) {
@@ -360,6 +449,7 @@ export class LocalMemory {
             const writeResult = await this.writeEntryWithRetry(input, options.signal, now);
             if (writeResult.written) {
               written += 1;
+              llm += 1;
               if (writeResult.entry && derivedIndex) {
                 // Markdown 已提交；索引失败不得把候选重新标成失败并诱发重复写入。
                 await derivedIndex.indexEntry(writeResult.entry).catch(() => undefined);
@@ -367,7 +457,7 @@ export class LocalMemory {
               // 写入即整理：同 topic 合并防止碎片化；整理失败不影响已提交条目。
               const overview = await this.storage.getOverview({ signal: options.signal });
               const selector = input.origin?.kind === "user" || input.audience === "universal" ? "user" : "current_workspace";
-              const consolidation = await this.consolidateEntries(selector, {
+              const consolidation = options.useLlm === false ? undefined : await this.consolidateEntries(selector, {
                 expectedRevision: overview.storeRevision,
                 topic: input.topic,
                 signal: options.signal
@@ -377,6 +467,9 @@ export class LocalMemory {
                 return undefined;
               });
               if (consolidation && consolidation.revision !== overview.storeRevision) {
+                const reduced = Math.max(0, (consolidation.before ?? 0) - (consolidation.after ?? 0));
+                if (options.useLlm === false) similarity += reduced;
+                else llm += reduced;
                 // 整理会同时新增和删除多个 ID，不能把它伪装成单条增量写。
                 try {
                   derivedIndex?.requestRebuild();
@@ -406,6 +499,21 @@ export class LocalMemory {
       throw error;
     } finally {
       const finishedAt = new Date().toISOString();
+      const lastRun: MemorySleepRun = {
+        id: `${startedAt}-${finishedAt}`,
+        trigger: options.trigger ?? "scheduled",
+        examined: scanned,
+        written,
+        failed,
+        archived,
+        exact,
+        expired,
+        similarity,
+        llm,
+        startedAt,
+        finishedAt
+      };
+      const previousRuns = this.maintenance.sleepRuns ?? [];
       this.maintenance = {
         state: "idle",
         lastScanAt: startedAt,
@@ -414,7 +522,9 @@ export class LocalMemory {
         processed,
         written,
         failed,
-        error: lastError
+        error: lastError,
+        lastRun: { ...lastRun, archived },
+        sleepRuns: [...previousRuns, lastRun].slice(-20)
       };
       // Abort 后仍要留下已验证的清理/失败状态；状态写入不复用已中止 signal。
       await this.storage.writeMaintenanceStatus(this.maintenance).catch((error) => {

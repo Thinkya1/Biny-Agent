@@ -1,5 +1,5 @@
 /**
- * 自动记忆召回的混合检索层。
+ * 自动记忆召回：可选查询改写后进行向量余弦 topK，向量不可用时回退词法。
  *
  * Markdown/LocalMemory 仍是事实源；SQLite 只提供可丢弃的向量排名。向量不可用、指纹或
  * 内容哈希不匹配时会 fail closed 到 user + 当前 workspace 的词法结果，绝不自动带入
@@ -23,13 +23,11 @@ import type {
   MemorySearchResult
 } from "./memoryTypes.js";
 
-const reciprocalRankConstant = 60;
-const vectorWeight = 0.6;
-const lexicalWeight = 0.4;
+const lexicalWeight = 1;
+const queryRewriteTimeoutMs = 3_000;
 const currentWorkspaceBoost = 1.1;
 const userMemoryBoost = 1.05;
 const defaultRecallMaxChars = 12_000;
-const queryRewriteTimeoutMs = 3_000;
 const maximumSemanticCandidates = 100;
 
 export interface AutomaticMemoryStore {
@@ -124,9 +122,7 @@ export class HybridMemoryRetriever {
     if (!snapshot.entries.length || options.limit < 1) return emptySearchResult(snapshot);
 
     const safeQuery = redactSecrets(query).trim();
-    const rewritePerfStartedAt = perfNow();
     const rewritten = await this.rewrite(safeQuery, snapshot.entries, options.signal);
-    recordPerfPhase("memory.rewrite", rewritePerfStartedAt, { changed: rewritten !== safeQuery });
     const lexicalQueries = [...new Set([safeQuery, rewritten].filter(Boolean))];
     if (!lexicalQueries.length && paths.length) lexicalQueries.push("");
     const lexicalPerfStartedAt = perfNow();
@@ -164,6 +160,21 @@ export class HybridMemoryRetriever {
     }, snapshot.storeRevision);
   }
 
+  private async rewrite(query: string, entries: readonly MemoryEntry[], signal?: AbortSignal): Promise<string> {
+    if (!query || !this.options.rewriteQuery || this.options.queryRewriteEnabled?.() === false) return query;
+    if (entries.some(({ id }) => id === query)) return query;
+    const timeout = AbortSignal.timeout(queryRewriteTimeoutMs);
+    const rewriteSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+    try {
+      const rewritten = (await raceWithAbort(this.options.rewriteQuery(query, rewriteSignal), rewriteSignal))
+        .trim().replace(/\s+/gu, " ").slice(0, 1_000);
+      return rewritten || query;
+    } catch {
+      signal?.throwIfAborted();
+      return query;
+    }
+  }
+
   async recordInjectedRecall(ids: string[], options: { signal?: AbortSignal; now?: Date } = {}): Promise<void> {
     const uniqueIds = [...new Set(ids)];
     if (!uniqueIds.length) return;
@@ -174,23 +185,6 @@ export class HybridMemoryRetriever {
     if (this.options.closeVectorIndex === false) return;
     this.vectorIndex?.close?.();
     this.vectorIndex = undefined;
-  }
-
-  private async rewrite(query: string, entries: readonly MemoryEntry[], signal?: AbortSignal): Promise<string> {
-    if (!query || !this.options.rewriteQuery || this.options.queryRewriteEnabled?.() === false) return query;
-    if (isExactIdOrPathQuery(query, entries)) return query;
-    const timeout = AbortSignal.timeout(queryRewriteTimeoutMs);
-    const rewriteSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
-    try {
-      const rewritten = cleanRewrittenQuery(await raceWithAbort(
-        this.options.rewriteQuery(query, rewriteSignal),
-        rewriteSignal
-      ));
-      return rewritten || query;
-    } catch {
-      signal?.throwIfAborted();
-      return query;
-    }
   }
 
   private async semanticSearch(
@@ -247,23 +241,25 @@ export class HybridMemoryRetriever {
 /** 纯排序函数不访问磁盘或模型，便于锁定跨项目门禁、权重和预算行为。 */
 export function rankHybridMemory(input: HybridMemoryRankingInput, storeRevision = 0): MemorySearchResult {
   const entries = new Map(input.entries.map((entry) => [entry.id, entry]));
-  const vectorIds = new Set(input.vectorRanking.map(({ entryId }) => entryId));
   const scores = new Map<string, number>();
   const add = (id: string, score: number): void => {
     const entry = entries.get(id);
     if (!entry || (input.automatic !== false
-      && !automaticOriginAllowed(entry, input.currentWorkspaceId, input.semanticAvailable, vectorIds))) return;
+      && !automaticOriginAllowed(entry, input.currentWorkspaceId))) return;
     scores.set(id, (scores.get(id) ?? 0) + score);
   };
 
-  const lexicalDivisor = Math.max(1, input.lexicalRankings.length);
-  for (const ranking of input.lexicalRankings) {
-    for (const [index, id] of ranking.entries()) {
-      add(id, lexicalWeight / lexicalDivisor / (reciprocalRankConstant + index + 1));
+  // 使用 sqlite-vec 的 cosine similarity + topK。不要把词法排名和向量排名
+  // 混成 RRF：向量可用时，语义相似度就是唯一排序依据；只有 embedding 不可用时才回退词法。
+  if (input.semanticAvailable && input.vectorRanking.length > 0) {
+    for (const candidate of input.vectorRanking) add(candidate.entryId, candidate.similarity);
+  } else {
+    const lexicalDivisor = Math.max(1, input.lexicalRankings.length);
+    for (const ranking of input.lexicalRankings) {
+      for (const [index, id] of ranking.entries()) {
+        add(id, lexicalWeight / lexicalDivisor / (index + 1));
+      }
     }
-  }
-  for (const [index, candidate] of input.vectorRanking.entries()) {
-    add(candidate.entryId, vectorWeight / (reciprocalRankConstant + index + 1));
   }
 
   const ranked = [...scores].map(([id, score]) => {
@@ -327,12 +323,9 @@ export function rankHybridMemory(input: HybridMemoryRankingInput, storeRevision 
 
 function automaticOriginAllowed(
   entry: MemoryEntry,
-  currentWorkspaceId: string,
-  semanticAvailable: boolean,
-  vectorIds: ReadonlySet<string>
+  currentWorkspaceId: string
 ): boolean {
-  if (entry.origin.kind === "user" || entry.origin.workspaceId === currentWorkspaceId) return true;
-  return semanticAvailable && vectorIds.has(entry.id);
+  return entry.origin.kind === "user" || entry.origin.workspaceId === currentWorkspaceId;
 }
 
 function originBoost(entry: MemoryEntry, currentWorkspaceId: string): number {
@@ -371,37 +364,11 @@ async function canonicalWorkspaceId(workspaceRoot: string): Promise<string> {
   return createHash("sha256").update(canonical).digest("hex").slice(0, 24);
 }
 
-function isExactIdOrPathQuery(query: string, entries: readonly MemoryEntry[]): boolean {
-  if (entries.some(({ id }) => id === query)) return true;
-  return /^(?:entries[\\/])?.+[/\\][^/\\]+$/u.test(query)
-    || /^(?:\.{0,2}[/\\])?[^\s/\\]+\.[A-Za-z0-9]{1,12}$/u.test(query);
-}
-
-function cleanRewrittenQuery(value: string): string {
-  return redactSecrets(value)
-    .trim()
-    .replace(/^```(?:text)?\s*/iu, "")
-    .replace(/\s*```$/u, "")
-    .replace(/^(?:query|查询|检索词)\s*[:：]\s*/iu, "")
-    .replace(/\s+/gu, " ")
-    .slice(0, 1_000)
-    .trim();
-}
-
 function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise<T>((resolve, reject) => {
-    const aborted = (): void => reject(signal.reason);
-    signal.addEventListener("abort", aborted, { once: true });
-    void promise.then(
-      (value) => {
-        signal.removeEventListener("abort", aborted);
-        resolve(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", aborted);
-        reject(error);
-      }
-    );
+    const abort = (): void => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    void promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
   });
 }

@@ -1,10 +1,3 @@
-/**
- * 个性化配置与会话覆盖的共享内核。
- *
- * 人格预设与自定义指令已下线（改由 SOUL/IDENTITY/STYLE 与 USER.md 承载）；这里只保留
- * 记忆与 TELOS 策略，以及「按聊天覆盖记忆开关」这一最小能力。配置、Desktop、TUI 和
- * Agent runtime 都复用这里的严格 schema 与解析规则，避免不同入口对记忆开关产生不同解释。
- */
 import { z } from "zod";
 import type { EmbeddingModelRef } from "../llm/embedding/types.js";
 
@@ -21,26 +14,6 @@ export const embeddingModelRefSchema: z.ZodType<EmbeddingModelRef> = z.discrimin
 ]);
 
 export type { EmbeddingModelRef } from "../llm/embedding/types.js";
-
-export const telosPolicySchema = z.object({
-  /** TELOS 受 memory.enabled 外层门禁约束；这里是 TELOS 自身的总开关。 */
-  enabled: z.boolean().default(false),
-  /** 是否从成功根回合中积累脱敏行为观察。 */
-  autoObserve: z.boolean().default(false),
-  /** 是否把已确认行为模式与 TELOS 做偏差比较。 */
-  driftDetection: z.boolean().default(false),
-  /** 是否在 Desktop idle 时显示偏差提醒。 */
-  proactivePrompts: z.boolean().default(false)
-}).strict();
-
-export type TelosPolicy = z.infer<typeof telosPolicySchema>;
-
-export const defaultTelosPolicy: TelosPolicy = {
-  enabled: false,
-  autoObserve: false,
-  driftDetection: false,
-  proactivePrompts: false
-};
 
 /** 早期记忆配置里出现过、当前已废弃的键；strict 校验前剥离以兼容旧文件。 */
 const deprecatedMemoryPolicyKeys = [] as const;
@@ -77,6 +50,7 @@ const rawMemoryPolicySchema = z.preprocess(stripDeprecatedMemoryPolicy, z.object
   consolidationModel: z.string().min(1).optional(),
   // 嵌入模型默认本地 multilingual-e5-small（可下载）；云端需 provider 已配置并经隐私确认。
   embeddingModel: embeddingModelRefSchema.optional(),
+  similarityThreshold: z.number().min(0).max(1).default(0.7),
   similarityThresholds: z.record(memorySimilarityThresholdSchema).default({}),
   // key 是 provider alias + endpoint 的不可逆摘要；不保存 URL、凭据或记忆正文。
   cloudEmbeddingConsents: z.record(z.object({
@@ -87,8 +61,13 @@ const rawMemoryPolicySchema = z.preprocess(stripDeprecatedMemoryPolicy, z.object
   excludeExternalContext: z.boolean().default(true),
   // 自动注入条数上限（概览之外的条目召回）。
   maxRecalled: z.number().int().min(1).max(20).default(5),
-  // 新增策略保持 optional，旧 config 不会因为升级而出现无意义的写回差异。
-  telos: telosPolicySchema.optional()
+  sleepEnabled: z.boolean().default(true),
+  sleepTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/u).default("03:00"),
+  archiveRetentionDays: z.number().int().min(1).max(3650).default(90),
+  temporaryTtl: z.number().int().min(1).max(3650).default(30),
+  useLlm: z.boolean().default(true),
+  llmMergeLow: z.number().min(0).max(1).default(0.65),
+  llmBatchSize: z.number().int().min(1).max(100).default(20),
 }).strict());
 
 export const memoryPolicySchema = rawMemoryPolicySchema.transform((policy) => ({
@@ -105,10 +84,18 @@ export const memoryPolicySchema = rawMemoryPolicySchema.transform((policy) => ({
   extractModel: undefined,
   consolidationModel: undefined,
   embeddingModel: { kind: "local", model: "multilingual-e5-small" },
+  similarityThreshold: 0.7,
   similarityThresholds: {},
   cloudEmbeddingConsents: {},
   excludeExternalContext: true,
-  maxRecalled: 5
+  maxRecalled: 5,
+  sleepEnabled: true,
+  sleepTime: "03:00",
+  archiveRetentionDays: 90,
+  temporaryTtl: 30,
+  useLlm: true,
+  llmMergeLow: 0.65,
+  llmBatchSize: 20
 });
 
 export type MemoryPolicy = z.infer<typeof memoryPolicySchema>;
@@ -154,10 +141,13 @@ export interface ResolvedChatPersonalization {
   extractModel?: string;
   consolidationModel?: string;
   embeddingModel?: EmbeddingModelRef;
+  similarityThreshold: number;
   similarityThresholds: Record<string, z.infer<typeof memorySimilarityThresholdSchema>>;
   excludeExternalContext: boolean;
   maxRecalled: number;
-  telos: TelosPolicy;
+  sleepEnabled: boolean;
+  sleepTime: string;
+  archiveRetentionDays: number;
 }
 
 export interface AgentPersonalizationState {
@@ -181,12 +171,6 @@ export function resolveChatPersonalization(
 ): ResolvedChatPersonalization {
   const parsedMemory = memoryPolicySchema.parse(memory);
   const parsedOverride = chatPersonalizationOverrideSchema.parse(override);
-  const configuredTelos = parsedMemory.telos ?? defaultTelosPolicy;
-  // memory.enabled 是 TELOS 的外层门禁；任一层关闭都不注入策略、不记录观察、不检测偏差，
-  // 但不清理已保存的 TELOS 文档、观察或审核结果。
-  const telos = parsedMemory.enabled && configuredTelos.enabled
-    ? configuredTelos
-    : defaultTelosPolicy;
   return {
     memoryEnabled: parsedMemory.enabled,
     useMemories: parsedMemory.enabled && (parsedOverride.useMemories === "inherit" ? parsedMemory.useMemories : parsedOverride.useMemories),
@@ -199,10 +183,13 @@ export function resolveChatPersonalization(
     extractModel: parsedMemory.extractModel,
     consolidationModel: parsedMemory.consolidationModel,
     embeddingModel: parsedMemory.embeddingModel,
+    similarityThreshold: parsedMemory.similarityThreshold,
     similarityThresholds: parsedMemory.similarityThresholds,
     excludeExternalContext: parsedMemory.excludeExternalContext,
     maxRecalled: parsedMemory.maxRecalled,
-    telos
+    sleepEnabled: parsedMemory.sleepEnabled,
+    sleepTime: parsedMemory.sleepTime,
+    archiveRetentionDays: parsedMemory.archiveRetentionDays
   };
 }
 

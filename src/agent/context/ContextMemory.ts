@@ -82,6 +82,7 @@ export class ContextMemory {
   ) {
     this.resolveBudget = getBudgetLimits ?? (() => ({
       contextWindow: maxTokens,
+      contextWindowIsFallback: true,
       maxInputTokens: maxTokens,
       maxOutputTokens: undefined,
       modelAlias: undefined
@@ -91,6 +92,7 @@ export class ContextMemory {
       maxTokens: budget.maxInputTokens,
       usedTokens: 0,
       contextWindow: budget.contextWindow,
+      contextWindowIsFallback: budget.contextWindowIsFallback,
       effectiveContextWindow: budget.effectiveContextWindow,
       effectiveContextWindowPercent: budget.effectiveContextWindowPercent,
       contextReserveTokens: budget.contextReserveTokens,
@@ -129,7 +131,7 @@ export class ContextMemory {
     const workspace = await this.workspace.prepareTurn(input, signal);
     recordPerfPhase("context.workspace", workspacePerfStartedAt);
     // 概览（codex 式锚点）始终注入；语义召回的条目作为其下增量。条目内容由 recall_memory
-    // 按需取用；引用在回合结束解析 <memory-citations> 后回写使用统计。
+    // 按需取用；召回统计由 runtime 在实际注入时记录。
     const overviewPerfStartedAt = perfNow();
     const memoryOverview = useMemories ? await this.loadMemoryOverview(signal) : "";
     recordPerfPhase("context.memoryOverview", overviewPerfStartedAt);
@@ -191,6 +193,7 @@ export class ContextMemory {
     this.lastBudget = {
       ...assembly.budget,
       contextWindow: budget.contextWindow,
+      contextWindowIsFallback: budget.contextWindowIsFallback,
       effectiveContextWindow: budget.effectiveContextWindow,
       effectiveContextWindowPercent: budget.effectiveContextWindowPercent,
       contextReserveTokens: budget.contextReserveTokens,
@@ -652,6 +655,7 @@ export class ContextMemory {
       ...this.lastBudget,
       maxTokens: budget.maxInputTokens,
       contextWindow: budget.contextWindow,
+      contextWindowIsFallback: budget.contextWindowIsFallback,
       effectiveContextWindow: budget.effectiveContextWindow,
       effectiveContextWindowPercent: budget.effectiveContextWindowPercent,
       contextReserveTokens: budget.contextReserveTokens,
@@ -678,6 +682,7 @@ export class ContextMemory {
       ...this.lastBudget,
       maxTokens: budget.maxInputTokens,
       contextWindow: budget.contextWindow,
+      contextWindowIsFallback: budget.contextWindowIsFallback,
       effectiveContextWindow: budget.effectiveContextWindow,
       effectiveContextWindowPercent: budget.effectiveContextWindowPercent,
       contextReserveTokens: budget.contextReserveTokens,
@@ -1042,6 +1047,7 @@ function normalizeRestoredBudget(budget: ContextBudgetStatus, limits: ModelConte
     ...budget,
     maxTokens: limits.maxInputTokens,
     contextWindow: limits.contextWindow,
+    contextWindowIsFallback: limits.contextWindowIsFallback,
     effectiveContextWindow: limits.effectiveContextWindow,
     effectiveContextWindowPercent: limits.effectiveContextWindowPercent,
     contextReserveTokens: limits.contextReserveTokens,
@@ -1063,6 +1069,7 @@ function estimateRestoredBudget(history: AgentMessage[], limits: ModelContextBud
   return {
     maxTokens: limits.maxInputTokens,
     contextWindow: limits.contextWindow,
+    contextWindowIsFallback: limits.contextWindowIsFallback,
     effectiveContextWindow: limits.effectiveContextWindow,
     effectiveContextWindowPercent: limits.effectiveContextWindowPercent,
     contextReserveTokens: limits.contextReserveTokens,

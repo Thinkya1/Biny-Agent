@@ -24,6 +24,8 @@ async function main(): Promise<void> {
   await testSingleRootSafetyBoundary();
   await testListEntriesPagination();
   await testReadPathsDoNotRepair();
+  await testArchiveAndRestore();
+  await testSleepRunRecord();
   await testEmbeddingStatusDoesNotCreateIndex();
   console.log("memory v3 tests passed");
 }
@@ -221,6 +223,43 @@ async function testCandidateOriginEligibilityAndExactContent(): Promise<void> {
     assert.equal(queued.candidate?.summary.includes("sk-candidate-secret-value"), true);
     assert.equal((await memory.listEligibleCandidates({ now: new Date("2026-08-10T05:59:59.999Z") })).candidates.length, 0);
     assert.equal((await memory.listEligibleCandidates({ now: new Date("2026-08-10T06:00:00.000Z") })).candidates.length, 1);
+  });
+}
+
+async function testSleepRunRecord(): Promise<void> {
+  await withIsolatedMemory(async (workspaceRoot) => {
+    const memory = new LocalMemory(workspaceRoot, unusedModel);
+    await memory.enqueueCandidate({
+      summary: "A completed task summary with enough durable content for sleep processing.",
+      completed: true,
+      lineage: { source: "completed_task", sessionId: "sleep-session", turnId: "sleep-turn", runId: "sleep-run", externalContext: false }
+    }, { expectedRevision: 0, excludeExternalContext: true, now: new Date("2026-08-01T00:00:00.000Z") });
+    const result = await memory.processEligibleCandidates({ now: new Date("2026-08-02T00:00:00.000Z"), minAgeMs: 0 } as never);
+    void result;
+    const status = await memory.loadMaintenanceStatus();
+    assert.equal(status.lastRun?.trigger, "scheduled");
+    assert.equal(status.lastRun?.examined, 1);
+    assert.equal(typeof status.lastRun?.id, "string");
+  });
+}
+
+async function testArchiveAndRestore(): Promise<void> {
+  await withIsolatedMemory(async (workspaceRoot) => {
+    const storage = new MemoryStorage(workspaceRoot);
+    const created = await storage.writeEntry(projectEntry(
+      "Archiveable memory",
+      "This memory remains available after archival and can be restored without deleting its Markdown source."
+    ), { expectedRevision: 0 });
+    assert.ok(created.entry);
+    const archived = await storage.archiveEntry(created.entry!.id, true, { expectedRevision: created.revision, now: new Date("2026-08-20T00:00:00.000Z") });
+    assert.equal(archived.archived, true);
+    assert.equal(archived.entry?.archivedReason, "manual");
+    assert.equal((await storage.listEntries({ origins: ["all"] })).entries.length, 0);
+    assert.equal((await storage.listEntries({ origins: ["all"], includeArchived: true })).entries.length, 1);
+    const restored = await storage.archiveEntry(created.entry!.id, false, { expectedRevision: archived.revision, now: new Date("2026-08-21T00:00:00.000Z") });
+    assert.equal(restored.archived, false);
+    assert.equal(restored.entry?.archivedAt, undefined);
+    assert.equal((await storage.listEntries({ origins: ["all"] })).entries.length, 1);
   });
 }
 

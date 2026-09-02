@@ -9,7 +9,7 @@ Biny 是一个本地优先、记忆优先（First Local × First Memory）的 AI
 - **三端入口**：Desktop、TUI、CLI 共用 Agent Runtime、工具和 Session。
 - **工作区工具**：文件读写、代码搜索、Git、Shell、受管进程、Web、Todo、MCP、Plugin 和 Skill。
 - **模型与 Provider**：支持主流模型服务、OpenAI-compatible / Anthropic-compatible 网关和 Ollama。
-- **本地状态**：Session、Memory、TELOS、Agent Identity 和运行状态以本地文件或数据库为主。
+- **本地状态**：Session、Memory、Agent Identity 和运行状态以本地文件或数据库为主。
 - **安全与恢复**：权限确认、checkpoint/undo、Session 恢复，以及可审计的工具执行结果。
 - **个性化**：表达风格、长期记忆和 Agent 灵魂分层管理；Markdown 是身份与记忆的权威来源。
 - **活动感知**：macOS 原生采集器在本地记录屏幕活动（截图、OCR、输入事件），写入前规则脱敏、原始内容不出设备；分析层归纳会话摘要并聚合每日工作日记，Agent 可主动检索你最近在做什么。
@@ -63,7 +63,7 @@ CLI、TUI 和 Desktop 共用全局 `~/.biny/config.json`；项目设置可放在
 
 ### Agent 灵魂
 
-全局 `$BINY_AGENT_DIR/identity/`（默认 `~/.biny/agent/identity/`）保存 `SOUL.md`、`IDENTITY.md`、`STYLE.md` 和 `USER.md`。身份资料默认加载，Desktop 的 **设置 → 通用 → Agent 灵魂** 支持只读预览和提案审核；Memory、TELOS 与身份资料彼此分开。
+全局 `$BINY_AGENT_DIR/identity/`（默认 `~/.biny/agent/identity/`）保存 `SOUL.md`、`IDENTITY.md`、`STYLE.md` 和 `USER.md`。身份资料默认加载，Desktop 的 **设置 → 通用 → Agent 灵魂** 支持只读预览和提案审核；Memory 与身份资料彼此分开。
 
 ## 开发
 

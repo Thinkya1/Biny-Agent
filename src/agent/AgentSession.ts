@@ -50,7 +50,6 @@ import type {
 import { ToolExecutionCoordinator, type ToolExecutionBudgetSnapshot } from "./toolExecutionCoordinator.js";
 import {
   buildSystemPrompt,
-  personalizationRuntimePolicyFromSystemPrompt,
   refreshRuntimeSystemPrompt,
   systemPromptForTelemetry,
   withActiveRunCompactionSummary
@@ -74,7 +73,6 @@ import {
 import { evaluateCompletion } from "./completionReview.js";
 import { ContextMemory } from "./context/ContextMemory.js";
 import { LocalMemory, withFreshRevision, redactSecrets } from "./context/LocalMemory.js";
-import { TelosStorage } from "./context/telosStorage.js";
 import { IdentityStorage } from "./context/identityStorage.js";
 import { EmotionStorage } from "./context/emotionStorage.js";
 import { renderEmotionPrompt } from "./context/emotionPrompt.js";
@@ -85,7 +83,6 @@ import {
   MemoryEmbeddingService,
   type MemoryEmbeddingRuntimeStatus
 } from "./context/MemoryEmbeddingService.js";
-import { parseMemoryCitations } from "./context/memoryCitations.js";
 import { WorkspaceContext } from "./context/WorkspaceContext.js";
 import type { CompactionResult, ContextStatus } from "./context/types.js";
 import { recordNativeTelemetry } from "../observability/telemetry.js";
@@ -152,6 +149,8 @@ export interface AgentSessionOptions {
   runtimeEventSink?: RuntimeEventSink;
   /** Host-owned MCP/Plugin 调用的统一 Capability authority。 */
   capabilities?: CapabilityStore;
+  /** 由 composition root 提供的 Activity 被动上下文；失败时不得阻断普通聊天。 */
+  activityContext?: (input: string, model: AgentModel | undefined, signal?: AbortSignal) => Promise<string | undefined>;
   /** 自动技能提取产出待审核草稿后回调（仅 pending 成功路径）；宿主用它向界面推送审核入口。 */
   onSkillDraftCreated?: (notice: { draft: { id: string; name: string; description: string; toolCalls: number }; runId?: string }) => void;
 }
@@ -221,6 +220,8 @@ export interface AgentSessionInfo {
   modelAlias: string;
   thinking: ThinkingSelection;
   contextWindow?: number;
+  /** 上下文窗口未由模型元数据声明时为 true。 */
+  contextWindowIsFallback?: boolean;
   /** 按模型有效窗口比例计算的可用输入窗口。 */
   effectiveContextWindow?: number;
   effectiveContextWindowPercent?: number;
@@ -287,7 +288,6 @@ type MemoryModelField = "memoryModel" | "rewriteModel" | "extractModel" | "conso
 export class AgentSession {
   private readonly contextMemory: ContextMemory;
   private readonly localMemory: LocalMemory;
-  private readonly telosStorage: TelosStorage;
   private readonly identityStorage: IdentityStorage;
   private readonly emotionStorage: EmotionStorage;
   private readonly memoryModelFor: (field: MemoryModelField) => AgentModel;
@@ -359,7 +359,6 @@ export class AgentSession {
       () => this.sideModelRequestContext(),
       () => this.memoryModelFor("consolidationModel")
     );
-    this.telosStorage = new TelosStorage(options.workspaceRoot);
     this.identityStorage = new IdentityStorage();
     this.emotionStorage = new EmotionStorage();
     this.localEmbeddingManager = new LocalEmbeddingManager(path.join(globalAgentDir(), "models", "embeddings"));
@@ -379,22 +378,22 @@ export class AgentSession {
       workspaceRoot: options.workspaceRoot,
       getEmbeddingRuntime: async () => await this.memoryEmbeddingService.embeddingRuntime(),
       getReadOnlyVectorIndex: openReadOnlyMemoryIndex,
-      getThresholds: (fingerprint, recommended) => (
-        this.activeConfig.context.memory.similarityThresholds[fingerprint] ?? recommended
-      ),
+      getThresholds: (fingerprint, _recommended) => {
+        const configured = this.activeConfig.context.memory.similarityThresholds[fingerprint];
+        const threshold = this.activeConfig.context.memory.similarityThreshold;
+        return configured === undefined
+          ? { currentWorkspace: threshold, crossWorkspace: threshold }
+          : { currentWorkspace: Math.max(threshold, configured.currentWorkspace), crossWorkspace: Math.max(threshold, configured.crossWorkspace) };
+      },
       queryRewriteEnabled: () => this.activePersonalization.queryRewrite,
       rewriteQuery: async (query, signal) => {
         const result = await generateNativeText(this.memoryModelFor("rewriteModel"), [{
           role: "user",
-          content: [{
-            type: "text",
-            text: [
-              "Rewrite the user's question as one concise semantic memory search query.",
-              "Preserve concrete identifiers, paths and technical terms. Return only the query.",
-              "",
-              query
-            ].join("\n")
-          }]
+          content: [{ type: "text", text: [
+            "Rewrite the user's question as one concise semantic memory search query.",
+            "Preserve concrete identifiers, paths and technical terms. Return only the query.",
+            "", query
+          ].join("\n") }]
         }], {
           signal,
           timeoutMs: 3_000,
@@ -405,7 +404,7 @@ export class AgentSession {
         });
         if (result.usage) await onUsage(result.usage, "memory");
         return result.text;
-      },
+      }
     });
     // 压缩摘要可切换到更便宜的模型。与 memoryModel 一样读取 root-turn 快照；解析失败只
     // 打 warning 并回退当前对话模型，绝不让配置问题阻断会话压缩。按 alias 缓存成功结果。
@@ -435,7 +434,7 @@ export class AgentSession {
         if (options.modelManager) return options.modelManager.getContextBudget();
         // 直接注入 AgentModel 的宿主没有 ModelManager，只能使用显式上下文上限；这里不猜测模型能力。
         const fallback = options.config.context.maxInputTokens ?? defaultModelContextWindow;
-        return { contextWindow: fallback, maxInputTokens: fallback, maxOutputTokens: undefined };
+        return { contextWindow: fallback, contextWindowIsFallback: true, maxInputTokens: fallback, maxOutputTokens: undefined };
       },
       { ...options.config.context.compaction, resolveSummaryModel },
       onModelRequest,
@@ -452,7 +451,6 @@ export class AgentSession {
 
   async initialize(): Promise<void> {
     await this.contextMemory.initialize();
-    if (this.activePersonalization.telos.enabled) await this.telosStorage.initialize();
     await this.identityStorage.initialize();
   }
 
@@ -485,22 +483,33 @@ export class AgentSession {
 
   /** 重新生成也要使用和普通回合相同的稳定系统提示词，只替换消息上下文。 */
   private async baseSystemPrompt(
+    input: string,
     mode: AgentRunMode,
     permissionMode: PermissionMode,
     personalization: ResolvedChatPersonalization,
-    capabilitySelection?: AgentCapabilitySelection
+    capabilitySelection?: AgentCapabilitySelection,
+    signal?: AbortSignal
   ): Promise<string> {
     const selectedToolNames = this.selectedToolNames(capabilitySelection);
     const initialTools = mode === "plan"
       ? selectPlanTools(this.promptTools(selectedToolNames ? [...selectedToolNames] : undefined), permissionMode)
       : this.promptTools(selectedToolNames ? [...selectedToolNames] : undefined);
-    const telosPrompt = personalization.telos.enabled
-      ? await this.telosStorage.promptText()
-      : undefined;
     const identityPrompt = this.activeConfig.context.identity.enabled
       ? await this.identityStorage.promptText(this.activeConfig.context.identity.userEnabled)
       : undefined;
     const emotionPrompt = await this.currentEmotionPrompt();
+    let activityPrompt: string | undefined;
+    if (this.options.activityContext !== undefined) {
+      try {
+        activityPrompt = await this.options.activityContext(
+          input,
+          this.options.modelManager?.getModel() ?? this.options.model,
+          signal
+        );
+      } catch {
+        // Activity 是辅助上下文，索引/权限/模型不可用时继续正常聊天。
+      }
+    }
     return buildSystemPrompt({
       mode: mode === "plan" ? "plan" : "qa",
       permissionMode,
@@ -508,8 +517,8 @@ export class AgentSession {
       tools: initialTools,
       personalization,
       identityPrompt,
-      telosPrompt,
       emotionPrompt,
+      activityPrompt,
       cwd: this.options.workspaceRoot
     });
   }
@@ -730,9 +739,13 @@ export class AgentSession {
     return providers.createEmbeddingRuntime(ref);
   }
 
-  /** TELOS 由独立存储维护；Desktop/Host 通过 AgentSession 取得同一份本地权威。 */
-  getTelosStorage(): TelosStorage {
-    return this.telosStorage;
+  /** Activity 固定使用本地 multilingual-e5-small，不复用可配置的云端记忆 embedding。 */
+  async getActivityEmbeddingRuntime(): Promise<EmbeddingModelRuntime | undefined> {
+    try {
+      return await this.localEmbeddingManager.createRuntime("multilingual-e5-small");
+    } catch {
+      return undefined;
+    }
   }
 
   /** 身份资料由同一个 AgentSession 读取，Desktop 也可通过本地存储服务复用这份权威。 */
@@ -760,6 +773,10 @@ export class AgentSession {
       origins: options.origins,
       automatic: false
     });
+  }
+
+  cancelMemoryMaintenance(): boolean {
+    return this.localMemory.cancelMaintenance();
   }
 
   async memoryEmbeddingStatus(): Promise<MemoryEmbeddingRuntimeStatus> {
@@ -956,7 +973,7 @@ export class AgentSession {
     const permissionMode = this.options.permissionManager.getStatus().mode;
     this.contextMemory.restore(prefixMessages, replay.contextState ?? replay.contextUsage);
     this.contextMessageReferences = prefixReferences;
-    const basePrompt = await this.baseSystemPrompt(mode, permissionMode, personalization, options.capabilitySelection);
+    const basePrompt = await this.baseSystemPrompt(sourceInput, mode, permissionMode, personalization, options.capabilitySelection, options.abortSignal);
     const prepared = await this.contextMemory.prepareTurn(
       sourceInput,
       appendPromptContext(basePrompt, options.promptContext),
@@ -1110,15 +1127,7 @@ export class AgentSession {
     const retrying = runOptions.retryOfMessageId !== undefined;
     const hasProvidedContext = Boolean(runOptions.continueFrom?.length);
     const continuing = hasProvidedContext && !retrying;
-    const persistedPolicy = hasProvidedContext
-      ? personalizationRuntimePolicyFromSystemPrompt(runOptions.continueSystemPrompt)
-      : undefined;
-    let turnPersonalization: ResolvedChatPersonalization = persistedPolicy === undefined
-      ? this.activePersonalization
-      : {
-        ...this.activePersonalization,
-        ...persistedPolicy
-      };
+    let turnPersonalization: ResolvedChatPersonalization = this.activePersonalization;
     this.contextMemory.setPersonalization(
       {},
       turnPersonalization.useMemories
@@ -1236,7 +1245,7 @@ export class AgentSession {
       // Plan 的协作状态独立于权限模式：普通权限收窄为只读工具，full-access 才恢复
       // 写入/执行工具；这与 Plan 提示词的分支必须使用同一份权限快照。
       const systemPromptPerfStartedAt = perfNow();
-      const baseSystemPrompt = await this.baseSystemPrompt(mode, permissionMode, turnPersonalization, runOptions.capabilitySelection);
+      const baseSystemPrompt = await this.baseSystemPrompt(input, mode, permissionMode, turnPersonalization, runOptions.capabilitySelection, abortSignal);
       recordPerfPhase("turn.baseSystemPrompt", systemPromptPerfStartedAt, { runId: runtimeRunId });
       const prepareTurnPerfStartedAt = perfNow();
       const prepared = await this.contextMemory.prepareTurn(
@@ -1365,8 +1374,7 @@ export class AgentSession {
       mode,
       runBudget,
       completedStepsBeforeRun,
-      messageQueues,
-      personalization
+      messageQueues
     } = args;
     let systemPrompt = initialSystemPrompt;
     const nativeModel = this.options.modelManager?.getModel() ?? this.options.model;
@@ -1963,12 +1971,11 @@ export class AgentSession {
       }
       await this.recordTurnOutcome(outcome);
       if (outcome.status === "completed") {
-        await this.recordCitedMemories(content).catch(() => undefined);
         await this.enqueueCompletedMemoryCandidate(
           input,
           content,
           runOptions.continueFrom?.length ? [...runOptions.continueFrom, ...newMessages] : newMessages,
-          personalization,
+          this.activePersonalization,
           runOptions
         ).catch(() => undefined);
         if (!runOptions.continueFrom?.length) {
@@ -2256,20 +2263,9 @@ export class AgentSession {
     this.recordModelUsage(usage, operation, modelAlias);
   }
 
-  /**
-   * 解析回答末尾的记忆引用块并回写使用统计（仅计入真实存在的条目）。
-   * 失败只丢一次统计，不影响回合结果；session JSONL 保留原始块供审计与渲染角标。
-   */
-  private async recordCitedMemories(answer: string): Promise<void> {
-    if (!answer.includes("<memory-citations>")) return;
-    const { citations } = parseMemoryCitations(answer);
-    if (!citations.length) return;
-    const storedIds = new Set((await this.localMemory.listMemoryEntries({ origins: ["all"] })).entries.map(({ id }) => id));
-    const valid = citations.filter(({ id }) => storedIds.has(id)).map(({ id }) => id);
-    if (!valid.length) return;
-    await this.localMemory.recordRecallUsage(valid);
-  }
 
+
+  /** 自动记忆入口：成功根回合先进入延迟队列，由后台维护决定是否长期保存。 */
   private async enqueueCompletedMemoryCandidate(
     task: string,
     answer: string,
@@ -2277,7 +2273,7 @@ export class AgentSession {
     personalization: ResolvedChatPersonalization,
     runOptions: AgentRunOptions
   ): Promise<void> {
-    if (!personalization.contributeMemories && !personalization.telos.autoObserve) return;
+    if (!personalization.contributeMemories) return;
     const sessionId = this.recorder.sessionId;
     const turnId = runOptions.turnId;
     const runId = runOptions.runId;
@@ -2285,39 +2281,13 @@ export class AgentSession {
     const externalContext = Boolean(runOptions.attachments?.length) || this.usedExternalContext(messages);
     const summary = completedMemoryCandidateSummary(task, answer);
     if (!summary) return;
-    const input = {
-      summary,
-      completed: true as const,
-      lineage: {
-        source: "completed_task" as const,
-        sessionId,
-        turnId,
-        runId,
-        externalContext
-      }
-    };
-    if (personalization.contributeMemories) {
-      await withFreshRevision(this.localMemory, undefined, async (expectedRevision) => (
-        await this.localMemory.enqueueCandidate(input, {
-          expectedRevision,
-          excludeExternalContext: personalization.excludeExternalContext
-        })
-      )).catch(() => undefined);
-    }
-    if (personalization.telos.autoObserve && (!externalContext || !personalization.excludeExternalContext)) {
-      try {
-        await this.telosStorage.recordObservation({
-          scope: "workspace",
-          summary,
-          sessionId,
-          turnId,
-          runId,
-          externalContext
-        });
-      } catch {
-        // TELOS 是后台辅助能力，不能让一条已经成功的用户任务变成失败。
-      }
-    }
+    await withFreshRevision(this.localMemory, undefined, async (expectedRevision) => (
+      await this.localMemory.enqueueCandidate({
+        summary,
+        completed: true as const,
+        lineage: { source: "completed_task" as const, sessionId, turnId, runId, externalContext }
+      }, { expectedRevision, excludeExternalContext: personalization.excludeExternalContext })
+    ));
   }
 
   private usedExternalContext(messages: readonly AgentMessage[]): boolean {
@@ -3168,21 +3138,14 @@ function appendPromptContext(systemPrompt: string, promptContext: string | undef
 function completedMemoryCandidateSummary(task: string, answer: string): string | undefined {
   const taskSummary = boundedCandidateText(task, 600);
   const outcomeSummary = boundedCandidateText(answer, 1_200);
-  // 短寒暄和一次性确认不具备可复用价值。这里保留本地 durable memory 的原文，
-  // 只用长度门槛排除没有信息量的回合；外发边界由模型/Provider 策略决定。
   if (Array.from(`${taskSummary}\n${outcomeSummary}`).length < 180) return undefined;
-  return [
-    `Completed task: ${taskSummary || "(no public task summary)"}`,
-    `Outcome: ${outcomeSummary || "(no public outcome summary)"}`
-  ].join("\n");
+  return [`Completed task: ${taskSummary || "(no public task summary)"}`, `Outcome: ${outcomeSummary || "(no public outcome summary)"}`].join("\n");
 }
 
 function boundedCandidateText(value: string, maxCharacters: number): string {
   const normalized = value.replace(/\s+/gu, " ").trim();
   const characters = Array.from(normalized);
-  return characters.length <= maxCharacters
-    ? normalized
-    : `${characters.slice(0, Math.max(0, maxCharacters - 1)).join("")}…`;
+  return characters.length <= maxCharacters ? normalized : `${characters.slice(0, Math.max(0, maxCharacters - 1)).join("")}…`;
 }
 
 function readToolBudget(value: unknown): ToolExecutionBudgetSnapshot | undefined {

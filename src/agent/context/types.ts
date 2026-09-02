@@ -51,6 +51,8 @@ export interface ContextBudgetStatus {
   maxTokens: number;
   usedTokens: number;
   contextWindow?: number;
+  /** 上下文窗口未由模型元数据声明时为 true；旧 session 没有该字段时视为未知。 */
+  contextWindowIsFallback?: boolean;
   /** 按模型有效窗口比例计算的可用输入窗口，不等于原始 contextWindow。 */
   effectiveContextWindow?: number;
   effectiveContextWindowPercent?: number;

@@ -54,6 +54,8 @@ const frontmatterSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   revision: z.number().int().nonnegative(),
+  archivedAt: z.string().optional(),
+  archivedReason: z.enum(["exact", "expired", "orphan", "similarity", "llm", "manual"]).optional(),
   lineage: z.array(lineageSchema).min(1)
 });
 
@@ -92,6 +94,8 @@ export interface StoredEntryFields {
   revision: number;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
+  archivedReason?: MemoryEntry["archivedReason"];
 }
 
 export interface RankedMemoryEntry {
@@ -123,6 +127,8 @@ export function sanitizeMemoryEntryInput(input: MemoryEntryInput): MemoryEntryIn
     paths: sanitizeStringArray(input.paths, 16, 500),
     keywords: sanitizeStringArray(input.keywords, 12, 120).map((value) => value.toLowerCase()),
     importance: normalizeImportance(input.importance),
+    archivedAt: input.archivedAt,
+    archivedReason: input.archivedReason,
     lineage
   };
   if (!sanitized.title) sanitized.title = "Memory note";
@@ -153,7 +159,9 @@ export function createStoredMemoryEntry(input: MemoryEntryInput, fields: StoredE
       : 0,
     lastRecalledAt: "lastRecalledAt" in input && typeof input.lastRecalledAt === "string"
       ? assertIsoTime(input.lastRecalledAt)
-      : undefined
+      : undefined,
+    archivedAt: "archivedAt" in input && typeof input.archivedAt === "string" ? assertIsoTime(input.archivedAt) : undefined,
+    archivedReason: "archivedReason" in input && isArchiveReason(input.archivedReason) ? input.archivedReason : undefined
   };
 }
 
@@ -162,7 +170,9 @@ export function renderMemoryEntry(entry: MemoryEntry): string {
     id: entry.id,
     revision: entry.revision,
     createdAt: entry.createdAt,
-    updatedAt: entry.updatedAt
+    updatedAt: entry.updatedAt,
+    archivedAt: entry.archivedAt,
+    archivedReason: entry.archivedReason
   });
   const frontmatter = stringifyYaml({
     version: memoryFormatVersion,
@@ -179,6 +189,8 @@ export function renderMemoryEntry(entry: MemoryEntry): string {
     createdAt: safe.createdAt,
     updatedAt: safe.updatedAt,
     revision: safe.revision,
+    archivedAt: safe.archivedAt,
+    archivedReason: safe.archivedReason,
     lineage: safe.lineage
   }, { lineWidth: 0 }).trimEnd();
   return [
@@ -219,10 +231,14 @@ export function parseMemoryEntryFile(content: string): MemoryEntry | undefined {
       paths: value.paths,
       keywords: value.keywords,
       importance: value.importance,
+      archivedAt: value.archivedAt,
+      archivedReason: value.archivedReason,
       lineage: value.lineage
     }, {
       id: value.id,
       revision: value.revision,
+      archivedAt: value.archivedAt,
+      archivedReason: value.archivedReason,
       createdAt: value.createdAt,
       updatedAt: value.updatedAt
     });
@@ -395,6 +411,10 @@ function normalizeForDedup(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function isArchiveReason(value: unknown): value is NonNullable<MemoryEntry["archivedReason"]> {
+  return value === "exact" || value === "expired" || value === "orphan" || value === "similarity" || value === "llm" || value === "manual";
+}
+
 function isMemoryKind(value: string): value is MemoryEntryInput["kind"] {
   return value === "preference"
     || value === "working_style"
@@ -494,6 +514,5 @@ export function buildMemoryOverview(entries: readonly MemoryEntry[], options: { 
   const budgetNote = omittedTopics > 0
     ? `\n(${String(omittedEntries)} more entries across ${String(omittedTopics)} topics omitted beyond this overview budget)`
     : "";
-  const citationsRule = "Disclosure: when recalled entries shaped your answer, append a <memory-citations> block at the very end listing the entry ids you used.";
-  return `${[...header, ...lines].join("\n")}${budgetNote}\n${citationsRule}`;
+  return `${[...header, ...lines].join("\n")}${budgetNote}`;
 }

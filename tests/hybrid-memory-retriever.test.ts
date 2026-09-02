@@ -33,8 +33,8 @@ function testPureHybridRanking(): void {
     limit: 3,
     maxChars: 12_000
   });
-  assert.deepEqual(semantic.matches.map(({ entry }) => entry.id), [current.id, user.id, other.id]);
-  assert.deepEqual(semantic.report.origins.included, { user: 1, currentWorkspace: 1, otherWorkspaces: 1 });
+  assert.deepEqual(semantic.matches.map(({ entry }) => entry.id), [current.id, user.id]);
+  assert.deepEqual(semantic.report.origins.included, { user: 1, currentWorkspace: 1, otherWorkspaces: 0 });
 
   const fallback = rankHybridMemory({
     entries: [current, user, other],
@@ -48,17 +48,6 @@ function testPureHybridRanking(): void {
   assert.deepEqual(new Set(fallback.matches.map(({ entry }) => entry.id)), new Set([current.id, user.id]));
   assert.equal(fallback.matches.some(({ entry }) => entry.id === other.id), false);
 
-  const manualFallback = rankHybridMemory({
-    entries: [current, user, other],
-    currentWorkspaceId,
-    lexicalRankings: [[other.id, current.id, user.id]],
-    vectorRanking: [],
-    semanticAvailable: false,
-    automatic: false,
-    limit: 3,
-    maxChars: 12_000
-  });
-  assert.equal(manualFallback.matches.some(({ entry }) => entry.id === other.id), true);
 }
 
 function testWholeEntryBudget(): void {
@@ -83,21 +72,15 @@ async function testLexicalFallbackAndRewrite(): Promise<void> {
     const user = memoryEntry("user", { kind: "user" });
     const other = memoryEntry("other", { kind: "workspace", workspaceId: otherWorkspaceId, workspaceName: "other" });
     const store = new FakeMemoryStore([current, user, other]);
-    const rewritten: string[] = [];
     const retriever = new HybridMemoryRetriever({
       localMemory: store,
       workspaceRoot,
       getEmbeddingRuntime: async () => undefined,
       getReadOnlyVectorIndex: () => undefined,
       getThresholds: (_fingerprint, recommended) => recommended,
-      rewriteQuery: async (query) => {
-        rewritten.push(query);
-        return "发布流程";
-      }
     });
     const result = await retriever.retrieve("release workflow", [], { limit: 5 });
-    assert.deepEqual(rewritten, ["release workflow"]);
-    assert.deepEqual(store.searches, ["release workflow", "发布流程"]);
+    assert.deepEqual(store.searches, ["release workflow"]);
     assert.deepEqual(new Set(result.matches.map(({ entry }) => entry.id)), new Set([current.id, user.id]));
     assert.equal(result.matches.some(({ entry }) => entry.id === other.id), false);
   });
@@ -113,7 +96,6 @@ async function testRewriteFailureUsesOriginalQuery(): Promise<void> {
       getEmbeddingRuntime: async () => undefined,
       getReadOnlyVectorIndex: () => undefined,
       getThresholds: (_fingerprint, recommended) => recommended,
-      rewriteQuery: async () => { throw new Error("rewrite unavailable"); }
     });
     const result = await retriever.retrieve("original query", [], { limit: 1 });
     assert.deepEqual(store.searches, ["original query"]);

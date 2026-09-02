@@ -34,6 +34,7 @@ import {
   type MemoryCandidateMutationResult,
   type MemoryCandidateScanOptions,
   type MemoryCandidateScanResult,
+  type MemoryArchiveResult,
   type MemoryClearResult,
   type MemoryDeleteResult,
   type MemoryEntriesResult,
@@ -157,7 +158,35 @@ const maintenanceSchema = z.object({
   processed: z.number().int().nonnegative(),
   written: z.number().int().nonnegative(),
   failed: z.number().int().nonnegative(),
-  error: z.string().optional()
+  error: z.string().optional(),
+  lastRun: z.object({
+    id: z.string().min(1),
+    trigger: z.enum(["scheduled", "manual"]),
+    examined: z.number().int().nonnegative(),
+    written: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    archived: z.number().int().nonnegative().default(0),
+    exact: z.number().int().nonnegative().default(0),
+    expired: z.number().int().nonnegative().default(0),
+    similarity: z.number().int().nonnegative().default(0),
+    llm: z.number().int().nonnegative().default(0),
+    startedAt: z.string(),
+    finishedAt: z.string()
+  }).optional(),
+  sleepRuns: z.array(z.object({
+    id: z.string().min(1),
+    trigger: z.enum(["scheduled", "manual"]),
+    examined: z.number().int().nonnegative(),
+    written: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    archived: z.number().int().nonnegative().default(0),
+    exact: z.number().int().nonnegative().default(0),
+    expired: z.number().int().nonnegative().default(0),
+    similarity: z.number().int().nonnegative().default(0),
+    llm: z.number().int().nonnegative().default(0),
+    startedAt: z.string(),
+    finishedAt: z.string()
+  })).max(20).optional()
 });
 
 const pendingMutationSchema = z.object({
@@ -209,6 +238,7 @@ export class MemoryStorage {
     const workspaceId = currentWorkspaceId(snapshot.directory);
     const topic = options.topic === undefined ? undefined : normalizeMemoryTopic(options.topic);
     const matched = snapshot.entries
+      .filter(({ entry }) => options.includeArchived === true || entry.archivedAt === undefined)
       .filter(({ entry }) => matchesOriginSelectors(entry.origin, selectors, workspaceId))
       .filter(({ entry }) => topic === undefined || entry.topic === topic)
       .sort((left, right) => compareEntriesForDisplay(left.entry, right.entry));
@@ -244,6 +274,7 @@ export class MemoryStorage {
     const now = options.now ?? new Date();
     const ranked = rankMemoryEntries(
       snapshot.entries.map(({ entry }) => entry)
+        .filter((entry) => options.includeArchived === true || entry.archivedAt === undefined)
         .filter((entry) => matchesOriginSelectors(entry.origin, selectors, workspaceId)),
       query,
       queryPaths,
@@ -357,6 +388,8 @@ export class MemoryStorage {
         paths: patch.paths ?? record.entry.paths,
         keywords: patch.keywords ?? record.entry.keywords,
         importance: patch.importance ?? record.entry.importance,
+        archivedAt: record.entry.archivedAt,
+        archivedReason: record.entry.archivedReason,
         lineage: [
           ...record.entry.lineage,
           {
@@ -385,6 +418,68 @@ export class MemoryStorage {
         path: path.relative(directory.storageRoot, path.join(directory.path, entryDirectoryName, record.fileName)),
         revision: nextRevision
       };
+    });
+  }
+
+  async archiveEntry(id: string, archived: boolean, options: MemoryMutationOptions): Promise<MemoryArchiveResult> {
+    options.signal?.throwIfAborted();
+    const canonicalWorkspace = await fs.realpath(path.resolve(this.workspaceRoot));
+    return await this.withScopeLock("project", true, options.signal, async (directory) => {
+      const now = options.now ?? new Date();
+      const snapshot = await this.readScopeLocked(directory, options.signal);
+      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
+      const record = snapshot.entries.find(({ entry }) => entry.id === id);
+      if (!record) return { archived: false, revision: snapshot.state.revision };
+      if ((record.entry.archivedAt !== undefined) === archived) return { archived, entry: record.entry, revision: snapshot.state.revision };
+      const nextRevision = snapshot.state.revision + 1;
+      const input = sanitizeMemoryEntryInput({
+        origin: record.entry.origin,
+        kind: record.entry.kind,
+        topic: record.entry.topic,
+        title: record.entry.title,
+        summary: record.entry.summary,
+        decisions: record.entry.decisions,
+        paths: record.entry.paths,
+        keywords: record.entry.keywords,
+        importance: record.entry.importance,
+        archivedAt: archived ? now.toISOString() : undefined,
+        archivedReason: archived ? "manual" : undefined,
+        lineage: record.entry.lineage
+      });
+      assertAllowedScopedEntry(input, canonicalWorkspace);
+      const entry = createStoredMemoryEntry(input, {
+        id: record.entry.id,
+        revision: nextRevision,
+        createdAt: record.entry.createdAt,
+        updatedAt: now.toISOString()
+      });
+      await atomicWriteChildFile(directory, path.join(directory.path, entryDirectoryName), record.fileName, renderMemoryEntry(entry));
+      const records = snapshot.entries.map((item) => item.entry.id === id ? { entry, fileName: item.fileName } : item);
+      await this.commitSnapshot(directory, snapshot.state, nextRevision, records, snapshot.candidates, now);
+      return { archived, entry, revision: nextRevision };
+    });
+  }
+
+  async purgeArchivedEntries(retentionDays: number, options: MemoryMutationOptions): Promise<{ deleted: number; revision: number }> {
+    options.signal?.throwIfAborted();
+    return await this.withScopeLock("project", true, options.signal, async (directory) => {
+      const snapshot = await this.readScopeLocked(directory, options.signal);
+      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
+      const cutoff = (options.now ?? new Date()).getTime() - Math.max(1, Math.trunc(retentionDays)) * 86_400_000;
+      const targets = snapshot.entries.filter(({ entry }) => entry.archivedAt !== undefined && Date.parse(entry.archivedAt) <= cutoff);
+      if (!targets.length) return { deleted: 0, revision: snapshot.state.revision };
+      const nextRevision = snapshot.state.revision + 1;
+      await this.commitDestructiveMutation(directory, {
+        version: 3,
+        fromRevision: snapshot.state.revision,
+        toRevision: nextRevision,
+        createdAt: (options.now ?? new Date()).toISOString(),
+        entryWrites: [],
+        entryDeletes: targets.map(({ fileName }) => fileName),
+        candidateDeletes: []
+      }, options.signal);
+      await pruneUsageEntries(directory, targets.map(({ entry }) => entry.id), options.signal);
+      return { deleted: targets.length, revision: nextRevision };
     });
   }
 
@@ -662,7 +757,35 @@ export class MemoryStorage {
         processed: safeCounter(status.processed),
         written: safeCounter(status.written),
         failed: safeCounter(status.failed),
-        error: status.error === undefined ? undefined : redactSecrets(status.error).trim().slice(0, 2_000) || undefined
+        error: status.error === undefined ? undefined : redactSecrets(status.error).trim().slice(0, 2_000) || undefined,
+        lastRun: status.lastRun === undefined ? undefined : {
+          id: status.lastRun.id,
+          trigger: status.lastRun.trigger,
+          examined: safeCounter(status.lastRun.examined),
+          written: safeCounter(status.lastRun.written),
+          failed: safeCounter(status.lastRun.failed),
+          archived: safeCounter(status.lastRun.archived),
+          exact: safeCounter(status.lastRun.exact ?? 0),
+          expired: safeCounter(status.lastRun.expired ?? 0),
+          similarity: safeCounter(status.lastRun.similarity ?? 0),
+          llm: safeCounter(status.lastRun.llm ?? 0),
+          startedAt: safeOptionalTime(status.lastRun.startedAt) ?? new Date(0).toISOString(),
+          finishedAt: safeOptionalTime(status.lastRun.finishedAt) ?? new Date(0).toISOString()
+        },
+        sleepRuns: status.sleepRuns?.slice(-20).map((run) => ({
+          id: run.id,
+          trigger: run.trigger,
+          examined: safeCounter(run.examined),
+          written: safeCounter(run.written),
+          failed: safeCounter(run.failed),
+          archived: safeCounter(run.archived ?? 0),
+          exact: safeCounter(run.exact ?? 0),
+          expired: safeCounter(run.expired ?? 0),
+          similarity: safeCounter(run.similarity ?? 0),
+          llm: safeCounter(run.llm ?? 0),
+          startedAt: safeOptionalTime(run.startedAt) ?? new Date(0).toISOString(),
+          finishedAt: safeOptionalTime(run.finishedAt) ?? new Date(0).toISOString()
+        }))
       };
       await atomicWriteFile(directory, maintenanceFileName, `${JSON.stringify({ version: 3, ...safe }, null, 2)}\n`);
     });

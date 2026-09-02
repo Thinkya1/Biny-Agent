@@ -71,6 +71,8 @@ export interface MemoryEntryInput {
   keywords?: string[];
   /** 1（低）到 5（高），默认 3。 */
   importance?: number;
+  archivedAt?: string;
+  archivedReason?: MemoryEntry["archivedReason"];
   lineage: MemoryLineage | MemoryLineage[];
 }
 
@@ -85,6 +87,8 @@ export interface MemoryEntryPatch {
   keywords?: string[];
   importance?: number;
   userEvidence?: string;
+  archivedAt?: string;
+  archivedReason?: MemoryEntry["archivedReason"];
 }
 
 export interface MemoryEntry {
@@ -106,6 +110,9 @@ export interface MemoryEntry {
   /** 派生 usage 投影；不会写入权威 Markdown。 */
   recallCount: number;
   lastRecalledAt?: string;
+  /** memory_archive 对应的可恢复归档状态。 */
+  archivedAt?: string;
+  archivedReason?: "exact" | "expired" | "orphan" | "similarity" | "llm" | "manual";
 }
 
 export interface MemoryCandidateLineage {
@@ -168,6 +175,8 @@ export interface MemoryListOptions extends MemoryReadOptions {
   limit?: number;
   /** 分页起始偏移；与 limit 组合实现 offset 分页。 */
   offset?: number;
+  /** 默认隐藏归档记忆；管理界面可显式读取。 */
+  includeArchived?: boolean;
 }
 
 export interface MemoryEntriesResult {
@@ -188,6 +197,18 @@ export interface ScopedMemoryWriteResult {
 
 export interface MemoryDeleteResult {
   deleted: boolean;
+  revision: number;
+}
+
+export interface MemoryArchiveEntriesResult {
+  entries: MemoryEntry[];
+  storeRevision: number;
+  total: number;
+}
+
+export interface MemoryArchiveResult {
+  archived: boolean;
+  entry?: MemoryEntry;
   revision: number;
 }
 
@@ -232,6 +253,7 @@ export interface MemoryRecallReport {
 }
 
 export interface MemorySearchOptions extends MemoryReadOptions {
+  includeArchived?: boolean;
   origins?: MemoryOriginSelector[];
   /** 单库合计上限。 */
   limit?: number;
@@ -296,6 +318,36 @@ export interface MemoryDerivedIndexSink {
 
 export interface MemoryMaintenanceOptions extends MemoryReadOptions {
   now?: Date;
+  trigger?: "scheduled" | "manual";
+  archiveRetentionDays?: number;
+  temporaryTtl?: number;
+  useLlm?: boolean;
+  llmMergeLow?: number;
+  llmBatchSize?: number;
+}
+
+export interface MemorySleepPreview {
+  available: boolean;
+  candidates: number;
+  temporaryToArchive: number;
+  archivedToDelete: number;
+  recentRuns: number;
+  lastRun?: MemorySleepRun;
+}
+
+export interface MemorySleepRun {
+  id: string;
+  trigger: "scheduled" | "manual";
+  examined: number;
+  written: number;
+  failed: number;
+  archived: number;
+  exact: number;
+  expired: number;
+  similarity: number;
+  llm: number;
+  startedAt: string;
+  finishedAt: string;
 }
 
 export interface MemoryMaintenanceResult {
@@ -317,6 +369,9 @@ export interface MemoryMaintenanceStatus {
   written: number;
   failed: number;
   error?: string;
+  lastRun?: MemorySleepRun;
+  /** 最近的睡眠整理历史，最多保留 20 次。 */
+  sleepRuns?: MemorySleepRun[];
 }
 
 /** CAS 失败是正常并发结果，调用方应重新读取 storeRevision 后重试。 */

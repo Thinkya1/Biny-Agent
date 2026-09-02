@@ -655,12 +655,21 @@ async function testContextPreparationAbortStopsAutoCompaction(): Promise<void> {
 async function testRestoreWithoutPersistedBudgetUsesHistoryEstimate(): Promise<void> {
   await withTempWorkspace(async (workspaceRoot) => {
     const provider = new ContextTestModel();
+    const fallbackBudget = () => ({
+      contextWindow: 131_072,
+      contextWindowIsFallback: true,
+      maxInputTokens: 120,
+      maxOutputTokens: undefined,
+      modelAlias: "gateway-model"
+    });
     const memory = new ContextMemory(
       () => provider.model,
       new WorkspaceContext(workspaceRoot, [], 32 * 1024),
       undefined,
       120,
-      32 * 1024
+      32 * 1024,
+      undefined,
+      fallbackBudget
     );
     memory.restore([
       { role: "user", content: "historical request ".repeat(4) },
@@ -669,7 +678,10 @@ async function testRestoreWithoutPersistedBudgetUsesHistoryEstimate(): Promise<v
     const status = await memory.status();
     assert.equal(status.budget.usedTokens > 0, true);
     assert.equal(status.budget.maxTokens, 120);
+    assert.equal(status.budget.contextWindowIsFallback, true);
+    assert.equal(memory.snapshot().budget.contextWindowIsFallback, true);
     memory.recordProviderUsage({ inputTokens: 119, outputTokens: 1, totalTokens: 120 });
+    assert.equal((await memory.status()).budget.contextWindowIsFallback, true);
     memory.setCheckpoint({
       summary: "## Goal\n- Continue from a restored checkpoint.",
       firstKeptMessageIndex: 1,
@@ -679,6 +691,19 @@ async function testRestoreWithoutPersistedBudgetUsesHistoryEstimate(): Promise<v
     });
     const checkpointed = await memory.status();
     assert.equal(checkpointed.budget.source, "estimated", "provider usage before a checkpoint is stale");
+    assert.equal(checkpointed.budget.contextWindowIsFallback, true);
+
+    const restored = new ContextMemory(
+      () => provider.model,
+      new WorkspaceContext(workspaceRoot, [], 32 * 1024),
+      undefined,
+      120,
+      32 * 1024,
+      undefined,
+      fallbackBudget
+    );
+    restored.restore(memory.getHistory(), memory.snapshot());
+    assert.equal((await restored.status()).budget.contextWindowIsFallback, true);
   });
 }
 
@@ -1563,7 +1588,7 @@ async function testMemoryCandidateLifecycleAndUsagePersistence(): Promise<void> 
     await agent.runTask(`Remember this successful context workflow: ${"grounded details ".repeat(20)}`);
     const overview = await agent.getLocalMemory().getOverview();
     await agent.close();
-    // v3：回合内不再有记忆模型调用（无查询重写）；候选在维护窗口由提取模型处理。
+    // 有信息量的成功回合进入后台记忆候选。
     assert.equal(overview.candidateCount, 1);
 
     const shortAgent = new AgentSession({
@@ -1578,7 +1603,7 @@ async function testMemoryCandidateLifecycleAndUsagePersistence(): Promise<void> 
     await shortAgent.runTask("hi");
     const afterShortTurn = await shortAgent.getLocalMemory().getOverview();
     await shortAgent.close();
-    assert.equal(afterShortTurn.candidateCount, 1);
+    assert.equal(afterShortTurn.candidateCount, overview.candidateCount);
   });
 }
 
