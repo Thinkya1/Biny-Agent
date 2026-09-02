@@ -442,17 +442,21 @@ export class DesktopAgentManager {
     let managed: ManagedRuntime | undefined;
     let runtimeError: string | undefined;
     let writerConflict: DesktopSessionWriterConflict | undefined;
+    let runtimeSnapshot: InteractiveRuntimeSnapshot | undefined;
     try {
       managed = await this.ensureRuntime(projectId);
       const remote = managed.runtime instanceof RuntimeHostClient ? managed.runtime : undefined;
       if (remote) {
-        await remote.focusSession(sessionId);
+        runtimeSnapshot = await remote.focusSession(sessionId);
       } else if (managed.runtime.getSnapshot().info.sessionId !== sessionId) {
         if (runtimeIsBusy(managed.runtime.getSnapshot())) {
           // 同进程 fallback 没有 Host 注册表，忙时只能阅读历史，不能偷偷切换 owner。
         } else {
           await managed.runtime.resumeSession(sessionId);
+          runtimeSnapshot = managed.runtime.getSnapshot();
         }
+      } else {
+        runtimeSnapshot = managed.runtime.getSnapshot();
       }
     } catch (error) {
       if (isSessionWriterConflictError(error)) {
@@ -465,6 +469,7 @@ export class DesktopAgentManager {
       } else {
         runtimeError = formatRuntimeInitializationError(error);
         this.runtimeErrors.set(projectId, runtimeError);
+        runtimeSnapshot = undefined;
       }
     }
     if (managed !== undefined && runtimeError === undefined) {
@@ -472,6 +477,7 @@ export class DesktopAgentManager {
       document = await this.projects.openSession(project, sessionId, this.runtimeSnapshots(projectId), this.projectEvents(projectId));
       const remote = managed.runtime instanceof RuntimeHostClient ? managed.runtime : undefined;
       const targetSnapshot = remote?.getSnapshot() ?? managed.runtime.getSnapshot();
+      if (targetSnapshot.info.sessionId === sessionId) runtimeSnapshot = targetSnapshot;
       if (writerConflict === undefined && targetSnapshot.info.sessionId === sessionId && !runtimeIsBusy(targetSnapshot)) {
         try {
           await managed.runtime.claimSession(sessionId);
@@ -487,6 +493,7 @@ export class DesktopAgentManager {
             runtimeError = formatRuntimeInitializationError(error);
             this.runtimeErrors.set(projectId, runtimeError);
             document = historicalDocument;
+            runtimeSnapshot = undefined;
           }
         }
       }
@@ -502,7 +509,8 @@ export class DesktopAgentManager {
         unread: false
       },
       writerConflict,
-      runtimeError
+      runtimeError,
+      runtimeSnapshot
     };
   }
 

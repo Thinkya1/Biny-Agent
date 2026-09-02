@@ -360,6 +360,8 @@ export interface DesktopSessionDocument {
   session: DesktopSessionSummary;
   events: SessionEvent[];
   liveEvents: AgentHostEvent[];
+  /** 打开会话时同步返回的当前 Runtime 快照，避免渲染层沿用上一个会话的运行态。 */
+  runtimeSnapshot?: InteractiveRuntimeSnapshot;
   /** 会话体量接近持久化上限时给出预警信息；未接近时缺省。 */
   limits?: DesktopSessionLimits;
   /** session 仍可读，但当前 Desktop 没有 writer ownership 时的只读冲突。 */

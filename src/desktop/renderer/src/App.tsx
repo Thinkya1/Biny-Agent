@@ -407,6 +407,10 @@ function DesktopApp(): React.JSX.Element {
       setWorkspace((current) => current?.project.id === projectId
         ? {
             ...current,
+            runtime: nextDocument.runtimeSnapshot ?? current.runtime,
+            sessionRuntimes: nextDocument.runtimeSnapshot
+              ? { ...current.sessionRuntimes, [sessionId]: nextDocument.runtimeSnapshot }
+              : current.sessionRuntimes,
             selectedSessionId: sessionId,
             sessions: mergeProjectSessionPage(current.sessions, projectId, [nextDocument.session])
           }
@@ -1249,8 +1253,12 @@ function DesktopApp(): React.JSX.Element {
   }, [contextBudget, document, workspace?.models, workspace?.runtime?.info]);
   const clearToast = useCallback(() => setToast(undefined), []);
   const sessionSummary = workspace?.sessions.find((session) => session.id === selectedSessionId) ?? document?.session;
-  // 并行池化后按「选中会话自己的 runtime」取运行态；还没加载进池时回退主 runtime。
-  const selectedRuntimeSnapshot = (selectedSessionId !== undefined ? workspace?.sessionRuntimes?.[selectedSessionId] : undefined) ?? workspace?.runtime;
+  // 并行池化后按「选中会话自己的 runtime」取运行态；主 runtime 只有在确实绑定该会话时
+  // 才能作为回退，避免切换会话时把上一个会话的 thinking 状态带进当前页面。
+  const selectedRuntimeSnapshot = selectedSessionId !== undefined
+    ? workspace?.sessionRuntimes?.[selectedSessionId]
+      ?? (workspace?.runtime?.info.sessionId === selectedSessionId ? workspace.runtime : undefined)
+    : workspace?.runtime;
   const activeRunSnapshot = activeRun(selectedRuntimeSnapshot);
   const pendingPermissionSnapshot = pendingPermission(selectedRuntimeSnapshot);
   const activeSessionId = activeRunSnapshot?.sessionId ?? pendingPermissionSnapshot?.sessionId;
