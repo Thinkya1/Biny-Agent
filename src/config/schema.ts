@@ -140,6 +140,7 @@ const contextSchema = z.object({
     extractModel: undefined,
     consolidationModel: undefined,
     embeddingModel: { kind: "local", model: "multilingual-e5-small" },
+    similarityThreshold: 0.7,
     similarityThresholds: {},
     cloudEmbeddingConsents: {},
     excludeExternalContext: true,
@@ -164,7 +165,7 @@ export const modelCompatibilitySchema = z.object({
   maxTokensField: z.enum(["max_tokens", "max_completion_tokens"]).optional()
 });
 
-const thinkingLevelMapSchema = z.record(z.string(), z.string().min(1).nullable()).superRefine((map, context) => {
+export const thinkingLevelMapSchema = z.record(z.string(), z.string().min(1).nullable()).superRefine((map, context) => {
   for (const key of Object.keys(map)) {
     if (!thinkingLevelSchema.options.includes(key as z.infer<typeof thinkingLevelSchema>)) {
       context.addIssue({
@@ -175,6 +176,18 @@ const thinkingLevelMapSchema = z.record(z.string(), z.string().min(1).nullable()
     }
   }
 });
+
+/**
+ * 连接下按原始模型 ID 保存的用户元数据覆盖。
+ *
+ * 这组字段与 alias 的传输配置分开，目录刷新只能更新运行时投影，不能覆盖用户在这里
+ * 明确填写的上下文窗口、输入上限或 thinking 参数映射。
+ */
+export const modelProfileSchema = z.object({
+  contextWindow: z.number().int().min(4_096).max(2_000_000).optional(),
+  maxInputTokens: z.number().int().min(2_048).max(2_000_000).optional(),
+  thinkingLevelMap: thinkingLevelMapSchema.optional()
+}).strict();
 
 const thinkingSchema = z.object({
   enabled: z.boolean().default(true),
@@ -224,6 +237,7 @@ const providerConfigSchema = z.object({
   headers: z.record(z.string()).optional(),
   apiBackend: modelApiBackendSchema.optional(),
   compatibility: modelCompatibilitySchema.optional(),
+  modelProfiles: z.record(z.string().trim().min(1).max(240), modelProfileSchema).optional(),
   /** 外部端点不得凭 URL 推断本地性；未来本地服务必须显式声明。 */
   dataResidency: activityDataResidencySchema.optional(),
   /** 仅显式声明的 provider embedding 型号会进入目录；不会从聊天模型或 ID 猜测。 */
@@ -719,6 +733,7 @@ export type CompactionConfig = AgentConfig["context"]["compaction"];
 export type ChatParamsConfig = AgentConfig["chat"];
 export type ModelProvider = z.infer<typeof modelProviderSchema>;
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
+export type ModelProfile = z.infer<typeof modelProfileSchema>;
 export type ProviderEmbeddingModelConfig = z.infer<typeof providerEmbeddingModelSchema>;
 export type ModelAliasConfig = z.infer<typeof modelAliasSchema>;
 export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
@@ -837,10 +852,18 @@ export const defaultConfig: AgentConfig = {
       extractModel: undefined,
       consolidationModel: undefined,
       embeddingModel: { kind: "local", model: "multilingual-e5-small" },
+      similarityThreshold: 0.7,
       similarityThresholds: {},
       cloudEmbeddingConsents: {},
       excludeExternalContext: true,
-      maxRecalled: 5
+      maxRecalled: 5,
+      sleepEnabled: true,
+      sleepTime: "03:00",
+      archiveRetentionDays: 90,
+      temporaryTtl: 30,
+      useLlm: true,
+      llmMergeLow: 0.65,
+      llmBatchSize: 20
     }
   },
   web: {
