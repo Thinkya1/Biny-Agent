@@ -915,16 +915,6 @@ export function registerDesktopIpc(context: IpcContext): void {
     );
   });
 
-  handleRecoveryGated(desktopIpc.compactMemory, async (_event, projectId: unknown, filter: unknown, expectedRevision: unknown, topic: unknown) => {
-    return await context.agents.compactMemory(
-      idSchema.parse(projectId),
-      memoryOriginFilterSchema.parse(filter),
-      memoryRevisionSchema.parse(expectedRevision),
-      topic === undefined ? undefined : memoryTopicSchema.parse(topic)
-    );
-  });
-
-
   handleRecoveryGated(desktopIpc.memoryEmbeddingStatus, async (_event, projectId: unknown) => {
     return await context.agents.memoryEmbeddingStatus(idSchema.parse(projectId));
   });

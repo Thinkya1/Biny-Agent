@@ -1,11 +1,7 @@
 /** Biny 的公共 AI 类型；Agent Loop 与运行时服务保持为内部实现。 */
 export * from "./activity/index.js";
 import type {
-  MemoryCandidate as StoredMemoryCandidate,
-  MemoryCandidateInput as StoredMemoryCandidateInput,
-  MemoryCandidateMutationResult as StoredMemoryCandidateMutationResult,
   MemoryClearResult as StoredMemoryClearResult,
-  MemoryConsolidationResult as StoredMemoryConsolidationResult,
   MemoryEntriesResult as StoredMemoryEntriesResult,
   MemoryEntry as StoredMemoryEntry,
   MemoryEntryInput as StoredMemoryEntryInput,
@@ -14,7 +10,7 @@ import type {
   MemoryRecallOmission as StoredMemoryRecallOmission,
   MemoryRecallReport as StoredMemoryRecallReport,
   MemorySearchResult as StoredMemorySearchResult,
-  ScopedMemoryWriteResult as StoredMemoryWriteResult
+  MemoryWriteResult as StoredMemoryWriteResult
 } from "./agent/context/memoryTypes.js";
 
 export * from "./ai/index.js";
@@ -41,15 +37,11 @@ export type {
 
 export type MemoryEntryInput = StoredMemoryEntryInput;
 export type MemoryEntry = StoredMemoryEntry;
-export type MemoryCandidateInput = StoredMemoryCandidateInput;
-export type MemoryCandidate = StoredMemoryCandidate;
 export type MemoryOverview = StoredMemoryOverview;
 export type MemoryEntriesResult = StoredMemoryEntriesResult;
 export type MemoryClearResult = StoredMemoryClearResult;
-export type MemoryConsolidationResult = StoredMemoryConsolidationResult;
 export type MemoryRecallOmission = StoredMemoryRecallOmission;
 export type MemoryRecallReport = StoredMemoryRecallReport;
 export type MemoryMatch = StoredMemoryMatch;
 export type MemorySearchResult = StoredMemorySearchResult;
 export type MemoryWriteResult = StoredMemoryWriteResult;
-export type MemoryCandidateMutationResult = StoredMemoryCandidateMutationResult;

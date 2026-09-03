@@ -5,6 +5,7 @@
  * 统一落到 AgentSession，避免协议路由层直接拼装领域读写细节。
  */
 import type { CommandRuntime } from "../CommandRuntime.js";
+import type { MemoryEntry } from "../../agent/context/memoryTypes.js";
 import {
   optionalSafeInteger,
   optionalString,
@@ -69,7 +70,7 @@ export async function executeRuntimeHostMemoryOperation(
   if (action === "sleep-run-now") {
     const state = await commands.agent.getPersonalizationState();
     const policy = state.memory;
-    const result = await memory.processEligibleCandidates({
+    const result = await memory.runMemoryMaintenance({
       trigger: "manual",
       archiveRetentionDays: policy.archiveRetentionDays,
       temporaryTtl: policy.temporaryTtl,
@@ -77,8 +78,11 @@ export async function executeRuntimeHostMemoryOperation(
       llmMergeLow: policy.llmMergeLow,
       llmBatchSize: policy.llmBatchSize
     }, {
-      indexEntry: async (entry) => await commands.agent.indexMemoryEntry(entry),
-      requestRebuild: () => context.scheduleEmbeddingRebuild()
+      indexEntry: async (entry: MemoryEntry) => await commands.agent.indexMemoryEntry(entry),
+      requestRebuild: () => context.scheduleEmbeddingRebuild(),
+      findSimilarPairs: async (entries: readonly MemoryEntry[], minimumSimilarity: number, signal?: AbortSignal) => (
+        await commands.agent.findMemorySimilarityPairs(entries, minimumSimilarity, signal)
+      )
     });
     return { result, maintenance: memory.maintenanceStatus() };
   }
@@ -93,7 +97,6 @@ export async function executeRuntimeHostMemoryOperation(
     const result = await memory.writeEntry(readMemoryEntryInput(payload.entry), {
       expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
     });
-    if (result.written && result.entry) await commands.agent.indexMemoryEntry(result.entry);
     return result;
   }
   if (action === "update-v3") {
@@ -102,7 +105,6 @@ export async function executeRuntimeHostMemoryOperation(
       readMemoryEntryPatch(payload.patch),
       { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") }
     );
-    if (result.written && result.entry) await commands.agent.indexMemoryEntry(result.entry);
     return result;
   }
   if (action === "archive-list-v3") {
@@ -119,26 +121,13 @@ export async function executeRuntimeHostMemoryOperation(
       id,
       { expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision") }
     );
-    if (result.deleted) commands.agent.removeMemoryEmbeddingEntries([id]);
     return result;
   }
   if (action === "clear-v3") {
     const selector = readMemoryOriginSelector(payload.selector, true);
-    const clearedIds = (await memory.listMemoryEntries({ origins: [selector] })).entries.map(({ id }) => id);
     const result = await memory.clearEntries(selector, {
       expectedRevision: requiredInteger(payload.expectedRevision, "expectedRevision")
     });
-    if (result.deletedEntries) commands.agent.removeMemoryEmbeddingEntries(clearedIds);
-    return result;
-  }
-  if (action === "consolidate-v3") {
-    const selector = readMemoryOriginSelector(payload.selector, true);
-    const expectedRevision = requiredInteger(payload.expectedRevision, "expectedRevision");
-    const result = await memory.consolidateEntries(selector, {
-      expectedRevision,
-      topic: optionalString(payload.topic)
-    });
-    if (result.revision !== expectedRevision) context.scheduleEmbeddingRebuild();
     return result;
   }
   throw new Error(`Unknown memory operation: ${action}`);

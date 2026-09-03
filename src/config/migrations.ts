@@ -73,7 +73,6 @@ function migrateMemoryPolicy(document: Record<string, unknown>): void {
   if (legacyEnabled !== undefined) memory.enabled = legacyEnabled;
   if (typeof memory.model === "string" && memory.model.length > 0) {
     if (memory.extractModel === undefined) memory.extractModel = memory.model;
-    if (memory.consolidationModel === undefined) memory.consolidationModel = memory.model;
   }
   if (legacyEnabled === undefined) delete memory.enabled;
   delete memory.autoRemember;

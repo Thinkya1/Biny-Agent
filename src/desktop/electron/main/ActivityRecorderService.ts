@@ -16,6 +16,7 @@ import { ActivityPrivacyPolicy } from "../../../activity/privacyPolicy.js";
 import {
   analyzePendingActivitySessions,
   buildActivityReport,
+  type ActivityAnalyzerDeps,
   type ActivityReportResult
 } from "../../../activity/analyzer.js";
 import { refreshActivitySummaryWithNarrative } from "../../../activity/summary.js";
@@ -121,6 +122,8 @@ export interface ActivityRecorderServiceOptions {
   dailySummaryInitialDelayMs?: number;
   dailySummaryIntervalMs?: number;
   writeDailyNote?: (dateKey: string, content: string) => Promise<string>;
+  /** Activity 分析提取出的稳定事实写入统一记忆库。 */
+  writeMemories?: ActivityAnalyzerDeps["writeMemories"];
 }
 
 export class ActivityRecorderService {
@@ -156,6 +159,7 @@ export class ActivityRecorderService {
   private readonly dailySummaryInitialDelayMs: number;
   private readonly dailySummaryIntervalMs: number;
   private readonly writeDailyNote: (dateKey: string, content: string) => Promise<string>;
+  private readonly writeMemories: ActivityAnalyzerDeps["writeMemories"];
   private dailySummaryInitialTimer?: ReturnType<typeof setTimeout>;
   private dailySummaryTimer?: ReturnType<typeof setTimeout>;
   /** stop 在 operation queue 内执行；sidecar 收尾期间的事件不能再排到当前操作之后。 */
@@ -176,6 +180,7 @@ export class ActivityRecorderService {
     this.dailySummaryInitialDelayMs = options.dailySummaryInitialDelayMs ?? 120_000;
     this.dailySummaryIntervalMs = options.dailySummaryIntervalMs ?? 15 * 60 * 1_000;
     this.writeDailyNote = options.writeDailyNote ?? writeDailyMemoryNote;
+    this.writeMemories = options.writeMemories;
     // 分析只由启动后的首次检查和周期 sweep 触发；门禁与模型选择在
     // runAnalysisSweep 里每次新鲜加载。
     this.analysisScheduler = new ActivityAnalysisScheduler({
@@ -297,7 +302,7 @@ export class ActivityRecorderService {
     const store = new ActivityStore();
     await store.open(config.activity.outputDirectory);
     try {
-      return await buildActivityReport({ store, policy, model }, date ?? "today");
+      return await buildActivityReport({ store, policy, model, writeMemories: this.writeMemories }, date ?? "today");
     } finally {
       await store.close();
     }
@@ -333,7 +338,7 @@ export class ActivityRecorderService {
     const store = new ActivityStore();
     await store.open(config.activity.outputDirectory);
     try {
-      await analyzePendingActivitySessions({ store, policy, model, signal: this.analysisAbort.signal });
+      await analyzePendingActivitySessions({ store, policy, model, signal: this.analysisAbort.signal, writeMemories: this.writeMemories });
     } finally {
       await store.close();
     }

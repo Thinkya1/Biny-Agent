@@ -874,7 +874,7 @@ export class RuntimeHostClient implements InteractiveRuntimeHandle {
     return await this.memory("sleep-runs", {});
   }
 
-  async previewMemorySleep(): Promise<{ available: boolean; candidates: number; temporaryToArchive: number; archivedToDelete: number; recentRuns: number; lastRun?: unknown }> {
+  async previewMemorySleep(): Promise<{ available: boolean; entries: number; temporaryToArchive: number; archivedToDelete: number; recentRuns: number; lastRun?: unknown }> {
     return await this.memory("sleep-preview", {});
   }
 

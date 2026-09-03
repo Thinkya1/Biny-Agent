@@ -1,9 +1,9 @@
 /**
- * 自动记忆召回：可选查询改写后进行向量余弦 topK，向量不可用时回退词法。
+ * 自动记忆召回：可选查询改写后进行向量余弦 topK；向量不可用时保持为空。
  *
- * Markdown/LocalMemory 仍是事实源；SQLite 只提供可丢弃的向量排名。向量不可用、指纹或
- * 内容哈希不匹配时会 fail closed 到 user + 当前 workspace 的词法结果，绝不自动带入
- * 其他项目的内容。
+ * SQLite/LocalMemory 负责事实源；向量索引只提供可丢弃的语义排名。向量不可用、指纹或
+ * 内容哈希不匹配时自动召回 fail closed，绝不把词法猜测或其他项目内容带进上下文；手动
+ * `/memory search` 仍然保留词法 fallback。
  */
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -31,9 +31,9 @@ const defaultRecallMaxChars = 12_000;
 const maximumSemanticCandidates = 100;
 
 export interface AutomaticMemoryStore {
-  listMemoryEntries(options?: { origins?: MemoryOriginSelector[]; signal?: AbortSignal }): Promise<MemoryEntriesResult>;
+  listMemoryEntries(options?: { origins?: MemoryOriginSelector[]; includeArchived?: boolean; signal?: AbortSignal }): Promise<MemoryEntriesResult>;
   search(query: string, paths: string[], options?: MemorySearchOptions): Promise<MemorySearchResult>;
-  recordInjectedRecall(ids: string[], options?: { signal?: AbortSignal; now?: Date }): Promise<void>;
+  recordRecallUsage(ids: string[], options?: { signal?: AbortSignal; now?: Date }): Promise<void>;
 }
 
 export interface MemoryVectorSearchIndex {
@@ -75,18 +75,13 @@ export interface HybridMemoryRankingInput {
   maxChars: number;
 }
 
-/** AgentSession 与 Runtime Host 重建索引必须使用同一段文本和同一哈希。 */
+/**
+ * AgentSession 与 Runtime Host 重建索引必须使用同一段文本和同一哈希。
+ * Embedding 只接收记忆 summary；它就是这段事实正文。
+ * 标题、topic、来源和展示字段不应污染语义向量，也不应因为元数据编辑触发重建。
+ */
 export function memoryEntryEmbeddingText(entry: MemoryEntry): string {
-  return [
-    `Origin: ${entry.origin.kind === "user" ? "user" : `workspace:${entry.origin.workspaceId}`}`,
-    `Kind: ${entry.kind}`,
-    `Topic: ${entry.topic}`,
-    `Title: ${entry.title}`,
-    `Summary: ${entry.summary}`,
-    entry.decisions.length ? `Decisions:\n${entry.decisions.map((value) => `- ${value}`).join("\n")}` : "",
-    entry.paths.length ? `Paths:\n${entry.paths.map((value) => `- ${value}`).join("\n")}` : "",
-    entry.keywords.length ? `Keywords: ${entry.keywords.join(", ")}` : ""
-  ].filter(Boolean).join("\n");
+  return entry.summary;
 }
 
 export function memoryEntryContentHash(entry: MemoryEntry): string {
@@ -109,13 +104,18 @@ export class HybridMemoryRetriever {
       maxChars?: number;
       signal?: AbortSignal;
       origins?: MemoryOriginSelector[];
+      includeArchived?: boolean;
       automatic?: boolean;
     }
   ): Promise<MemorySearchResult> {
     options.signal?.throwIfAborted();
+    const origins = options.origins ?? (options.automatic === false
+      ? ["all"]
+      : ["user", "current_workspace"]);
     const listPerfStartedAt = perfNow();
     const snapshot = await this.options.localMemory.listMemoryEntries({
-      origins: options.origins ?? ["all"],
+      origins,
+      includeArchived: options.includeArchived,
       signal: options.signal
     });
     recordPerfPhase("memory.listEntries", listPerfStartedAt);
@@ -123,25 +123,27 @@ export class HybridMemoryRetriever {
 
     const safeQuery = redactSecrets(query).trim();
     const rewritten = await this.rewrite(safeQuery, snapshot.entries, options.signal);
-    const lexicalQueries = [...new Set([safeQuery, rewritten].filter(Boolean))];
-    if (!lexicalQueries.length && paths.length) lexicalQueries.push("");
-    const lexicalPerfStartedAt = perfNow();
-    const lexicalResults = await Promise.all(lexicalQueries.map(async (value) => (
-      await this.options.localMemory.search(value, paths, {
-        origins: ["all"],
-        limit: snapshot.entries.length,
-        signal: options.signal
-      })
-    )));
-    recordPerfPhase("memory.lexical", lexicalPerfStartedAt);
-    const exactId = snapshot.entries.find(({ id }) => id === safeQuery)?.id;
-    const lexicalRankings = lexicalResults.map(({ matches }) => {
-      const ids = matches.map(({ entry }) => entry.id);
-      return exactId === undefined ? ids : [exactId, ...ids.filter((id) => id !== exactId)];
-    });
     const matchPaths = new Map(Object.entries(snapshot.paths ?? {}));
-    for (const result of lexicalResults) {
-      for (const match of result.matches) if (!matchPaths.has(match.entry.id)) matchPaths.set(match.entry.id, match.path);
+    const lexicalRankings: string[][] = [];
+    if (options.automatic !== true) {
+      const lexicalQueries = [...new Set([safeQuery, rewritten].filter(Boolean))];
+      if (!lexicalQueries.length && paths.length) lexicalQueries.push("");
+      const lexicalPerfStartedAt = perfNow();
+      const lexicalResults = await Promise.all(lexicalQueries.map(async (value) => (
+        await this.options.localMemory.search(value, paths, {
+          origins,
+          includeArchived: options.includeArchived,
+          limit: snapshot.entries.length,
+          signal: options.signal
+        })
+      )));
+      recordPerfPhase("memory.lexical", lexicalPerfStartedAt);
+      const exactId = snapshot.entries.find(({ id }) => id === safeQuery)?.id;
+      for (const result of lexicalResults) {
+        const ids = result.matches.map(({ entry }) => entry.id);
+        lexicalRankings.push(exactId === undefined ? ids : [exactId, ...ids.filter((id) => id !== exactId)]);
+        for (const match of result.matches) if (!matchPaths.has(match.entry.id)) matchPaths.set(match.entry.id, match.path);
+      }
     }
 
     const semanticPerfStartedAt = perfNow();
@@ -175,10 +177,10 @@ export class HybridMemoryRetriever {
     }
   }
 
-  async recordInjectedRecall(ids: string[], options: { signal?: AbortSignal; now?: Date } = {}): Promise<void> {
+  async recordRecallUsage(ids: string[], options: { signal?: AbortSignal; now?: Date } = {}): Promise<void> {
     const uniqueIds = [...new Set(ids)];
     if (!uniqueIds.length) return;
-    await this.options.localMemory.recordInjectedRecall(uniqueIds, options);
+    await this.options.localMemory.recordRecallUsage(uniqueIds, options);
   }
 
   close(): void {
@@ -249,10 +251,17 @@ export function rankHybridMemory(input: HybridMemoryRankingInput, storeRevision 
     scores.set(id, (scores.get(id) ?? 0) + score);
   };
 
-  // 使用 sqlite-vec 的 cosine similarity + topK。不要把词法排名和向量排名
-  // 混成 RRF：向量可用时，语义相似度就是唯一排序依据；只有 embedding 不可用时才回退词法。
-  if (input.semanticAvailable && input.vectorRanking.length > 0) {
-    for (const candidate of input.vectorRanking) add(candidate.entryId, candidate.similarity);
+  // 自动模式只接受通过阈值的向量结果；手动搜索才在 embedding 不可用时回退词法。
+  // 过滤必须发生在分支选择前，否则跨 workspace 向量被丢弃后会错误触发词法回退。
+  const allowedVectorRanking = input.vectorRanking.filter((candidate) => {
+    const entry = entries.get(candidate.entryId);
+    return entry !== undefined && (input.automatic === false
+      || automaticOriginAllowed(entry, input.currentWorkspaceId));
+  });
+  if (input.semanticAvailable && allowedVectorRanking.length > 0) {
+    for (const candidate of allowedVectorRanking) add(candidate.entryId, candidate.similarity);
+  } else if (input.automatic === true) {
+    return emptyRankedMemoryResult(storeRevision);
   } else {
     const lexicalDivisor = Math.max(1, input.lexicalRankings.length);
     for (const ranking of input.lexicalRankings) {
@@ -302,7 +311,7 @@ export function rankHybridMemory(input: HybridMemoryRankingInput, storeRevision 
       entry,
       originBucket: bucket,
       topic: entry.topic,
-      path: input.paths?.get(entry.id) ?? `entries/${entry.id}.md`,
+      path: input.paths?.get(entry.id) ?? "memory://" + entry.id,
       excerpt,
       score
     });
@@ -317,6 +326,19 @@ export function rankHybridMemory(input: HybridMemoryRankingInput, storeRevision 
       budgetOmission: budgetOmitted > 0
         ? { maxChars: Math.max(0, input.maxChars), usedChars, omitted: budgetOmitted }
         : undefined
+    }
+  };
+}
+
+function emptyRankedMemoryResult(storeRevision: number): MemorySearchResult {
+  const origins = emptyOriginCounts();
+  return {
+    matches: [],
+    storeRevision,
+    report: {
+      origins: { included: origins, trimmed: { ...origins } },
+      omitted: [],
+      budgetOmission: undefined
     }
   };
 }

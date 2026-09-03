@@ -344,7 +344,6 @@ function DesktopApp(): React.JSX.Element {
     cancelMemoryEmbeddingRebuild,
     cancelModelLogin,
     clearMemory,
-    compactMemory,
     deleteMemoryEntry,
     deleteMemoryEmbeddingModel,
     downloadMemoryEmbeddingModel,
@@ -1418,7 +1417,6 @@ function DesktopApp(): React.JSX.Element {
             onClearCookies={async () => await window.biny.clearCookies()}
             onClearMemory={clearMemory}
             onClose={closeSettings}
-            onCompactMemory={compactMemory}
             onDeleteMemoryEntry={deleteMemoryEntry}
             onArchiveMemoryEntry={archiveMemoryEntry}
             onLoadArchivedMemory={loadArchivedMemory}

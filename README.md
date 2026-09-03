@@ -11,7 +11,7 @@ Biny 是一个本地优先、记忆优先（First Local × First Memory）的 AI
 - **模型与 Provider**：支持主流模型服务、OpenAI-compatible / Anthropic-compatible 网关和 Ollama。
 - **本地状态**：Session、Memory、Agent Identity 和运行状态以本地文件或数据库为主。
 - **安全与恢复**：权限确认、checkpoint/undo、Session 恢复，以及可审计的工具执行结果。
-- **个性化**：表达风格、长期记忆和 Agent 灵魂分层管理；Markdown 是身份与记忆的权威来源。
+- **个性化**：表达风格、长期记忆和 Agent 灵魂分层管理；Markdown 仍是身份资料的权威来源，长期记忆由 SQLite 保存。
 - **活动感知**：macOS 原生采集器在本地记录屏幕活动（截图、OCR、输入事件），写入前规则脱敏、原始内容不出设备；分析层归纳会话摘要并聚合每日工作日记，Agent 可主动检索你最近在做什么。
 - **交互**：支持 Chat / Plan、follow-up / steer、slash command、编辑、重试和重新生成。
 

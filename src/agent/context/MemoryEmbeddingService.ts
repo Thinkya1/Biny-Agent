@@ -1,8 +1,9 @@
 /**
  * 记忆 Embedding 的下载与派生索引协调器。
  *
- * Markdown 仍是唯一事实源；这里的失败只会留下待重建状态。完整重建写入独立 generation，
- * 增量写只允许命中相同模型指纹和维度的 active generation。
+ * SQLite 记忆仍是唯一事实源；事实表和向量派生表位于同一个 memory.sqlite。这里的失败只会
+ * 留下待重建状态。完整重建写入独立 generation，增量写只允许命中相同模型指纹和维度的
+ * active generation。
  */
 import type {
   EmbeddingModelDescriptor,
@@ -13,7 +14,9 @@ import type {
   LocalEmbeddingModelStatus
 } from "../../llm/embedding/types.js";
 import type { LocalEmbeddingManager } from "../../llm/embedding/LocalEmbeddingRuntime.js";
+import { cosineSimilarity } from "../../llm/embedding/vector.js";
 import type { MemoryEntry } from "./memoryTypes.js";
+import type { MemorySimilarityPair } from "./memoryTypes.js";
 import type { LocalMemory } from "./LocalMemory.js";
 import {
   MemoryVectorIndex,
@@ -104,7 +107,8 @@ export class MemoryEmbeddingService {
     try {
       statusIndex = this.vectorIndexInstance ?? this.options.getReadOnlyVectorIndex();
       if (statusIndex === undefined) {
-        // 索引文件不存在时，状态页只报告未知/待处理，不为了一次读取创建空 SQLite。
+        // memory.sqlite 或其中的向量表尚未存在时，状态页只报告未知/待处理，不为了一次
+        // 读取创建数据库或补写向量表。
         index = { building: 0, failed: 0 };
       } else {
         indexAvailable = true;
@@ -238,38 +242,30 @@ export class MemoryEmbeddingService {
     const controller = new AbortController();
     this.rebuildAbort = controller;
     const combined = signal === undefined ? controller.signal : AbortSignal.any([signal, controller.signal]);
-    const entries = (await this.options.localMemory.listMemoryEntries({ origins: ["all"], signal: combined })).entries;
     const startedAt = this.now();
-    this.operation = {
-      kind: "rebuild",
-      state: "running",
-      startedAt,
-      updatedAt: startedAt,
-      processedEntries: 0,
-      totalEntries: entries.length
-    };
+    let entries: MemoryEntry[] = [];
+    let snapshotRevision = 0;
     let generationId: string | undefined;
-    let modelFingerprint: string | undefined;
-    let entryIdentities: Array<{ entryId: string; contentHash: string }> = [];
-    let nonIndexedIdentities: Array<{ entryId: string; contentHash: string }> = [];
+    let releaseRebuildLock: (() => void) | undefined;
     try {
+      releaseRebuildLock = this.vectorIndex().acquireRebuildLock();
+      const snapshot = await this.options.localMemory.listMemoryEntries({ origins: ["all"], signal: combined });
+      entries = snapshot.entries;
+      snapshotRevision = snapshot.storeRevision;
+      this.operation = {
+        kind: "rebuild",
+        state: "running",
+        startedAt,
+        updatedAt: startedAt,
+        processedEntries: 0,
+        totalEntries: entries.length
+      };
       const runtime = await this.options.getRuntime();
       if (!runtime) throw new Error("尚未选择 Embedding 模型。");
-      modelFingerprint = runtime.descriptor.fingerprint;
-      entryIdentities = entries.map((entry) => ({
-        entryId: entry.id,
-        contentHash: memoryEntryContentHash(entry)
-      }));
-      // 新 generation 构建期间继续使用完整的旧 active generation。只有当前内容本来就没有
-      // 可用向量的条目才保持 pending；完整切换由 completeGeneration 在一个事务内完成。
-      nonIndexedIdentities = this.vectorIndex().entryStates(modelFingerprint, entryIdentities)
-        .filter(({ status }) => status !== "indexed")
-        .map(({ entryId, contentHash }) => ({ entryId, contentHash }));
       if (!entries.length) {
         const dimensions = runtime.descriptor.dimensions;
         if (dimensions !== undefined) {
           generationId = this.vectorIndex().beginGeneration(runtime.descriptor.fingerprint, dimensions);
-          this.vectorIndex().completeGeneration(generationId);
         }
       } else {
         for (let offset = 0; offset < entries.length; offset += rebuildBatchSize) {
@@ -299,8 +295,14 @@ export class MemoryEmbeddingService {
           };
         }
         if (generationId === undefined) throw new Error("记忆向量 generation 未创建。");
-        this.vectorIndex().completeGeneration(generationId);
       }
+      // rebuild 期间如果 SQLite revision 发生变化，旧快照不能覆盖新写入的记忆。
+      // 保留旧 active generation，让下一次重建或增量索引继续提供降级结果。
+      const latest = await this.options.localMemory.getOverview({ signal: combined });
+      if (latest.storeRevision !== snapshotRevision) {
+        throw new Error("记忆在向量索引重建期间发生变化，请稍后重试。");
+      }
+      if (generationId !== undefined) this.vectorIndex().completeGeneration(generationId);
       this.operation = {
         kind: "rebuild",
         state: "completed",
@@ -318,14 +320,6 @@ export class MemoryEmbeddingService {
         }
       }
       const cancelled = combined.aborted;
-      if (modelFingerprint !== undefined && nonIndexedIdentities.length) {
-        try {
-          if (cancelled) this.vectorIndex().markEntriesPending(modelFingerprint, nonIndexedIdentities);
-          else this.vectorIndex().markEntriesFailed(modelFingerprint, nonIndexedIdentities, error);
-        } catch {
-          // SQLite 自身不可用时由 status 返回整体降级，不能覆盖原始重建错误。
-        }
-      }
       this.operation = {
         kind: "rebuild",
         state: cancelled ? "cancelled" : "failed",
@@ -337,11 +331,12 @@ export class MemoryEmbeddingService {
       };
       throw error;
     } finally {
+      releaseRebuildLock?.();
       if (this.rebuildAbort === controller) this.rebuildAbort = undefined;
     }
   }
 
-  /** Markdown 已经提交，增量失败只能标为待重试，不能把错误传播回存储事务。 */
+  /** SQLite 事实已经提交，增量失败只能标为待重试，不能把错误传播回存储事务。 */
   async indexEntry(entry: MemoryEntry): Promise<void> {
     const identity = { entryId: entry.id, contentHash: memoryEntryContentHash(entry) };
     let modelFingerprint: string | undefined;
@@ -353,18 +348,32 @@ export class MemoryEmbeddingService {
         return;
       }
       modelFingerprint = runtime.descriptor.fingerprint;
-      this.vectorIndex().markEntriesPending(modelFingerprint, [identity]);
+      const index = this.vectorIndex();
+      const active = index.status().active;
+      if (!active
+        || active.modelFingerprint !== runtime.descriptor.fingerprint
+        || active.vectorCount < 1
+        || (runtime.descriptor.dimensions !== undefined && active.dimensions !== runtime.descriptor.dimensions)) {
+        // 没有可用 active generation 时不能只建立一条半成品索引；把现有 SQLite
+        // 一次性纳入新 generation，行为与全量 rebuild 一致。
+        await this.rebuild();
+        return;
+      }
+      index.markEntriesPending(modelFingerprint, [identity]);
       const embedded = await runtime.embed({ texts: [memoryEntryEmbeddingText(entry)], inputType: "passage" });
       const vector = embedded.embeddings[0];
       if (!vector || embedded.fingerprint !== runtime.descriptor.fingerprint) {
         throw new Error("Embedding 模型没有返回可用的单条向量。");
       }
-      const updated = this.vectorIndex().upsertActiveVectors(embedded.fingerprint, [{
+      const updated = index.upsertActiveVectors(embedded.fingerprint, [{
         entryId: entry.id,
         contentHash: identity.contentHash,
         embedding: vector
       }]);
-      if (!updated) throw new Error("当前向量 generation 与 Embedding 模型不一致，需要重建索引。");
+      if (!updated) {
+        await this.rebuild();
+        return;
+      }
     } catch (error) {
       try {
         modelFingerprint ??= await this.activeModelFingerprint();
@@ -372,8 +381,161 @@ export class MemoryEmbeddingService {
           this.vectorIndex().markEntriesFailed(modelFingerprint, [identity], error);
         }
       } catch {
-        // Markdown 已成功提交；派生索引错误留给 status 的整体降级处理。
+        // SQLite 事实已成功提交；派生索引错误留给 status 的整体降级处理。
       }
+    }
+  }
+
+  /** 读取当前模型的 active vectors，计算 Sleep 所需的相似边；索引不可用时安全返回空集。 */
+  async findSimilarPairs(
+    entries: readonly MemoryEntry[],
+    minimumSimilarity: number,
+    signal?: AbortSignal
+  ): Promise<MemorySimilarityPair[]> {
+    if (!Number.isFinite(minimumSimilarity) || minimumSimilarity < -1 || minimumSimilarity > 1) {
+      throw new Error("Memory sleep similarity threshold must be between -1 and 1.");
+    }
+    if (entries.length < 2) return [];
+    signal?.throwIfAborted();
+    let runtime: EmbeddingModelRuntime | undefined;
+    try {
+      runtime = await this.options.getRuntime();
+    } catch {
+      signal?.throwIfAborted();
+      return [];
+    }
+    if (!runtime) return [];
+    signal?.throwIfAborted();
+    const cachedIndex = this.vectorIndexInstance;
+    let index: MemoryVectorIndex | undefined;
+    try {
+      index = cachedIndex ?? this.options.getReadOnlyVectorIndex();
+    } catch {
+      return [];
+    }
+    if (!index) return [];
+    let active: MemoryVectorIndexStatus["active"] | undefined;
+    try {
+      active = index.status().active;
+      if (!active || active.modelFingerprint !== runtime.descriptor.fingerprint) return [];
+      const vectorById = new Map(index.listActiveEmbeddings({
+        modelFingerprint: runtime.descriptor.fingerprint,
+        entryIds: new Set(entries.map((entry) => entry.id))
+      }).map((vector) => [vector.entryId, vector] as const));
+      const usable = entries.filter((entry) => {
+        const vector = vectorById.get(entry.id);
+        return vector !== undefined && vector.contentHash === memoryEntryContentHash(entry);
+      }).map((entry) => ({ entry, vector: vectorById.get(entry.id)! }));
+      const pairs: MemorySimilarityPair[] = [];
+      for (let left = 0; left < usable.length; left += 1) {
+        signal?.throwIfAborted();
+        for (let right = left + 1; right < usable.length; right += 1) {
+          const similarity = cosineSimilarity(usable[left]!.vector.embedding, usable[right]!.vector.embedding);
+          if (similarity >= minimumSimilarity) {
+            pairs.push({
+              leftId: usable[left]!.entry.id,
+              rightId: usable[right]!.entry.id,
+              similarity
+            });
+          }
+        }
+      }
+      return pairs.sort((left, right) => (
+        right.similarity - left.similarity
+        || left.leftId.localeCompare(right.leftId)
+        || left.rightId.localeCompare(right.rightId)
+      ));
+    } catch {
+      signal?.throwIfAborted();
+      return [];
+    } finally {
+      // Similarity scanning is a read path. Do not retain a read-only handle in
+      // vectorIndexInstance，否则下一次 SQLite 事实写入会尝试更新旧索引。
+      if (index !== cachedIndex) index.close();
+    }
+  }
+
+  /**
+   * 用一段新文本找语义候选。自动写入的 LLM 去重、语义删除和 temporary 清理都走这条
+   * 只读路径；embedding 不可用时返回 undefined，让上层区分“没有候选”和“无法判断”。
+   * 索引尚未建立时按空候选处理；后续写入会
+   * 继续进入事实库，并由增量索引/重建补齐派生向量。
+   */
+  async findSimilarEntries(
+    query: string,
+    entries: readonly MemoryEntry[],
+    limit: number,
+    minimumSimilarity: number,
+    signal?: AbortSignal
+  ): Promise<MemoryEntry[] | undefined> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Memory semantic candidate limit must be between 1 and 100.");
+    }
+    if (!Number.isFinite(minimumSimilarity) || minimumSimilarity < -1 || minimumSimilarity > 1) {
+      throw new Error("Memory semantic candidate threshold must be between -1 and 1.");
+    }
+    const text = query.trim();
+    if (!text) return [];
+    signal?.throwIfAborted();
+
+    let runtime: EmbeddingModelRuntime | undefined;
+    try {
+      runtime = await this.options.getRuntime();
+    } catch {
+      signal?.throwIfAborted();
+      return undefined;
+    }
+    if (!runtime) return undefined;
+    // Resolve runtime before the empty-store fast path. Callers such as
+    // Activity need to distinguish “semantic search is available but there are
+    // no candidates” from “the required embedding runtime is unavailable”.
+    if (!entries.length) return [];
+
+    let embedded: Awaited<ReturnType<EmbeddingModelRuntime["embed"]>>;
+    try {
+      embedded = await runtime.embed({ texts: [text], inputType: "query", signal });
+    } catch {
+      signal?.throwIfAborted();
+      return undefined;
+    }
+    const queryEmbedding = embedded.embeddings[0];
+    if (!queryEmbedding
+      || embedded.fingerprint !== runtime.descriptor.fingerprint
+      || (runtime.descriptor.dimensions !== undefined && embedded.dimensions !== runtime.descriptor.dimensions)
+      || embedded.dimensions !== queryEmbedding.length) {
+      return undefined;
+    }
+
+    const cachedIndex = this.vectorIndexInstance;
+    let index: MemoryVectorIndex | undefined;
+    try {
+      index = cachedIndex ?? this.options.getReadOnlyVectorIndex();
+      // An empty vector table returns an empty candidate set. Do not block the first automatic
+      // memory on a rebuild; only an unavailable embedding runtime above is a
+      // hard failure for automatic deduplication.
+      if (!index) return [];
+      const active = index.status().active;
+      if (!active
+        || active.modelFingerprint !== runtime.descriptor.fingerprint
+        || active.dimensions !== embedded.dimensions) {
+        return [];
+      }
+      const entryById = new Map(entries.map((entry) => [entry.id, entry] as const));
+      const results = index.search(queryEmbedding, {
+        modelFingerprint: runtime.descriptor.fingerprint,
+        limit,
+        minimumSimilarity,
+        entryIds: new Set(entryById.keys())
+      });
+      return results.flatMap((result) => {
+        const entry = entryById.get(result.entryId);
+        return entry && result.contentHash === memoryEntryContentHash(entry) ? [entry] : [];
+      });
+    } catch {
+      signal?.throwIfAborted();
+      return undefined;
+    } finally {
+      if (index !== undefined && index !== cachedIndex) index.close();
     }
   }
 
@@ -381,7 +543,7 @@ export class MemoryEmbeddingService {
     try {
       this.vectorIndex().removeEntries(entryIds);
     } catch {
-      // 索引是派生数据；删除 Markdown 的结果不能因 SQLite 损坏而回滚。
+      // 索引是派生数据；删除 SQLite 事实的结果不能因向量库损坏而回滚。
     }
   }
 

@@ -17,7 +17,7 @@ const localMemory = {
     signal?.throwIfAborted();
     return undefined;
   },
-  processEligibleCandidates: async (
+  runMemoryMaintenance: async (
     _options: unknown,
     derivedIndex: { requestRebuild?: () => void }
   ) => {
@@ -25,7 +25,13 @@ const localMemory = {
     derivedIndex.requestRebuild?.();
     return undefined;
   },
-  listEligibleCandidates: async () => ({ candidates: [{ id: "candidate-1" }] })
+  previewMaintenance: async () => ({
+    available: true,
+    entries: 1,
+    temporaryToArchive: 0,
+    archivedToDelete: 0,
+    recentRuns: 0
+  })
 };
 const commands = {
   agent: {
@@ -45,7 +51,7 @@ assert.deepEqual(calls, ["load", "process", "rebuild"]);
 
 maintenance.stop();
 const preview = await maintenance.preview();
-assert.deepEqual(preview, { available: true, candidates: 1, archived: 0, recentRuns: 0 });
+assert.deepEqual(preview, { available: true, entries: 1, temporaryToArchive: 0, archivedToDelete: 0, recentRuns: 0 });
 assert.equal(maintenance.cancel(), false);
 maintenance.scheduleEmbeddingRebuild();
 await new Promise<void>((resolve) => setTimeout(resolve, 10));

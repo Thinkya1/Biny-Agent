@@ -202,7 +202,7 @@ export function analyzePermissionRequest(input: AnalyzePermissionInput): Permiss
   }
 
   if (input.toolName === "recall_memory") {
-    // 记忆检索只读取经过校验的单一来源感知记忆库；不会修改 Markdown 权威数据。
+    // 记忆检索只读取经过校验的单一来源感知 SQLite 事实库。
     return {
       ...base(input),
       actionType: "read",
@@ -212,7 +212,7 @@ export function analyzePermissionRequest(input: AnalyzePermissionInput): Permiss
   }
 
   if (input.toolName === "save_memory") {
-    // audience 明确区分 workspace 与 universal；两者共享同一受校验的 Markdown 权威库。
+    // audience 明确区分 workspace 与 universal；两者共享同一受校验的 SQLite 事实库。
     return {
       ...base(input),
       actionType: "write",

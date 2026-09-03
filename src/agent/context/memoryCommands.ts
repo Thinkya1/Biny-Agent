@@ -24,8 +24,7 @@ export const memoryCommandUsage = [
   "  /memory show [all|current|user|other] <id-or-topic>",
   "  /memory add [workspace|universal] [kind] <topic> <note>",
   "  /memory forget [all|current|user|other] <id-or-topic>",
-  "  /memory search [all|current|user|other] <query>",
-  "  /memory consolidate [current|user] [topic]"
+  "  /memory search [all|current|user|other] <query>"
 ].join("\n");
 
 export async function runMemoryCommand(
@@ -120,21 +119,6 @@ export async function runMemoryCommand(
       ...result.matches.map((match) => `  [${originLabel(match.entry)}/${match.entry.kind}/${match.topic}] ${match.entry.id} (score ${String(match.score)}) ${match.excerpt}`),
       `Included: user=${String(result.report.origins.included.user)}, current=${String(result.report.origins.included.currentWorkspace)}, other=${String(result.report.origins.included.otherWorkspaces)}; omitted=${String(result.report.omitted.length)}`
     ].join("\n");
-  }
-
-  if (action === "compact" || action === "consolidate") {
-    const parsed = readOptionalSelector(args.slice(1), "current_workspace");
-    if (parsed.origin !== "current_workspace" && parsed.origin !== "user") {
-      return "Consolidation requires current or user so entries from different origins are never merged.";
-    }
-    const topic = parsed.rest.join(" ").trim() || undefined;
-    const result = await withFreshRevision(memory, undefined, async (expectedRevision) => (
-      await memory.consolidateEntries(parsed.origin, { expectedRevision, topic })
-    ));
-    if (result.error) return `Memory consolidation failed without changing data: ${result.error}`;
-    return result.after < result.before
-      ? `Consolidated ${selectorLabel(parsed.origin)} memory: ${String(result.before)} -> ${String(result.after)} entries.`
-      : `${selectorLabel(parsed.origin)} memory has ${String(result.before)} entries; nothing to merge.`;
   }
 
   return memoryCommandUsage;

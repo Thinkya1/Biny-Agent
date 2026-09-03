@@ -52,27 +52,20 @@ export function projectSessionsDir(workspaceRoot: string, options: PathEnvironme
   return projectStateDir("sessions", workspaceRoot, options);
 }
 
-/** 旧 v2 项目 Memory 目录仅用于首次迁移读取；v3 单库位于全局 agent 目录。 */
-export function projectMemoryDir(workspaceRoot: string, options: PathEnvironment = {}): string {
-  // v2 存量数据只可能写在旧版 24hex 目录名下（v2 时代还没有 <basename>-<hash8> 命名），
-  // 迁移读取必须按旧命名定位，不能走 projectStateDir 的新命名。
-  return path.join(projectStateParentDir("memory", options), legacyProjectStateDirName(workspaceRoot));
-}
-
 /**
- * 项目 session/memory 目录名：`<basename>-<hash8>`。
+ * 项目 session 目录名：`<basename>-<hash8>`。
  *
  * basename 取自工作区文件夹名（sanitize 后允许中文、≤48 字符，见下方 sanitize），hash8 是
  * 规范化工作区绝对路径 sha256 的前 8 位，在同名项目之间消歧。旧版纯 24hex 目录名由
- * `legacyProjectStateDirName` 复现，供 store.ts 在首次访问时找到并迁移旧目录。
+ * `legacyProjectStateDirName` 复现，供 session store 在首次访问时找到并迁移旧目录。
  *
  * 这里是纯函数：不做任何 fs 访问，保证 recorder 的同步路径构造和 store 的断言拿到同一个答案。
  */
-function projectStateDir(kind: "sessions" | "memory", workspaceRoot: string, options: PathEnvironment): string {
+function projectStateDir(kind: "sessions", workspaceRoot: string, options: PathEnvironment): string {
   return path.join(projectStateParentDir(kind, options), projectStateDirName(workspaceRoot));
 }
 
-function projectStateParentDir(kind: "sessions" | "memory", options: PathEnvironment): string {
+function projectStateParentDir(kind: "sessions", options: PathEnvironment): string {
   const configuredRoot = globalAgentDir(options);
   const canonicalRoot = existsSync(configuredRoot) ? realpathSync(configuredRoot) : configuredRoot;
   return path.join(canonicalRoot, kind);

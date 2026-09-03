@@ -131,16 +131,15 @@ const contextSchema = z.object({
   identity: { enabled: true, userEnabled: true },
   emotion: { enabled: true, allowModelUpdate: true },
   memory: {
-    enabled: false,
+    enabled: true,
     useMemories: true,
     generateMemories: true,
     queryRewrite: true,
     memoryModel: undefined,
     rewriteModel: undefined,
     extractModel: undefined,
-    consolidationModel: undefined,
     embeddingModel: { kind: "local", model: "multilingual-e5-small" },
-    similarityThreshold: 0.7,
+    similarityThreshold: 0.1,
     similarityThresholds: {},
     cloudEmbeddingConsents: {},
     excludeExternalContext: true,
@@ -670,7 +669,7 @@ const canonicalConfigSchema = z.object({
     });
   }
 
-  for (const field of ["memoryModel", "rewriteModel", "extractModel", "consolidationModel"] as const) {
+  for (const field of ["memoryModel", "rewriteModel", "extractModel"] as const) {
     const memoryAlias = config.context.memory[field];
     if (memoryAlias && !config.models[memoryAlias]) {
       context.addIssue({
@@ -843,26 +842,25 @@ export const defaultConfig: AgentConfig = {
     identity: { enabled: true, userEnabled: true },
     emotion: { enabled: true, allowModelUpdate: true },
     memory: {
-      enabled: false,
+      enabled: true,
       useMemories: true,
       generateMemories: true,
       queryRewrite: true,
       memoryModel: undefined,
       rewriteModel: undefined,
       extractModel: undefined,
-      consolidationModel: undefined,
       embeddingModel: { kind: "local", model: "multilingual-e5-small" },
-      similarityThreshold: 0.7,
+      similarityThreshold: 0.1,
       similarityThresholds: {},
       cloudEmbeddingConsents: {},
       excludeExternalContext: true,
       maxRecalled: 5,
       sleepEnabled: true,
       sleepTime: "03:00",
-      archiveRetentionDays: 90,
+      archiveRetentionDays: 30,
       temporaryTtl: 30,
       useLlm: true,
-      llmMergeLow: 0.65,
+      llmMergeLow: 0.75,
       llmBatchSize: 20
     }
   },

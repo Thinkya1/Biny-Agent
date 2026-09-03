@@ -730,7 +730,6 @@ function makeAnalysis(sessionId: string, title?: string) {
     repos: [],
     events: [],
     urls: [],
-    memoryCandidates: [],
     worthMemory: false,
     worthKnowledge: false,
     isMeeting: false,

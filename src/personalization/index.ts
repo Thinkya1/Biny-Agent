@@ -15,16 +15,6 @@ export const embeddingModelRefSchema: z.ZodType<EmbeddingModelRef> = z.discrimin
 
 export type { EmbeddingModelRef } from "../llm/embedding/types.js";
 
-/** 早期记忆配置里出现过、当前已废弃的键；strict 校验前剥离以兼容旧文件。 */
-const deprecatedMemoryPolicyKeys = [] as const;
-
-const stripDeprecatedMemoryPolicy = (value: unknown): unknown => {
-  if (typeof value !== "object" || value === null) return value;
-  const record = { ...(value as Record<string, unknown>) };
-  for (const key of deprecatedMemoryPolicyKeys) delete record[key];
-  return record;
-};
-
 export const memorySimilarityThresholdSchema = z.object({
   currentWorkspace: z.number().min(0).max(1),
   crossWorkspace: z.number().min(0).max(1)
@@ -37,7 +27,7 @@ export const memorySimilarityThresholdSchema = z.object({
   });
 });
 
-const rawMemoryPolicySchema = z.preprocess(stripDeprecatedMemoryPolicy, z.object({
+const rawMemoryPolicySchema = z.object({
   // enabled 是硬门禁；聊天级 use/contribute 覆盖不能绕过它。
   enabled: z.boolean().optional(),
   useMemories: z.boolean().default(true),
@@ -47,7 +37,6 @@ const rawMemoryPolicySchema = z.preprocess(stripDeprecatedMemoryPolicy, z.object
   memoryModel: z.string().min(1).optional(),
   rewriteModel: z.string().min(1).optional(),
   extractModel: z.string().min(1).optional(),
-  consolidationModel: z.string().min(1).optional(),
   // 嵌入模型默认本地 multilingual-e5-small（可下载）；云端需 provider 已配置并经隐私确认。
   embeddingModel: embeddingModelRefSchema.optional(),
   similarityThreshold: z.number().min(0).max(1).default(0.7),
@@ -63,38 +52,37 @@ const rawMemoryPolicySchema = z.preprocess(stripDeprecatedMemoryPolicy, z.object
   maxRecalled: z.number().int().min(1).max(20).default(5),
   sleepEnabled: z.boolean().default(true),
   sleepTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/u).default("03:00"),
-  archiveRetentionDays: z.number().int().min(1).max(3650).default(90),
+  archiveRetentionDays: z.number().int().min(1).max(3650).default(30),
   temporaryTtl: z.number().int().min(1).max(3650).default(30),
   useLlm: z.boolean().default(true),
-  llmMergeLow: z.number().min(0).max(1).default(0.65),
+  llmMergeLow: z.number().min(0).max(1).default(0.75),
   llmBatchSize: z.number().int().min(1).max(100).default(20),
-}).strict());
+}).strict();
 
 export const memoryPolicySchema = rawMemoryPolicySchema.transform((policy) => ({
   ...policy,
   // 缺少总开关的旧配置按两个自动开关的 OR 推导；显式关闭总开关时由迁移结果保留关闭语义。
   enabled: policy.enabled ?? (policy.useMemories || policy.generateMemories)
 })).default({
-  enabled: false,
+  enabled: true,
   useMemories: true,
   generateMemories: true,
   queryRewrite: true,
   memoryModel: undefined,
   rewriteModel: undefined,
   extractModel: undefined,
-  consolidationModel: undefined,
   embeddingModel: { kind: "local", model: "multilingual-e5-small" },
-  similarityThreshold: 0.7,
+  similarityThreshold: 0.1,
   similarityThresholds: {},
   cloudEmbeddingConsents: {},
   excludeExternalContext: true,
   maxRecalled: 5,
   sleepEnabled: true,
   sleepTime: "03:00",
-  archiveRetentionDays: 90,
+  archiveRetentionDays: 30,
   temporaryTtl: 30,
   useLlm: true,
-  llmMergeLow: 0.65,
+  llmMergeLow: 0.75,
   llmBatchSize: 20
 });
 
@@ -139,7 +127,6 @@ export interface ResolvedChatPersonalization {
   memoryModel?: string;
   rewriteModel?: string;
   extractModel?: string;
-  consolidationModel?: string;
   embeddingModel?: EmbeddingModelRef;
   similarityThreshold: number;
   similarityThresholds: Record<string, z.infer<typeof memorySimilarityThresholdSchema>>;
@@ -181,7 +168,6 @@ export function resolveChatPersonalization(
     queryRewrite: parsedMemory.queryRewrite,
     rewriteModel: parsedMemory.rewriteModel,
     extractModel: parsedMemory.extractModel,
-    consolidationModel: parsedMemory.consolidationModel,
     embeddingModel: parsedMemory.embeddingModel,
     similarityThreshold: parsedMemory.similarityThreshold,
     similarityThresholds: parsedMemory.similarityThresholds,

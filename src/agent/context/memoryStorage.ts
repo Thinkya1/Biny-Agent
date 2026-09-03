@@ -1,40 +1,29 @@
 /**
- * LocalMemory v3 的纯磁盘存储层。
+ * 本地记忆的 SQLite 事实库。
  *
- * 单一全局 memory 根目录的跨进程写入由一个全局 SQLite 权威库（.memory-authority.sqlite 上的
- * BEGIN IMMEDIATE 写事务）串行化；进程持锁期间崩溃会让事务随连接断开自动回滚，无需 stale 锁回收。
- * entry、state、candidate 和 MEMORY.md 都先写同目录临时文件、fsync 后 rename。模型调用不在写锁内执行。
+ * memories 保存当前可召回的事实，memory_archive 保存可恢复的历史，Sleep 审计和 Embedding
+ * 派生表也都在同一个 memory.sqlite 里。向量仍是可重建投影，不参与事实提交。
  */
-import { constants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { globalAgentDir } from "../../config/paths.js";
 import { redactSecrets } from "../../utils/secrets.js";
 import {
-  assertAllowedScopedEntry,
+  assertAllowedMemoryEntry,
   createStoredMemoryEntry,
-  maxMemoryCandidateChars,
-  maxMemoryEntryChars,
   memoryEntryEquals,
-  memoryOriginsEqual,
   memoryMatchFromRanked,
   normalizeMemoryTopic,
-  parseMemoryEntryFile,
   rankMemoryEntries,
-  renderMemoryEntry,
   sanitizeMemoryEntryInput
 } from "./memoryFormat.js";
 import {
   MemoryRevisionConflictError,
-  type MemoryCandidate,
-  type MemoryCandidateInput,
-  type MemoryCandidateMutationOptions,
-  type MemoryCandidateMutationResult,
-  type MemoryCandidateScanOptions,
-  type MemoryCandidateScanResult,
-  type MemoryArchiveResult,
+  type MemoryArchiveReason,
+  type MemoryBulkArchiveResult,
   type MemoryClearResult,
   type MemoryDeleteResult,
   type MemoryEntriesResult,
@@ -49,107 +38,65 @@ import {
   type MemoryOriginSelector,
   type MemoryOverview,
   type MemoryReadOptions,
-  type MemoryScope,
   type MemorySearchOptions,
   type MemorySearchResult,
-  type ScopedMemoryWriteResult
+  type MemorySleepRun,
+  type MemoryWriteResult
 } from "./memoryTypes.js";
 
-export const memoryCandidateEligibilityMs = 6 * 60 * 60 * 1_000;
+export const memoryDatabaseFileName = "memory.sqlite";
 
-const stateFileName = ".memory-state.json";
-const maintenanceFileName = ".maintenance.json";
-const usageFileName = ".memory-usage.json";
-const pendingMutationFileName = ".pending-mutation.json";
-const entryDirectoryName = "entries";
-const candidateDirectoryName = ".candidates";
-/** 全局记忆写权威库：与 memory 根同目录，BEGIN IMMEDIATE 事务即跨进程写锁。 */
-const authorityDatabaseName = ".memory-authority.sqlite";
-const authorityBusyTimeoutMs = 5_000;
-const maxStateChars = 32_000;
-const maxCandidateFileChars = 8_000;
-const maxPendingMutationChars = 1_000_000;
-const maxUsageChars = 5_000_000;
+const memorySchemaVersion = 3;
+const sqliteBusyTimeoutMs = 5_000;
+const memoryRootName = "memory";
+const maxMaintenanceErrorChars = 2_000;
 
-interface PinnedScopeDirectory {
-  workspaceRoot: string;
-  storageRoot: string;
-  path: string;
-  scope: MemoryScope;
-  device: number | bigint;
-  inode: number | bigint;
-}
-
-interface MemoryState {
-  version: 3;
-  revision: number;
-  updatedAt: string;
-}
-
-interface ScopeEntryRecord {
-  entry: MemoryEntry;
-  fileName: string;
-}
-
-interface PendingEntryWrite {
-  fileName: string;
-  content: string;
-  id: string;
-}
-
-interface PendingMutation {
-  version: 3;
-  fromRevision: number;
-  toRevision: number;
-  createdAt: string;
-  entryWrites: PendingEntryWrite[];
-  entryDeletes: string[];
-  candidateDeletes: string[];
-}
-
-interface ScopeSnapshot {
-  directory?: PinnedScopeDirectory;
-  state: MemoryState;
-  entries: ScopeEntryRecord[];
-  candidates: MemoryCandidate[];
-}
-
-
-interface ReplaceEntriesResult {
-  entries: MemoryEntry[];
-  revision: number;
-}
-
-const candidateSchema = z.object({
-  version: z.literal(3),
-  id: z.string().min(8).max(128),
-  summary: z.string().min(1).max(maxMemoryCandidateChars),
-  completed: z.literal(true),
-  lineage: z.object({
-    source: z.literal("completed_task"),
-    sessionId: z.string().min(1).max(200),
-    turnId: z.string().min(1).max(200),
-    runId: z.string().min(1).max(200),
-    externalContext: z.boolean()
-  }),
-  origin: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("user") }),
-    z.object({
-      kind: z.literal("workspace"),
-      workspaceId: z.string().regex(/^[a-f0-9]{24}$/u),
-      workspaceName: z.string().min(1).max(120)
-    })
-  ]),
-  audienceHint: z.enum(["universal", "workspace"]).optional(),
-  kindHint: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]).optional(),
-  createdAt: z.string(),
-  eligibleAt: z.string(),
-  revision: z.number().int().nonnegative()
+const memoryMetadataSchema = z.object({
+  kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]),
+  topic: z.string(),
+  title: z.string(),
+  decisions: z.array(z.string()),
+  paths: z.array(z.string()),
+  keywords: z.array(z.string()),
+  importance: z.number(),
+  durability: z.enum(["temporary", "permanent"]),
+  expiresAt: z.string().optional(),
+  lineage: z.array(z.object({
+    source: z.enum(["explicit", "explicit_edit", "completed_task", "sleep"]),
+    externalContext: z.boolean(),
+    sessionId: z.string().optional(),
+    turnId: z.string().optional(),
+    runId: z.string().optional(),
+    sourceEntryIds: z.array(z.string()).optional(),
+    userEvidence: z.string().optional()
+  })).min(1)
 });
 
+const memorySleepRunSchema = z.object({
+  id: z.string().min(1),
+  status: z.enum(["running", "completed", "failed", "cancelled"]),
+  trigger: z.enum(["scheduled", "manual"]),
+  examined: z.number().int().nonnegative(),
+  written: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  archived: z.number().int().nonnegative(),
+  exact: z.number().int().nonnegative(),
+  expired: z.number().int().nonnegative(),
+  similarity: z.number().int().nonnegative(),
+  llm: z.number().int().nonnegative(),
+  archivedExact: z.number().int().nonnegative().default(0),
+  archivedExpired: z.number().int().nonnegative().default(0),
+  archivedOrphan: z.number().int().nonnegative().default(0),
+  archivedSimilarity: z.number().int().nonnegative().default(0),
+  archivedLlm: z.number().int().nonnegative().default(0),
+  inputTokens: z.number().int().nonnegative().default(0),
+  outputTokens: z.number().int().nonnegative().default(0),
+  startedAt: z.string(),
+  finishedAt: z.string().optional(),
+  error: z.string().optional()
+});
 
-const maintenanceSchema = z.object({
-  version: z.literal(3),
+const memoryStateSchema = z.object({
   state: z.enum(["idle", "running"]),
   startedAt: z.string().optional(),
   lastScanAt: z.string().optional(),
@@ -158,129 +105,128 @@ const maintenanceSchema = z.object({
   processed: z.number().int().nonnegative(),
   written: z.number().int().nonnegative(),
   failed: z.number().int().nonnegative(),
-  error: z.string().optional(),
-  lastRun: z.object({
-    id: z.string().min(1),
-    trigger: z.enum(["scheduled", "manual"]),
-    examined: z.number().int().nonnegative(),
-    written: z.number().int().nonnegative(),
-    failed: z.number().int().nonnegative(),
-    archived: z.number().int().nonnegative().default(0),
-    exact: z.number().int().nonnegative().default(0),
-    expired: z.number().int().nonnegative().default(0),
-    similarity: z.number().int().nonnegative().default(0),
-    llm: z.number().int().nonnegative().default(0),
-    startedAt: z.string(),
-    finishedAt: z.string()
-  }).optional(),
-  sleepRuns: z.array(z.object({
-    id: z.string().min(1),
-    trigger: z.enum(["scheduled", "manual"]),
-    examined: z.number().int().nonnegative(),
-    written: z.number().int().nonnegative(),
-    failed: z.number().int().nonnegative(),
-    archived: z.number().int().nonnegative().default(0),
-    exact: z.number().int().nonnegative().default(0),
-    expired: z.number().int().nonnegative().default(0),
-    similarity: z.number().int().nonnegative().default(0),
-    llm: z.number().int().nonnegative().default(0),
-    startedAt: z.string(),
-    finishedAt: z.string()
-  })).max(20).optional()
+  error: z.string().optional()
 });
 
-const pendingMutationSchema = z.object({
-  version: z.literal(3),
-  fromRevision: z.number().int().nonnegative(),
-  toRevision: z.number().int().positive(),
-  createdAt: z.string(),
-  entryWrites: z.array(z.object({
-    fileName: z.string(),
-    content: z.string(),
-    id: z.string()
-  })),
-  entryDeletes: z.array(z.string()),
-  candidateDeletes: z.array(z.string())
-});
+type SqlValue = string | number | bigint | null | Uint8Array;
 
-const usageSchema = z.object({
-  version: z.literal(1),
-  entries: z.record(z.string(), z.object({
-    recallCount: z.number().int().nonnegative(),
-    lastRecalledAt: z.string().optional()
-  }))
-});
+interface MemoryDbRow {
+  id: unknown;
+  original_id?: unknown;
+  content: unknown;
+  metadata: unknown;
+  origin_kind: unknown;
+  workspace_id: unknown;
+  workspace_name: unknown;
+  created_at: unknown;
+  updated_at: unknown;
+  revision: unknown;
+  access_count: unknown;
+  last_recalled_at: unknown;
+  archived_at?: unknown;
+  archived_reason?: unknown;
+  archived_by?: unknown;
+  merged_into?: unknown;
+}
+
+interface MaintenanceDbRow {
+  state: unknown;
+  started_at: unknown;
+  last_scan_at: unknown;
+  last_finished_at: unknown;
+  eligible: unknown;
+  processed: unknown;
+  written: unknown;
+  failed: unknown;
+  error: unknown;
+  last_run_json: unknown;
+}
+
+interface SleepRunDbRow {
+  id: unknown;
+  status: unknown;
+  trigger: unknown;
+  examined: unknown;
+  written: unknown;
+  failed: unknown;
+  archived: unknown;
+  exact: unknown;
+  expired: unknown;
+  similarity: unknown;
+  llm: unknown;
+  archived_exact?: unknown;
+  archived_expired?: unknown;
+  archived_orphan?: unknown;
+  archived_similarity?: unknown;
+  archived_llm?: unknown;
+  input_tokens?: unknown;
+  output_tokens?: unknown;
+  started_at: unknown;
+  finished_at: unknown;
+  error: unknown;
+}
 
 export class MemoryStorage {
-  private authority: DatabaseSync | undefined;
-  /** 同一实例内的写串行化：避免并发写对共享权威连接发起嵌套 BEGIN；跨进程互斥仍由 BEGIN IMMEDIATE 兜底。 */
+  private database: DatabaseSync | undefined;
+  private databaseOpening: Promise<DatabaseSync | undefined> | undefined;
   private writeTail: Promise<unknown> = Promise.resolve();
 
   constructor(readonly workspaceRoot: string) {}
 
   async getOverview(options: MemoryReadOptions = {}): Promise<MemoryOverview> {
     options.signal?.throwIfAborted();
-    const snapshot = await this.readScope("project", options.signal);
-    const origins = countOrigins(snapshot.entries.map(({ entry }) => entry), currentWorkspaceId(snapshot.directory));
+    const workspace = await currentWorkspaceOrigin(this.workspaceRoot);
+    const database = await this.openDatabase(false);
+    const entries = database === undefined ? [] : readMemoryEntries(database);
     return {
-      storeRevision: snapshot.state.revision,
-      entryCount: snapshot.entries.length,
-      candidateCount: snapshot.candidates.length,
-      origins
+      storeRevision: database === undefined ? 0 : readRevision(database),
+      entryCount: entries.filter((entry) => entry.archivedAt === undefined).length,
+      origins: countOrigins(
+        entries.filter((entry) => entry.archivedAt === undefined),
+        workspace.workspaceId
+      )
     };
   }
 
-  /** v3 单库列表入口；offset/limit 组合做分页，total 为分页前计数。 */
   async listEntries(options: MemoryListOptions = {}): Promise<MemoryEntriesResult> {
     options.signal?.throwIfAborted();
-    const snapshot = await this.readScope("project", options.signal);
+    const workspace = await currentWorkspaceOrigin(this.workspaceRoot);
+    const database = await this.openDatabase(false);
+    const allEntries = database === undefined ? [] : readMemoryEntries(database);
     const selectors = normalizeOriginSelectors(options.origins);
-    const workspaceId = currentWorkspaceId(snapshot.directory);
     const topic = options.topic === undefined ? undefined : normalizeMemoryTopic(options.topic);
-    const matched = snapshot.entries
-      .filter(({ entry }) => options.includeArchived === true || entry.archivedAt === undefined)
-      .filter(({ entry }) => matchesOriginSelectors(entry.origin, selectors, workspaceId))
-      .filter(({ entry }) => topic === undefined || entry.topic === topic)
-      .sort((left, right) => compareEntriesForDisplay(left.entry, right.entry));
+    const matched = allEntries
+      .filter((entry) => options.includeArchived === true || entry.archivedAt === undefined)
+      .filter((entry) => matchesOriginSelectors(entry.origin, selectors, workspace.workspaceId))
+      .filter((entry) => topic === undefined || entry.topic === topic)
+      .sort(compareEntriesForDisplay);
     const offset = normalizeLimit(options.offset, 0);
     const records = matched.slice(offset, offset + normalizeLimit(options.limit, Number.MAX_SAFE_INTEGER));
     return {
-      entries: records.map(({ entry }) => entry),
-      paths: snapshot.directory === undefined
+      entries: records,
+      paths: database === undefined
         ? undefined
-        : Object.fromEntries(records.map(({ entry, fileName }) => [
-          entry.id,
-          path.relative(snapshot.directory!.storageRoot, path.join(snapshot.directory!.path, entryDirectoryName, fileName))
-        ])),
-      storeRevision: snapshot.state.revision,
+        : Object.fromEntries(records.map((entry) => [entry.id, memoryReference(entry.id)])),
+      storeRevision: database === undefined ? 0 : readRevision(database),
       total: matched.length
     };
   }
 
-  /** v3 单库词法搜索入口；语义层在 Runtime Host 上游组合。 */
   async search(query: string, queryPaths: string[], options: MemorySearchOptions = {}): Promise<MemorySearchResult> {
-    return await this.searchInternal(query, queryPaths, options);
-  }
-
-  private async searchInternal(
-    query: string,
-    queryPaths: string[],
-    options: MemorySearchOptions
-  ): Promise<MemorySearchResult> {
     options.signal?.throwIfAborted();
-    const snapshot = await this.readScope("project", options.signal);
+    const workspace = await currentWorkspaceOrigin(this.workspaceRoot);
+    const database = await this.openDatabase(false);
+    const allEntries = database === undefined ? [] : readMemoryEntries(database);
     const selectors = normalizeOriginSelectors(options.origins);
-    const workspaceId = currentWorkspaceId(snapshot.directory);
     const now = options.now ?? new Date();
     const ranked = rankMemoryEntries(
-      snapshot.entries.map(({ entry }) => entry)
+      allEntries
         .filter((entry) => options.includeArchived === true || entry.archivedAt === undefined)
-        .filter((entry) => matchesOriginSelectors(entry.origin, selectors, workspaceId)),
+        .filter((entry) => matchesOriginSelectors(entry.origin, selectors, workspace.workspaceId)),
       query,
       queryPaths,
       now
     );
-    const records = new Map(snapshot.entries.map((record) => [record.entry.id, record] as const));
     const limit = normalizeLimit(options.limit, 3);
     const originIncluded = emptyOriginCounts();
     const originTrimmed = emptyOriginCounts();
@@ -290,9 +236,7 @@ export class MemoryStorage {
     let budgetOmitted = 0;
 
     for (const rankedEntry of ranked) {
-      const record = records.get(rankedEntry.entry.id);
-      if (!record || !snapshot.directory) continue;
-      const bucket = originBucket(rankedEntry.entry.origin, workspaceId);
+      const bucket = originBucket(rankedEntry.entry.origin, workspace.workspaceId);
       if (matches.length >= limit) {
         originTrimmed[bucket] += 1;
         omitted.push({ origin: rankedEntry.entry.origin, id: rankedEntry.entry.id, reason: "entry_limit" });
@@ -307,47 +251,49 @@ export class MemoryStorage {
       usedChars += estimatedChars;
       originIncluded[bucket] += 1;
       matches.push({
-        ...memoryMatchFromRanked(
-          rankedEntry,
-          path.relative(snapshot.directory.storageRoot, path.join(snapshot.directory.path, entryDirectoryName, record.fileName))
-        ),
+        ...memoryMatchFromRanked(rankedEntry, memoryReference(rankedEntry.entry.id)),
         originBucket: bucket
       });
     }
 
-    const report: MemorySearchResult["report"] = {
-      origins: { included: originIncluded, trimmed: originTrimmed },
-      omitted,
-      budgetOmission: options.maxChars === undefined || budgetOmitted === 0
-        ? undefined
-        : { maxChars: Math.max(0, options.maxChars), usedChars, omitted: budgetOmitted }
-    };
     return {
       matches,
-      storeRevision: snapshot.state.revision,
-      report
+      storeRevision: database === undefined ? 0 : readRevision(database),
+      report: {
+        origins: { included: originIncluded, trimmed: originTrimmed },
+        omitted,
+        budgetOmission: options.maxChars === undefined || budgetOmitted === 0
+          ? undefined
+          : {
+              maxChars: Math.max(0, options.maxChars),
+              usedChars,
+              omitted: budgetOmitted
+            }
+      }
     };
   }
 
-  async writeEntry(input: MemoryEntryInput, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
+  async writeEntry(input: MemoryEntryInput, options: MemoryMutationOptions): Promise<MemoryWriteResult> {
     options.signal?.throwIfAborted();
-    const canonicalWorkspace = await fs.realpath(path.resolve(this.workspaceRoot));
-    const safe = resolveEntryOrigin(sanitizeMemoryEntryInput(input), workspaceOrigin(canonicalWorkspace));
-    assertAllowedScopedEntry(safe, canonicalWorkspace);
-    return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      if (safe.summary.length < 20) return { written: false, revision: snapshot.state.revision };
-      const duplicate = snapshot.entries.find(({ entry }) => entry.topic === safe.topic && memoryEntryEquals(entry, safe));
+    const current = await currentWorkspaceOrigin(this.workspaceRoot);
+    const safe = resolveEntryOrigin(sanitizeMemoryEntryInput(input), current);
+    assertAllowedMemoryEntry(safe, this.workspaceRoot);
+    return await this.withWrite(options.signal, (database) => {
+      const revision = readRevision(database);
+      assertExpectedRevision(options.expectedRevision, revision);
+      if (safe.summary.length < 20) return { written: false, revision };
+      const duplicate = readMemoryEntries(database).find((entry) => (
+        entry.archivedAt === undefined && memoryEntryEquals(entry, safe)
+      ));
       if (duplicate) {
         return {
           written: false,
-          entry: duplicate.entry,
-          path: path.relative(directory.storageRoot, path.join(directory.path, entryDirectoryName, duplicate.fileName)),
-          revision: snapshot.state.revision
+          entry: duplicate,
+          path: memoryReference(duplicate.id),
+          revision
         };
       }
-      const nextRevision = snapshot.state.revision + 1;
+      const nextRevision = revision + 1;
       const now = (options.now ?? new Date()).toISOString();
       const entry = createStoredMemoryEntry(safe, {
         id: randomUUID(),
@@ -355,606 +301,892 @@ export class MemoryStorage {
         createdAt: now,
         updatedAt: now
       });
-      const fileName = chooseEntryFileName(entry, snapshot.entries);
-      await atomicWriteChildFile(directory, path.join(directory.path, entryDirectoryName), fileName, renderMemoryEntry(entry));
-      const records = [...snapshot.entries, { entry, fileName }];
-      await this.commitSnapshot(directory, snapshot.state, nextRevision, records, snapshot.candidates, options.now ?? new Date());
+      insertActiveMemory(database, entry);
+      setRevision(database, nextRevision);
       return {
         written: true,
         entry,
-        path: path.relative(directory.storageRoot, path.join(directory.path, entryDirectoryName, fileName)),
+        path: memoryReference(entry.id),
         revision: nextRevision
       };
     });
   }
 
-  async updateEntry(id: string, patch: MemoryEntryPatch, options: MemoryMutationOptions): Promise<ScopedMemoryWriteResult> {
+  async updateEntry(id: string, patch: MemoryEntryPatch, options: MemoryMutationOptions): Promise<MemoryWriteResult> {
     options.signal?.throwIfAborted();
-    const canonicalWorkspace = await fs.realpath(path.resolve(this.workspaceRoot));
-    return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const now = options.now ?? new Date();
-      const snapshot = await this.readScopeLocked(directory, options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      const record = snapshot.entries.find(({ entry }) => entry.id === id);
-      if (!record) return { written: false, revision: snapshot.state.revision };
-      const nextRevision = snapshot.state.revision + 1;
+    return await this.withWrite(options.signal, (database) => {
+      const revision = readRevision(database);
+      assertExpectedRevision(options.expectedRevision, revision);
+      const existing = findMemoryEntry(database, id);
+      if (!existing) return { written: false, revision };
       const input = sanitizeMemoryEntryInput({
-        origin: record.entry.origin,
-        kind: patch.kind ?? record.entry.kind,
-        topic: patch.topic ?? record.entry.topic,
-        title: patch.title ?? record.entry.title,
-        summary: patch.summary ?? record.entry.summary,
-        decisions: patch.decisions ?? record.entry.decisions,
-        paths: patch.paths ?? record.entry.paths,
-        keywords: patch.keywords ?? record.entry.keywords,
-        importance: patch.importance ?? record.entry.importance,
-        archivedAt: record.entry.archivedAt,
-        archivedReason: record.entry.archivedReason,
+        origin: existing.origin,
+        kind: patch.kind ?? existing.kind,
+        topic: patch.topic ?? existing.topic,
+        title: patch.title ?? existing.title,
+        summary: patch.summary ?? existing.summary,
+        decisions: patch.decisions ?? existing.decisions,
+        paths: patch.paths ?? existing.paths,
+        keywords: patch.keywords ?? existing.keywords,
+        importance: patch.importance ?? existing.importance,
+        durability: patch.durability ?? existing.durability,
+        expiresAt: patch.expiresAt ?? existing.expiresAt,
+        archivedAt: existing.archivedAt,
+        archivedReason: existing.archivedReason,
+        mergedInto: patch.mergedInto ?? existing.mergedInto,
         lineage: [
-          ...record.entry.lineage,
+          ...existing.lineage,
           {
             source: "explicit_edit",
             externalContext: false,
-            sourceEntryIds: [record.entry.id],
+            sourceEntryIds: [existing.id],
             userEvidence: patch.userEvidence
           }
         ]
       });
-      if (!input.origin) throw new Error("Edited memory must retain its origin.");
-      assertAllowedScopedEntry(input, canonicalWorkspace);
-      if (input.summary.length < 20) return { written: false, entry: record.entry, revision: snapshot.state.revision };
+      assertAllowedMemoryEntry(input, this.workspaceRoot);
+      if (input.summary.length < 20) {
+        return { written: false, entry: existing, path: memoryReference(existing.id), revision };
+      }
+      const nextRevision = revision + 1;
       const entry = createStoredMemoryEntry(input, {
-        id: record.entry.id,
+        id: existing.id,
         revision: nextRevision,
-        createdAt: record.entry.createdAt,
-        updatedAt: now.toISOString()
+        createdAt: existing.createdAt,
+        updatedAt: (options.now ?? new Date()).toISOString(),
+        originalId: existing.originalId,
+        archivedBy: existing.archivedBy
       });
-      await atomicWriteChildFile(directory, path.join(directory.path, entryDirectoryName), record.fileName, renderMemoryEntry(entry));
-      const records = snapshot.entries.map((item) => item.entry.id === id ? { entry, fileName: item.fileName } : item);
-      await this.commitSnapshot(directory, snapshot.state, nextRevision, records, snapshot.candidates, now);
+      entry.recallCount = existing.recallCount;
+      entry.lastRecalledAt = existing.lastRecalledAt;
+      if (existing.archivedAt === undefined) updateActiveMemory(database, entry);
+      else updateArchivedMemory(database, entry);
+      setRevision(database, nextRevision);
       return {
         written: true,
         entry,
-        path: path.relative(directory.storageRoot, path.join(directory.path, entryDirectoryName, record.fileName)),
+        path: memoryReference(entry.id),
         revision: nextRevision
       };
     });
   }
 
-  async archiveEntry(id: string, archived: boolean, options: MemoryMutationOptions): Promise<MemoryArchiveResult> {
+  async archiveEntry(id: string, archived: boolean, options: MemoryMutationOptions): Promise<{ archived: boolean; entry?: MemoryEntry; revision: number }> {
     options.signal?.throwIfAborted();
-    const canonicalWorkspace = await fs.realpath(path.resolve(this.workspaceRoot));
-    return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const now = options.now ?? new Date();
-      const snapshot = await this.readScopeLocked(directory, options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      const record = snapshot.entries.find(({ entry }) => entry.id === id);
-      if (!record) return { archived: false, revision: snapshot.state.revision };
-      if ((record.entry.archivedAt !== undefined) === archived) return { archived, entry: record.entry, revision: snapshot.state.revision };
-      const nextRevision = snapshot.state.revision + 1;
-      const input = sanitizeMemoryEntryInput({
-        origin: record.entry.origin,
-        kind: record.entry.kind,
-        topic: record.entry.topic,
-        title: record.entry.title,
-        summary: record.entry.summary,
-        decisions: record.entry.decisions,
-        paths: record.entry.paths,
-        keywords: record.entry.keywords,
-        importance: record.entry.importance,
-        archivedAt: archived ? now.toISOString() : undefined,
-        archivedReason: archived ? "manual" : undefined,
-        lineage: record.entry.lineage
+    return await this.withWrite(options.signal, (database) => {
+      const revision = readRevision(database);
+      assertExpectedRevision(options.expectedRevision, revision);
+      const existing = findMemoryEntry(database, id);
+      if (!existing) return { archived: false, revision };
+      if ((existing.archivedAt !== undefined) === archived) return { archived, entry: existing, revision };
+      const now = (options.now ?? new Date()).toISOString();
+      const nextRevision = revision + 1;
+      if (archived) {
+        const entry = createStoredMemoryEntry({
+          origin: existing.origin,
+          kind: existing.kind,
+          topic: existing.topic,
+          title: existing.title,
+          summary: existing.summary,
+          decisions: existing.decisions,
+          paths: existing.paths,
+          keywords: existing.keywords,
+          importance: existing.importance,
+          durability: existing.durability,
+          expiresAt: existing.expiresAt,
+          archivedAt: now,
+          archivedReason: "manual",
+          lineage: existing.lineage
+        }, {
+          // Assign a fresh archive row id and keep the active fact id in
+          // original_id. The latter also lets the derived vector index remove
+          // the active vector after the move.
+          id: randomUUID(),
+          originalId: existing.id,
+          archivedBy: options.archivedBy ?? "manual",
+          revision: nextRevision,
+          createdAt: existing.createdAt,
+          updatedAt: existing.updatedAt
+        });
+        entry.recallCount = existing.recallCount;
+        entry.lastRecalledAt = existing.lastRecalledAt;
+        insertArchivedMemory(database, entry);
+        deleteActiveMemory(database, existing.id);
+        setRevision(database, nextRevision);
+        return { archived, entry, revision: nextRevision };
+      } else {
+        // Restoring an archive is an add operation: the restored active memory
+        // receives a new fact id, while the archive row id is consumed.
+        const entry = createStoredMemoryEntry({
+          origin: existing.origin,
+          kind: existing.kind,
+          topic: existing.topic,
+          title: existing.title,
+          summary: existing.summary,
+          decisions: existing.decisions,
+          paths: existing.paths,
+          keywords: existing.keywords,
+          importance: existing.importance,
+          durability: existing.durability,
+          lineage: existing.lineage
+        }, {
+          id: randomUUID(),
+          revision: nextRevision,
+          createdAt: now,
+          updatedAt: now
+        });
+        entry.recallCount = existing.recallCount;
+        entry.lastRecalledAt = existing.lastRecalledAt;
+        insertActiveMemory(database, entry);
+        deleteArchivedMemory(database, existing.id);
+        setRevision(database, nextRevision);
+        return { archived, entry, revision: nextRevision };
+      }
+    });
+  }
+
+  async archiveEntries(
+    ids: readonly string[],
+    reason: MemoryArchiveReason,
+    options: MemoryMutationOptions & { mergedInto?: string }
+  ): Promise<MemoryBulkArchiveResult> {
+    options.signal?.throwIfAborted();
+    const uniqueIds = [...new Set(ids)];
+    return await this.withWrite(options.signal, (database) => {
+      const revision = readRevision(database);
+      assertExpectedRevision(options.expectedRevision, revision);
+      if (!uniqueIds.length) return { entries: [], archived: 0, revision };
+      const active = readMemoryEntries(database).filter((entry) => (
+        entry.archivedAt === undefined && uniqueIds.includes(entry.id)
+      ));
+      if (!active.length) return { entries: [], archived: 0, revision };
+      const now = (options.now ?? new Date()).toISOString();
+      const nextRevision = revision + 1;
+      const entries = active.map((existing) => {
+        const entry = createStoredMemoryEntry({
+          origin: existing.origin,
+          kind: existing.kind,
+          topic: existing.topic,
+          title: existing.title,
+          summary: existing.summary,
+          decisions: existing.decisions,
+          paths: existing.paths,
+          keywords: existing.keywords,
+          importance: existing.importance,
+          durability: existing.durability,
+          expiresAt: existing.expiresAt,
+          archivedAt: now,
+          archivedReason: reason,
+          mergedInto: options.mergedInto,
+          lineage: existing.lineage
+        }, {
+          id: randomUUID(),
+          originalId: existing.id,
+          archivedBy: options.archivedBy ?? "manual",
+          revision: nextRevision,
+          createdAt: existing.createdAt,
+          updatedAt: existing.updatedAt
+        });
+        entry.recallCount = existing.recallCount;
+        entry.lastRecalledAt = existing.lastRecalledAt;
+        assertAllowedMemoryEntry(entry, this.workspaceRoot);
+        return entry;
       });
-      assertAllowedScopedEntry(input, canonicalWorkspace);
-      const entry = createStoredMemoryEntry(input, {
-        id: record.entry.id,
-        revision: nextRevision,
-        createdAt: record.entry.createdAt,
-        updatedAt: now.toISOString()
-      });
-      await atomicWriteChildFile(directory, path.join(directory.path, entryDirectoryName), record.fileName, renderMemoryEntry(entry));
-      const records = snapshot.entries.map((item) => item.entry.id === id ? { entry, fileName: item.fileName } : item);
-      await this.commitSnapshot(directory, snapshot.state, nextRevision, records, snapshot.candidates, now);
-      return { archived, entry, revision: nextRevision };
+      for (const entry of entries) {
+        insertArchivedMemory(database, entry);
+        deleteActiveMemory(database, entry.originalId ?? entry.id);
+      }
+      setRevision(database, nextRevision);
+      return { entries, archived: entries.length, revision: nextRevision };
     });
   }
 
   async purgeArchivedEntries(retentionDays: number, options: MemoryMutationOptions): Promise<{ deleted: number; revision: number }> {
     options.signal?.throwIfAborted();
-    return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      const cutoff = (options.now ?? new Date()).getTime() - Math.max(1, Math.trunc(retentionDays)) * 86_400_000;
-      const targets = snapshot.entries.filter(({ entry }) => entry.archivedAt !== undefined && Date.parse(entry.archivedAt) <= cutoff);
-      if (!targets.length) return { deleted: 0, revision: snapshot.state.revision };
-      const nextRevision = snapshot.state.revision + 1;
-      await this.commitDestructiveMutation(directory, {
-        version: 3,
-        fromRevision: snapshot.state.revision,
-        toRevision: nextRevision,
-        createdAt: (options.now ?? new Date()).toISOString(),
-        entryWrites: [],
-        entryDeletes: targets.map(({ fileName }) => fileName),
-        candidateDeletes: []
-      }, options.signal);
-      await pruneUsageEntries(directory, targets.map(({ entry }) => entry.id), options.signal);
-      return { deleted: targets.length, revision: nextRevision };
+    return await this.withWrite(options.signal, (database) => {
+      const revision = readRevision(database);
+      assertExpectedRevision(options.expectedRevision, revision);
+      const cutoff = (options.now ?? new Date()).getTime()
+        - Math.max(1, Math.trunc(retentionDays)) * 86_400_000;
+      const targets = readMemoryEntries(database).filter((entry) => (
+        entry.archivedAt !== undefined && Date.parse(entry.archivedAt) <= cutoff
+      ));
+      if (!targets.length) return { deleted: 0, revision };
+      const deleteStatement = database.prepare("DELETE FROM memory_archive WHERE id = ?");
+      for (const entry of targets) deleteStatement.run(entry.id);
+      setRevision(database, revision + 1);
+      return { deleted: targets.length, revision: revision + 1 };
     });
   }
 
   async deleteEntry(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
-    return await this.deleteEntryInternal(id, options);
-  }
-
-  private async deleteEntryInternal(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
     options.signal?.throwIfAborted();
-    return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      const record = snapshot.entries.find(({ entry }) => entry.id === id);
-      if (!record) return { deleted: false, revision: snapshot.state.revision };
-      const nextRevision = snapshot.state.revision + 1;
-      await this.commitDestructiveMutation(directory, {
-        version: 3,
-        fromRevision: snapshot.state.revision,
-        toRevision: nextRevision,
-        createdAt: (options.now ?? new Date()).toISOString(),
-        entryWrites: [],
-        entryDeletes: [record.fileName],
-        candidateDeletes: []
-      }, options.signal);
-      await pruneUsageEntries(directory, [id], options.signal);
-      return { deleted: true, revision: nextRevision };
+    return await this.withWrite(options.signal, (database) => {
+      const revision = readRevision(database);
+      assertExpectedRevision(options.expectedRevision, revision);
+      const existing = findMemoryEntry(database, id);
+      if (!existing) return { deleted: false, revision };
+      if (existing.archivedAt === undefined) deleteActiveMemory(database, existing.id);
+      else deleteArchivedMemory(database, existing.id);
+      setRevision(database, revision + 1);
+      return { deleted: true, entry: existing, revision: revision + 1 };
     });
   }
 
   async clearEntries(selector: MemoryOriginSelector, options: MemoryMutationOptions): Promise<MemoryClearResult> {
     options.signal?.throwIfAborted();
-    return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      const workspaceId = currentWorkspaceId(directory);
-      const targets = snapshot.entries.filter(({ entry }) => matchesOriginSelectors(entry.origin, [selector], workspaceId));
-      const candidates = snapshot.candidates.filter((candidate) => matchesOriginSelectors(candidate.origin, [selector], workspaceId));
-      if (!targets.length && !candidates.length) {
-        return { selector, deletedEntries: 0, deletedCandidates: 0, revision: snapshot.state.revision };
+    const workspace = await currentWorkspaceOrigin(this.workspaceRoot);
+    return await this.withWrite(options.signal, (database) => {
+      const revision = readRevision(database);
+      assertExpectedRevision(options.expectedRevision, revision);
+      const entries = readMemoryEntries(database).filter((entry) => (
+        matchesOriginSelectors(entry.origin, [selector], workspace.workspaceId)
+      ));
+      if (!entries.length) {
+        return { selector, deletedEntries: 0, revision };
       }
-      const nextRevision = snapshot.state.revision + 1;
-      await this.commitDestructiveMutation(directory, {
-        version: 3,
-        fromRevision: snapshot.state.revision,
-        toRevision: nextRevision,
-        createdAt: (options.now ?? new Date()).toISOString(),
-        entryWrites: [],
-        entryDeletes: targets.map(({ fileName }) => fileName),
-        candidateDeletes: candidates.map(({ id }) => id)
-      }, options.signal);
-      if (targets.length) {
-        await pruneUsageEntries(directory, targets.map(({ entry }) => entry.id), options.signal);
+      for (const entry of entries) {
+        if (entry.archivedAt === undefined) deleteActiveMemory(database, entry.id);
+        else deleteArchivedMemory(database, entry.id);
       }
+      setRevision(database, revision + 1);
       return {
         selector,
-        deletedEntries: targets.length,
-        deletedCandidates: candidates.length,
-        revision: nextRevision
+        deletedEntries: entries.length,
+        revision: revision + 1
       };
     });
-  }
-
-  async enqueueCandidate(input: MemoryCandidateInput, options: MemoryCandidateMutationOptions): Promise<MemoryCandidateMutationResult> {
-    options.signal?.throwIfAborted();
-    if (input.completed !== true) throw new Error("Only completed root turns can become memory candidates.");
-    validateCandidateLineage(input);
-    return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const now = options.now ?? new Date();
-      const snapshot = await this.readScopeLocked(directory, options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      if (input.lineage.externalContext && options.excludeExternalContext) {
-        return { queued: false, revision: snapshot.state.revision, reason: "external_context_excluded" };
-      }
-      // 候选绝不保存完整聊天，只保留用户明确允许沉淀的有界 summary；正文不做盲目改写。
-      const summary = input.summary.trim().slice(0, maxMemoryCandidateChars);
-      if (summary.length < 20) return { queued: false, revision: snapshot.state.revision, reason: "summary_too_short" };
-      const duplicate = snapshot.candidates.find((candidate) => (
-        candidate.lineage.runId === input.lineage.runId
-        && candidate.lineage.turnId === input.lineage.turnId
-        && normalizeForDedup(candidate.summary) === normalizeForDedup(summary)
-      ));
-      if (duplicate) return { queued: false, candidate: duplicate, revision: snapshot.state.revision, reason: "duplicate" };
-      const nextRevision = snapshot.state.revision + 1;
-      const createdAt = now.toISOString();
-      const candidateOrigin = input.origin ?? (input.audienceHint === "universal"
-        ? { kind: "user" as const }
-        : workspaceOrigin(directory.workspaceRoot));
-      const candidate: MemoryCandidate = {
-        id: randomUUID(),
-        summary,
-        completed: true,
-        lineage: {
-          source: "completed_task",
-          sessionId: input.lineage.sessionId.trim().slice(0, 200),
-          turnId: input.lineage.turnId.trim().slice(0, 200),
-          runId: input.lineage.runId.trim().slice(0, 200),
-          externalContext: input.lineage.externalContext
-        },
-        origin: candidateOrigin,
-        audienceHint: input.audienceHint,
-        kindHint: input.kindHint,
-        createdAt,
-        eligibleAt: new Date(now.getTime() + memoryCandidateEligibilityMs).toISOString(),
-        revision: nextRevision
-      };
-      await writeCandidate(directory, candidate);
-      await this.commitSnapshot(
-        directory,
-        snapshot.state,
-        nextRevision,
-        snapshot.entries,
-        [...snapshot.candidates, candidate],
-        now
-      );
-      return { queued: true, candidate, revision: nextRevision };
-    });
-  }
-
-  /** 纯读取 API：启动扫描和定时扫描都可注入 now/minAgeMs 做确定性测试。 */
-  async scanEligibleCandidates(options: MemoryCandidateScanOptions = {}): Promise<MemoryCandidateScanResult> {
-    options.signal?.throwIfAborted();
-    const snapshot = await this.readScope("project", options.signal);
-    const nowMs = (options.now ?? new Date()).getTime();
-    const minAgeMs = Math.max(0, options.minAgeMs ?? memoryCandidateEligibilityMs);
-    const candidates = snapshot.candidates
-      .filter((candidate) => candidate.origin.kind === "workspace" && candidate.origin.workspaceId === currentWorkspaceId(snapshot.directory))
-      .filter((candidate) => nowMs >= Date.parse(candidate.createdAt) + minAgeMs)
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-      .slice(0, normalizeLimit(options.limit, Number.MAX_SAFE_INTEGER));
-    return { candidates, revision: snapshot.state.revision };
-  }
-
-  async removeCandidate(id: string, options: MemoryMutationOptions): Promise<MemoryDeleteResult> {
-    options.signal?.throwIfAborted();
-    return await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const snapshot = await this.readScopeLocked(directory, options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      if (!snapshot.candidates.some((candidate) => candidate.id === id)) {
-        return { deleted: false, revision: snapshot.state.revision };
-      }
-      const nextRevision = snapshot.state.revision + 1;
-      await this.commitDestructiveMutation(directory, {
-        version: 3,
-        fromRevision: snapshot.state.revision,
-        toRevision: nextRevision,
-        createdAt: (options.now ?? new Date()).toISOString(),
-        entryWrites: [],
-        entryDeletes: [],
-        candidateDeletes: [id]
-      }, options.signal);
-      return { deleted: true, revision: nextRevision };
-    });
-  }
-
-  /**
-   * 只有调用方确认条目已实际组装进模型上下文后才调用。usage 是可丢弃投影，
-   * 不推进内容 revision，也不会污染权威 Markdown。
-   */
-  /** 回写「条目被引用」的使用投影；同一投影在 delete/clear 时同步清理孤儿行。 */
-  /** 兼容旧调用名的别名；等价于 recordRecallUsage。 */
-  async recordInjectedRecall(ids: string[], options: MemoryReadOptions & { now?: Date } = {}): Promise<void> {
-    await this.recordRecallUsage(ids, options);
   }
 
   async recordRecallUsage(ids: string[], options: MemoryReadOptions & { now?: Date } = {}): Promise<void> {
     options.signal?.throwIfAborted();
     const uniqueIds = [...new Set(ids)];
     if (!uniqueIds.length) return;
-    await this.withScopeLock("project", true, options.signal, async (directory) => {
-      const usage = await readUsage(directory, options.signal);
-      const nowIso = (options.now ?? new Date()).toISOString();
-      let changed = false;
+    await this.withWrite(options.signal, (database) => {
+      const now = (options.now ?? new Date()).toISOString();
+      const active = database.prepare(
+        "UPDATE memories SET access_count = access_count + 1, last_recalled_at = ? WHERE id = ?"
+      );
+      const archived = database.prepare(
+        "UPDATE memory_archive SET access_count = access_count + 1, last_recalled_at = ? WHERE id = ?"
+      );
       for (const id of uniqueIds) {
-        usage[id] = {
-          recallCount: (usage[id]?.recallCount ?? 0) + 1,
-          lastRecalledAt: nowIso
-        };
-        changed = true;
+        const result = active.run(now, id);
+        if (result.changes === 0) archived.run(now, id);
       }
-      if (changed) await writeUsageFile(directory, usage);
     });
   }
 
-  /** consolidation 已在锁外调用模型；这里只用一次 CAS 原子替换被覆盖的 source entries。 */
-  async replaceEntries(
-    scope: MemoryScope,
-    sourceEntryIds: string[],
-    replacements: MemoryEntryInput[],
-    options: MemoryMutationOptions
-  ): Promise<ReplaceEntriesResult> {
-    options.signal?.throwIfAborted();
-    return await this.withScopeLock(scope, true, options.signal, async (directory) => {
-      const now = options.now ?? new Date();
-      const snapshot = await this.readScopeLocked(directory, options.signal);
-      assertExpectedRevision("store", options.expectedRevision, snapshot.state.revision);
-      const sourceSet = new Set(sourceEntryIds);
-      if (sourceSet.size !== sourceEntryIds.length) throw new Error("Consolidation source ids must be unique.");
-      if (![...sourceSet].every((id) => snapshot.entries.some(({ entry }) => entry.id === id))) {
-        throw new MemoryRevisionConflictError(options.expectedRevision, snapshot.state.revision);
-      }
-      const sources = snapshot.entries.filter(({ entry }) => sourceSet.has(entry.id));
-      const sourceOrigin = sources[0]?.entry.origin;
-      if (!sourceOrigin || sources.some(({ entry }) => !memoryOriginsEqual(entry.origin, sourceOrigin))) {
-        throw new Error("Consolidation cannot combine entries from different memory origins.");
-      }
-      const safeReplacements = replacements.map((entry) => {
-        const safe = sanitizeMemoryEntryInput({ ...entry, origin: entry.origin ?? sourceOrigin });
-        if (!safe.origin || !memoryOriginsEqual(safe.origin, sourceOrigin)) throw new Error("Consolidation cannot move entries between memory origins.");
-        if (safe.summary.length < 20) throw new Error("Consolidation returned a memory summary that is too short.");
-        assertAllowedScopedEntry(safe, directory.workspaceRoot);
-        return safe;
-      });
-      if (!safeReplacements.length) throw new Error("Consolidation cannot delete all source memories.");
-      const nextRevision = snapshot.state.revision + 1;
-      const timestamp = now.toISOString();
-      const created: ScopeEntryRecord[] = [];
-      for (const input of safeReplacements) {
-        const entry = createStoredMemoryEntry(input, {
-          id: randomUUID(),
-          revision: nextRevision,
-          createdAt: timestamp,
-          updatedAt: timestamp
-        });
-        // source 文件删除前仍占用名字；新 entry 必须避开它们，不能先覆盖再被清理阶段删除。
-        const fileName = chooseEntryFileName(entry, [...snapshot.entries, ...created]);
-        created.push({ entry, fileName });
-      }
-      await this.commitDestructiveMutation(directory, {
-        version: 3,
-        fromRevision: snapshot.state.revision,
-        toRevision: nextRevision,
-        createdAt: timestamp,
-        entryWrites: created.map(({ entry, fileName }) => ({
-          fileName,
-          content: renderMemoryEntry(entry),
-          id: entry.id
-        })),
-        entryDeletes: snapshot.entries.filter(({ entry }) => sourceSet.has(entry.id)).map(({ fileName }) => fileName),
-        candidateDeletes: []
-      }, options.signal);
-      return { entries: created.map(({ entry }) => entry), revision: nextRevision };
-    });
-  }
-
-
-  /** 维护状态是操作元数据，不改变 memory revision；后台失败和进程重启后仍可审计。 */
   async readMaintenanceStatus(options: MemoryReadOptions = {}): Promise<MemoryMaintenanceStatus> {
     options.signal?.throwIfAborted();
-    const directory = await resolveScopeDirectory(this.workspaceRoot, "project", false);
-    if (!directory) return emptyMaintenanceStatus();
-    // 维护状态是单文件原子写，无锁读拿到的要么是旧值要么是新值，不会读到半截。
-    const content = await readOptionalSafeFile(directory, maintenanceFileName, maxStateChars, options.signal);
-    if (!content) return emptyMaintenanceStatus();
-    let raw: unknown;
-    try {
-      raw = JSON.parse(content);
-    } catch {
-      throw new Error("Invalid memory maintenance status JSON.");
-    }
-    const parsed = maintenanceSchema.safeParse(raw);
-    if (!parsed.success) throw new Error("Invalid memory maintenance status.");
-    const { version: _version, ...status } = parsed.data;
-    return status;
+    const database = await this.openDatabase(false);
+    if (database === undefined) return emptyMaintenanceStatus();
+    const row = database.prepare("SELECT * FROM memory_maintenance WHERE id = 1").get() as MaintenanceDbRow | undefined;
+    if (!row) return emptyMaintenanceStatus();
+    const state = memoryStateSchema.safeParse({
+      state: row.state,
+      startedAt: optionalTimeValue(row.started_at),
+      lastScanAt: optionalTimeValue(row.last_scan_at),
+      lastFinishedAt: optionalTimeValue(row.last_finished_at),
+      eligible: safeCounter(row.eligible),
+      processed: safeCounter(row.processed),
+      written: safeCounter(row.written),
+      failed: safeCounter(row.failed),
+      error: optionalString(row.error)
+    });
+    if (!state.success) throw new Error("Invalid memory maintenance status.");
+    const lastRun = parseSleepRun(row.last_run_json);
+    const sleepRuns = readSleepRuns(database);
+    return {
+      ...state.data,
+      lastRun,
+      sleepRuns: sleepRuns.length ? sleepRuns : undefined
+    };
   }
 
   async writeMaintenanceStatus(status: MemoryMaintenanceStatus, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    await this.withScopeLock("project", true, signal, async (directory) => {
-      const safe: MemoryMaintenanceStatus = {
-        state: status.state,
-        startedAt: safeOptionalTime(status.startedAt),
-        lastScanAt: safeOptionalTime(status.lastScanAt),
-        lastFinishedAt: safeOptionalTime(status.lastFinishedAt),
-        eligible: safeCounter(status.eligible),
-        processed: safeCounter(status.processed),
-        written: safeCounter(status.written),
-        failed: safeCounter(status.failed),
-        error: status.error === undefined ? undefined : redactSecrets(status.error).trim().slice(0, 2_000) || undefined,
-        lastRun: status.lastRun === undefined ? undefined : {
-          id: status.lastRun.id,
-          trigger: status.lastRun.trigger,
-          examined: safeCounter(status.lastRun.examined),
-          written: safeCounter(status.lastRun.written),
-          failed: safeCounter(status.lastRun.failed),
-          archived: safeCounter(status.lastRun.archived),
-          exact: safeCounter(status.lastRun.exact ?? 0),
-          expired: safeCounter(status.lastRun.expired ?? 0),
-          similarity: safeCounter(status.lastRun.similarity ?? 0),
-          llm: safeCounter(status.lastRun.llm ?? 0),
-          startedAt: safeOptionalTime(status.lastRun.startedAt) ?? new Date(0).toISOString(),
-          finishedAt: safeOptionalTime(status.lastRun.finishedAt) ?? new Date(0).toISOString()
-        },
-        sleepRuns: status.sleepRuns?.slice(-20).map((run) => ({
-          id: run.id,
-          trigger: run.trigger,
-          examined: safeCounter(run.examined),
-          written: safeCounter(run.written),
-          failed: safeCounter(run.failed),
-          archived: safeCounter(run.archived ?? 0),
-          exact: safeCounter(run.exact ?? 0),
-          expired: safeCounter(run.expired ?? 0),
-          similarity: safeCounter(run.similarity ?? 0),
-          llm: safeCounter(run.llm ?? 0),
-          startedAt: safeOptionalTime(run.startedAt) ?? new Date(0).toISOString(),
-          finishedAt: safeOptionalTime(run.finishedAt) ?? new Date(0).toISOString()
-        }))
-      };
-      await atomicWriteFile(directory, maintenanceFileName, `${JSON.stringify({ version: 3, ...safe }, null, 2)}\n`);
+    const safe = sanitizeMaintenanceStatus(status);
+    await this.withWrite(signal, (database) => {
+      const existingRuns = safe.sleepRuns === undefined ? readSleepRuns(database) : [];
+      const runs = safe.sleepRuns ?? existingRuns;
+      database.prepare(
+        "INSERT INTO memory_maintenance (id, state, started_at, last_scan_at, last_finished_at, eligible, processed, written, failed, error, last_run_json) " +
+        "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(id) DO UPDATE SET state = excluded.state, started_at = excluded.started_at, " +
+        "last_scan_at = excluded.last_scan_at, last_finished_at = excluded.last_finished_at, " +
+        "eligible = excluded.eligible, processed = excluded.processed, written = excluded.written, " +
+        "failed = excluded.failed, error = excluded.error, last_run_json = excluded.last_run_json"
+      ).run(
+        safe.state,
+        safe.startedAt ?? null,
+        safe.lastScanAt ?? null,
+        safe.lastFinishedAt ?? null,
+        safe.eligible,
+        safe.processed,
+        safe.written,
+        safe.failed,
+        safe.error ?? null,
+        safe.lastRun === undefined ? null : JSON.stringify(safe.lastRun)
+      );
+      database.prepare("DELETE FROM memory_sleep_runs").run();
+      const insert = database.prepare(
+        "INSERT INTO memory_sleep_runs " +
+        "(id, status, trigger, examined, written, failed, archived, exact, expired, similarity, llm, " +
+        "archived_exact, archived_expired, archived_orphan, archived_similarity, archived_llm, input_tokens, output_tokens, " +
+        "started_at, finished_at, error) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      );
+      for (const run of runs.slice(-20)) {
+        insert.run(
+          run.id,
+          run.status,
+          run.trigger,
+          run.examined,
+          run.written,
+          run.failed,
+          run.archived,
+          run.exact,
+          run.expired,
+          run.similarity,
+          run.llm,
+          run.archivedExact,
+          run.archivedExpired,
+          run.archivedOrphan,
+          run.archivedSimilarity,
+          run.archivedLlm,
+          run.inputTokens,
+          run.outputTokens,
+          run.startedAt,
+          run.finishedAt ?? null,
+          run.error ?? null
+        );
+      }
     });
   }
 
-  /** 读路径不取目录锁：单文件写入是原子的，跨文件视图允许短暂不一致。 */
-  private async readScope(scope: MemoryScope, signal?: AbortSignal): Promise<ScopeSnapshot> {
-    signal?.throwIfAborted();
-    const existing = await resolveScopeDirectory(this.workspaceRoot, scope, false);
-    if (!existing) return emptySnapshot();
-    return await this.readScopeUnlocked(existing, signal);
-  }
-
-  /** 锁内读：供写路径在持有目录锁时复用，做 revision CAS 与恢复。 */
-  private async readScopeLocked(directory: PinnedScopeDirectory, signal?: AbortSignal): Promise<ScopeSnapshot> {
-    return await this.readScopeInternal(directory, signal, true);
-  }
-
-  /** 无锁读：跳过待提交恢复和状态修复，读到的是允许短暂不一致的快照。 */
-  private async readScopeUnlocked(directory: PinnedScopeDirectory, signal?: AbortSignal): Promise<ScopeSnapshot> {
-    return await this.readScopeInternal(directory, signal, false);
-  }
-
-  private async readScopeInternal(directory: PinnedScopeDirectory, signal: AbortSignal | undefined, locked: boolean): Promise<ScopeSnapshot> {
-    signal?.throwIfAborted();
-    await assertPinnedScopeDirectory(this.workspaceRoot, directory);
-    const rawState = await readState(directory);
-    // 只有持锁写方才负责恢复中断的 mutation；普通读不重放未提交内容，也不修复状态文件。
-    const state = locked
-      ? await recoverPendingMutationLocked(directory, rawState, signal)
-      : rawState;
-    const entries = await applyUsageProjection(directory, await readEntryRecords(directory, signal), signal);
-    const candidates = await readCandidates(directory, false, signal);
-    const snapshotState = locked ? stateForSnapshot(state, entries, candidates) : state;
-    return { directory, state: snapshotState, entries, candidates };
-  }
-
-  private async withScopeLock<T>(
-    scope: MemoryScope,
-    create: boolean,
-    signal: AbortSignal | undefined,
-    operation: (directory: PinnedScopeDirectory) => Promise<T>
-  ): Promise<T> {
-    const directory = await resolveScopeDirectory(this.workspaceRoot, scope, create);
-    if (!directory) throw new Error(`Failed to create ${scope} memory storage.`);
-    return await this.withResolvedScopeLock(directory, signal, async () => await operation(directory));
-  }
-
-  /**
-   * 记忆写的跨进程互斥：全局权威库上的 BEGIN IMMEDIATE 写事务即写锁。
-   * SQLite 对同一数据库文件做文件级互斥；持锁期间进程崩溃会让事务随连接断开回滚，锁自动释放。
-   * 文件读写在这个临界区内 await，SQLite 锁只保护「谁在改」，真正的崩溃安全仍由 atomicWriteFile 保证。
-   */
-  private async withResolvedScopeLock<T>(
-    directory: PinnedScopeDirectory,
-    signal: AbortSignal | undefined,
-    operation: () => Promise<T>
-  ): Promise<T> {
-    const run = this.writeTail.then(() => this.withAuthorityTransaction(directory, signal, operation));
-    // 队列只承载背压，不把上一次失败传给下一次。
-    this.writeTail = run.catch(() => undefined);
-    return await run;
-  }
-
-  private async withAuthorityTransaction<T>(
-    directory: PinnedScopeDirectory,
-    signal: AbortSignal | undefined,
-    operation: () => Promise<T>
-  ): Promise<T> {
-    signal?.throwIfAborted();
-    const database = this.memoryAuthority(directory);
-    database.exec("BEGIN IMMEDIATE");
+  private async openDatabase(create: boolean): Promise<DatabaseSync | undefined> {
+    if (this.database) return this.database;
+    const opening = this.databaseOpening;
+    if (opening) {
+      const database = await opening;
+      if (database || !create) return database;
+      return await this.openDatabase(true);
+    }
+    const next = this.openDatabaseInternal(create);
+    this.databaseOpening = next;
     try {
-      await assertPinnedScopeDirectory(this.workspaceRoot, directory);
-      signal?.throwIfAborted();
-      const result = await operation();
-      database.exec("COMMIT");
-      return result;
+      const database = await next;
+      if (database) this.database = database;
+      return database;
+    } finally {
+      if (this.databaseOpening === next) this.databaseOpening = undefined;
+    }
+  }
+
+  private async openDatabaseInternal(create: boolean): Promise<DatabaseSync | undefined> {
+    const databasePath = await resolveMemoryDatabasePath(create);
+    if (databasePath === undefined) return undefined;
+    const database = new DatabaseSync(databasePath, {
+      timeout: sqliteBusyTimeoutMs,
+      enableForeignKeyConstraints: true
+    });
+    try {
+      await assertSafeDatabaseFile(databasePath);
+      migrateDatabase(database);
+      return database;
     } catch (error) {
-      try {
-        database.exec("ROLLBACK");
-      } catch {
-        // 保留原始错误；连接关闭时 SQLite 会回收残留事务。
-      }
+      database.close();
       throw error;
     }
   }
 
-  /** 打开（并缓存）全局记忆写权威库；与 memory 根同目录，保证锁的粒度与库一致。 */
-  private memoryAuthority(directory: PinnedScopeDirectory): DatabaseSync {
-    if (this.authority) return this.authority;
-    const databasePath = path.join(directory.path, authorityDatabaseName);
-    // 不设 WAL：多进程可能同时首次打开，切换日志模式要拿写锁会相互冲突。
-    // 权威库不写任何业务数据，默认 rollback-journal 已足够；BEGIN IMMEDIATE 本身即写锁。
-    const database = new DatabaseSync(databasePath, { timeout: authorityBusyTimeoutMs });
-    this.authority = database;
-    return database;
-  }
-
-  private async commitSnapshot(
-    directory: PinnedScopeDirectory,
-    previous: MemoryState,
-    revision: number,
-    entries: ScopeEntryRecord[],
-    _candidates: MemoryCandidate[],
-    now: Date
-  ): Promise<void> {
-    void previous;
-    const state: MemoryState = {
-      version: 3,
-      revision,
-      updatedAt: now.toISOString()
-    };
-    // state 最后落盘，revision 因此充当这次目录 mutation 的 commit marker。
-    await atomicWriteFile(directory, stateFileName, renderState(state));
-  }
-
-  private async commitDestructiveMutation(
-    directory: PinnedScopeDirectory,
-    mutation: PendingMutation,
-    signal?: AbortSignal
-  ): Promise<void> {
+  private async withWrite<T>(
+    signal: AbortSignal | undefined,
+    operation: (database: DatabaseSync) => T
+  ): Promise<T> {
     signal?.throwIfAborted();
-    await atomicWriteFile(directory, pendingMutationFileName, `${JSON.stringify(mutation)}\n`);
-    await recoverPendingMutationLocked(directory, await readState(directory), signal);
+    const database = await this.openDatabase(true);
+    if (database === undefined) throw new Error("Failed to create memory database.");
+    const run = this.writeTail.then(() => runTransaction(database, signal, operation));
+    this.writeTail = run.catch(() => undefined);
+    return await run;
   }
 }
 
-function emptySnapshot(): ScopeSnapshot {
-  return { state: emptyState(), entries: [], candidates: [] };
+function migrateDatabase(database: DatabaseSync): void {
+  const row = database.prepare("PRAGMA user_version").get() as Record<string, unknown> | undefined;
+  const version = safeCounter(row?.user_version);
+  if (version > memorySchemaVersion) {
+    throw new Error("Unsupported memory database schema version: " + String(version));
+  }
+  migrateLegacyArchiveTable(database);
+  database.exec(
+    "PRAGMA journal_mode = WAL; " +
+    "PRAGMA synchronous = NORMAL; " +
+    "PRAGMA foreign_keys = ON; " +
+    "CREATE TABLE IF NOT EXISTS memory_meta (" +
+    "key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL" +
+    "); " +
+    "INSERT INTO memory_meta (key, value) VALUES ('revision', '0') " +
+    "ON CONFLICT(key) DO NOTHING; " +
+    "CREATE TABLE IF NOT EXISTS memories (" +
+    "id TEXT PRIMARY KEY NOT NULL, content TEXT NOT NULL, metadata TEXT NOT NULL, " +
+    "origin_kind TEXT NOT NULL, workspace_id TEXT, workspace_name TEXT, " +
+    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL, " +
+    "access_count INTEGER NOT NULL DEFAULT 0, last_recalled_at TEXT" +
+    "); " +
+    "CREATE INDEX IF NOT EXISTS memories_origin_idx ON memories(origin_kind, workspace_id); " +
+    "CREATE TABLE IF NOT EXISTS memory_archive (" +
+    "id TEXT PRIMARY KEY NOT NULL, original_id TEXT NOT NULL, content TEXT NOT NULL, metadata TEXT NOT NULL, " +
+    "origin_kind TEXT NOT NULL, workspace_id TEXT, workspace_name TEXT, " +
+    "original_created_at TEXT NOT NULL, original_updated_at TEXT NOT NULL, revision INTEGER NOT NULL, " +
+    "access_count INTEGER NOT NULL DEFAULT 0, last_recalled_at TEXT, " +
+    "archived_at TEXT NOT NULL, archived_reason TEXT NOT NULL, archived_by TEXT NOT NULL, merged_into TEXT" +
+    "); " +
+    "CREATE INDEX IF NOT EXISTS memory_archive_original_idx ON memory_archive(original_id); " +
+    "CREATE INDEX IF NOT EXISTS memory_archive_origin_idx ON memory_archive(origin_kind, workspace_id); " +
+    "CREATE TABLE IF NOT EXISTS memory_maintenance (" +
+    "id INTEGER PRIMARY KEY CHECK (id = 1), state TEXT NOT NULL, " +
+    "started_at TEXT, last_scan_at TEXT, last_finished_at TEXT, " +
+    "eligible INTEGER NOT NULL, processed INTEGER NOT NULL, written INTEGER NOT NULL, failed INTEGER NOT NULL, " +
+    "error TEXT, last_run_json TEXT" +
+    "); " +
+    "CREATE TABLE IF NOT EXISTS memory_sleep_runs (" +
+    "id TEXT PRIMARY KEY NOT NULL, status TEXT NOT NULL, trigger TEXT NOT NULL, " +
+    "examined INTEGER NOT NULL, written INTEGER NOT NULL, failed INTEGER NOT NULL, archived INTEGER NOT NULL, " +
+    "exact INTEGER NOT NULL, expired INTEGER NOT NULL, similarity INTEGER NOT NULL, llm INTEGER NOT NULL, " +
+    "archived_exact INTEGER NOT NULL DEFAULT 0, archived_expired INTEGER NOT NULL DEFAULT 0, " +
+    "archived_orphan INTEGER NOT NULL DEFAULT 0, archived_similarity INTEGER NOT NULL DEFAULT 0, " +
+    "archived_llm INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, " +
+    "output_tokens INTEGER NOT NULL DEFAULT 0, " +
+    "started_at TEXT NOT NULL, finished_at TEXT, error TEXT" +
+    "); " +
+    "PRAGMA user_version = 3;"
+  );
+  ensureSleepRunColumns(database);
+  database.exec(`PRAGMA user_version = ${String(memorySchemaVersion)};`);
 }
 
-function emptyState(): MemoryState {
-  return { version: 3, revision: 0, updatedAt: new Date(0).toISOString() };
+/**
+ * v2 的 archive 以 original_id 为主键；当前 archive 是独立历史行，id 每次归档都重新生成。
+ * 当前 checkout 尚未发布，迁移只需保留旧内容并补齐审计字段。
+ */
+function migrateLegacyArchiveTable(database: DatabaseSync): void {
+  const columns = new Set((database.prepare("PRAGMA table_info(memory_archive)").all() as Array<{ name?: unknown }>)
+    .map((row) => typeof row.name === "string" ? row.name : ""));
+  if (columns.size === 0 || (columns.has("id") && columns.has("original_created_at") && columns.has("archived_by"))) return;
+
+  database.exec("ALTER TABLE memory_archive RENAME TO memory_archive_legacy_v2");
+  createArchiveTable(database);
+  database.exec(
+    "INSERT INTO memory_archive " +
+    "(id, original_id, content, metadata, origin_kind, workspace_id, workspace_name, " +
+    "original_created_at, original_updated_at, revision, access_count, last_recalled_at, " +
+    "archived_at, archived_reason, archived_by, merged_into) " +
+    "SELECT original_id, original_id, content, metadata, origin_kind, workspace_id, workspace_name, " +
+    "created_at, updated_at, revision, access_count, last_recalled_at, archived_at, " +
+    "COALESCE(archived_reason, 'manual'), 'manual', merged_into " +
+    "FROM memory_archive_legacy_v2"
+  );
+  database.exec("DROP TABLE memory_archive_legacy_v2");
+}
+
+function createArchiveTable(database: DatabaseSync): void {
+  database.exec(
+    "CREATE TABLE IF NOT EXISTS memory_archive (" +
+    "id TEXT PRIMARY KEY NOT NULL, original_id TEXT NOT NULL, content TEXT NOT NULL, metadata TEXT NOT NULL, " +
+    "origin_kind TEXT NOT NULL, workspace_id TEXT, workspace_name TEXT, " +
+    "original_created_at TEXT NOT NULL, original_updated_at TEXT NOT NULL, revision INTEGER NOT NULL, " +
+    "access_count INTEGER NOT NULL DEFAULT 0, last_recalled_at TEXT, archived_at TEXT NOT NULL, " +
+    "archived_reason TEXT NOT NULL, archived_by TEXT NOT NULL, merged_into TEXT" +
+    ")"
+  );
+}
+
+/** Additive upgrade for the short-lived v1 sleep history; all names are constants, not user input. */
+function ensureSleepRunColumns(database: DatabaseSync): void {
+  const columns = new Set((database.prepare("PRAGMA table_info(memory_sleep_runs)").all() as Array<{ name?: unknown }>)
+    .map((row) => typeof row.name === "string" ? row.name : ""));
+  const additions = [
+    ["archived_exact", "INTEGER NOT NULL DEFAULT 0"],
+    ["archived_expired", "INTEGER NOT NULL DEFAULT 0"],
+    ["archived_orphan", "INTEGER NOT NULL DEFAULT 0"],
+    ["archived_similarity", "INTEGER NOT NULL DEFAULT 0"],
+    ["archived_llm", "INTEGER NOT NULL DEFAULT 0"],
+    ["input_tokens", "INTEGER NOT NULL DEFAULT 0"],
+    ["output_tokens", "INTEGER NOT NULL DEFAULT 0"]
+  ] as const;
+  for (const [name, definition] of additions) {
+    if (!columns.has(name)) database.exec(`ALTER TABLE memory_sleep_runs ADD COLUMN ${name} ${definition}`);
+  }
+}
+
+function runTransaction<T>(
+  database: DatabaseSync,
+  signal: AbortSignal | undefined,
+  operation: (database: DatabaseSync) => T
+): T {
+  signal?.throwIfAborted();
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    signal?.throwIfAborted();
+    const result = operation(database);
+    database.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {
+      // 保留原始错误。
+    }
+    throw error;
+  }
+}
+
+function readRevision(database: DatabaseSync): number {
+  const row = database.prepare("SELECT value FROM memory_meta WHERE key = 'revision'").get() as { value?: unknown } | undefined;
+  return safeRevision(row?.value);
+}
+
+function setRevision(database: DatabaseSync, revision: number): void {
+  database.prepare(
+    "INSERT INTO memory_meta (key, value) VALUES ('revision', ?) " +
+    "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  ).run(String(revision));
+}
+
+function readMemoryEntries(database: DatabaseSync): MemoryEntry[] {
+  const active = database.prepare("SELECT * FROM memories").all() as unknown as MemoryDbRow[];
+  const archived = database.prepare(
+    "SELECT id, original_id, content, metadata, origin_kind, workspace_id, workspace_name, " +
+    "original_created_at AS created_at, original_updated_at AS updated_at, revision, access_count, last_recalled_at, " +
+    "archived_at, archived_reason, archived_by, merged_into " +
+    "FROM memory_archive"
+  ).all() as unknown as MemoryDbRow[];
+  const entries = [
+    ...active.map((row) => memoryFromRow(row)),
+    ...archived.map((row) => memoryFromRow(row))
+  ];
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (ids.has(entry.id)) throw new Error("Duplicate memory entry id: " + entry.id);
+    ids.add(entry.id);
+  }
+  return entries;
+}
+
+function findMemoryEntry(database: DatabaseSync, id: string): MemoryEntry | undefined {
+  const active = database.prepare("SELECT * FROM memories WHERE id = ?").get(id) as MemoryDbRow | undefined;
+  if (active) return memoryFromRow(active);
+  const archived = database.prepare(
+    "SELECT id, original_id, content, metadata, origin_kind, workspace_id, workspace_name, " +
+    "original_created_at AS created_at, original_updated_at AS updated_at, revision, access_count, last_recalled_at, " +
+    "archived_at, archived_reason, archived_by, merged_into " +
+    "FROM memory_archive WHERE id = ?"
+  ).get(id) as MemoryDbRow | undefined;
+  return archived ? memoryFromRow(archived) : undefined;
+}
+
+function memoryFromRow(row: MemoryDbRow): MemoryEntry {
+  const metadata = parseMemoryMetadata(row.metadata);
+  const origin = originFromColumns(row.origin_kind, row.workspace_id, row.workspace_name);
+  const archivedAt = optionalTimeValue(row.archived_at);
+  const archivedReason = archiveReasonValue(row.archived_reason);
+  const originalId = archivedAt === undefined ? undefined : optionalString(row.original_id);
+  const archivedBy = archivedAt === undefined ? undefined : optionalString(row.archived_by);
+  const mergedInto = optionalString(row.merged_into);
+  const entry = createStoredMemoryEntry({
+    origin,
+    kind: metadata.kind,
+    topic: metadata.topic,
+    title: metadata.title,
+    summary: stringValue(row.content, "memory content"),
+    decisions: metadata.decisions,
+    paths: metadata.paths,
+    keywords: metadata.keywords,
+    importance: metadata.importance,
+    durability: metadata.durability,
+    expiresAt: metadata.expiresAt,
+    archivedAt,
+    archivedReason,
+    mergedInto,
+    lineage: metadata.lineage
+  }, {
+    id: stringValue(row.id, "memory id"),
+    originalId,
+    archivedBy,
+    revision: safeRevision(row.revision),
+    createdAt: stringValue(row.created_at, "memory created_at"),
+    updatedAt: stringValue(row.updated_at, "memory updated_at"),
+    durability: metadata.durability
+  });
+  entry.recallCount = safeCounter(row.access_count);
+  entry.lastRecalledAt = optionalTimeValue(row.last_recalled_at);
+  return entry;
+}
+
+function parseMemoryMetadata(value: unknown): z.infer<typeof memoryMetadataSchema> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stringValue(value, "memory metadata"));
+  } catch {
+    throw new Error("Invalid memory metadata JSON.");
+  }
+  const parsed = memoryMetadataSchema.safeParse(raw);
+  if (!parsed.success) throw new Error("Invalid memory metadata.");
+  return parsed.data;
+}
+
+function insertActiveMemory(database: DatabaseSync, entry: MemoryEntry): void {
+  database.prepare(
+    "INSERT INTO memories " +
+    "(id, content, metadata, origin_kind, workspace_id, workspace_name, created_at, updated_at, revision, access_count, last_recalled_at) " +
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(...activeMemoryValues(entry));
+}
+
+function updateActiveMemory(database: DatabaseSync, entry: MemoryEntry): void {
+  database.prepare(
+    "UPDATE memories SET content = ?, metadata = ?, origin_kind = ?, workspace_id = ?, workspace_name = ?, " +
+    "updated_at = ?, revision = ? WHERE id = ?"
+  ).run(
+    entry.summary,
+    memoryMetadata(entry),
+    entry.origin.kind,
+    entry.origin.kind === "workspace" ? entry.origin.workspaceId : null,
+    entry.origin.kind === "workspace" ? entry.origin.workspaceName : null,
+    entry.updatedAt,
+    entry.revision,
+    entry.id
+  );
+}
+
+function insertArchivedMemory(database: DatabaseSync, entry: MemoryEntry): void {
+  if (!entry.archivedAt || !entry.originalId) throw new Error("Archived memory requires archived_at and original_id.");
+  database.prepare(
+    "INSERT INTO memory_archive " +
+    "(id, original_id, content, metadata, origin_kind, workspace_id, workspace_name, original_created_at, " +
+    "original_updated_at, revision, access_count, last_recalled_at, archived_at, archived_reason, archived_by, merged_into) " +
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(...archivedMemoryValues(entry));
+}
+
+function updateArchivedMemory(database: DatabaseSync, entry: MemoryEntry): void {
+  if (!entry.archivedAt) throw new Error("Archived memory requires archived_at.");
+  database.prepare(
+    "UPDATE memory_archive SET content = ?, metadata = ?, origin_kind = ?, workspace_id = ?, workspace_name = ?, " +
+    "original_updated_at = ?, revision = ?, archived_at = ?, archived_reason = ?, archived_by = ?, merged_into = ? WHERE id = ?"
+  ).run(
+    entry.summary,
+    memoryMetadata(entry),
+    entry.origin.kind,
+    entry.origin.kind === "workspace" ? entry.origin.workspaceId : null,
+    entry.origin.kind === "workspace" ? entry.origin.workspaceName : null,
+    entry.updatedAt,
+    entry.revision,
+    entry.archivedAt,
+    entry.archivedReason ?? "manual",
+    entry.archivedBy ?? "manual",
+    entry.mergedInto ?? null,
+    entry.id
+  );
+}
+
+function activeMemoryValues(entry: MemoryEntry): SqlValue[] {
+  return [
+    entry.id,
+    entry.summary,
+    memoryMetadata(entry),
+    entry.origin.kind,
+    entry.origin.kind === "workspace" ? entry.origin.workspaceId : null,
+    entry.origin.kind === "workspace" ? entry.origin.workspaceName : null,
+    entry.createdAt,
+    entry.updatedAt,
+    entry.revision,
+    entry.recallCount,
+    entry.lastRecalledAt ?? null
+  ];
+}
+
+function archivedMemoryValues(entry: MemoryEntry): SqlValue[] {
+  if (!entry.archivedAt || !entry.originalId) throw new Error("Archived memory requires archived_at and original_id.");
+  return [
+    entry.id,
+    entry.originalId,
+    entry.summary,
+    memoryMetadata(entry),
+    entry.origin.kind,
+    entry.origin.kind === "workspace" ? entry.origin.workspaceId : null,
+    entry.origin.kind === "workspace" ? entry.origin.workspaceName : null,
+    entry.createdAt,
+    entry.updatedAt,
+    entry.revision,
+    entry.recallCount,
+    entry.lastRecalledAt ?? null,
+    entry.archivedAt,
+    entry.archivedReason ?? "manual",
+    entry.archivedBy ?? "manual",
+    entry.mergedInto ?? null
+  ];
+}
+
+function memoryMetadata(entry: MemoryEntry): string {
+  return JSON.stringify({
+    kind: entry.kind,
+    topic: entry.topic,
+    title: entry.title,
+    decisions: entry.decisions,
+    paths: entry.paths,
+    keywords: entry.keywords,
+    importance: entry.importance,
+    durability: entry.durability,
+    expiresAt: entry.expiresAt,
+    lineage: entry.lineage
+  });
+}
+
+function deleteActiveMemory(database: DatabaseSync, id: string): void {
+  database.prepare("DELETE FROM memories WHERE id = ?").run(id);
+}
+
+function deleteArchivedMemory(database: DatabaseSync, id: string): void {
+  database.prepare("DELETE FROM memory_archive WHERE id = ?").run(id);
 }
 
 function emptyMaintenanceStatus(): MemoryMaintenanceStatus {
   return { state: "idle", eligible: 0, processed: 0, written: 0, failed: 0 };
 }
 
-async function resolveScopeDirectory(workspaceRoot: string, scope: MemoryScope, create: boolean): Promise<PinnedScopeDirectory | undefined> {
-  const workspacePath = path.resolve(workspaceRoot);
-  const canonicalWorkspace = await fs.realpath(workspacePath);
+function sanitizeMaintenanceStatus(status: MemoryMaintenanceStatus): MemoryMaintenanceStatus {
+  const safeRun = status.lastRun === undefined ? undefined : sanitizeSleepRun(status.lastRun);
+  const runs = status.sleepRuns?.slice(-20).map(sanitizeSleepRun);
+  return {
+    state: status.state,
+    startedAt: safeOptionalTime(status.startedAt),
+    lastScanAt: safeOptionalTime(status.lastScanAt),
+    lastFinishedAt: safeOptionalTime(status.lastFinishedAt),
+    eligible: safeCounter(status.eligible),
+    processed: safeCounter(status.processed),
+    written: safeCounter(status.written),
+    failed: safeCounter(status.failed),
+    error: sanitizeError(status.error),
+    lastRun: safeRun,
+    sleepRuns: runs
+  };
+}
+
+function sanitizeSleepRun(run: MemorySleepRun): MemorySleepRun {
+  return {
+    id: run.id.trim().slice(0, 200),
+    status: run.status ?? "completed",
+    trigger: run.trigger,
+    examined: safeCounter(run.examined),
+    written: safeCounter(run.written),
+    failed: safeCounter(run.failed),
+    archived: safeCounter(run.archived),
+    exact: safeCounter(run.exact),
+    expired: safeCounter(run.expired),
+    similarity: safeCounter(run.similarity),
+    llm: safeCounter(run.llm),
+    archivedExact: Math.max(safeCounter(run.archivedExact), safeCounter(run.exact)),
+    archivedExpired: Math.max(safeCounter(run.archivedExpired), safeCounter(run.expired)),
+    archivedOrphan: safeCounter(run.archivedOrphan),
+    archivedSimilarity: Math.max(safeCounter(run.archivedSimilarity), safeCounter(run.similarity)),
+    archivedLlm: Math.max(safeCounter(run.archivedLlm), safeCounter(run.llm)),
+    inputTokens: safeCounter(run.inputTokens),
+    outputTokens: safeCounter(run.outputTokens),
+    startedAt: safeOptionalTime(run.startedAt) ?? new Date(0).toISOString(),
+    finishedAt: safeOptionalTime(run.finishedAt),
+    error: sanitizeError(run.error)
+  };
+}
+
+function readSleepRuns(database: DatabaseSync): MemorySleepRun[] {
+  const rows = database.prepare(
+    "SELECT id, status, trigger, examined, written, failed, archived, exact, expired, similarity, llm, " +
+    "archived_exact, archived_expired, archived_orphan, archived_similarity, archived_llm, input_tokens, output_tokens, " +
+    "started_at, finished_at, error " +
+    "FROM memory_sleep_runs ORDER BY started_at ASC, id ASC"
+  ).all() as unknown as SleepRunDbRow[];
+  return rows.map((row) => {
+    const parsed = memorySleepRunSchema.safeParse({
+      id: stringValue(row.id, "sleep run id"),
+      status: stringValue(row.status, "sleep run status"),
+      trigger: stringValue(row.trigger, "sleep run trigger"),
+      examined: safeCounter(row.examined),
+      written: safeCounter(row.written),
+      failed: safeCounter(row.failed),
+      archived: safeCounter(row.archived),
+      exact: safeCounter(row.exact),
+      expired: safeCounter(row.expired),
+      similarity: safeCounter(row.similarity),
+      llm: safeCounter(row.llm),
+      archivedExact: Math.max(safeCounter(row.archived_exact), safeCounter(row.exact)),
+      archivedExpired: Math.max(safeCounter(row.archived_expired), safeCounter(row.expired)),
+      archivedOrphan: safeCounter(row.archived_orphan),
+      archivedSimilarity: Math.max(safeCounter(row.archived_similarity), safeCounter(row.similarity)),
+      archivedLlm: Math.max(safeCounter(row.archived_llm), safeCounter(row.llm)),
+      inputTokens: safeCounter(row.input_tokens),
+      outputTokens: safeCounter(row.output_tokens),
+      startedAt: stringValue(row.started_at, "sleep run started_at"),
+      finishedAt: optionalTimeValue(row.finished_at),
+      error: optionalString(row.error)
+    });
+    if (!parsed.success) throw new Error("Invalid memory sleep run.");
+    return parsed.data;
+  });
+}
+
+function parseSleepRun(value: unknown): MemorySleepRun | undefined {
+  if (value === null || value === undefined) return undefined;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stringValue(value, "last sleep run"));
+  } catch {
+    throw new Error("Invalid last sleep run JSON.");
+  }
+  const parsed = memorySleepRunSchema.safeParse(raw);
+  if (!parsed.success) throw new Error("Invalid last sleep run.");
+  return sanitizeSleepRun(parsed.data);
+}
+
+async function resolveMemoryDatabasePath(create: boolean): Promise<string | undefined> {
   const configuredAgentPath = path.resolve(globalAgentDir());
   const agent = await ensureRealDirectory(configuredAgentPath, create, "global agent directory");
   if (!agent) return undefined;
   const canonicalAgent = await fs.realpath(configuredAgentPath);
-  const memoryRootPath = path.join(canonicalAgent, "memory");
-  const memoryRoot = await ensureRealDirectory(memoryRootPath, create, "global memory root");
-  if (!memoryRoot) return undefined;
-  const canonicalMemoryRoot = await fs.realpath(memoryRootPath);
-  if (canonicalMemoryRoot !== memoryRootPath) throw new Error("Global memory root must be a real canonical directory.");
-  void scope;
-  const scopePath = canonicalMemoryRoot;
-  const stat = await fs.lstat(scopePath);
-  const canonicalScope = await fs.realpath(scopePath);
-  if (canonicalScope !== canonicalMemoryRoot) throw new Error("Memory storage resolves outside the global memory root.");
-  return {
-    workspaceRoot: canonicalWorkspace,
-    storageRoot: canonicalAgent,
-    path: canonicalScope,
-    scope: "project",
-    device: stat.dev,
-    inode: stat.ino
-  };
+  const memoryPath = path.join(canonicalAgent, memoryRootName);
+  const memory = await ensureRealDirectory(memoryPath, create, "global memory root");
+  if (!memory) return undefined;
+  const canonicalMemory = await fs.realpath(memoryPath);
+  if (canonicalMemory !== memoryPath) {
+    throw new Error("Global memory root must be a real canonical directory.");
+  }
+  const databasePath = path.join(canonicalMemory, memoryDatabaseFileName);
+  try {
+    await assertSafeDatabaseFile(databasePath);
+  } catch (error) {
+    if (isNotFound(error) && create) return databasePath;
+    if (isNotFound(error)) return undefined;
+    throw error;
+  }
+  return databasePath;
 }
 
-async function ensureRealDirectory(directory: string, create: boolean, label: string): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> {
-  let stat;
+async function assertSafeDatabaseFile(databasePath: string): Promise<void> {
+  const stat = await fs.lstat(databasePath);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || await fs.realpath(databasePath) !== databasePath) {
+    throw new Error("Memory database must be a regular, canonical file.");
+  }
+}
+
+async function ensureRealDirectory(
+  directory: string,
+  create: boolean,
+  label: string
+): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> {
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
     stat = await fs.lstat(directory);
   } catch (error) {
@@ -970,471 +1202,15 @@ async function ensureRealDirectory(directory: string, create: boolean, label: st
     stat = await fs.lstat(directory);
   }
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error(`Local memory storage ${label} must be a real directory, not a symbolic link.`);
+    throw new Error("Local memory storage " + label + " must be a real directory, not a symbolic link.");
   }
   if (create) await fs.chmod(directory, 0o700);
   return stat;
 }
 
-async function assertPinnedScopeDirectory(workspaceRoot: string, expected: PinnedScopeDirectory): Promise<void> {
-  const current = await resolveScopeDirectory(workspaceRoot, expected.scope, false);
-  if (!current || current.path !== expected.path || current.device !== expected.device || current.inode !== expected.inode) {
-    throw new Error("Local memory storage changed during access.");
-  }
-}
-
-async function readState(directory: PinnedScopeDirectory): Promise<MemoryState> {
-  const content = await readOptionalSafeFile(directory, stateFileName, maxStateChars);
-  if (!content) return emptyState();
-  try {
-    const parsed = JSON.parse(content) as Partial<MemoryState>;
-    if (parsed.version !== 3 || !Number.isSafeInteger(parsed.revision) || (parsed.revision ?? -1) < 0 || typeof parsed.updatedAt !== "string") {
-      throw new Error("Invalid memory state.");
-    }
-    return { version: 3, revision: parsed.revision as number, updatedAt: parsed.updatedAt };
-  } catch (error) {
-    if (error instanceof SyntaxError) throw new Error(`Invalid memory state JSON in ${directory.scope} scope.`);
-    throw error;
-  }
-}
-
-async function recoverPendingMutationLocked(
-  directory: PinnedScopeDirectory,
-  state: MemoryState,
-  signal?: AbortSignal
-): Promise<MemoryState> {
-  const content = await readOptionalSafeFile(directory, pendingMutationFileName, maxPendingMutationChars, signal);
-  if (!content) return state;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(content);
-  } catch {
-    throw new Error("Invalid pending memory mutation JSON.");
-  }
-  const parsed = pendingMutationSchema.safeParse(raw);
-  if (!parsed.success) throw new Error("Invalid pending memory mutation manifest.");
-  const mutation = parsed.data;
-  if (mutation.toRevision !== mutation.fromRevision + 1) {
-    throw new Error("Pending memory mutation does not match its revision sequence.");
-  }
-  if (state.revision !== mutation.fromRevision && state.revision !== mutation.toRevision) {
-    throw new Error(`Pending memory mutation cannot recover revision ${String(state.revision)}.`);
-  }
-  const writeNames = new Set(mutation.entryWrites.map(({ fileName }) => fileName));
-  if (writeNames.size !== mutation.entryWrites.length || mutation.entryDeletes.some((fileName) => writeNames.has(fileName))) {
-    throw new Error("Pending memory mutation contains duplicate or overlapping entry targets.");
-  }
-  const entriesPath = path.join(directory.path, entryDirectoryName);
-  await ensureSafeChildDirectory(directory, entriesPath, true, "memory entry directory");
-  for (const write of mutation.entryWrites) {
-    signal?.throwIfAborted();
-    const existing = await readOptionalSafeChildFile(directory, entriesPath, write.fileName, maxMemoryEntryChars, signal);
-    if (existing !== undefined) {
-      const entry = parseMemoryEntryFile(existing);
-      if (!entry || entry.id !== write.id || existing !== write.content) {
-        throw new Error(`Pending memory entry write conflicts with ${write.fileName}.`);
-      }
-    } else {
-      const entry = parseMemoryEntryFile(write.content);
-      if (!entry || entry.id !== write.id || entry.revision !== mutation.toRevision) {
-        throw new Error(`Invalid pending memory entry payload: ${write.fileName}`);
-      }
-      await atomicWriteChildFile(directory, entriesPath, write.fileName, write.content);
-    }
-  }
-  for (const fileName of mutation.entryDeletes) {
-    signal?.throwIfAborted();
-    await unlinkSafeChildFile(directory, entriesPath, fileName).catch((error) => {
-      if (!isNotFound(error)) throw error;
-    });
-  }
-  for (const id of mutation.candidateDeletes) {
-    signal?.throwIfAborted();
-    await unlinkCandidate(directory, id).catch((error) => {
-      if (!isNotFound(error)) throw error;
-    });
-  }
-  const entries = await readEntryRecords(directory, signal);
-  const recovered: MemoryState = {
-    version: 3,
-    revision: mutation.toRevision,
-    updatedAt: mutation.createdAt
-  };
-  void entries;
-  await atomicWriteFile(directory, stateFileName, renderState(recovered));
-  await unlinkSafeFile(directory, pendingMutationFileName);
-  return recovered;
-}
-
-async function readEntryRecords(directory: PinnedScopeDirectory, signal?: AbortSignal): Promise<ScopeEntryRecord[]> {
-  signal?.throwIfAborted();
-  const entriesPath = path.join(directory.path, entryDirectoryName);
-  const child = await ensureSafeChildDirectory(directory, entriesPath, false, "memory entry directory");
-  if (!child) return [];
-  const names = (await fs.readdir(entriesPath, { withFileTypes: true }))
-    .filter((entry) => entry.name.endsWith(".md"))
-    .map((entry) => entry.name)
-    .sort();
-  const records: ScopeEntryRecord[] = [];
-  for (const fileName of names) {
-    const content = await readOptionalSafeChildFile(directory, entriesPath, fileName, maxMemoryEntryChars, signal);
-    if (content === undefined) continue;
-    const entry = parseMemoryEntryFile(content);
-    if (!entry) throw new Error(`Invalid v3 memory entry file: ${fileName}`);
-    records.push({ entry, fileName });
-  }
-  const ids = new Set<string>();
-  for (const { entry } of records) {
-    if (ids.has(entry.id)) throw new Error(`Duplicate memory entry id: ${entry.id}`);
-    ids.add(entry.id);
-  }
-  return records;
-}
-
-async function readCandidates(directory: PinnedScopeDirectory, create: boolean, signal?: AbortSignal): Promise<MemoryCandidate[]> {
-  const candidatesPath = path.join(directory.path, candidateDirectoryName);
-  const child = await ensureSafeChildDirectory(directory, candidatesPath, create, "memory candidate directory");
-  if (!child) return [];
-  signal?.throwIfAborted();
-  const fileNames = (await fs.readdir(candidatesPath, { withFileTypes: true }))
-    .filter((entry) => entry.name.endsWith(".json"))
-    .map((entry) => entry.name)
-    .sort();
-  const candidates: MemoryCandidate[] = [];
-  for (const fileName of fileNames) {
-    const content = await readOptionalSafeChildFile(directory, candidatesPath, fileName, maxCandidateFileChars, signal);
-    if (!content) continue;
-    let raw: unknown;
-    try {
-      raw = JSON.parse(content);
-    } catch {
-      throw new Error(`Invalid memory candidate JSON: ${fileName}`);
-    }
-    const parsed = candidateSchema.safeParse(raw);
-    if (!parsed.success) throw new Error(`Invalid memory candidate: ${fileName}`);
-    candidates.push(parsed.data);
-  }
-  return candidates;
-}
-
-async function readUsage(
-  directory: PinnedScopeDirectory,
-  signal?: AbortSignal
-): Promise<Record<string, { recallCount: number; lastRecalledAt?: string }>> {
-  const content = await readOptionalSafeFile(directory, usageFileName, maxUsageChars, signal);
-  if (!content) return {};
-  let raw: unknown;
-  try {
-    raw = JSON.parse(content);
-  } catch {
-    throw new Error("Invalid memory usage projection JSON.");
-  }
-  const parsed = usageSchema.safeParse(raw);
-  if (!parsed.success) throw new Error("Invalid memory usage projection.");
-  return parsed.data.entries;
-}
-
-async function writeUsageFile(
-  directory: PinnedScopeDirectory,
-  entries: Record<string, { recallCount: number; lastRecalledAt?: string }>
-): Promise<void> {
-  await atomicWriteFile(directory, usageFileName, `${JSON.stringify({ version: 1, entries }, null, 2)}\n`);
-}
-
-async function pruneUsageEntries(
-  directory: PinnedScopeDirectory,
-  ids: readonly string[],
-  signal?: AbortSignal
-): Promise<void> {
-  signal?.throwIfAborted();
-  const usage = await readUsage(directory, signal);
-  let changed = false;
-  for (const id of ids) {
-    if (usage[id] !== undefined) {
-      delete usage[id];
-      changed = true;
-    }
-  }
-  if (changed) await writeUsageFile(directory, usage);
-}
-
-async function applyUsageProjection(
-  directory: PinnedScopeDirectory,
-  records: ScopeEntryRecord[],
-  signal?: AbortSignal
-): Promise<ScopeEntryRecord[]> {
-  const usage = await readUsage(directory, signal);
-  return records.map(({ entry, fileName }) => {
-    const projected = usage[entry.id];
-    return {
-      fileName,
-      entry: {
-        ...entry,
-        recallCount: projected?.recallCount ?? 0,
-        lastRecalledAt: projected?.lastRecalledAt !== undefined && Number.isFinite(Date.parse(projected.lastRecalledAt))
-          ? new Date(projected.lastRecalledAt).toISOString()
-          : undefined
-      }
-    };
-  });
-}
-
-async function writeCandidate(directory: PinnedScopeDirectory, candidate: MemoryCandidate): Promise<void> {
-  const candidatePath = path.join(directory.path, candidateDirectoryName);
-  await ensureSafeChildDirectory(directory, candidatePath, true, "memory candidate directory");
-  await atomicWriteChildFile(directory, candidatePath, `${candidate.id}.json`, `${JSON.stringify({ version: 3, ...candidate }, null, 2)}\n`);
-}
-
-async function unlinkCandidate(directory: PinnedScopeDirectory, id: string): Promise<void> {
-  const candidatePath = path.join(directory.path, candidateDirectoryName);
-  const child = await ensureSafeChildDirectory(directory, candidatePath, false, "memory candidate directory");
-  if (!child) return;
-  await unlinkSafeChildFile(directory, candidatePath, `${id}.json`);
-}
-
-
-
-
-
-/**
- * 迁移重放只能忽略 v3 写入时重新分配的 id/revision；其余规范化字段（包括来源路径与 lineage）
- * 都必须完全相同。这样同一旧 id 下 decisions、paths 等任一字段变化都不会被静默吞掉。
- */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/**
- * v1 topic files were unbounded. Preserve their complete bytes in .legacy-v1
- * and split the active v2 representation without cutting a UTF-16 surrogate
- * pair; createStoredMemoryEntry applies the same character budget to summary.
- */
-
-
-
-function stateForSnapshot(state: MemoryState, entries: ScopeEntryRecord[], candidates: MemoryCandidate[]): MemoryState {
-  const revision = Math.max(state.revision, ...entries.map(({ entry }) => entry.revision), ...candidates.map((candidate) => candidate.revision), 0);
-  return revision === state.revision ? state : { ...state, revision };
-}
-
-function chooseEntryFileName(entry: MemoryEntry, records: ScopeEntryRecord[]): string {
-  const simple = `${entry.topic}.md`;
-  if (!records.some(({ fileName }) => fileName.toLowerCase() === simple.toLowerCase())) return simple;
-  let length = 12;
-  while (length <= entry.id.length) {
-    const candidate = `${entry.topic}-${entry.id.slice(0, length)}.md`;
-    if (!records.some(({ fileName }) => fileName.toLowerCase() === candidate.toLowerCase())) return candidate;
-    length += 4;
-  }
-  return `${entry.topic}-${randomUUID()}.md`;
-}
-
-
-
-function renderState(state: MemoryState): string {
-  return `${JSON.stringify(state, null, 2)}\n`;
-}
-
-async function readOptionalSafeFile(
-  directory: PinnedScopeDirectory,
-  fileName: string,
-  maxChars: number,
-  signal?: AbortSignal
-): Promise<string | undefined> {
-  assertLeafName(fileName);
-  signal?.throwIfAborted();
-  await assertPinnedScopeDirectory(directory.workspaceRoot, directory);
-  const filePath = path.join(directory.path, fileName);
-  let handle;
-  try {
-    await assertSafeLeaf(filePath, fileName, false);
-    handle = await fs.open(filePath, constants.O_RDONLY | noFollowFlag());
-  } catch (error) {
-    if (isNotFound(error)) return undefined;
-    if (isSymbolicLinkError(error)) throw unsafeLeafError(fileName);
-    throw error;
-  }
-  try {
-    const initial = await handle.stat();
-    if (!initial.isFile() || initial.nlink !== 1) throw unsafeLeafError(fileName);
-    const content = await handle.readFile({ encoding: "utf8", signal });
-    const current = await handle.stat();
-    const binding = await fs.lstat(filePath);
-    if (!current.isFile() || current.nlink !== 1 || current.dev !== initial.dev || current.ino !== initial.ino
-      || binding.isSymbolicLink() || !binding.isFile() || binding.nlink !== 1 || binding.dev !== initial.dev || binding.ino !== initial.ino) {
-      throw unsafeLeafError(fileName);
-    }
-    await assertPinnedScopeDirectory(directory.workspaceRoot, directory);
-    return content.slice(0, maxChars);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function atomicWriteFile(directory: PinnedScopeDirectory, fileName: string, content: string): Promise<void> {
-  assertLeafName(fileName);
-  await assertPinnedScopeDirectory(directory.workspaceRoot, directory);
-  const target = path.join(directory.path, fileName);
-  await assertSafeLeaf(target, fileName, true);
-  const temporaryName = `.${fileName}.${randomUUID()}.tmp`;
-  const temporary = path.join(directory.path, temporaryName);
-  let handle;
-  try {
-    handle = await fs.open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
-    await handle.writeFile(content, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await assertPinnedScopeDirectory(directory.workspaceRoot, directory);
-    await assertSafeLeaf(target, fileName, true);
-    await fs.rename(temporary, target);
-    await fs.chmod(target, 0o600);
-    await syncDirectory(directory.path);
-  } finally {
-    await handle?.close();
-    await fs.unlink(temporary).catch(() => undefined);
-  }
-}
-
-async function unlinkSafeFile(directory: PinnedScopeDirectory, fileName: string): Promise<void> {
-  assertLeafName(fileName);
-  await assertPinnedScopeDirectory(directory.workspaceRoot, directory);
-  const target = path.join(directory.path, fileName);
-  await assertSafeLeaf(target, fileName, false);
-  await fs.unlink(target);
-  await syncDirectory(directory.path);
-}
-
-async function assertSafeLeaf(filePath: string, fileName: string, allowMissing: boolean): Promise<void> {
-  try {
-    const stat = await fs.lstat(filePath);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || await fs.realpath(filePath) !== filePath) {
-      throw unsafeLeafError(fileName);
-    }
-  } catch (error) {
-    if (allowMissing && isNotFound(error)) return;
-    throw error;
-  }
-}
-
-async function ensureSafeChildDirectory(
-  directory: PinnedScopeDirectory,
-  childPath: string,
-  create: boolean,
-  label: string
-): Promise<Awaited<ReturnType<typeof fs.lstat>> | undefined> {
-  await assertPinnedScopeDirectory(directory.workspaceRoot, directory);
-  const expected = path.join(directory.path, path.basename(childPath));
-  if (childPath !== expected) throw new Error(`Invalid ${label} path.`);
-  const stat = await ensureRealDirectory(childPath, create, label);
-  if (!stat) return undefined;
-  if (await fs.realpath(childPath) !== childPath) throw new Error(`${label} must be a real canonical directory.`);
-  return stat;
-}
-
-async function readOptionalSafeChildFile(
-  directory: PinnedScopeDirectory,
-  childPath: string,
-  fileName: string,
-  maxChars: number,
-  signal?: AbortSignal
-): Promise<string | undefined> {
-  await ensureSafeChildDirectory(directory, childPath, false, "memory child directory");
-  assertLeafName(fileName);
-  const target = path.join(childPath, fileName);
-  let handle;
-  try {
-    await assertSafeLeaf(target, fileName, false);
-    handle = await fs.open(target, constants.O_RDONLY | noFollowFlag());
-  } catch (error) {
-    if (isNotFound(error)) return undefined;
-    throw error;
-  }
-  try {
-    const content = await handle.readFile({ encoding: "utf8", signal });
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1) throw unsafeLeafError(fileName);
-    await assertPinnedScopeDirectory(directory.workspaceRoot, directory);
-    return content.slice(0, maxChars);
-  } finally {
-    await handle.close();
-  }
-}
-
-async function atomicWriteChildFile(directory: PinnedScopeDirectory, childPath: string, fileName: string, content: string): Promise<void> {
-  await ensureSafeChildDirectory(directory, childPath, true, "memory child directory");
-  assertLeafName(fileName);
-  const target = path.join(childPath, fileName);
-  await assertSafeLeaf(target, fileName, true);
-  const temporary = path.join(childPath, `.${fileName}.${randomUUID()}.tmp`);
-  let handle;
-  try {
-    handle = await fs.open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(), 0o600);
-    await handle.writeFile(content, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await fs.rename(temporary, target);
-    await fs.chmod(target, 0o600);
-    await syncDirectory(childPath);
-  } finally {
-    await handle?.close();
-    await fs.unlink(temporary).catch(() => undefined);
-  }
-}
-
-async function unlinkSafeChildFile(directory: PinnedScopeDirectory, childPath: string, fileName: string): Promise<void> {
-  await ensureSafeChildDirectory(directory, childPath, false, "memory child directory");
-  assertLeafName(fileName);
-  const target = path.join(childPath, fileName);
-  await assertSafeLeaf(target, fileName, false);
-  await fs.unlink(target);
-  await syncDirectory(childPath);
-}
-
-
-/**
- * Finish a verified v1 backup after migration commits. The backup stays
- * user-readable and removable with its workspace; its integrity comes from
- * the byte-for-byte verification above plus safe-leaf checks, not chmod bits
- * that would make normal workspace cleanup fail.
- */
-
-
-async function syncDirectory(directory: string): Promise<void> {
-  const handle = await fs.open(directory, constants.O_RDONLY);
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
-function assertLeafName(fileName: string): void {
-  if (!fileName || fileName.includes("\0") || path.basename(fileName) !== fileName) {
-    throw new Error(`Invalid local memory file name: ${fileName}`);
-  }
-}
-
-function unsafeLeafError(fileName: string): Error {
-  return new Error(`Local memory file must be a single regular file, not a symbolic link or hard link: ${fileName}`);
-}
-
-function assertExpectedRevision(scope: MemoryScope | "store", expected: number, actual: number): void {
-  if (!Number.isSafeInteger(expected) || expected < 0) throw new Error("expectedRevision must be a non-negative integer.");
-  if (expected !== actual) throw new MemoryRevisionConflictError(expected, actual);
+async function currentWorkspaceOrigin(workspaceRoot: string): Promise<Extract<MemoryOrigin, { kind: "workspace" }>> {
+  const canonicalWorkspace = await fs.realpath(path.resolve(workspaceRoot));
+  return workspaceOrigin(canonicalWorkspace);
 }
 
 function workspaceOrigin(canonicalWorkspace: string): Extract<MemoryOrigin, { kind: "workspace" }> {
@@ -1452,16 +1228,28 @@ function resolveEntryOrigin(input: MemoryEntryInput, current: MemoryOrigin): Mem
       ? "workspace"
       : undefined;
   const origin = input.origin ?? (intended === "user" ? { kind: "user" as const } : current);
-  if (intended !== undefined && origin.kind !== intended) throw new Error("Memory audience conflicts with origin.");
+  if (intended !== undefined && origin.kind !== intended) {
+    throw new Error("Memory audience conflicts with origin.");
+  }
   if (origin.kind === "workspace" && current.kind === "workspace" && origin.workspaceId !== current.workspaceId) {
     throw new Error("New workspace memory must use the current workspace origin.");
   }
   return { ...input, origin };
 }
 
-function normalizeOriginSelectors(
-  origins: MemoryOriginSelector[] | undefined
-): MemoryOriginSelector[] {
+function originFromColumns(kindValue: unknown, workspaceIdValue: unknown, workspaceNameValue: unknown): MemoryOrigin {
+  const kind = stringValue(kindValue, "memory origin kind");
+  if (kind === "user") return { kind: "user" };
+  if (kind !== "workspace") throw new Error("Invalid memory origin kind: " + kind);
+  const workspaceId = stringValue(workspaceIdValue, "memory workspace id");
+  const workspaceName = stringValue(workspaceNameValue, "memory workspace name");
+  if (!/^[a-f0-9]{24}$/u.test(workspaceId) || !workspaceName.trim()) {
+    throw new Error("Invalid workspace memory origin.");
+  }
+  return { kind: "workspace", workspaceId, workspaceName };
+}
+
+function normalizeOriginSelectors(origins: MemoryOriginSelector[] | undefined): MemoryOriginSelector[] {
   if (origins?.length) return [...new Set(origins)];
   return ["all"];
 }
@@ -1472,10 +1260,6 @@ function matchesOriginSelectors(origin: MemoryOrigin, selectors: MemoryOriginSel
   return origin.workspaceId === workspaceId
     ? selectors.includes("current_workspace")
     : selectors.includes("other_workspaces");
-}
-
-function currentWorkspaceId(directory: PinnedScopeDirectory | undefined): string {
-  return directory ? workspaceOrigin(directory.workspaceRoot).workspaceId : "";
 }
 
 function emptyOriginCounts(): MemoryOriginCounts {
@@ -1493,52 +1277,64 @@ function countOrigins(entries: MemoryEntry[], workspaceId: string): MemoryOrigin
   return counts;
 }
 
-function normalizeLimit(value: number | undefined, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (!Number.isFinite(value)) return fallback;
-  return Math.max(0, Math.trunc(value));
-}
-
 function compareEntriesForDisplay(left: MemoryEntry, right: MemoryEntry): number {
   return right.importance - left.importance
     || right.updatedAt.localeCompare(left.updatedAt)
     || left.id.localeCompare(right.id);
 }
 
-function validateCandidateLineage(input: MemoryCandidateInput): void {
-  if (input.lineage.source !== "completed_task") throw new Error("Memory candidates require completed_task lineage.");
-  if (input.kindHint !== undefined && !isMemoryKind(input.kindHint)) {
-    throw new Error(`Invalid memory candidate kind hint: ${String(input.kindHint)}`);
-  }
-  for (const [field, value] of Object.entries({
-    sessionId: input.lineage.sessionId,
-    turnId: input.lineage.turnId,
-    runId: input.lineage.runId
-  })) {
-    if (!value.trim()) throw new Error(`Memory candidate lineage requires ${field}.`);
-  }
+function normalizeLimit(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.trunc(value));
 }
 
-function isMemoryKind(value: string): boolean {
-  return value === "preference"
-    || value === "working_style"
-    || value === "fact"
-    || value === "decision"
-    || value === "workflow"
-    || value === "gotcha";
+function archiveReasonValue(value: unknown): MemoryArchiveReason | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (value === "exact_dup" || value === "exact" || value === "expired" || value === "orphan"
+    || value === "similarity_merge" || value === "llm_merge"
+    || value === "similarity" || value === "llm" || value === "manual") return value;
+  throw new Error("Invalid memory archive reason.");
 }
 
-function normalizeForDedup(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
+function memoryReference(id: string): string {
+  return "memory://" + id;
 }
 
-function safeCounter(value: number): number {
-  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+function stringValue(value: unknown, label: string): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("utf8");
+  throw new Error("Invalid " + label + ".");
+}
+
+function optionalString(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  return stringValue(value, "memory string");
+}
+
+function optionalTimeValue(value: unknown): string | undefined {
+  const string = optionalString(value);
+  return safeOptionalTime(string);
+}
+
+function safeCounter(value: unknown): number {
+  const number = typeof value === "bigint" ? Number(value) : typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : 0;
+}
+
+function safeRevision(value: unknown): number {
+  const number = typeof value === "bigint" ? Number(value) : typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) throw new Error("Invalid memory revision.");
+  return number;
 }
 
 function safeOptionalTime(value: string | undefined): string | undefined {
   if (value === undefined || !Number.isFinite(Date.parse(value))) return undefined;
   return new Date(value).toISOString();
+}
+
+function sanitizeError(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return redactSecrets(value).trim().slice(0, maxMaintenanceErrorChars) || undefined;
 }
 
 function isNotFound(error: unknown): boolean {
@@ -1549,10 +1345,9 @@ function isAlreadyExists(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 }
 
-function isSymbolicLinkError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && (error.code === "ELOOP" || error.code === "EMLINK");
-}
-
-function noFollowFlag(): number {
-  return typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+function assertExpectedRevision(expected: number, actual: number): void {
+  if (!Number.isSafeInteger(expected) || expected < 0) {
+    throw new Error("expectedRevision must be a non-negative integer.");
+  }
+  if (expected !== actual) throw new MemoryRevisionConflictError(expected, actual);
 }

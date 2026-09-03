@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentAttachment, AgentRunMode } from "../../agent/AgentSession.js";
 import { agentCapabilitySelectionSchema, type AgentCapabilitySelection } from "../../agent/capabilitySelection.js";
 import type { AgentRunOutcome, RuntimeRequestIds } from "../InteractiveAgentRuntime.js";
-import type { MemoryEntryInput, MemoryEntryPatch, MemoryKind, MemoryLineage, MemoryLineageSource, MemoryOriginSelector } from "../../agent/context/memoryTypes.js";
+import type { MemoryDurability, MemoryEntryInput, MemoryEntryPatch, MemoryKind, MemoryLineage, MemoryLineageSource, MemoryOriginSelector } from "../../agent/context/memoryTypes.js";
 import { thinkingLevelSchema } from "../../config/schema.js";
 import type { PermissionAction, PermissionMode, PermissionResult } from "../../permission/PermissionManager.js";
 import type { RuntimeRunStatus } from "../RuntimeAuthority.js";
@@ -89,6 +89,8 @@ export function readMemoryEntryInput(value: unknown): MemoryEntryInput {
     paths: record.paths === undefined ? undefined : readStringArray(record.paths, "entry.paths"),
     keywords: record.keywords === undefined ? undefined : readStringArray(record.keywords, "entry.keywords"),
     importance,
+    durability: readMemoryDurability(record.durability),
+    expiresAt: optionalString(record.expiresAt),
     lineage: lineageValues.map(readMemoryLineage)
   };
 }
@@ -113,8 +115,16 @@ export function readMemoryEntryPatch(value: unknown): MemoryEntryPatch {
     paths: record.paths === undefined ? undefined : readStringArray(record.paths, "patch.paths"),
     keywords: record.keywords === undefined ? undefined : readStringArray(record.keywords, "patch.keywords"),
     importance,
+    durability: readMemoryDurability(record.durability),
+    expiresAt: optionalString(record.expiresAt),
     userEvidence: optionalString(record.userEvidence)
   };
+}
+
+export function readMemoryDurability(value: unknown): MemoryDurability | undefined {
+  if (value === undefined) return undefined;
+  if (value === "temporary" || value === "permanent") return value;
+  throw new Error("Runtime Host memory durability must be temporary or permanent.");
 }
 
 export function readMemoryKind(value: unknown): MemoryKind {
@@ -139,15 +149,13 @@ export function readMemoryLineage(value: unknown): MemoryLineage {
     sessionId: optionalString(record.sessionId),
     turnId: optionalString(record.turnId),
     runId: optionalString(record.runId),
-    candidateId: optionalString(record.candidateId),
     sourceEntryIds: record.sourceEntryIds === undefined ? undefined : readStringArray(record.sourceEntryIds, "entry.lineage.sourceEntryIds"),
-    legacyPath: optionalString(record.legacyPath),
     userEvidence: optionalString(record.userEvidence)
   };
 }
 
 export function readMemoryLineageSource(value: unknown): MemoryLineageSource {
-  if (value === "explicit" || value === "completed_task" || value === "candidate" || value === "migration" || value === "consolidation") {
+  if (value === "explicit" || value === "explicit_edit" || value === "completed_task" || value === "sleep") {
     return value;
   }
   throw new Error("Runtime Host memory lineage source is invalid.");

@@ -109,6 +109,7 @@ export function SettingsMemory({
       const matches = await onSearch(filter, value, includeArchived);
       setEntries(matches.map((match) => ({
         id: match.id,
+        originalId: match.originalId,
         origin: match.origin,
         revision: stats?.revision ?? 0,
         topic: match.topic,
@@ -122,10 +123,14 @@ export function SettingsMemory({
         createdAt: match.createdAt,
         updatedAt: match.updatedAt,
         lineage: match.lineage,
+        durability: match.durability,
+        expiresAt: match.expiresAt,
         recallCount: match.recallCount,
         lastRecalledAt: match.lastRecalledAt,
         archivedAt: match.archivedAt,
-        archivedReason: match.archivedReason
+        archivedReason: match.archivedReason,
+        mergedInto: match.mergedInto,
+        archivedBy: match.archivedBy
       })));
       setError(undefined);
     } catch (cause) {
@@ -187,7 +192,7 @@ export function SettingsMemory({
       const result = await onPreviewSleep();
       if (result.available) {
         setSleepPreview(result);
-        onNotify(`本次整理将检查 ${result.candidates} 条候选，${result.temporaryToArchive} 条临时记忆待归档，${result.archivedToDelete} 条归档待删除`);
+        onNotify(`本次整理将检查 ${result.entries} 条记忆，${result.temporaryToArchive} 条临时记忆待归档，${result.archivedToDelete} 条归档待删除`);
       } else {
         onNotify("当前无法预览整理");
       }
@@ -341,7 +346,7 @@ export function SettingsMemory({
                   <span className={entry.lineage.some((lineage) => lineage.source === "explicit") ? "is-manual" : "is-auto"}>
                     {entry.lineage.some((lineage) => lineage.source === "explicit") ? "手动" : "自动"}
                   </span>
-                  <span>{entry.kind === "preference" || entry.kind === "working_style" ? "永久" : "临时"}</span>
+                  <span>{entry.durability === "temporary" ? "临时" : "永久"}</span>
                   {entry.lineage.some((lineage) => lineage.sessionId) ? <span>来自聊天</span> : null}
                   {entry.archivedAt ? <span>已归档</span> : null}
                 </div>
@@ -377,7 +382,7 @@ export function SettingsMemory({
               上次整理：{stats.maintenance.lastRun.examined} 条检查 · {stats.maintenance.lastRun.exact} 条完全重复 · {stats.maintenance.lastRun.expired} 条期限 · {stats.maintenance.lastRun.similarity} 条近似 · {stats.maintenance.lastRun.llm} 条 LLM 合并 · {stats.maintenance.lastRun.failed} 条失败
             </small>
           ) : null}
-          {sleepPreview ? <small className="activity-memory-sleep-preview">预览：{sleepPreview.candidates} 条候选，{sleepPreview.temporaryToArchive} 条临时记忆待归档，{sleepPreview.archivedToDelete} 条归档待删除。</small> : null}
+          {sleepPreview ? <small className="activity-memory-sleep-preview">预览：{sleepPreview.entries} 条记忆，{sleepPreview.temporaryToArchive} 条临时记忆待归档，{sleepPreview.archivedToDelete} 条归档待删除。</small> : null}
           {sleepRuns.length > 0 ? (
             <small className="activity-memory-sleep-history">最近周期：{sleepRuns.slice(-3).reverse().map((run) => `${run.examined} 检查 · ${run.exact} 完全重复 · ${run.expired} 期限 · ${run.similarity} 近似 · ${run.llm} LLM`).join("；")}</small>
           ) : null}

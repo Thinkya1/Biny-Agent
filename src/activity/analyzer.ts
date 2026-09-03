@@ -133,6 +133,20 @@ export type ActivityAnalysisOutcome =
   | { status: "skipped"; reason: "session_not_ended" | "no_model" }
   | { status: "error"; error: string };
 
+export interface ActivityMemoryCandidate {
+  type: "project" | "feedback" | "reference" | "user";
+  content: string;
+  why: string;
+}
+
+export interface ActivityMemoryWriteContext {
+  sessionId: string;
+  analyzedAt: string;
+  project?: string;
+  /** Activity 分析和记忆写入共用同一个模型实例，避免模型漂移和重复创建。 */
+  model: AgentModel;
+}
+
 export interface ActivityAnalyzerDeps {
   store: ActivityStore;
   policy: ActivityPrivacyPolicy;
@@ -144,6 +158,11 @@ export interface ActivityAnalyzerDeps {
   signal?: AbortSignal;
   /** 可注入时钟，便于测试固定 analyzedAt 与「今天」。 */
   now?: () => Date;
+  /** 分析完成后把模型挑出的稳定事实写入统一记忆库；失败不能影响 Activity 分析结果。 */
+  writeMemories?: (
+    candidates: readonly ActivityMemoryCandidate[],
+    context: ActivityMemoryWriteContext
+  ) => Promise<void>;
 }
 
 export interface ActivitySweepResult {
@@ -271,11 +290,12 @@ export async function analyzeActivitySession(
     ]);
   const summary = parsed.summary?.trim() || parsed.description?.trim() || parsed.title?.trim() || ACTIVITY_ANALYSIS_FAILED_SUMMARY;
   const memoryCandidates = parsed.memoryCandidates;
+  const project = normalizeProject(parsed.project, knownProjects);
   const analysis: ActivitySessionAnalysis = {
     sessionId: session.id,
     analyzedAt,
     analyzerModel: model.modelId,
-    project: normalizeProject(parsed.project, knownProjects),
+    project,
     title: parsed.title?.trim() || deriveTitle(summary),
     description: parsed.description?.trim() || summary,
     summary,
@@ -293,8 +313,7 @@ export async function analyzeActivitySession(
     events: entityDetails.events,
     urls: entityDetails.urls,
     entityDetails,
-    memoryCandidates,
-    // 根据候选数组判定 worthMemory；模型直接给出的 boolean 只兼容旧协议。
+    // 根据临时记忆数组判定 worthMemory；模型直接给出的 boolean 只兼容旧协议。
     worthMemory: memoryCandidates.length > 0,
     worthKnowledge: parsed.worthKnowledge,
     isMeeting: parsed.isMeeting,
@@ -304,6 +323,18 @@ export async function analyzeActivitySession(
     inputHash
   };
   store.recordAnalysis(analysis);
+  if (memoryCandidates.length > 0) {
+    try {
+      await deps.writeMemories?.(memoryCandidates, {
+        sessionId: session.id,
+        analyzedAt,
+        project,
+        model
+      });
+    } catch {
+      // 统一记忆库是分析结果的旁路投影；写入失败不能让 Activity 分析失败或阻塞下次 sweep。
+    }
+  }
   return { status: "analyzed", analysis, cached: false };
 }
 
@@ -476,7 +507,6 @@ function buildTrivialAnalysis(
     decisions: [],
     entities: [],
     highlights: [],
-    memoryCandidates: [],
     worthMemory: false,
     worthKnowledge: false,
     isMeeting: false,

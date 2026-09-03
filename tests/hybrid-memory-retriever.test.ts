@@ -10,7 +10,7 @@ import {
   type AutomaticMemoryStore,
   type MemoryVectorSearchIndex
 } from "../src/agent/context/HybridMemoryRetriever.js";
-import type { MemoryEntry, MemorySearchResult } from "../src/agent/context/memoryTypes.js";
+import type { MemoryEntry, MemorySearchOptions, MemorySearchResult } from "../src/agent/context/memoryTypes.js";
 import type { EmbeddingModelRuntime } from "../src/llm/embedding/types.js";
 
 const currentWorkspaceId = "a".repeat(24);
@@ -35,6 +35,18 @@ function testPureHybridRanking(): void {
   });
   assert.deepEqual(semantic.matches.map(({ entry }) => entry.id), [current.id, user.id]);
   assert.deepEqual(semantic.report.origins.included, { user: 1, currentWorkspace: 1, otherWorkspaces: 0 });
+
+  const filteredSemantic = rankHybridMemory({
+    entries: [current, user, other],
+    currentWorkspaceId,
+    lexicalRankings: [[current.id, user.id, other.id]],
+    vectorRanking: [{ entryId: other.id, similarity: 0.99 }],
+    semanticAvailable: true,
+    limit: 3,
+    maxChars: 12_000
+  });
+  assert.deepEqual(new Set(filteredSemantic.matches.map(({ entry }) => entry.id)), new Set([current.id, user.id]),
+    "过滤掉全部向量候选后必须回退到词法召回");
 
   const fallback = rankHybridMemory({
     entries: [current, user, other],
@@ -103,6 +115,23 @@ async function testRewriteFailureUsesOriginalQuery(): Promise<void> {
   });
 }
 
+async function testArchivedSearchFlagPropagates(): Promise<void> {
+  await withWorkspace(async (workspaceRoot) => {
+    const current = memoryEntry("current", { kind: "workspace", workspaceId: workspaceId(workspaceRoot), workspaceName: "current" });
+    const store = new FakeMemoryStore([current]);
+    const retriever = new HybridMemoryRetriever({
+      localMemory: store,
+      workspaceRoot,
+      getEmbeddingRuntime: async () => undefined,
+      getReadOnlyVectorIndex: () => undefined,
+      getThresholds: (_fingerprint, recommended) => recommended
+    });
+    await retriever.retrieve("release", [], { limit: 1, includeArchived: true, automatic: false });
+    assert.deepEqual(store.listArchivedFlags, [true]);
+    assert.deepEqual(store.searchArchivedFlags, [true]);
+  });
+}
+
 async function testFingerprintThresholdAndCrossWorkspaceGate(): Promise<void> {
   await withWorkspace(async (workspaceRoot) => {
     const current = memoryEntry("current", { kind: "workspace", workspaceId: workspaceId(workspaceRoot), workspaceName: "current" });
@@ -148,7 +177,7 @@ async function testFingerprintThresholdAndCrossWorkspaceGate(): Promise<void> {
     assert.equal(result.matches.some(({ entry }) => entry.id === other.id), false, "lexical hits cannot bypass the cross-workspace vector threshold");
     assert.deepEqual(new Set(result.matches.map(({ entry }) => entry.id)), new Set([current.id, user.id]));
 
-    await retriever.recordInjectedRecall(result.matches.map(({ entry }) => entry.id), { now: new Date("2026-08-13T00:00:00.000Z") });
+    await retriever.recordRecallUsage(result.matches.map(({ entry }) => entry.id), { now: new Date("2026-08-13T00:00:00.000Z") });
     assert.deepEqual(store.recalled, [current.id, user.id].sort());
     retriever.close();
     assert.equal(index.closed, true);
@@ -157,36 +186,37 @@ async function testFingerprintThresholdAndCrossWorkspaceGate(): Promise<void> {
 
 class FakeMemoryStore implements AutomaticMemoryStore {
   readonly searches: string[] = [];
+  readonly listArchivedFlags: Array<boolean | undefined> = [];
+  readonly searchArchivedFlags: Array<boolean | undefined> = [];
   recalled: string[] = [];
 
   constructor(private readonly entries: MemoryEntry[]) {}
 
-  async listMemoryEntries(): Promise<{ entries: MemoryEntry[]; storeRevision: number; revision: { global: number; project: number } }> {
-    return { entries: this.entries, storeRevision: 7, revision: { global: 7, project: 7 } };
+  async listMemoryEntries(options?: { includeArchived?: boolean }): Promise<{ entries: MemoryEntry[]; storeRevision: number }> {
+    this.listArchivedFlags.push(options?.includeArchived);
+    return { entries: this.entries, storeRevision: 7 };
   }
 
-  async search(query: string): Promise<MemorySearchResult> {
+  async search(query: string, _paths: string[], options?: MemorySearchOptions): Promise<MemorySearchResult> {
     this.searches.push(query);
+    this.searchArchivedFlags.push(options?.includeArchived);
     return {
       matches: this.entries.map((entry, index) => ({
         entry,
         topic: entry.topic,
-        path: `entries/${entry.id}.md`,
+        path: "memory://" + entry.id,
         excerpt: entry.summary,
         score: this.entries.length - index
       })),
       storeRevision: 7,
-      revision: { global: 7, project: 7 },
       report: {
         origins: { included: { user: 0, currentWorkspace: 0, otherWorkspaces: 0 }, trimmed: { user: 0, currentWorkspace: 0, otherWorkspaces: 0 } },
-        included: { global: 0, project: 0 },
-        trimmed: { global: 0, project: 0 },
         omitted: []
       }
     };
   }
 
-  async recordInjectedRecall(ids: string[]): Promise<void> {
+  async recordRecallUsage(ids: string[]): Promise<void> {
     this.recalled = [...ids].sort();
   }
 }
@@ -227,7 +257,6 @@ function memoryEntry(id: string, origin: MemoryEntry["origin"], summary = `Durab
   return {
     id,
     origin,
-    scope: origin.kind === "user" ? "global" : "project",
     kind: origin.kind === "user" ? "working_style" : "workflow",
     topic: "release",
     title: `${id} title`,
@@ -240,6 +269,7 @@ function memoryEntry(id: string, origin: MemoryEntry["origin"], summary = `Durab
     updatedAt: "2026-08-13T00:00:00.000Z",
     revision: 1,
     lineage: [{ source: "explicit", externalContext: false, userEvidence: origin.kind === "user" ? "explicit" : undefined }],
+    durability: "permanent",
     recallCount: 0,
     lastRecalledAt: undefined
   };
@@ -263,6 +293,7 @@ testPureHybridRanking();
 testWholeEntryBudget();
 await testLexicalFallbackAndRewrite();
 await testRewriteFailureUsesOriginalQuery();
+await testArchivedSearchFlagPropagates();
 await testFingerprintThresholdAndCrossWorkspaceGate();
 
 console.log("hybrid memory retriever tests passed");

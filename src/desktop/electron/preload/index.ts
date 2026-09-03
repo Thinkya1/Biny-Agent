@@ -133,7 +133,6 @@ const api: DesktopApi = {
   previewMemorySleep: async (projectId) => await ipcRenderer.invoke(desktopIpc.previewMemorySleep, projectId),
   cancelMemorySleep: async (projectId) => await ipcRenderer.invoke(desktopIpc.cancelMemorySleep, projectId),
   clearMemory: async (projectId, filter, expectedRevision) => await ipcRenderer.invoke(desktopIpc.clearMemory, projectId, filter, expectedRevision),
-  compactMemory: async (projectId, filter, expectedRevision, topic) => await ipcRenderer.invoke(desktopIpc.compactMemory, projectId, filter, expectedRevision, topic),
   memoryEmbeddingStatus: async (projectId) => await ipcRenderer.invoke(desktopIpc.memoryEmbeddingStatus, projectId),
   downloadMemoryEmbeddingModel: async (projectId, model) => await ipcRenderer.invoke(desktopIpc.downloadMemoryEmbeddingModel, projectId, model),
   cancelMemoryEmbeddingDownload: async (projectId, model) => await ipcRenderer.invoke(desktopIpc.cancelMemoryEmbeddingDownload, projectId, model),

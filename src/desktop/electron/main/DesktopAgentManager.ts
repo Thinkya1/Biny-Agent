@@ -88,7 +88,6 @@ import type {
   DesktopChatPersonalizationOverride,
   DesktopEmbeddingModelDescriptor,
   DesktopGitBranch,
-  DesktopMemoryCompactionResult,
   DesktopMemoryEmbeddingCancellationResult,
   DesktopMemoryEmbeddingDeleteResult,
   DesktopMemoryEmbeddingStatus,
@@ -238,6 +237,27 @@ export class DesktopAgentManager {
       if (managed.commands) return await managed.commands.agent.getActivityEmbeddingRuntime();
     }
     return undefined;
+  }
+
+  /** Activity 记忆写入复用已经驻留的 AgentSession；没有 session 时不为后台分析强行启动 Runtime。 */
+  async findMemorySimilarEntries(
+    query: string,
+    options: { limit: number; minimumSimilarity: number; signal?: AbortSignal }
+  ): Promise<MemoryEntry[] | undefined> {
+    for (const managed of this.runtimes.values()) {
+      if (managed.commands) return await managed.commands.agent.findMemorySimilarEntries(query, options);
+    }
+    return undefined;
+  }
+
+  /** Activity 事实已经写入 SQLite 后，尽力把它投影进现有的全局向量索引。 */
+  async indexActivityMemoryEntry(entry: MemoryEntry): Promise<void> {
+    for (const managed of this.runtimes.values()) {
+      if (managed.commands) {
+        await managed.commands.agent.indexMemoryEntry(entry);
+        return;
+      }
+    }
   }
 
   async workspaceSnapshot(projectId: string): Promise<DesktopWorkspaceSnapshot> {
@@ -1392,7 +1412,6 @@ export class DesktopAgentManager {
       settings: { ...config.memory },
       totalEntries: store.overview.entryCount,
       memoryStats: memoryStats(store.allEntries),
-      candidateCount: store.overview.candidateCount,
       origins: { ...store.overview.origins },
       maintenance: { ...store.maintenance },
       topics: [...topicCounts.entries()].map(([topic, count]) => ({ topic, entries: count })),
@@ -1423,7 +1442,6 @@ export class DesktopAgentManager {
       settings: { ...config.memory },
       totalEntries: store.overview.entryCount,
       memoryStats: memoryStats(store.allEntries),
-      candidateCount: store.overview.candidateCount,
       origins: { ...store.overview.origins },
       maintenance: { ...store.maintenance },
       topics: [...topicCounts.entries()].map(([topic, count]) => ({ topic, entries: count }))
@@ -1574,6 +1592,7 @@ export class DesktopAgentManager {
       : await requireRemoteRuntime(runtime).memory<MemorySearchResult>("search-v3", { selector: filter, query, limit: 8, includeArchived });
     return result.matches.map((match) => ({
       id: match.entry.id,
+      originalId: match.entry.originalId,
       origin: match.entry.origin,
       topic: match.topic,
       kind: match.entry.kind,
@@ -1581,13 +1600,17 @@ export class DesktopAgentManager {
       importance: match.entry.importance,
       createdAt: match.entry.createdAt,
       updatedAt: match.entry.updatedAt,
+      durability: match.entry.durability,
+      expiresAt: match.entry.expiresAt,
       path: match.path,
       excerpt: match.excerpt,
       score: match.score,
       recallCount: match.entry.recallCount,
       lastRecalledAt: match.entry.lastRecalledAt,
       archivedAt: match.entry.archivedAt,
-      archivedReason: match.entry.archivedReason
+      archivedReason: match.entry.archivedReason,
+      mergedInto: match.entry.mergedInto,
+      archivedBy: match.entry.archivedBy
     }));
   }
 
@@ -1612,6 +1635,8 @@ export class DesktopAgentManager {
       paths: input.paths,
       keywords: input.keywords,
       importance: input.importance,
+      durability: input.durability,
+      expiresAt: input.expiresAt,
       lineage: {
         source: "explicit" as const,
         externalContext: false,
@@ -1704,11 +1729,21 @@ export class DesktopAgentManager {
       llmBatchSize: memoryPolicy.llmBatchSize
     };
     if (commands) {
-      await runtime.runExclusiveOperation("memory", async () => {
-        await commands.agent.getLocalMemory().processEligibleCandidates(maintenanceOptions, {
-          indexEntry: async (entry) => await commands.agent.indexMemoryEntry(entry),
-          requestRebuild: () => this.scheduleIdleManagedRuntimeRebuild()
-        });
+      let rebuildRequested = false;
+      await runtime.runExclusiveOperation("memory", async (signal) => {
+        try {
+          await commands.agent.getLocalMemory().runMemoryMaintenance({ ...maintenanceOptions, signal }, {
+            indexEntry: async (entry) => await commands.agent.indexMemoryEntry(entry),
+            requestRebuild: () => { rebuildRequested = true; },
+            findSimilarPairs: async (entries, minimumSimilarity, pairSignal) => (
+              await commands.agent.findMemorySimilarityPairs(entries, minimumSimilarity, pairSignal)
+            )
+          });
+        } finally {
+          // Sleep 的归档发生在 SQLite 提交之后；批次结束再重建一次派生索引，避免
+          // 每个条目单独重建，也不把“重建 Runtime”误当成“重建 Embedding”。
+          if (rebuildRequested) await commands.agent.rebuildMemoryEmbeddingIndex(signal).catch(() => undefined);
+        }
       });
     } else {
       await requireRemoteRuntime(runtime).memory("sleep-run-now", maintenanceOptions);
@@ -1735,10 +1770,11 @@ export class DesktopAgentManager {
     const { runtime, commands } = await this.runtimeForGlobalWrite(projectId, archived ? "任务运行期间不能归档记忆。" : "任务运行期间不能恢复记忆。");
     const result = commands
       ? await runtime.runExclusiveOperation("memory", async () => await requireLocalMemory(commands).archiveEntry(entryId, archived, { expectedRevision }))
-      : await requireRemoteRuntime(runtime).memory<{ archived: boolean }>("archive-v3", { id: entryId, archived, expectedRevision });
-    if (!result.archived) throw new Error("未找到该记忆条目，可能已被其他操作改变。");
-    if (archived) commands?.agent.removeMemoryEmbeddingEntries([entryId]);
-    else this.scheduleIdleManagedRuntimeRebuild();
+      : await requireRemoteRuntime(runtime).memory<{ archived: boolean; entry?: MemoryEntry }>("archive-v3", { id: entryId, archived, expectedRevision });
+    // `archived` is the resulting state, so a successful restore legitimately
+    // returns false. Presence of the returned entry is the mutation/no-op
+    // success signal; absence means the id was not found.
+    if (!result.entry) throw new Error("未找到该记忆条目，可能已被其他操作改变。");
     return await this.memoryStats(projectId);
   }
 
@@ -1779,37 +1815,7 @@ export class DesktopAgentManager {
     return await this.memoryStats(projectId);
   }
 
-  async compactMemory(
-    projectId: string,
-    filter: DesktopMemoryOriginFilter,
-    expectedRevision: number,
-    topic?: string
-  ): Promise<DesktopMemoryCompactionResult> {
-    this.projects.requireProject(projectId);
-    const { runtime, commands } = await this.runtimeForGlobalWrite(
-      projectId,
-      "任务运行期间不能整理记忆。"
-    );
-    const result = commands
-      ? await runtime.runExclusiveOperation(
-        "memory",
-        async () => await requireLocalMemory(commands).consolidateEntries(filter, { expectedRevision, topic })
-      )
-      : await requireRemoteRuntime(runtime).memory<DesktopMemoryCompactionResult>("consolidate-v3", {
-        selector: filter,
-        expectedRevision,
-        topic
-      });
-    return {
-      filter,
-      before: result.before,
-      after: result.after,
-      revision: result.revision,
-      error: result.error
-    };
-  }
-
-  /** 设置事务不再触发索引动作；记忆没有派生向量索引，只需在配置变更时重建运行时。 */
+  /** 设置事务只提交配置；驻留 Runtime 的刷新仍在后台进行，向量索引按自身状态收敛。 */
   settingsCommitted(prepared: PreparedDesktopSettingsConfig): void {
     if (prepared.beforeRevision !== prepared.targetRevision) this.scheduleIdleManagedRuntimeRebuild();
   }
@@ -2744,8 +2750,8 @@ export class DesktopAgentManager {
   }
 
   /**
-   * runtime 未驻留：不触发冷启动，主进程直接读记忆文件（存储层无锁读取）。
-   * 与正在写入的进程并发时允许跨文件短暂不一致；单个 Markdown/状态文件仍由原子写保护。
+   * runtime 未驻留：不触发冷启动，主进程直接读 memory.sqlite。
+   * SQLite 读取使用自己的只读查询；与正在写入的进程并发时由 SQLite 事务保证一致性。
    */
   private async readMemoryStoreFromDisk(
     projectId: string,
@@ -2931,7 +2937,7 @@ function memoryStats(entries: MemoryEntriesResult): { total: number; autoGenerat
   for (const entry of entries.entries) {
     const manual = entry.lineage.some((item) => item.source === "explicit" || item.source === "explicit_edit");
     if (manual) manualAdded += 1;
-    else if (entry.lineage.some((item) => item.source === "completed_task" || item.source === "candidate" || item.source === "consolidation")) autoGenerated += 1;
+    else if (entry.lineage.some((item) => item.source === "completed_task" || item.source === "sleep")) autoGenerated += 1;
   }
   return { total: entries.entries.length, autoGenerated, manualAdded };
 }

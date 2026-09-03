@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { LocalMemory } from "../src/agent/context/LocalMemory.js";
 import { runMemoryCommand } from "../src/agent/context/memoryCommands.js";
 import { WorkspaceContext } from "../src/agent/context/WorkspaceContext.js";
-import { BINY_AGENT_DIR_ENV, globalAgentDir } from "../src/config/paths.js";
+import { BINY_AGENT_DIR_ENV } from "../src/config/paths.js";
 import { configSchema, defaultConfig } from "../src/config/schema.js";
 import {
   buildSubagentDefinitionsPrompt,
@@ -34,7 +34,7 @@ async function main(): Promise<void> {
     await testSubagentBudgetExhaustionReturnsPartialFindings();
     await testMemoryTopicLifecycle();
     await testMemoryTools();
-    await testMaintenanceDerivedIndexSync();
+    await testMaintenanceScansDurableEntries();
     await testGlobalInstructionFile();
   } finally {
     if (previousGlobalRoot === undefined) delete process.env[BINY_AGENT_DIR_ENV];
@@ -316,10 +316,7 @@ async function testMemoryTools(): Promise<void> {
     assert.ok(!("isError" in saveExecution));
     const saved = await saveExecution.execute({ toolCallId: "save-1" }) as { saved: boolean; id?: string; path?: string };
     assert.equal(saved.saved, true);
-    assert.equal(saved.path, path.relative(
-      await realpath(globalAgentDir()),
-      path.join(await realpath(globalAgentDir()), "memory", "entries", "workflows.md")
-    ));
+    assert.match(saved.path ?? "", /^memory:\/\/[a-z0-9-]+$/u);
 
     // 无效参数走 isError 分支而不是抛异常。
     const invalid = await saveTool.resolveExecution({ topic: "x", title: "y", summary: "short" });
@@ -341,94 +338,56 @@ async function testMemoryTools(): Promise<void> {
   }
 }
 
-async function testMaintenanceDerivedIndexSync(): Promise<void> {
+async function testMaintenanceScansDurableEntries(): Promise<void> {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-maintenance-"));
   const agentRoot = await mkdtemp(path.join(os.tmpdir(), "biny-memory-maintenance-agent-"));
   const previousAgentRoot = process.env[BINY_AGENT_DIR_ENV];
   process.env[BINY_AGENT_DIR_ENV] = agentRoot;
   try {
-    const memory = new LocalMemory(workspaceRoot, maintenanceModel);
+    const memory = new LocalMemory(workspaceRoot, unusedModel);
+    const summary = "The same durable maintenance workflow is shared by the workspace and the user memory namespace.";
     const existing = await memory.writeEntry({
       audience: "workspace",
       kind: "workflow",
       topic: "maintenance",
       title: "Existing maintenance rule",
-      summary: "The existing durable workflow is kept before candidate consolidation.",
+      summary,
       lineage: { source: "explicit", externalContext: false }
     }, { expectedRevision: 0, now: new Date("2026-08-01T00:00:00.000Z") });
-    await memory.enqueueCandidate({
-      summary: "A completed task added another durable maintenance workflow for this workspace.",
-      completed: true,
+    await memory.writeEntry({
+      audience: "universal",
+      kind: "working_style",
+      topic: "maintenance",
+      title: "Durable maintenance preference",
+      summary,
       lineage: {
-        source: "completed_task",
-        sessionId: "session-maintenance",
-        turnId: "turn-maintenance",
-        runId: "run-maintenance",
-        externalContext: false
-      },
-      audienceHint: "workspace",
-      kindHint: "workflow"
-    }, {
-      expectedRevision: existing.revision,
-      excludeExternalContext: true,
-      now: new Date("2026-08-01T01:00:00.000Z")
-    });
+        source: "explicit",
+        externalContext: false,
+        userEvidence: "The user explicitly wants this maintenance workflow remembered."
+      }
+    }, { expectedRevision: existing.revision, now: new Date("2026-08-01T01:00:00.000Z") });
 
-    const result = await memory.processEligibleCandidates({ now: new Date("2026-08-01T07:00:00.000Z") });
-    assert.equal(result.written, 1);
-    const entries = (await memory.listMemoryEntries({ origins: ["current_workspace"] })).entries;
+    let rebuilds = 0;
+    const result = await memory.runMemoryMaintenance({ now: new Date("2026-08-01T07:00:00.000Z"), useLlm: false }, {
+      requestRebuild: () => { rebuilds += 1; }
+    });
+    assert.equal(result.failed, 0);
+    assert.equal(result.written, 0);
+    assert.equal(rebuilds, 1);
+    const entries = (await memory.listMemoryEntries({ origins: ["all"] })).entries;
     assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.origin.kind, "user");
+    const archived = (await memory.listArchivedEntries()).entries;
+    assert.equal(archived.length, 1);
+    assert.equal(archived[0]?.origin.kind, "workspace");
+    const status = await memory.loadMaintenanceStatus();
+    assert.equal(status.lastRun?.exact, 1);
   } finally {
     if (previousAgentRoot === undefined) delete process.env[BINY_AGENT_DIR_ENV];
     else process.env[BINY_AGENT_DIR_ENV] = previousAgentRoot;
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(agentRoot, { recursive: true, force: true });
   }
-}
-
-function maintenanceModel(): AgentModel {
-  return {
-    provider: "test",
-    modelId: "memory-maintenance",
-    async stream(context) {
-      const prompt = context.messages.flatMap((message) => (
-        typeof message.content === "string"
-          ? [message.content]
-          : message.content.flatMap((content) => content.type === "text" ? [content.text] : [])
-      )).join("\n");
-      const text = prompt.includes("Consolidate this project memory topic file")
-        ? JSON.stringify({
-          entries: [{
-            sourceEntryIds: [...prompt.matchAll(/"id":"([^"]+)"/gu)].map((match) => match[1]),
-            kind: "workflow",
-            topic: "maintenance",
-            title: "Consolidated maintenance rules",
-            summary: "Both durable maintenance workflows remain represented after consolidation.",
-            decisions: [],
-            paths: [],
-            keywords: ["maintenance"],
-            importance: 3
-          }]
-        })
-        : JSON.stringify({
-          memory: {
-            audience: "workspace",
-            kind: "workflow",
-            topic: "maintenance",
-            title: "Candidate maintenance rule",
-            summary: "The completed task established another durable workspace maintenance workflow.",
-            decisions: [],
-            paths: [],
-            keywords: ["maintenance"],
-            importance: 3
-          }
-        });
-      return (async function* () {
-        yield { type: "text-delta" as const, text };
-        yield { type: "finish" as const, reason: "stop" as const };
-      })();
-    }
-  };
 }
 
 async function testGlobalInstructionFile(): Promise<void> {

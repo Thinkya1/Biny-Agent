@@ -326,7 +326,6 @@ function testPersonalizationSelectors(): void {
       contributeMemories: true,
       generateMemories: true,
       extractModel: undefined,
-      consolidationModel: undefined,
       excludeExternalContext: true,
       maxRecalled: 3
     },

@@ -72,7 +72,7 @@ import {
 } from "./completionGuard.js";
 import { evaluateCompletion } from "./completionReview.js";
 import { ContextMemory } from "./context/ContextMemory.js";
-import { LocalMemory, withFreshRevision, redactSecrets } from "./context/LocalMemory.js";
+import { LocalMemory, redactSecrets } from "./context/LocalMemory.js";
 import { IdentityStorage } from "./context/identityStorage.js";
 import { EmotionStorage } from "./context/emotionStorage.js";
 import { renderEmotionPrompt } from "./context/emotionPrompt.js";
@@ -118,7 +118,13 @@ import {
   type GlobalPersonalizationUpdate,
   type ResolvedChatPersonalization
 } from "../personalization/index.js";
-import type { MemoryEntry, MemorySearchOptions, MemorySearchResult } from "./context/memoryTypes.js";
+import type {
+  MemoryEntry,
+  MemorySearchOptions,
+  MemorySearchResult,
+  MemorySimilarSearchOptions,
+  MemorySimilarityPair
+} from "./context/memoryTypes.js";
 import { resolveCapabilityNames, type AgentCapabilitySelection } from "./capabilitySelection.js";
 
 export interface AgentSessionOptions {
@@ -279,7 +285,7 @@ const maxQueuedRunMessages = 100;
 const fatigueResetAfterMs = 4 * 60 * 60 * 1_000;
 const fatiguePerCompletedModelStep = 2;
 const maxFatigue = 100;
-type MemoryModelField = "memoryModel" | "rewriteModel" | "extractModel" | "consolidationModel";
+type MemoryModelField = "memoryModel" | "rewriteModel" | "extractModel";
 
 /**
  * Stateful core agent for one workspace. Hosts use this public surface instead
@@ -335,8 +341,10 @@ export class AgentSession {
     const onModelRequest = async (metrics: ModelRequestMetrics): Promise<void> => {
       await this.recordModelRequest(metrics);
     };
-    // 抽取与整理可使用不同模型。getter 读取 root-turn 快照，因此外部配置变更不会让运行中的
-    // turn 漂移；下一根回合才会切换。按 alias 缓存 adapter，避免每个候选重复创建。
+    // 记忆抽取、去重、删除和 Sleep 都使用 tool/memory model；extractModel
+    // 仍保留给 Skill 抽取，不把两条不同调用链混在一起。
+    // getter 读取 root-turn 快照，因此外部配置变更不会让运行中的 turn 漂移；下一根回合才会切换。
+    // 按 alias 缓存 adapter，避免每次记忆操作重复创建。
     const memoryModels = new Map<string, AgentModel>();
     const memoryModel = (field: MemoryModelField): AgentModel => {
       const alias = this.activeConfig.context.memory[field]
@@ -354,10 +362,27 @@ export class AgentSession {
       persistenceRoot,
       () => this.memoryModelFor("extractModel"),
       onUsage,
-      undefined,
+      () => this.activeConfig.context.memory.maxRecalled,
       onModelRequest,
       () => this.sideModelRequestContext(),
-      () => this.memoryModelFor("consolidationModel")
+      {
+        indexEntry: async (entry) => await this.indexMemoryEntry(entry),
+        removeEntries: (entryIds) => this.removeMemoryEmbeddingEntries(entryIds)
+      },
+      async (query, searchOptions) => {
+        const snapshot = await this.localMemory.listMemoryEntries({
+          origins: ["all"],
+          signal: searchOptions.signal
+        });
+        return await this.memoryEmbeddingService.findSimilarEntries(
+          query,
+          snapshot.entries,
+          searchOptions.limit,
+          searchOptions.minimumSimilarity,
+          searchOptions.signal
+        );
+      },
+      () => this.memoryModelFor("memoryModel")
     );
     this.identityStorage = new IdentityStorage();
     this.emotionStorage = new EmotionStorage();
@@ -771,6 +796,7 @@ export class AgentSession {
       maxChars: options.maxChars,
       signal: options.signal,
       origins: options.origins,
+      includeArchived: options.includeArchived,
       automatic: false
     });
   }
@@ -808,10 +834,43 @@ export class AgentSession {
   }
 
   async indexMemoryEntry(entry: MemoryEntry): Promise<void> {
-    // Markdown 已在调用前提交。配置瞬时读取失败也只能让该条目留待重建，不能把成功写入
+    // SQLite 事实已在调用前提交。配置瞬时读取失败也只能让该条目留待重建，不能把成功写入
     // 对外伪装成失败并诱发重复提交；旧快照若仍可用，Service 会安全尝试同指纹增量写。
     await this.refreshMemoryConfig().catch(() => undefined);
     await this.memoryEmbeddingService.indexEntry(entry);
+  }
+
+  async findMemorySimilarityPairs(
+    entries: readonly MemoryEntry[],
+    minimumSimilarity: number,
+    signal?: AbortSignal
+  ): Promise<MemorySimilarityPair[]> {
+    await this.refreshMemoryConfig().catch(() => undefined);
+    return await this.memoryEmbeddingService.findSimilarPairs(entries, minimumSimilarity, signal);
+  }
+
+  async findMemorySimilarEntries(
+    query: string,
+    options: MemorySimilarSearchOptions
+  ): Promise<MemoryEntry[] | undefined> {
+    await this.refreshMemoryConfig().catch(() => undefined);
+    // Activity memory writes are pinned to the local multilingual-e5-small
+    // space. Do not let a user-selected cloud/other embedding generation mix
+    // Activity facts into that index; unavailable means the caller skips the
+    // candidate.
+    const embeddingModel = this.activeConfig.context.memory.embeddingModel;
+    if (embeddingModel?.kind !== "local" || embeddingModel.model !== "multilingual-e5-small") return undefined;
+    const snapshot = await this.localMemory.listMemoryEntries({
+      origins: ["all"],
+      signal: options.signal
+    });
+    return await this.memoryEmbeddingService.findSimilarEntries(
+      query,
+      snapshot.entries,
+      options.limit,
+      options.minimumSimilarity,
+      options.signal
+    );
   }
 
   removeMemoryEmbeddingEntries(entryIds: readonly string[]): void {
@@ -1971,13 +2030,16 @@ export class AgentSession {
       }
       await this.recordTurnOutcome(outcome);
       if (outcome.status === "completed") {
-        await this.enqueueCompletedMemoryCandidate(
-          input,
-          content,
-          runOptions.continueFrom?.length ? [...runOptions.continueFrom, ...newMessages] : newMessages,
-          this.activePersonalization,
-          runOptions
-        ).catch(() => undefined);
+        // 记忆整理是完成回合后的旁路；不等待模型请求，也不让它改变当前回合终态。
+        if (this.activePersonalization.contributeMemories) {
+          void this.localMemory.summarizeAndStoreMemories(finalMessages.slice(-4), {
+            sessionId: this.recorder.sessionId,
+            turnId: runOptions.turnId!,
+            runId: runOptions.runId!,
+            externalContext: Boolean(runOptions.attachments?.length) || this.usedExternalContext(finalMessages),
+            excludeExternalContext: this.activePersonalization.excludeExternalContext
+          }).catch(() => undefined);
+        }
         if (!runOptions.continueFrom?.length) {
           void this.enqueueCompletedSkillDraft(input, content, newMessages, runOptions).catch(() => undefined);
         }
@@ -2261,33 +2323,6 @@ export class AgentSession {
     modelAlias?: string
   ): void {
     this.recordModelUsage(usage, operation, modelAlias);
-  }
-
-
-
-  /** 自动记忆入口：成功根回合先进入延迟队列，由后台维护决定是否长期保存。 */
-  private async enqueueCompletedMemoryCandidate(
-    task: string,
-    answer: string,
-    messages: AgentMessage[],
-    personalization: ResolvedChatPersonalization,
-    runOptions: AgentRunOptions
-  ): Promise<void> {
-    if (!personalization.contributeMemories) return;
-    const sessionId = this.recorder.sessionId;
-    const turnId = runOptions.turnId;
-    const runId = runOptions.runId;
-    if (!turnId || !runId) return;
-    const externalContext = Boolean(runOptions.attachments?.length) || this.usedExternalContext(messages);
-    const summary = completedMemoryCandidateSummary(task, answer);
-    if (!summary) return;
-    await withFreshRevision(this.localMemory, undefined, async (expectedRevision) => (
-      await this.localMemory.enqueueCandidate({
-        summary,
-        completed: true as const,
-        lineage: { source: "completed_task" as const, sessionId, turnId, runId, externalContext }
-      }, { expectedRevision, excludeExternalContext: personalization.excludeExternalContext })
-    ));
   }
 
   private usedExternalContext(messages: readonly AgentMessage[]): boolean {
@@ -3133,19 +3168,6 @@ function appendPromptContext(systemPrompt: string, promptContext: string | undef
     "</biny_external_context>"
   ].join("\n");
   return systemPrompt ? `${systemPrompt}\n\n${block}` : block;
-}
-
-function completedMemoryCandidateSummary(task: string, answer: string): string | undefined {
-  const taskSummary = boundedCandidateText(task, 600);
-  const outcomeSummary = boundedCandidateText(answer, 1_200);
-  if (Array.from(`${taskSummary}\n${outcomeSummary}`).length < 180) return undefined;
-  return [`Completed task: ${taskSummary || "(no public task summary)"}`, `Outcome: ${outcomeSummary || "(no public outcome summary)"}`].join("\n");
-}
-
-function boundedCandidateText(value: string, maxCharacters: number): string {
-  const normalized = value.replace(/\s+/gu, " ").trim();
-  const characters = Array.from(normalized);
-  return characters.length <= maxCharacters ? normalized : `${characters.slice(0, Math.max(0, maxCharacters - 1)).join("")}…`;
 }
 
 function readToolBudget(value: unknown): ToolExecutionBudgetSnapshot | undefined {

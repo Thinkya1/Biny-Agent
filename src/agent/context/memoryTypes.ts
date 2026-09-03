@@ -1,14 +1,17 @@
 /**
  * 本地记忆 v3 的稳定公共契约。
  *
- * Markdown 条目统一保存在一个全局记忆库中。origin 只描述事实来源，不再决定物理目录；
+ * SQLite 条目统一保存在一个全局记忆库中。origin 只描述事实来源，不再决定物理目录；
  * 所有写操作共享一个单调 revision，并通过 expectedRevision 做 CAS。
  */
 
 export type MemoryAudience = "universal" | "workspace";
 
-/** 仅用于识别旧磁盘布局，不属于运行时 API。 */
-export type MemoryScope = "global" | "project";
+/** Sleep 用 durability 区分会自然过期的短期记忆和长期记忆。 */
+export type MemoryDurability = "temporary" | "permanent";
+
+/** archive reason 使用稳定名称；旧短名称只用于读取当前开发库中的历史行。 */
+export type MemoryArchiveReason = "exact_dup" | "exact" | "expired" | "orphan" | "similarity_merge" | "llm_merge" | "similarity" | "llm" | "manual";
 
 export interface UserMemoryOrigin {
   kind: "user";
@@ -39,9 +42,7 @@ export type MemoryLineageSource =
   | "explicit"
   | "explicit_edit"
   | "completed_task"
-  | "candidate"
-  | "migration"
-  | "consolidation";
+  | "sleep";
 
 /** 一条记忆可以来自多个被合并的条目，所以 StoredMemoryEntry 使用 lineage 数组。 */
 export interface MemoryLineage {
@@ -50,9 +51,7 @@ export interface MemoryLineage {
   sessionId?: string;
   turnId?: string;
   runId?: string;
-  candidateId?: string;
   sourceEntryIds?: string[];
-  legacyPath?: string;
   /** universal 记忆必须能回溯到用户明确表达的偏好或工作方式。 */
   userEvidence?: string;
 }
@@ -71,8 +70,11 @@ export interface MemoryEntryInput {
   keywords?: string[];
   /** 1（低）到 5（高），默认 3。 */
   importance?: number;
+  durability?: MemoryDurability;
+  expiresAt?: string;
   archivedAt?: string;
-  archivedReason?: MemoryEntry["archivedReason"];
+  archivedReason?: MemoryArchiveReason;
+  mergedInto?: string;
   lineage: MemoryLineage | MemoryLineage[];
 }
 
@@ -86,13 +88,18 @@ export interface MemoryEntryPatch {
   paths?: string[];
   keywords?: string[];
   importance?: number;
+  durability?: MemoryDurability;
+  expiresAt?: string;
   userEvidence?: string;
   archivedAt?: string;
-  archivedReason?: MemoryEntry["archivedReason"];
+  archivedReason?: MemoryArchiveReason;
+  mergedInto?: string;
 }
 
 export interface MemoryEntry {
   id: string;
+  /** 归档条目拥有独立的 archive row id，并用 originalId 关联原活动条目。 */
+  originalId?: string;
   origin: MemoryOrigin;
   kind: MemoryKind;
   topic: string;
@@ -107,44 +114,30 @@ export interface MemoryEntry {
   /** 该条目最近写入时单一记忆库的 revision。 */
   revision: number;
   lineage: MemoryLineage[];
-  /** 派生 usage 投影；不会写入权威 Markdown。 */
+  durability: MemoryDurability;
+  expiresAt?: string;
+  /** SQLite 行上的 usage 字段；不会改变事实 revision。 */
   recallCount: number;
   lastRecalledAt?: string;
   /** memory_archive 对应的可恢复归档状态。 */
   archivedAt?: string;
-  archivedReason?: "exact" | "expired" | "orphan" | "similarity" | "llm" | "manual";
+  archivedReason?: MemoryArchiveReason;
+  /** 归档时指向保留下来的 survivor 或新 synthesis。 */
+  mergedInto?: string;
+  /** 产生该归档记录的操作（Sleep run id 或 manual）。 */
+  archivedBy?: string;
 }
 
-export interface MemoryCandidateLineage {
-  source: "completed_task";
-  sessionId: string;
-  turnId: string;
-  runId: string;
-  externalContext: boolean;
+/** 自动贡献记忆时使用的语义候选查询；undefined 表示 embedding/index 当前不可用。 */
+export interface MemorySimilarSearchOptions extends MemoryReadOptions {
+  limit: number;
+  minimumSimilarity: number;
 }
 
-/** 候选只保存成功根回合的有界摘要，不接受完整聊天字段。 */
-export interface MemoryCandidateInput {
-  summary: string;
-  completed: true;
-  lineage: MemoryCandidateLineage;
-  origin?: MemoryOrigin;
-  audienceHint?: MemoryAudience;
-  kindHint?: MemoryKind;
-}
-
-export interface MemoryCandidate {
-  id: string;
-  summary: string;
-  completed: true;
-  lineage: MemoryCandidateLineage;
-  origin: MemoryOrigin;
-  audienceHint?: MemoryAudience;
-  kindHint?: MemoryKind;
-  createdAt: string;
-  eligibleAt: string;
-  revision: number;
-}
+export type MemorySimilarEntrySearch = (
+  query: string,
+  options: MemorySimilarSearchOptions
+) => Promise<MemoryEntry[] | undefined>;
 
 export interface MemoryOriginCounts {
   user: number;
@@ -155,7 +148,6 @@ export interface MemoryOriginCounts {
 export interface MemoryOverview {
   storeRevision: number;
   entryCount: number;
-  candidateCount: number;
   origins: MemoryOriginCounts;
 }
 
@@ -167,6 +159,8 @@ export interface MemoryMutationOptions extends MemoryReadOptions {
   expectedRevision: number;
   /** 测试与确定性维护可注入时间；普通调用无需传入。 */
   now?: Date;
+  /** 归档审计来源；Sleep 使用 run id，手动归档默认 manual。 */
+  archivedBy?: string;
 }
 
 export interface MemoryListOptions extends MemoryReadOptions {
@@ -181,14 +175,14 @@ export interface MemoryListOptions extends MemoryReadOptions {
 
 export interface MemoryEntriesResult {
   entries: MemoryEntry[];
-  /** 条目 ID 到权威 Markdown 相对路径的映射，供向量独占命中仍能引用真实文件。 */
+  /** 条目 ID 到稳定 memory:// 引用的映射，供向量独占命中仍能回到事实条目。 */
   paths?: Record<string, string>;
   storeRevision: number;
   /** 应用 filter（origin/topic）后、分页前的条目总数；供分页 UI 计算页数。 */
   total: number;
 }
 
-export interface ScopedMemoryWriteResult {
+export interface MemoryWriteResult {
   written: boolean;
   entry?: MemoryEntry;
   path?: string;
@@ -197,6 +191,7 @@ export interface ScopedMemoryWriteResult {
 
 export interface MemoryDeleteResult {
   deleted: boolean;
+  entry?: MemoryEntry;
   revision: number;
 }
 
@@ -212,10 +207,15 @@ export interface MemoryArchiveResult {
   revision: number;
 }
 
+export interface MemoryBulkArchiveResult {
+  entries: MemoryEntry[];
+  archived: number;
+  revision: number;
+}
+
 export interface MemoryClearResult {
   selector: MemoryOriginSelector;
   deletedEntries: number;
-  deletedCandidates: number;
   revision: number;
 }
 
@@ -268,52 +268,27 @@ export interface MemorySearchResult {
   report: MemoryRecallReport;
 }
 
-export interface MemoryCandidateMutationOptions extends MemoryMutationOptions {
-  excludeExternalContext: boolean;
-}
-
-export interface MemoryCandidateMutationResult {
-  queued: boolean;
-  candidate?: MemoryCandidate;
-  revision: number;
-  reason?: "external_context_excluded" | "duplicate" | "summary_too_short";
-}
-
-export interface MemoryCandidateScanOptions extends MemoryReadOptions {
-  now?: Date;
-  minAgeMs?: number;
-  limit?: number;
-}
-
-export interface MemoryCandidateScanResult {
-  candidates: MemoryCandidate[];
-  revision: number;
-}
-
-export interface MemoryConsolidationOptions extends MemoryReadOptions {
-  expectedRevision: number;
-  topic?: string;
-  origins?: MemoryOriginSelector[];
-}
-
-export interface MemoryConsolidationResult {
-  origin?: MemoryOrigin;
-  before: number;
-  after: number;
-  revision: number;
-  error?: string;
-}
-
-
 /**
- * Markdown 写入后的派生索引同步边界。
+ * SQLite 事实写入后的派生索引同步边界。
  *
  * indexEntry 只处理仍然存在的单条新增；requestRebuild 只发出批量失效信号，调用方应在
- * 当前维护批次结束后再调度重建，避免与后续 Markdown mutation 并发。
+ * 当前维护批次结束后再调度重建，避免与后续 memory mutation 并发。
  */
 export interface MemoryDerivedIndexSink {
   indexEntry(entry: MemoryEntry): Promise<void>;
-  requestRebuild(): void;
+  removeEntries?(entryIds: readonly string[]): void;
+  requestRebuild?(): void;
+  findSimilarPairs?: (
+    entries: readonly MemoryEntry[],
+    minimumSimilarity: number,
+    signal?: AbortSignal
+  ) => Promise<MemorySimilarityPair[]>;
+}
+
+export interface MemorySimilarityPair {
+  leftId: string;
+  rightId: string;
+  similarity: number;
 }
 
 export interface MemoryMaintenanceOptions extends MemoryReadOptions {
@@ -328,7 +303,7 @@ export interface MemoryMaintenanceOptions extends MemoryReadOptions {
 
 export interface MemorySleepPreview {
   available: boolean;
-  candidates: number;
+  entries: number;
   temporaryToArchive: number;
   archivedToDelete: number;
   recentRuns: number;
@@ -337,6 +312,7 @@ export interface MemorySleepPreview {
 
 export interface MemorySleepRun {
   id: string;
+  status: "running" | "completed" | "failed" | "cancelled";
   trigger: "scheduled" | "manual";
   examined: number;
   written: number;
@@ -346,8 +322,17 @@ export interface MemorySleepRun {
   expired: number;
   similarity: number;
   llm: number;
+  /** Sleep run 的详细审计字段；旧的短字段保留为 UI/历史读取别名。 */
+  archivedExact: number;
+  archivedExpired: number;
+  archivedOrphan: number;
+  archivedSimilarity: number;
+  archivedLlm: number;
+  inputTokens: number;
+  outputTokens: number;
   startedAt: string;
-  finishedAt: string;
+  finishedAt?: string;
+  error?: string;
 }
 
 export interface MemoryMaintenanceResult {

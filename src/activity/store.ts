@@ -160,12 +160,6 @@ export interface ActivityAnalysisCommit {
   url?: string;
 }
 
-export interface ActivityMemoryCandidate {
-  type: "project" | "feedback" | "reference" | "user";
-  content: string;
-  why: string;
-}
-
 /** entities 分组；顶层兼容字段仍保留，便于旧报告和语义索引继续工作。 */
 export interface ActivityAnalysisEntityDetails {
   prs: ActivityAnalysisReference[];
@@ -217,8 +211,6 @@ export interface ActivitySessionAnalysis {
   events?: string[];
   urls?: string[];
   entityDetails?: ActivityAnalysisEntityDetails;
-  /** 只有这些候选真正存在时，worthMemory 才能为 true。 */
-  memoryCandidates?: ActivityMemoryCandidate[];
   /** 该 session 是否值得写入长期记忆。 */
   worthMemory: boolean;
   /** 该 session 是否值得沉淀为知识（报告/摘要里单独标注，供知识层消费）。 */
@@ -449,7 +441,6 @@ export class ActivityStore {
           repos_json TEXT NOT NULL DEFAULT '[]',
           events_json TEXT NOT NULL DEFAULT '[]',
           urls_json TEXT NOT NULL DEFAULT '[]',
-          memory_candidates_json TEXT NOT NULL DEFAULT '[]',
           entity_details_json TEXT NOT NULL DEFAULT '{}',
           confidence   REAL NOT NULL DEFAULT 0,
           source_event_count INTEGER NOT NULL DEFAULT 0,
@@ -1133,12 +1124,12 @@ export class ActivityStore {
         topics_json, prs_json, issues_json, people_json, versions_json, decisions_json,
         entities_json, highlights_json, worth_memory, worth_knowledge, is_meeting, storage_tier,
         title, description, commits_json, identifiers_json, repos_json, events_json, urls_json,
-        memory_candidates_json, entity_details_json,
+        entity_details_json,
         confidence, source_event_count, input_hash
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?
       )
       ON CONFLICT(session_id) DO UPDATE SET
         analyzed_at = excluded.analyzed_at,
@@ -1164,7 +1155,6 @@ export class ActivityStore {
         repos_json = excluded.repos_json,
         events_json = excluded.events_json,
         urls_json = excluded.urls_json,
-        memory_candidates_json = excluded.memory_candidates_json,
         entity_details_json = excluded.entity_details_json,
         confidence = excluded.confidence,
         source_event_count = excluded.source_event_count,
@@ -1194,7 +1184,6 @@ export class ActivityStore {
       JSON.stringify(analysis.repos ?? []),
       JSON.stringify(analysis.events ?? []),
       JSON.stringify(analysis.urls ?? []),
-      JSON.stringify(analysis.memoryCandidates ?? []),
       JSON.stringify(analysis.entityDetails ?? {}),
       analysis.confidence,
       analysis.sourceEventCount,
@@ -1774,7 +1763,6 @@ export class ActivityStore {
       && columns.has("repos_json")
       && columns.has("events_json")
       && columns.has("urls_json")
-      && columns.has("memory_candidates_json")
       && columns.has("entity_details_json")
     ) return;
     const additions: ReadonlyArray<readonly [string, string]> = [
@@ -1791,7 +1779,6 @@ export class ActivityStore {
       ["repos_json", "TEXT NOT NULL DEFAULT '[]'"],
       ["events_json", "TEXT NOT NULL DEFAULT '[]'"],
       ["urls_json", "TEXT NOT NULL DEFAULT '[]'"],
-      ["memory_candidates_json", "TEXT NOT NULL DEFAULT '[]'"],
       ["entity_details_json", "TEXT NOT NULL DEFAULT '{}'" ]
     ];
     for (const [column, definition] of additions) {
@@ -2024,7 +2011,6 @@ function parseAnalysisRow(row: Record<string, unknown>): ActivitySessionAnalysis
     repos: parseJsonArray<string>(row.repos_json),
     events: parseJsonArray<string>(row.events_json),
     urls: parseJsonArray<string>(row.urls_json),
-    memoryCandidates: parseJsonArray<ActivityMemoryCandidate>(row.memory_candidates_json),
     entityDetails: parseJsonObject<ActivityAnalysisEntityDetails>(row.entity_details_json),
     worthMemory: Number(row.worth_memory) === 1,
     worthKnowledge: Number(row.worth_knowledge) === 1,

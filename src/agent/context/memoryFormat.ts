@@ -1,101 +1,32 @@
 /**
- * 记忆条目的序列化、有界校验和确定性检索。
+ * SQLite 记忆的有界校验、规范化和确定性检索。
  *
- * 每个 v3 Markdown 文件只承载一条 entry；YAML frontmatter 是机器可读事实，正文保留给用户
- * 审计。向量索引属于可重建派生数据，不进入本文件格式。
+ * 事实序列化由 memoryStorage 交给 SQLite；向量索引属于可重建派生数据，不进入本模块。
  */
 import path from "node:path";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { z } from "zod";
 import type {
   MemoryEntry,
   MemoryEntryInput,
+  MemoryDurability,
   MemoryLineage,
   MemoryMatch,
   MemoryOrigin
 } from "./memoryTypes.js";
 
-export const memoryFormatVersion = 3;
-export const maxMemoryEntryChars = 32_000;
 export const maxMemorySummaryChars = 2_000;
-export const maxMemoryCandidateChars = 2_000;
-
-const lineageSchema = z.object({
-  source: z.enum(["explicit", "explicit_edit", "completed_task", "candidate", "migration", "consolidation"]),
-  externalContext: z.boolean(),
-  sessionId: z.string().optional(),
-  turnId: z.string().optional(),
-  runId: z.string().optional(),
-  candidateId: z.string().optional(),
-  sourceEntryIds: z.array(z.string()).optional(),
-  legacyPath: z.string().optional(),
-  userEvidence: z.string().optional()
-});
-
-const frontmatterSchema = z.object({
-  version: z.literal(memoryFormatVersion),
-  id: z.string().min(8).max(128),
-  origin: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("user") }),
-    z.object({
-      kind: z.literal("workspace"),
-      workspaceId: z.string().regex(/^[a-f0-9]{24}$/u),
-      workspaceName: z.string().min(1).max(120)
-    })
-  ]),
-  kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]),
-  topic: z.string(),
-  title: z.string(),
-  summary: z.string(),
-  decisions: z.array(z.string()).default([]),
-  paths: z.array(z.string()).default([]),
-  keywords: z.array(z.string()).default([]),
-  importance: z.number(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  revision: z.number().int().nonnegative(),
-  archivedAt: z.string().optional(),
-  archivedReason: z.enum(["exact", "expired", "orphan", "similarity", "llm", "manual"]).optional(),
-  lineage: z.array(lineageSchema).min(1)
-});
-
-const legacyV2FrontmatterSchema = z.object({
-  version: z.literal(2),
-  id: z.string().min(8).max(128),
-  scope: z.enum(["global", "project"]),
-  kind: z.enum(["preference", "working_style", "fact", "decision", "workflow", "gotcha"]),
-  topic: z.string(),
-  title: z.string(),
-  summary: z.string(),
-  decisions: z.array(z.string()).default([]),
-  paths: z.array(z.string()).default([]),
-  keywords: z.array(z.string()).default([]),
-  importance: z.number(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  revision: z.number().int().nonnegative(),
-  lineage: z.array(z.object({
-    source: z.enum(["explicit", "completed_task", "candidate", "migration", "consolidation"]),
-    externalContext: z.boolean(),
-    sessionId: z.string().optional(),
-    turnId: z.string().optional(),
-    runId: z.string().optional(),
-    candidateId: z.string().optional(),
-    sourceEntryIds: z.array(z.string()).optional(),
-    legacyPath: z.string().optional(),
-    userEvidence: z.string().optional()
-  })).min(1)
-});
-
-export type LegacyV2MemoryEntry = z.infer<typeof legacyV2FrontmatterSchema>;
 
 export interface StoredEntryFields {
   id: string;
+  originalId?: string;
   revision: number;
   createdAt: string;
   updatedAt: string;
+  durability?: MemoryDurability;
+  expiresAt?: string;
   archivedAt?: string;
   archivedReason?: MemoryEntry["archivedReason"];
+  mergedInto?: string;
+  archivedBy?: string;
 }
 
 export interface RankedMemoryEntry {
@@ -110,16 +41,15 @@ export function sanitizeMemoryEntryInput(input: MemoryEntryInput): MemoryEntryIn
   }
   if (input.origin !== undefined) validateMemoryOrigin(input.origin);
   if (input.audience !== undefined && input.audience !== "universal" && input.audience !== "workspace") {
-    throw new Error(`Invalid memory audience: ${String(input.audience)}`);
+    throw new Error("Invalid memory audience: " + String(input.audience));
   }
-  if (!isMemoryKind(input.kind)) throw new Error(`Invalid memory kind: ${String(input.kind)}`);
+  if (!isMemoryKind(input.kind)) throw new Error("Invalid memory kind: " + String(input.kind));
   const lineage = (Array.isArray(input.lineage) ? input.lineage : [input.lineage]).map(sanitizeMemoryLineage);
   if (!lineage.length) throw new Error("Memory entry lineage must not be empty.");
   const sanitized: MemoryEntryInput = {
     origin: input.origin === undefined ? undefined : sanitizeMemoryOrigin(input.origin),
     audience: input.audience,
     kind: input.kind,
-    // Memory 是用户明确选择的本地长期资料：只做长度/格式约束，不猜测哪些正文应该被改写。
     topic: normalizeMemoryTopic(input.topic),
     title: input.title.replace(/\s+/g, " ").trim().slice(0, 120),
     summary: input.summary.trim().slice(0, maxMemorySummaryChars),
@@ -127,20 +57,24 @@ export function sanitizeMemoryEntryInput(input: MemoryEntryInput): MemoryEntryIn
     paths: sanitizeStringArray(input.paths, 16, 500),
     keywords: sanitizeStringArray(input.keywords, 12, 120).map((value) => value.toLowerCase()),
     importance: normalizeImportance(input.importance),
+    durability: normalizeMemoryDurability(input.durability),
+    expiresAt: sanitizeOptionalTime(input.expiresAt),
     archivedAt: input.archivedAt,
     archivedReason: input.archivedReason,
+    mergedInto: sanitizeOptionalIdentifier(input.mergedInto),
     lineage
   };
   if (!sanitized.title) sanitized.title = "Memory note";
   return sanitized;
 }
 
-/** 写盘前再次做边界校验；候选经过模型也不能绕过格式和长度约束。 */
+/** 写入 SQLite 前再次做边界校验；模型输出也不能绕过格式和长度约束。 */
 export function createStoredMemoryEntry(input: MemoryEntryInput, fields: StoredEntryFields): MemoryEntry {
   const safe = sanitizeMemoryEntryInput(sanitizeMemoryEntryInput(input));
   if (!safe.origin) throw new Error("Stored memory entry requires a resolved origin.");
   return {
     id: sanitizeIdentifier(fields.id),
+    originalId: fields.originalId === undefined ? undefined : sanitizeIdentifier(fields.originalId),
     origin: safe.origin,
     kind: safe.kind,
     topic: safe.topic,
@@ -154,108 +88,18 @@ export function createStoredMemoryEntry(input: MemoryEntryInput, fields: StoredE
     updatedAt: assertIsoTime(fields.updatedAt),
     revision: Math.max(0, Math.trunc(fields.revision)),
     lineage: Array.isArray(safe.lineage) ? safe.lineage : [safe.lineage],
-    recallCount: "recallCount" in input && typeof input.recallCount === "number"
-      ? Math.max(0, Math.trunc(input.recallCount))
-      : 0,
-    lastRecalledAt: "lastRecalledAt" in input && typeof input.lastRecalledAt === "string"
-      ? assertIsoTime(input.lastRecalledAt)
-      : undefined,
-    archivedAt: "archivedAt" in input && typeof input.archivedAt === "string" ? assertIsoTime(input.archivedAt) : undefined,
-    archivedReason: "archivedReason" in input && isArchiveReason(input.archivedReason) ? input.archivedReason : undefined
+    durability: safe.durability ?? fields.durability ?? "permanent",
+    expiresAt: safe.expiresAt ?? sanitizeOptionalTime(fields.expiresAt),
+    recallCount: 0,
+    lastRecalledAt: undefined,
+    archivedAt: typeof safe.archivedAt === "string" ? assertIsoTime(safe.archivedAt) : undefined,
+    archivedReason: isArchiveReason(safe.archivedReason) ? safe.archivedReason : undefined,
+    mergedInto: typeof safe.mergedInto === "string" ? sanitizeOptionalIdentifier(safe.mergedInto) : undefined,
+    archivedBy: typeof fields.archivedBy === "string" ? fields.archivedBy.trim().slice(0, 200) || undefined : undefined
   };
 }
 
-export function renderMemoryEntry(entry: MemoryEntry): string {
-  const safe = createStoredMemoryEntry(entry, {
-    id: entry.id,
-    revision: entry.revision,
-    createdAt: entry.createdAt,
-    updatedAt: entry.updatedAt,
-    archivedAt: entry.archivedAt,
-    archivedReason: entry.archivedReason
-  });
-  const frontmatter = stringifyYaml({
-    version: memoryFormatVersion,
-    id: safe.id,
-    origin: safe.origin,
-    kind: safe.kind,
-    topic: safe.topic,
-    title: safe.title,
-    summary: safe.summary,
-    decisions: safe.decisions,
-    paths: safe.paths,
-    keywords: safe.keywords,
-    importance: safe.importance,
-    createdAt: safe.createdAt,
-    updatedAt: safe.updatedAt,
-    revision: safe.revision,
-    archivedAt: safe.archivedAt,
-    archivedReason: safe.archivedReason,
-    lineage: safe.lineage
-  }, { lineWidth: 0 }).trimEnd();
-  return [
-    "---",
-    frontmatter,
-    "---",
-    "",
-    `# ${safe.title}`,
-    "",
-    safe.summary,
-    ...(safe.decisions.length ? ["", "## Decisions", "", ...safe.decisions.map((decision) => `- ${decision}`)] : []),
-    ...(safe.paths.length ? ["", "## Paths", "", ...safe.paths.map((entryPath) => `- \`${entryPath.replaceAll("`", "")}\``)] : []),
-    ""
-  ].join("\n");
-}
-
-export function parseMemoryEntryFile(content: string): MemoryEntry | undefined {
-  if (!content.startsWith("---\n")) return undefined;
-  const closing = content.indexOf("\n---", 4);
-  if (closing < 0) return undefined;
-  let raw: unknown;
-  try {
-    raw = parseYaml(content.slice(4, closing));
-  } catch {
-    return undefined;
-  }
-  const parsed = frontmatterSchema.safeParse(raw);
-  if (!parsed.success) return undefined;
-  const value = parsed.data;
-  try {
-    return createStoredMemoryEntry({
-      origin: value.origin,
-      kind: value.kind,
-      topic: value.topic,
-      title: value.title,
-      summary: value.summary,
-      decisions: value.decisions,
-      paths: value.paths,
-      keywords: value.keywords,
-      importance: value.importance,
-      archivedAt: value.archivedAt,
-      archivedReason: value.archivedReason,
-      lineage: value.lineage
-    }, {
-      id: value.id,
-      revision: value.revision,
-      archivedAt: value.archivedAt,
-      archivedReason: value.archivedReason,
-      createdAt: value.createdAt,
-      updatedAt: value.updatedAt
-    });
-  } catch {
-    return undefined;
-  }
-}
-
-/** v2 scope 文件只在只读迁移阶段解析；不会作为 v3 活跃条目返回。 */
-export function parseLegacyV2MemoryEntryFile(content: string): LegacyV2MemoryEntry | undefined {
-  const raw = parseFrontmatter(content);
-  if (raw === undefined) return undefined;
-  const parsed = legacyV2FrontmatterSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
-}
-
-export function assertAllowedScopedEntry(entry: MemoryEntryInput, workspaceRoot: string): void {
+export function assertAllowedMemoryEntry(entry: MemoryEntryInput, workspaceRoot: string): void {
   const universal = entry.origin?.kind === "user" || entry.audience === "universal";
   if (!universal) return;
   if (entry.kind !== "preference" && entry.kind !== "working_style") {
@@ -266,7 +110,7 @@ export function assertAllowedScopedEntry(entry: MemoryEntryInput, workspaceRoot:
   }
   const lineages = Array.isArray(entry.lineage) ? entry.lineage : [entry.lineage];
   const evidenced = lineages.some((lineage) => (
-    (lineage.source === "explicit" || lineage.source === "completed_task" || lineage.source === "candidate")
+    (lineage.source === "explicit" || lineage.source === "completed_task")
     && Boolean(lineage.userEvidence?.trim())
   ));
   if (!evidenced) throw new Error("Universal memory requires explicit, auditable user evidence.");
@@ -279,7 +123,8 @@ export function rankMemoryEntries(entries: MemoryEntry[], query: string, queryPa
     const title = entry.title.toLowerCase();
     const summary = entry.summary.toLowerCase();
     const keywords = entry.keywords.map((keyword) => keyword.toLowerCase());
-    const searchable = `${title}\n${summary}\n${entry.decisions.join("\n").toLowerCase()}\n${keywords.join(" ")}`;
+    const searchable = title + "\n" + summary + "\n"
+      + entry.decisions.join("\n").toLowerCase() + "\n" + keywords.join(" ");
     let score = entry.importance * 4;
     for (const term of queryTerms) {
       if (keywords.some((keyword) => keyword === term)) score += 18;
@@ -296,7 +141,6 @@ export function rankMemoryEntries(entries: MemoryEntry[], query: string, queryPa
       }
     }
     const ageMs = Math.max(0, now.getTime() - Date.parse(entry.updatedAt));
-    // 90 天线性衰减只做轻量 tie-break；durable memory 不因年龄被删除或完全失去召回机会。
     score += Math.max(0, 8 - ageMs / (90 * 24 * 60 * 60 * 1_000) * 8);
     return { entry, score, excerpt: createMemoryExcerpt(entry, queryTerms) };
   }).filter(({ score, entry }) => queryTerms.length === 0 && pathTerms.length === 0 || score > entry.importance * 4 + 0.01)
@@ -314,7 +158,6 @@ export function normalizeMemoryTopic(value: string): string {
     .join("")
     .replace(/-+$/g, "");
   if (!normalized) return "project";
-  // macOS 默认大小写不敏感，memory.md 会和权威索引 MEMORY.md 冲突。
   return normalized.toLowerCase() === "memory" ? "memory-topic" : normalized;
 }
 
@@ -324,26 +167,27 @@ export function normalizeImportance(value: number | undefined): number {
 }
 
 export function sanitizeMemoryLineage(lineage: MemoryLineage): MemoryLineage {
-  if (!isLineageSource(lineage.source)) throw new Error(`Invalid memory lineage source: ${String(lineage.source)}`);
+  if (!isLineageSource(lineage.source)) throw new Error("Invalid memory lineage source: " + String(lineage.source));
   return {
     source: lineage.source,
     externalContext: lineage.externalContext,
     sessionId: sanitizeOptionalLineageValue(lineage.sessionId, 200),
     turnId: sanitizeOptionalLineageValue(lineage.turnId, 200),
     runId: sanitizeOptionalLineageValue(lineage.runId, 200),
-    candidateId: sanitizeOptionalLineageValue(lineage.candidateId, 200),
     sourceEntryIds: lineage.sourceEntryIds === undefined
       ? undefined
       : sanitizeStringArray(lineage.sourceEntryIds, Number.MAX_SAFE_INTEGER, 200),
-    legacyPath: sanitizeOptionalLineageValue(lineage.legacyPath, 500),
     userEvidence: sanitizeOptionalLineageValue(lineage.userEvidence, 1_000)
   };
 }
 
 export function memoryEntryEquals(left: MemoryEntry, right: MemoryEntryInput): boolean {
   return (right.origin === undefined || memoryOriginsEqual(left.origin, right.origin))
-    && normalizeForDedup(left.title) === normalizeForDedup(right.title)
-    && normalizeForDedup(left.summary) === normalizeForDedup(right.summary);
+    && memoryEntryExactKey(left) === memoryEntryExactKey(right);
+}
+
+export function memoryEntryExactKey(entry: Pick<MemoryEntry, "summary"> | Pick<MemoryEntryInput, "summary">): string {
+  return normalizeMemoryContent(entry.summary);
 }
 
 export function tokenizeMemoryText(value: string): string[] {
@@ -376,7 +220,7 @@ function createMemoryExcerpt(entry: MemoryEntry, terms: string[]): string {
 function containsProjectPath(entry: MemoryEntryInput, workspaceRoot: string): boolean {
   const content = [entry.topic, entry.title, entry.summary, ...(entry.keywords ?? [])].join("\n");
   if (content.includes(path.resolve(workspaceRoot))) return true;
-  return /(?:^|[\s`'(])(?:\.{0,2}\/|src\/|tests?\/|packages?\/|apps?\/|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.(?:[cm]?[jt]sx?|go|java|py|rs|md|json|ya?ml))(?:$|[\s`'),.:])/u.test(content);
+  return /(?:^|[\s\x60'(])(?:\.{0,2}\/|src\/|tests?\/|packages?\/|apps?\/|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.(?:[cm]?[jt]sx?|go|java|py|rs|md|json|ya?ml))(?:$|[\s\x60'),.:])/u.test(content);
 }
 
 function sanitizeStringArray(values: string[] | undefined, maxItems: number, maxChars: number): string[] {
@@ -399,7 +243,7 @@ function sanitizeIdentifier(value: string): string {
 }
 
 function assertIsoTime(value: string): string {
-  if (!Number.isFinite(Date.parse(value))) throw new Error(`Invalid memory timestamp: ${value}`);
+  if (!Number.isFinite(Date.parse(value))) throw new Error("Invalid memory timestamp: " + value);
   return new Date(value).toISOString();
 }
 
@@ -407,12 +251,30 @@ function normalizeSearchPath(value: string): string {
   return value.trim().replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
 }
 
-function normalizeForDedup(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
+export function normalizeMemoryContent(value: string): string {
+  return value.normalize("NFC").replace(/\s+/g, " ").trim();
 }
 
 function isArchiveReason(value: unknown): value is NonNullable<MemoryEntry["archivedReason"]> {
-  return value === "exact" || value === "expired" || value === "orphan" || value === "similarity" || value === "llm" || value === "manual";
+  return value === "exact_dup" || value === "exact" || value === "expired"
+    || value === "orphan" || value === "similarity_merge" || value === "llm_merge"
+    || value === "similarity" || value === "llm" || value === "manual";
+}
+
+function normalizeMemoryDurability(value: MemoryDurability | undefined): MemoryDurability {
+  return value === "temporary" ? "temporary" : "permanent";
+}
+
+function sanitizeOptionalTime(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return assertIsoTime(value);
+}
+
+function sanitizeOptionalIdentifier(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return sanitizeIdentifier(trimmed);
 }
 
 function isMemoryKind(value: string): value is MemoryEntryInput["kind"] {
@@ -428,17 +290,12 @@ function isLineageSource(value: string): value is MemoryLineage["source"] {
   return value === "explicit"
     || value === "explicit_edit"
     || value === "completed_task"
-    || value === "candidate"
-    || value === "migration"
-    || value === "consolidation";
-}
-
-export function scopeFromOrigin(origin: MemoryOrigin): "global" | "project" {
-  return origin.kind === "user" ? "global" : "project";
+    || value === "sleep";
 }
 
 export function memoryOriginsEqual(left: MemoryOrigin, right: MemoryOrigin): boolean {
-  return left.kind === right.kind && (left.kind === "user" || (right.kind === "workspace" && left.workspaceId === right.workspaceId));
+  return left.kind === right.kind
+    && (left.kind === "user" || (right.kind === "workspace" && left.workspaceId === right.workspaceId));
 }
 
 function validateMemoryOrigin(origin: MemoryOrigin): void {
@@ -456,63 +313,4 @@ function sanitizeMemoryOrigin(origin: MemoryOrigin): MemoryOrigin {
     workspaceId: origin.workspaceId,
     workspaceName: origin.workspaceName.replace(/\s+/g, " ").trim().slice(0, 120)
   };
-}
-
-function parseFrontmatter(content: string): unknown | undefined {
-  if (!content.startsWith("---\n")) return undefined;
-  const closing = content.indexOf("\n---", 4);
-  if (closing < 0) return undefined;
-  try {
-    return parseYaml(content.slice(4, closing));
-  } catch {
-    return undefined;
-  }
-}
-
-export const memoryOverviewMaxChars = 4_000;
-
-/**
- * 注入系统提示的有界记忆概览（codex 式 agentic 检索的锚点）。
- *
- * 只聚合 user 与当前工作区条目；跨项目内容绝不进入自动注入，模型显式选择其它 origin 时
- * 才能通过工具看到。返回空串表示本回合没有值得注入的记忆。
- */
-export function buildMemoryOverview(entries: readonly MemoryEntry[], options: { maxChars?: number } = {}): string {
-  const maxChars = Math.max(512, options.maxChars ?? memoryOverviewMaxChars);
-  if (!entries.length) return "";
-  const byTopic = new Map<string, MemoryEntry[]>();
-  for (const entry of entries) {
-    const group = byTopic.get(entry.topic);
-    if (group) group.push(entry);
-    else byTopic.set(entry.topic, [entry]);
-  }
-  const lines: string[] = [];
-  let omittedEntries = 0;
-  let omittedTopics = 0;
-  // 每组保留 importance 最高、更新最近的少数标题；整行装不下时丢弃整组并累计提示。
-  for (const topic of [...byTopic.keys()].sort()) {
-    const group = [...(byTopic.get(topic) ?? [])].sort((left, right) => (
-      right.importance - left.importance
-      || right.updatedAt.localeCompare(left.updatedAt)
-      || left.id.localeCompare(right.id)
-    ));
-    const shown = group.slice(0, 4).map(({ title }) => title);
-    const extra = group.length - shown.length;
-    const line = `- ${topic}: ${shown.join("; ")}${extra > 0 ? ` (+${String(extra)} more)` : ""} (${String(group.length)})`;
-    if ([...lines, line].join("\n").length > maxChars - 400) {
-      omittedEntries += group.length;
-      omittedTopics += 1;
-      continue;
-    }
-    lines.push(line);
-  }
-  if (!lines.length) return "";
-  const header = [
-    "Durable memory overview (user preferences and current workspace only; never other projects):",
-    "When the task may benefit from these prior decisions, workflows or gotchas, retrieve details with the recall_memory tool."
-  ];
-  const budgetNote = omittedTopics > 0
-    ? `\n(${String(omittedEntries)} more entries across ${String(omittedTopics)} topics omitted beyond this overview budget)`
-    : "";
-  return `${[...header, ...lines].join("\n")}${budgetNote}`;
 }

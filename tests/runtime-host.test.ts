@@ -57,7 +57,6 @@ async function main(): Promise<void> {
     useMemories: false,
     generateMemories: false,
     extractModel: undefined,
-    consolidationModel: undefined,
     excludeExternalContext: true,
     maxRecalled: 3
   };
@@ -185,14 +184,13 @@ async function main(): Promise<void> {
       },
       getLocalMemory: () => ({
         loadMaintenanceStatus: async () => ({ state: "idle", eligible: 0, processed: 0, written: 0, failed: 0 }),
-        processEligibleCandidates: async () => {
+        runMemoryMaintenance: async () => {
           maintenanceRuns += 1;
           return { scanned: 1, processed: 1, written: 1, failed: 0, startedAt: "", finishedAt: "" };
         },
         getOverview: async () => ({
           storeRevision: 7,
           entryCount: 0,
-          candidateCount: 0,
           origins: { user: 0, currentWorkspace: 0, otherWorkspaces: 0 }
         }),
         listMemoryEntries: async () => ({ entries: [], storeRevision: 7 }),
@@ -200,11 +198,6 @@ async function main(): Promise<void> {
           memoryExpectedRevision = options.expectedRevision;
           return { written: true, revision: options.expectedRevision + 1, entry: { id: "memory-entry-1" } };
         },
-        consolidateEntries: async (_selector: string, options: { expectedRevision: number }) => ({
-          before: 2,
-          after: 1,
-          revision: options.expectedRevision + 1
-        })
       }),
       indexMemoryEntry: async (entry: { id: string }) => { indexedMemoryEntries.push(entry.id); },
       removeMemoryEmbeddingEntries: () => undefined,

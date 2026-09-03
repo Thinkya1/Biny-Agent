@@ -212,7 +212,14 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
     }
     // 读取/写入 durable memory 与“当前聊天是否自动召回/贡献”是两组独立开关。
     // 工具始终注册；显式 save_memory 不会因聊天策略关闭而丢失。
-    for (const tool of createMemoryTools(() => agent?.getLocalMemory())) {
+    for (const tool of createMemoryTools(
+      () => agent?.getLocalMemory(),
+      async (query, paths, options) => {
+        const currentAgent = agent;
+        if (!currentAgent) throw new Error("Local memory is unavailable.");
+        return await currentAgent.searchMemory(query, paths, options);
+      }
+    )) {
       toolRegistry.registerBuiltinTool(tool);
     }
     if (config.context.emotion.enabled && config.context.emotion.allowModelUpdate) {

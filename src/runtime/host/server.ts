@@ -194,8 +194,8 @@ export class RuntimeHostServer {
   }
 
   /**
-   * 候选抽取是可中断的后台维护：启动时补扫，之后每小时扫描一次。用户一旦开始新回合，
-   * handleRuntimeUpdate 会立即中断模型调用，让前台聊天始终优先；候选仍留在磁盘等待下次扫描。
+   * 记忆 Sleep 是可中断的后台维护：启动时补扫，之后按调度周期运行。用户一旦开始新回合，
+   * handleRuntimeUpdate 会立即中断模型调用，让前台聊天始终优先；已有记忆仍留在事实库等待下次整理。
    */
   startMemoryMaintenance(): void {
     this.businessComposition.startMemoryMaintenance();

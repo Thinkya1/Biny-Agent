@@ -1,16 +1,27 @@
 /**
  * 记忆 Embedding 的可重建 SQLite 投影。
  *
- * Markdown 条目仍是唯一事实来源；这里用 generation 隔离重建过程，只有完整 generation
+ * SQLite 条目是唯一事实来源；这里用 generation 隔离重建过程，只有完整 generation
  * 会原子成为 active。任何模型指纹或维度不一致都会 fail closed，不混用旧向量。
  */
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, statSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { cosineSimilarity, normalizeEmbedding } from "../../llm/embedding/vector.js";
+import { memoryDatabaseFileName } from "./memoryStorage.js";
 
-const indexFileName = ".memory-index.sqlite";
+const rebuildLockSuffix = ".rebuild.lock";
 const sqliteBusyTimeoutMs = 5_000;
 const maxSearchLimit = 100;
 
@@ -91,15 +102,23 @@ export class MemoryVectorIndex {
 
   static openReadOnly(memoryRoot: string): MemoryVectorIndex | undefined {
     const resolvedRoot = path.resolve(memoryRoot);
-    const databasePath = path.join(resolvedRoot, indexFileName);
+    const databasePath = path.join(resolvedRoot, memoryDatabaseFileName);
     if (!existsSync(databasePath)) return undefined;
-    return new MemoryVectorIndex(resolvedRoot, { readOnly: true });
+    const index = new MemoryVectorIndex(resolvedRoot, { readOnly: true });
+    if (!index.hasSchema()) {
+      // Facts may have created memory.sqlite before the first embedding
+      // operation. A read path must treat missing vector tables as an absent
+      // derived index, not migrate or mutate the shared database.
+      index.close();
+      return undefined;
+    }
+    return index;
   }
 
   constructor(memoryRoot: string, options: MemoryVectorIndexOpenOptions = {}) {
     const resolvedRoot = path.resolve(memoryRoot);
     if (!options.readOnly) mkdirSync(resolvedRoot, { recursive: true });
-    this.databasePath = path.join(resolvedRoot, indexFileName);
+    this.databasePath = path.join(resolvedRoot, memoryDatabaseFileName);
     assertSafeDatabaseFile(this.databasePath);
     this.database = new DatabaseSync(this.databasePath, {
       timeout: sqliteBusyTimeoutMs,
@@ -107,11 +126,68 @@ export class MemoryVectorIndex {
       readOnly: options.readOnly
     });
     try {
-      if (!options.readOnly) this.migrate();
+      if (!options.readOnly) {
+        this.migrate();
+        this.recoverAbandonedGenerations();
+      }
     } catch (error) {
       this.database.close();
       throw error;
     }
+  }
+
+  /**
+   * rebuild 会跨越模型请求，SQLite transaction 不能覆盖这段时间；用同目录的独占锁
+   * 保证不同项目的 Runtime Host 不会同时切换同一个全局向量库。进程被杀死时，下一次
+   * 获取锁会根据 pid 清理遗留 generation。
+   */
+  acquireRebuildLock(): () => void {
+    this.assertOpen();
+    const lockPath = `${this.databasePath}${rebuildLockSuffix}`;
+    const token = randomUUID();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let descriptor: number | undefined;
+      try {
+        descriptor = openSync(lockPath, "wx", 0o600);
+        writeFileSync(descriptor, JSON.stringify({
+          pid: process.pid,
+          token,
+          startedAt: new Date().toISOString()
+        }), "utf8");
+        closeSync(descriptor);
+        descriptor = undefined;
+        try {
+          this.recoverAbandonedGenerations(token);
+        } catch (error) {
+          releaseRebuildLock(lockPath, token);
+          throw error;
+        }
+        let released = false;
+        return () => {
+          if (released) return;
+          released = true;
+          releaseRebuildLock(lockPath, token);
+        };
+      } catch (error) {
+        if (descriptor !== undefined) {
+          try {
+            closeSync(descriptor);
+          } catch {
+            // 保留最初的锁获取错误。
+          }
+        }
+        if (isAlreadyExistsError(error) && attempt === 0) {
+          const lock = readRebuildLock(lockPath);
+          if (lock !== undefined && isProcessAlive(lock.pid)) {
+            throw new Error("Memory vector rebuild is already running.");
+          }
+          unlinkRebuildLock(lockPath);
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error("Unable to acquire memory vector rebuild lock.");
   }
 
   beginGeneration(modelFingerprint: string, dimensions: number, generationId = randomUUID()): string {
@@ -164,7 +240,9 @@ export class MemoryVectorIndex {
         undefined,
         now
       );
-      this.database.prepare("DELETE FROM memory_vectors WHERE generation_id <> ?").run(generationId);
+      this.database.prepare(
+        "DELETE FROM memory_vectors WHERE generation_id <> ? AND generation_id IN (SELECT generation_id FROM memory_vector_generations WHERE status <> 'building')"
+      ).run(generationId);
       this.database.prepare("DELETE FROM memory_vector_generations WHERE generation_id <> ? AND status <> 'building'").run(generationId);
     });
   }
@@ -207,7 +285,7 @@ export class MemoryVectorIndex {
 
   /**
    * 只把与当前内容哈希和 active generation 都一致的条目视为 indexed。这样即使进程在
-   * Markdown 提交后崩溃，重启后的统计也不会把旧内容向量误报成已索引。
+   * 事实提交后崩溃，重启后的统计也不会把旧内容向量误报成已索引。
    *
    * 这是纯读取：缺失或失配状态只在返回值中临时视为 pending，持久化状态由明确的
    * 增量索引和完整重建写路径负责，不能让 status() 暗中修复索引。
@@ -309,6 +387,42 @@ export class MemoryVectorIndex {
     return results
       .sort((left, right) => right.similarity - left.similarity || left.entryId.localeCompare(right.entryId))
       .slice(0, limit);
+  }
+
+  /** 读取 active generation 的全部可用向量，供 Sleep 做两两相似度聚类。 */
+  listActiveEmbeddings(options: {
+    modelFingerprint: string;
+    entryIds?: ReadonlySet<string>;
+  }): Array<{ entryId: string; contentHash: string; embedding: Float32Array }> {
+    this.assertOpen();
+    validateFingerprint(options.modelFingerprint);
+    const active = this.activeGeneration();
+    if (!active || active.modelFingerprint !== options.modelFingerprint) return [];
+    const rows = this.database.prepare(
+      `SELECT vectors.entry_id, vectors.content_hash, vectors.embedding
+       FROM memory_vectors AS vectors
+       INNER JOIN memory_vector_entry_states AS states
+         ON states.entry_id = vectors.entry_id
+        AND states.model_fingerprint = ?
+        AND states.content_hash = vectors.content_hash
+        AND states.status = 'indexed'
+       WHERE vectors.generation_id = ?`
+    ).all(active.modelFingerprint, active.generationId) as unknown as VectorRow[];
+    const embeddings: Array<{ entryId: string; contentHash: string; embedding: Float32Array }> = [];
+    for (const row of rows) {
+      const entryId = stringValue(row.entry_id, "entry id");
+      if (options.entryIds && !options.entryIds.has(entryId)) continue;
+      try {
+        embeddings.push({
+          entryId,
+          contentHash: stringValue(row.content_hash, "content hash"),
+          embedding: decodeEmbedding(row.embedding, active.dimensions)
+        });
+      } catch {
+        // 索引是派生数据；单条损坏只会让该条暂时无法参与 Sleep。
+      }
+    }
+    return embeddings;
   }
 
   status(): MemoryVectorIndexStatus {
@@ -450,50 +564,18 @@ export class MemoryVectorIndex {
 
   private migrate(): void {
     this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
-    const version = this.database.prepare("PRAGMA user_version").get() as { user_version?: unknown } | undefined;
-    const current = nonNegativeInteger(version?.user_version, "memory vector schema version");
-    if (current > 3) throw new Error(`Memory vector index schema ${String(current)} is newer than this Biny build.`);
-    if (current === 3) return;
-    if (current === 2) {
-      this.transaction(() => {
-        this.database.exec("DROP TABLE IF EXISTS memory_vector_usage; PRAGMA user_version = 3;");
-      });
-      return;
-    }
-    if (current === 1) {
-      this.transaction(() => {
-        this.database.exec(`
-          CREATE TABLE memory_vector_entry_states (
-            entry_id TEXT NOT NULL,
-            model_fingerprint TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('pending', 'failed', 'indexed')),
-            error TEXT,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (entry_id, model_fingerprint, content_hash)
-          );
-          CREATE INDEX memory_vector_entry_states_model_idx
-            ON memory_vector_entry_states(model_fingerprint, status);
-          INSERT INTO memory_vector_entry_states
-            (entry_id, model_fingerprint, content_hash, status, error, updated_at)
-          SELECT vectors.entry_id, generations.model_fingerprint, vectors.content_hash, 'indexed', NULL, vectors.updated_at
-          FROM memory_vectors AS vectors
-          INNER JOIN memory_vector_generations AS generations
-            ON generations.generation_id = vectors.generation_id
-          WHERE generations.status = 'active';
-          DROP TABLE IF EXISTS memory_vector_usage;
-          PRAGMA user_version = 3;
-        `);
-      });
-      return;
-    }
+    // Facts and embeddings deliberately share one physical database. The fact
+    // store owns PRAGMA user_version, so vector tables use idempotent DDL here
+    // instead of a second schema-version state machine. This also lets a fact
+    // database created before the first embedding operation become searchable
+    // without changing its existing revision or migration history.
     this.transaction(() => {
       this.database.exec(`
-        CREATE TABLE memory_vector_meta (
+        CREATE TABLE IF NOT EXISTS memory_vector_meta (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
         );
-        CREATE TABLE memory_vector_generations (
+        CREATE TABLE IF NOT EXISTS memory_vector_generations (
           generation_id TEXT PRIMARY KEY,
           model_fingerprint TEXT NOT NULL,
           dimensions INTEGER NOT NULL CHECK (dimensions > 0),
@@ -502,7 +584,7 @@ export class MemoryVectorIndex {
           completed_at TEXT,
           error TEXT
         );
-        CREATE TABLE memory_vectors (
+        CREATE TABLE IF NOT EXISTS memory_vectors (
           generation_id TEXT NOT NULL REFERENCES memory_vector_generations(generation_id) ON DELETE CASCADE,
           entry_id TEXT NOT NULL,
           content_hash TEXT NOT NULL,
@@ -510,8 +592,8 @@ export class MemoryVectorIndex {
           updated_at TEXT NOT NULL,
           PRIMARY KEY (generation_id, entry_id)
         );
-        CREATE INDEX memory_vectors_entry_idx ON memory_vectors(entry_id);
-        CREATE TABLE memory_vector_entry_states (
+        CREATE INDEX IF NOT EXISTS memory_vectors_entry_idx ON memory_vectors(entry_id);
+        CREATE TABLE IF NOT EXISTS memory_vector_entry_states (
           entry_id TEXT NOT NULL,
           model_fingerprint TEXT NOT NULL,
           content_hash TEXT NOT NULL,
@@ -520,10 +602,35 @@ export class MemoryVectorIndex {
           updated_at TEXT NOT NULL,
           PRIMARY KEY (entry_id, model_fingerprint, content_hash)
         );
-        CREATE INDEX memory_vector_entry_states_model_idx
+        CREATE INDEX IF NOT EXISTS memory_vector_entry_states_model_idx
           ON memory_vector_entry_states(model_fingerprint, status);
-        PRAGMA user_version = 3;
       `);
+    });
+  }
+
+  private hasSchema(): boolean {
+    const required = [
+      "memory_vector_meta",
+      "memory_vector_generations",
+      "memory_vectors",
+      "memory_vector_entry_states"
+    ];
+    const present = new Set((this.database.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).all() as Array<{ name?: unknown }>).map((row) => row.name));
+    return required.every((name) => present.has(name));
+  }
+
+  private recoverAbandonedGenerations(ownerToken?: string): void {
+    const lockPath = `${this.databasePath}${rebuildLockSuffix}`;
+    const lock = readRebuildLock(lockPath);
+    if (lock !== undefined && lock.token !== ownerToken && isProcessAlive(lock.pid)) return;
+    if (lock !== undefined && lock.token !== ownerToken) unlinkRebuildLock(lockPath);
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      this.database.prepare(
+        "UPDATE memory_vector_generations SET status = 'failed', completed_at = ?, error = 'interrupted' WHERE status = 'building'"
+      ).run(now);
     });
   }
 
@@ -595,8 +702,75 @@ function decodeEmbedding(value: unknown, dimensions: number): Float32Array {
 function assertSafeDatabaseFile(databasePath: string): void {
   if (!existsSync(databasePath)) return;
   const link = lstatSync(databasePath);
-  if (!link.isFile() || link.isSymbolicLink()) throw new Error("Memory vector index must be a regular file.");
-  if (statSync(databasePath).nlink !== 1) throw new Error("Memory vector index must not be hard-linked.");
+  if (!link.isFile() || link.isSymbolicLink()) throw new Error("Memory database must be a regular file.");
+  if (statSync(databasePath).nlink !== 1) throw new Error("Memory database must not be hard-linked.");
+}
+
+interface RebuildLock {
+  pid: number;
+  token: string;
+}
+
+function readRebuildLock(lockPath: string): RebuildLock | undefined {
+  try {
+    const link = lstatSync(lockPath);
+    if (!link.isFile() || link.isSymbolicLink()) throw new Error("Memory vector rebuild lock must be a regular file.");
+    const parsed: unknown = JSON.parse(readFileSync(lockPath, "utf8"));
+    if (!parsed || typeof parsed !== "object") throw new Error("Memory vector rebuild lock is invalid.");
+    const record = parsed as { pid?: unknown; token?: unknown };
+    const pid = record.pid;
+    if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid < 1 || typeof record.token !== "string" || !record.token) {
+      throw new Error("Memory vector rebuild lock is invalid.");
+    }
+    return { pid, token: record.token };
+  } catch (error) {
+    if (isFileMissingError(error)) return undefined;
+    throw error;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+}
+
+function unlinkRebuildLock(lockPath: string): void {
+  try {
+    const link = lstatSync(lockPath);
+    if (!link.isFile() || link.isSymbolicLink()) throw new Error("Memory vector rebuild lock must be a regular file.");
+    unlinkSync(lockPath);
+  } catch (error) {
+    if (!isFileMissingError(error)) throw error;
+  }
+}
+
+function releaseRebuildLock(lockPath: string, token: string): void {
+  try {
+    if (readRebuildLock(lockPath)?.token === token) unlinkRebuildLock(lockPath);
+  } catch {
+    // 释放锁不能覆盖已经完成的索引结果；异常锁文件留给下一次获取时诊断。
+  }
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+  return errorCode(error) === "EEXIST";
+}
+
+function isFileMissingError(error: unknown): boolean {
+  return errorCode(error) === "ENOENT";
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : undefined
+    : undefined;
 }
 
 function validateFingerprint(value: string): void {

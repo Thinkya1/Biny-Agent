@@ -2893,9 +2893,6 @@ async function testDesktopMemoryV3CasAndOriginFilters(): Promise<void> {
     assert.equal(afterDelete.revision, 5);
     assert.equal(afterDelete.totalEntries, 2);
     assert.equal((await agents.memoryEntries(project.id, "current_workspace", 0, 100)).total, 0);
-    const compacted = await agents.compactMemory(project.id, "current_workspace", afterDelete.revision);
-    assert.deepEqual(compacted, { filter: "current_workspace", before: 0, after: 0, revision: 5, error: undefined });
-    await assert.rejects(agents.compactMemory(project.id, "current_workspace", 1), /Memory revision conflict/u);
     const cleared = await agents.clearMemory(project.id, "all", afterDelete.revision);
     assert.equal(cleared.totalEntries, 0);
     assert.equal(cleared.revision, 6);

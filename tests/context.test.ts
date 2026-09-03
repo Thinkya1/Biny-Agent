@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 import type { AgentMessage, AgentModel, ModelStreamContext, ModelStreamEvent } from "../src/agent/core/types.js";
 import { AgentSession } from "../src/agent/AgentSession.js";
 import { ContextMemory, estimateMessageTokens } from "../src/agent/context/ContextMemory.js";
 import { LocalMemory, redactSecrets } from "../src/agent/context/LocalMemory.js";
+import { memoryDatabaseFileName } from "../src/agent/context/memoryStorage.js";
 import { WorkspaceContext } from "../src/agent/context/WorkspaceContext.js";
 import { cloneAgentMessages, messageReasoning, messageText } from "../src/agent/modelMessages.js";
 import { selectPlanTools } from "../src/agent/planMode.js";
@@ -38,31 +40,27 @@ import { resolveWorkspacePath } from "../src/workspace/resolvePath.js";
 class ContextTestModel {
   readonly requests: AgentMessage[][] = [];
   readonly systemPrompts: Array<string | undefined> = [];
+  memoryExtractionCalls = 0;
   readonly model: AgentModel = createContextTestModel(this);
 
   respond(messages: AgentMessage[], systemPrompt?: string): string {
     this.requests.push(cloneAgentMessages(messages));
     this.systemPrompts.push(systemPrompt);
     const prompt = messageText(messages.at(-1) ?? { role: "user", content: "" });
-    if (prompt.includes("Extract one durable")) {
+    if (prompt.includes("update durable memory")) {
+      this.memoryExtractionCalls += 1;
       return JSON.stringify({
-        topic: "workflows",
-        title: "Context refresh workflow",
-        summary: "Refresh the workspace snapshot and RepoMap after a successful workspace write before the next turn.",
-        decisions: ["Use deterministic paths instead of vector retrieval."],
-        paths: ["src/agent/context/ContextMemory.ts"],
-        keywords: ["context", "refresh", "workflow"]
-      });
-    }
-    if (prompt.includes("Consolidate this project memory topic file")) {
-      return JSON.stringify({
-        entries: [{
-          title: "Weather workflow",
-          summary: "使用 wttr.in 获取天气，请求失败时最多重试三次并渲染 Markdown 表格。",
-          decisions: [],
-          paths: [],
-          keywords: ["weather", "retry"]
-        }]
+        add: [{
+          audience: "workspace",
+          kind: "workflow",
+          topic: "workflows",
+          title: "Context refresh workflow",
+          content: "Refresh the workspace snapshot and RepoMap after a successful workspace write before the next turn.",
+          decisions: ["Use deterministic paths instead of vector retrieval."],
+          paths: ["src/agent/context/ContextMemory.ts"],
+          keywords: ["context", "refresh", "workflow"]
+        }],
+        delete: []
       });
     }
     if (prompt.includes("durable context checkpoint")) {
@@ -144,7 +142,8 @@ async function main(): Promise<void> {
     await testTurnStatusPersistence();
     await testSessionAndToolDisplayRedaction();
     await testMemoryExactDurableContentAndWriter();
-    await testMemoryCandidateLifecycleAndUsagePersistence();
+    await testMemoryLifecycleAndUsagePersistence();
+    await testAutomaticMemoryRecallRequiresEmbedding();
     await testMemoryStorageBoundaries();
     await testMemoryEntryManagementAndCjkSearch();
     await testCredentialAndSymlinkBoundaries();
@@ -1534,7 +1533,7 @@ async function testMemoryExactDurableContentAndWriter(): Promise<void> {
       topic: "debugging",
       title: "Context refresh result",
       summary: "Refresh src/agent/context/ContextMemory.ts after write_file. apiKey=sk-supersecretvalue123.",
-      decisions: ["Use deterministic Markdown memory."],
+      decisions: ["Use deterministic SQLite memory."],
       paths: ["src/agent/context/ContextMemory.ts"],
       keywords: ["context", "refresh"],
       lineage: { source: "explicit", externalContext: false }
@@ -1546,7 +1545,7 @@ async function testMemoryExactDurableContentAndWriter(): Promise<void> {
       topic: "debugging",
       title: "Context refresh result",
       summary: "Refresh src/agent/context/ContextMemory.ts after write_file. apiKey=sk-supersecretvalue123.",
-      decisions: ["Use deterministic Markdown memory."],
+      decisions: ["Use deterministic SQLite memory."],
       paths: ["src/agent/context/ContextMemory.ts"],
       keywords: ["context", "refresh"],
       lineage: { source: "explicit", externalContext: false }
@@ -1554,9 +1553,13 @@ async function testMemoryExactDurableContentAndWriter(): Promise<void> {
     assert.equal(duplicate.written, false);
 
     assert.ok(first.path);
-    const debugFile = path.join(globalAgentDir(), first.path);
-    const stored = await fs.readFile(debugFile, "utf8");
-    assert.equal(stored.includes("sk-supersecretvalue123"), true);
+    const database = new DatabaseSync(path.join(globalAgentDir(), "memory", memoryDatabaseFileName), { readOnly: true });
+    try {
+      const row = database.prepare("SELECT content FROM memories WHERE id = ?").get(first.entry?.id) as { content?: string } | undefined;
+      assert.equal(row?.content?.includes("sk-supersecretvalue123"), true);
+    } finally {
+      database.close();
+    }
     assert.match(redactSecrets("Authorization: Bearer abcdefghijklmnop"), /\[redacted\]/);
     assert.equal(redactSecrets("aws_secret_access_key=not-a-real-value"), "aws_secret_access_key=[redacted]");
     assert.equal(redactSecrets("-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----"), "[redacted private key]");
@@ -1567,12 +1570,15 @@ async function testMemoryExactDurableContentAndWriter(): Promise<void> {
   });
 }
 
-async function testMemoryCandidateLifecycleAndUsagePersistence(): Promise<void> {
+async function testMemoryLifecycleAndUsagePersistence(): Promise<void> {
   await withTempWorkspace(async (workspaceRoot) => {
     const config = testConfig();
     config.context.memory.enabled = true;
     config.context.memory.useMemories = true;
     config.context.memory.generateMemories = true;
+    // 自动 ADD：没有可用 semantic embedding 时不写入事实库。
+    // 这个夹具不下载本地模型，因此专门验证后台抽取完成但写入 fail-closed。
+    config.context.memory.embeddingModel = undefined;
     const provider = new ContextTestModel();
     await ensureAgentDirs(workspaceRoot);
     const recorder = new SessionRecorder(workspaceRoot, "memory-usage");
@@ -1586,24 +1592,82 @@ async function testMemoryCandidateLifecycleAndUsagePersistence(): Promise<void> 
     });
     await agent.initialize();
     await agent.runTask(`Remember this successful context workflow: ${"grounded details ".repeat(20)}`);
+    await waitForMemoryExtraction(provider, 1);
     const overview = await agent.getLocalMemory().getOverview();
     await agent.close();
-    // 有信息量的成功回合进入后台记忆候选。
-    assert.equal(overview.candidateCount, 1);
+    // 有信息量的成功回合会直接尝试写入 active memory，不再经过候选队列；
+    // 但语义能力不可用时，按自动记忆的 fail-closed 规则跳过 ADD。
+    assert.equal(overview.origins.currentWorkspace, 0);
 
+    const shortProvider = new ContextTestModel();
     const shortAgent = new AgentSession({
       workspaceRoot,
       config,
-      model: new ContextTestModel().model,
+      model: shortProvider.model,
       toolRegistry: new ToolRegistry(),
       permissionManager: new PermissionManager({ ...config.permission, source: "test" }),
       recorder: new SessionRecorder(workspaceRoot, "short-memory-usage")
     });
     await shortAgent.initialize();
     await shortAgent.runTask("hi");
+    await waitForMemoryExtraction(shortProvider, 1);
     const afterShortTurn = await shortAgent.getLocalMemory().getOverview();
     await shortAgent.close();
-    assert.equal(afterShortTurn.candidateCount, overview.candidateCount);
+    assert.equal(afterShortTurn.origins.currentWorkspace, overview.origins.currentWorkspace);
+  });
+}
+
+async function waitForMemoryExtraction(provider: ContextTestModel, count: number): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (provider.memoryExtractionCalls < count && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(provider.memoryExtractionCalls >= count, true, "background memory extraction did not finish");
+}
+
+async function testAutomaticMemoryRecallRequiresEmbedding(): Promise<void> {
+  await withTempWorkspace(async (workspaceRoot) => {
+    const config = testConfig();
+    config.context.memory.enabled = true;
+    config.context.memory.useMemories = true;
+    config.context.memory.generateMemories = false;
+    config.context.memory.queryRewrite = false;
+    config.context.memory.embeddingModel = undefined;
+    const provider = new ContextTestModel();
+    await ensureAgentDirs(workspaceRoot);
+    const agent = new AgentSession({
+      workspaceRoot,
+      config,
+      model: provider.model,
+      toolRegistry: new ToolRegistry(),
+      permissionManager: new PermissionManager({ ...config.permission, source: "test" }),
+      recorder: new SessionRecorder(workspaceRoot, "configured-memory-recall-limit")
+    });
+    try {
+      await agent.initialize();
+      let revision = (await agent.getLocalMemory().getOverview()).storeRevision;
+      for (let index = 0; index < 4; index += 1) {
+        const result = await agent.getLocalMemory().writeEntry({
+          audience: "workspace",
+          kind: "fact",
+          topic: "recall-limit",
+          title: `Recall limit marker ${String(index)}`,
+          summary: `The recall-limit-token marker ${String(index)} is available for this retrieval test.`,
+          decisions: [],
+          paths: [],
+          keywords: ["recall-limit-token"],
+          importance: 3,
+          lineage: { source: "explicit", externalContext: false }
+        }, { expectedRevision: revision });
+        revision = result.revision;
+      }
+
+      await agent.runTask("Find the recall-limit-token markers.");
+      const systemPrompt = provider.systemPrompts.at(-1) ?? "";
+      assert.doesNotMatch(systemPrompt, /Summary: The recall-limit-token marker/u);
+    } finally {
+      await agent.close();
+    }
   });
 }
 
@@ -1646,19 +1710,10 @@ async function testMemoryEntryManagementAndCjkSearch(): Promise<void> {
     assert.equal(entries.entries.every((entry) => entry.topic === "project"), true);
     assert.equal(entries.entries.some((entry) => entry.title === "Weather retries"), true);
 
-    const compaction = await store.consolidateEntries("current_workspace", { expectedRevision: second.revision, topic: "project" });
-    assert.equal(compaction.before, 2);
-    assert.equal(compaction.after, 1);
-    assert.equal(compaction.error, undefined);
-    const compacted = await store.listMemoryEntries({ origins: ["current_workspace"] });
-    assert.equal(compacted.entries.length, 1);
-
-    const compactedEntry = compacted.entries[0];
-    assert.ok(compactedEntry);
-    const deleted = await store.deleteEntryById(compactedEntry.id, { expectedRevision: compacted.storeRevision });
+    const deleted = await store.deleteEntryById(second.entry!.id, { expectedRevision: second.revision });
     assert.equal(deleted.deleted, true);
-    assert.equal((await store.listMemoryEntries({ topic: "project" })).entries.length, 0);
-    assert.equal((await store.deleteEntryById(compactedEntry.id, { expectedRevision: deleted.revision })).deleted, false);
+    assert.equal((await store.listMemoryEntries({ topic: "project" })).entries.length, 1);
+    assert.equal((await store.deleteEntryById(second.entry!.id, { expectedRevision: deleted.revision })).deleted, false);
   });
 }
 
@@ -1694,12 +1749,10 @@ async function testMemoryStorageBoundaries(): Promise<void> {
 
       await fs.rm(memoryDir, { force: true });
       await fs.mkdir(memoryDir);
-      // v3 不再维护 MEMORY.md 索引；符号链接防护聚焦条目文件与状态文件。
-      const entriesDir = path.join(memoryDir, "entries");
-      await fs.mkdir(entriesDir);
-      await fs.link(victim, path.join(entriesDir, "debugging.md"));
-      await assert.rejects(store.listMemoryEntries(), /single regular file/);
-      await assert.rejects(store.writeEntry(entry, { expectedRevision: 0 }), /single regular file/);
+      const databasePath = path.join(memoryDir, memoryDatabaseFileName);
+      await fs.symlink(victim, databasePath);
+      await assert.rejects(store.listMemoryEntries(), /regular, canonical file/);
+      await assert.rejects(store.writeEntry(entry, { expectedRevision: 0 }), /regular, canonical file/);
       assert.equal(await fs.readFile(victim, "utf8"), victimContent);
     } finally {
       if (previousAgentRoot === undefined) delete process.env[BINY_AGENT_DIR_ENV];

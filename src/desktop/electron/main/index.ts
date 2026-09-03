@@ -23,6 +23,9 @@ import { DesktopSettingsTransaction } from "./DesktopSettingsTransaction.js";
 import { DesktopTerminalManager } from "./DesktopTerminalManager.js";
 import { DesktopUserDataStore } from "./DesktopUserDataStore.js";
 import { globalConfigDir } from "../../../config/paths.js";
+import { LocalMemory, withFreshRevision } from "../../../agent/context/LocalMemory.js";
+import type { MemoryEntryInput } from "../../../agent/context/memoryTypes.js";
+import type { ActivityMemoryCandidate, ActivityMemoryWriteContext } from "../../../activity/analyzer.js";
 import { registerDesktopIpc } from "./ipc.js";
 import { installApplicationMenu } from "./menu.js";
 import { QuickChatContextService } from "./QuickChatContextService.js";
@@ -125,6 +128,61 @@ async function startDesktopApplication(): Promise<void> {
     agents,
     net.fetch.bind(net) as unknown as typeof globalThis.fetch
   );
+  const writeActivityMemories = async (
+    candidates: readonly ActivityMemoryCandidate[],
+    context: ActivityMemoryWriteContext
+  ): Promise<void> => {
+    // Activity 分析发生在后台，当前选中的聊天项目可能早已变化；只能使用分析模型返回的
+    // project 元数据映射目标工作区，找不到时宁可跳过 workspace 候选，也不能写进 active 项目。
+    const targetProject = resolveActivityProject(context.project, state.projects());
+    const workspaceRoot = targetProject?.missing === false
+      ? targetProject.path
+      : await projects.globalDataRoot();
+    const memory = new LocalMemory(
+      workspaceRoot,
+      () => context.model,
+      undefined,
+      5,
+      undefined,
+      undefined,
+      {
+        indexEntry: async (entry) => await agents.indexActivityMemoryEntry(entry)
+      },
+      async (query, options) => await agents.findMemorySimilarEntries(query, options)
+    );
+    for (const candidate of candidates) {
+      if (candidate.type !== "user" && (targetProject === undefined || targetProject.missing)) continue;
+      const isUniversal = candidate.type === "user";
+      const input: MemoryEntryInput = {
+        audience: isUniversal ? "universal" : "workspace",
+        kind: isUniversal ? "working_style" : candidate.type === "feedback" ? "gotcha" : "fact",
+        topic: isUniversal ? "user" : candidate.type,
+        title: candidate.content.slice(0, 120),
+        summary: candidate.content,
+        // Keep the Activity type and project tag in keywords so later semantic
+        // and manual searches remain explainable without adding another metadata table.
+        keywords: [
+          candidate.type,
+          ...(!isUniversal && context.project?.trim() ? [`project:${context.project.trim()}`] : [])
+        ],
+        importance: candidate.type === "feedback" || isUniversal ? 4 : 3,
+        durability: "permanent",
+        lineage: {
+          source: "completed_task",
+          externalContext: false,
+          sessionId: context.sessionId,
+          userEvidence: candidate.why
+        }
+      };
+      await withFreshRevision(memory, undefined, async (expectedRevision) => (
+        await memory.writeAutoEntry(input, {
+          expectedRevision,
+          now: new Date(context.analyzedAt),
+          requireSemantic: true
+        })
+      ));
+    }
+  };
   const activity = new ActivityRecorderService({
     configStore,
     sidecarPath: defaultActivitySidecarPath({
@@ -132,6 +190,7 @@ async function startDesktopApplication(): Promise<void> {
       resourcesPath: process.resourcesPath,
       appPath: app.getAppPath()
     }),
+    writeMemories: writeActivityMemories,
     getEmbeddingRuntime: async () => await agents.getActivityEmbeddingRuntime(),
     emit: (snapshot) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(desktopIpc.activityEvent, snapshot);
@@ -347,6 +406,23 @@ function parseDesktopLaunchHandoff(argv: readonly string[]): DesktopLaunchHandof
   const sessionId = sessionIndex >= 0 ? argv[sessionIndex + 1] : undefined;
   if (!workspaceRoot || !sessionId || sessionId.includes("\0") || sessionId.length > 240) return undefined;
   return { workspaceRoot: path.resolve(workspaceRoot), sessionId };
+}
+
+function resolveActivityProject(
+  projectName: string | undefined,
+  candidates: readonly { name: string; path: string; missing: boolean }[]
+): { name: string; path: string; missing: boolean } | undefined {
+  const trimmed = projectName?.trim();
+  const normalized = trimmed?.toLocaleLowerCase();
+  if (!normalized) return undefined;
+  const absolute = trimmed?.startsWith("/")
+    ? path.resolve(trimmed).toLocaleLowerCase()
+    : undefined;
+  return candidates.find((project) => !project.missing && (
+    project.name.trim().toLocaleLowerCase() === normalized
+    || path.basename(project.path).toLocaleLowerCase() === normalized
+    || absolute === path.resolve(project.path).toLocaleLowerCase()
+  ));
 }
 
 function setDesktopIcon(): void {

@@ -198,11 +198,6 @@ export function useDesktopSettingsActions({
     return await window.biny.clearMemory(requireProject(projectIdRef.current), filter, expectedRevision);
   }, [projectIdRef]);
 
-  const compactMemory = useCallback(async (filter: DesktopMemoryOriginFilter, expectedRevision: number, topic?: string) => {
-    return await window.biny.compactMemory(requireProject(projectIdRef.current), filter, expectedRevision, topic);
-  }, [projectIdRef]);
-
-
   return {
     addMemoryEntry,
     archiveMemoryEntry,
@@ -216,7 +211,6 @@ export function useDesktopSettingsActions({
     cancelMemoryEmbeddingRebuild,
     cancelModelLogin,
     clearMemory,
-    compactMemory,
     deleteMemoryEntry,
     deleteMemoryEmbeddingModel,
     downloadMemoryEmbeddingModel,
