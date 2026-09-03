@@ -18,8 +18,11 @@ import {
   formatTokens,
   formatTokensPerSecond,
   humanizeRunError,
+  isRetryTargetError,
+  isRunErrorRetryable,
   isRunErrorStatus,
   runErrorPresentation,
+  runErrorRecovery,
   runErrorSeenKey,
   toolRowState,
   turnMetrics,
@@ -253,6 +256,23 @@ test("runErrorPresentation 按终态区分标题与语义色", () => {
   assert.deepEqual(runErrorPresentation("aborted"), { title: "已中止", variant: "warning" });
   assert.deepEqual(runErrorPresentation("incomplete"), { title: "本轮运行未完成", variant: "error" });
   assert.deepEqual(runErrorPresentation("failed"), { title: "本轮运行失败", variant: "error" });
+});
+
+test("重试目标脱离当前分支时给出可理解的错误与下一步", () => {
+  const message = "Error: Retry target is not on the active conversation path.";
+  assert.equal(isRetryTargetError(message), true);
+  assert.equal(isRunErrorRetryable(message), false);
+  assert.equal(humanizeRunError(message), "这条消息已不在当前对话分支中，不能直接重新生成。");
+  assert.deepEqual(runErrorPresentation("failed", message), { title: "这条回复已无法重试", variant: "error" });
+  assert.equal(
+    runErrorRecovery("failed", message),
+    "请关闭提示后发送新消息；如果刚切换过回复版本，请先切回当前版本。"
+  );
+});
+
+test("需要外部处理的任务不再提示断点续跑按钮", () => {
+  assert.equal(runErrorRecovery("blocked", "Need a target."), "请完成必要操作后，在输入框发送新消息。");
+  assert.equal(runErrorRecovery("incomplete", "The step limit was reached."), "本轮已停止，请检查上方输出后发送新消息。");
 });
 
 test("isRunErrorStatus 五种错误终态为真，运行/完成态为假", () => {

@@ -23,10 +23,10 @@ import { MarkdownContent } from "./MarkdownContent.js";
 import { useTypewriter } from "./useTypewriter.js";
 import { ToolActivity } from "./ToolActivity.js";
 import { CompactionRow } from "./chat/NoticeRow.js";
-import { RunErrorCard } from "./chat/RunErrorCard.js";
 import { MessageClock } from "./chat/MessageClock.js";
 import { ThinkingBlock } from "./chat/ThinkingBlock.js";
 import { ExecutionGroup, type ExecutionGroupStep } from "./chat/ExecutionGroup.js";
+import { markRunErrorsSeen, pruneRunErrorsSeen } from "./chat/runErrorDismissal.js";
 import { pickThinkingMessage } from "../thinkingMessages.js";
 
 interface MessageTimelineProps {
@@ -36,7 +36,6 @@ interface MessageTimelineProps {
   onPreviewFile(path: string): void;
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
-  onResume(): Promise<void>;
   thinking: boolean;
   onRetry(targetMessageId: string, input: string, idempotencyKey: string): Promise<void>;
   onSwitchVersion(messageId: string, direction: "prev" | "next"): Promise<void>;
@@ -55,7 +54,7 @@ interface OptimisticRewrite {
   settled: boolean;
 }
 
-export const MessageTimeline = memo(function MessageTimeline({ projectId, sessionId, turns, onPreviewFile, onOpenExternal, onResolvePermission, onResume, thinking, onRetry, onSwitchVersion, onEditUserMessage, onCreateBranch, onRollbackFiles, onDeleteUserMessage }: MessageTimelineProps): React.JSX.Element {
+export const MessageTimeline = memo(function MessageTimeline({ projectId, sessionId, turns, onPreviewFile, onOpenExternal, onResolvePermission, thinking, onRetry, onSwitchVersion, onEditUserMessage, onCreateBranch, onRollbackFiles, onDeleteUserMessage }: MessageTimelineProps): React.JSX.Element {
   const [editing, setEditing] = useState<{ turnId: string; value: string; userMessageIndex: number }>();
   // 重试/重写会先把目标之后的消息从视图中撤掉，再等待新回合流入；这里保留同样的
   // 乐观投影。持久化仍由 App/Runtime 负责，组件只在请求尚未完成时负责视觉上的覆盖。
@@ -250,14 +249,12 @@ export const MessageTimeline = memo(function MessageTimeline({ projectId, sessio
           onPreviewFile={onPreviewFile}
           onOpenExternal={onOpenExternal}
           onResolvePermission={onResolvePermission}
-          onResume={onResume}
           onRollbackFiles={onRollbackFiles}
           onRetry={onRetry}
           onRetryStart={startOptimisticRewrite}
           onRetrySettled={settleOptimisticRewrite}
           onSwitchVersion={onSwitchVersion}
           projectId={projectId}
-          sessionId={sessionId}
           turn={turn}
         />
       ))}
@@ -297,95 +294,13 @@ function optimisticRewriteTurn(turn: TimelineTurn, user: string): TimelineTurn {
   };
 }
 
-/**
- * 「已看过」的轮次错误登记处，身份由 runErrorSeenKey 给出（project + session + 轮次终态时间戳）。
- *
- * 展示语义按「一个错误只打扰一次」设计：手动点 ×、或者切走/离开这个会话，都算已读过，
- * 之后无论切回来还是重启应用都不再复活。所以内存集合负责跨会话即时生效，localStorage
- * 负责重启应用也生效。终态持久化在 session 文件里，「读过一次就不再提」正是要压住它。
- *
- * 身份必须与投影方式无关（见 chatModel.runErrorSeenKey），否则实时轮次（runId）重建为
- * 历史轮次（history-N）后标记对不上号。本地存储只是缓存：读失败退回内存集合，写失败只影响
- * 本次运行期；数量有上限，超出淘汰最旧的，不会无限膨胀。
- */
-const dismissedRunErrorTurns = new Set<string>();
-const DISMISSED_RUN_ERROR_STORAGE_KEY = "biny.desktop.dismissed-run-errors";
-/** 持久化上限：超出就淘汰最旧的，避免本地缓存无限增长。 */
-const DISMISSED_RUN_ERROR_LIMIT = 500;
-/** 是否已从 localStorage 注水；注水只做一次，之后以内存集合为准。 */
-let dismissedRunErrorHydrated = false;
-
-function hydrateDismissedRunErrors(): void {
-  if (dismissedRunErrorHydrated) return;
-  dismissedRunErrorHydrated = true;
-  try {
-    if (typeof window === "undefined") return;
-    const raw = window.localStorage.getItem(DISMISSED_RUN_ERROR_STORAGE_KEY);
-    if (!raw) return;
-    const stored: unknown = JSON.parse(raw);
-    if (!Array.isArray(stored)) return;
-    for (const key of stored) {
-      if (typeof key === "string" && key) dismissedRunErrorTurns.add(key);
-    }
-  } catch {
-    // 本地存储读失败：退回内存集合，本次运行期内仍然有效。
-  }
-}
-
-function persistDismissedRunErrors(): void {
-  try {
-    if (typeof window === "undefined") return;
-    // Set 是插入序：markRunErrorsSeen 先用 delete+add 把命中项挪到末尾，这里直接截尾淘汰最旧的。
-    window.localStorage.setItem(
-      DISMISSED_RUN_ERROR_STORAGE_KEY,
-      JSON.stringify([...dismissedRunErrorTurns].slice(-DISMISSED_RUN_ERROR_LIMIT))
-    );
-  } catch {
-    // 本地存储写失败：内存集合已记，本次运行期内仍不会再展示。
-  }
-}
-
-function isRunErrorSeen(key: string): boolean {
-  hydrateDismissedRunErrors();
-  return dismissedRunErrorTurns.has(key);
-}
-
-/** 批量登记「已看过」；每项先删再插挪到最新端（近似 LRU 触碰序），合并成一次持久化。 */
-function markRunErrorsSeen(keys: readonly string[]): void {
-  hydrateDismissedRunErrors();
-  for (const key of keys) {
-    dismissedRunErrorTurns.delete(key);
-    dismissedRunErrorTurns.add(key);
-  }
-  persistDismissedRunErrors();
-}
-
-/**
- * 新一轮开始时回收本会话失效的「已看过」标记：编辑/重试会让位置序号漂移或让轮次消失，
- * 只保留还挂在现存轮次上的标记，其余清掉并立即持久化——新失败的轮次有新身份，不受影响。
- */
-function pruneRunErrorsSeen(projectId: string, sessionId: string | undefined, validIdentifiers: ReadonlySet<string>): void {
-  hydrateDismissedRunErrors();
-  const prefix = `${projectId}:${sessionId ?? "draft"}:`;
-  let mutated = false;
-  for (const key of dismissedRunErrorTurns) {
-    if (!key.startsWith(prefix)) continue;
-    if (validIdentifiers.has(key.slice(prefix.length))) continue;
-    dismissedRunErrorTurns.delete(key);
-    mutated = true;
-  }
-  if (mutated) persistDismissedRunErrors();
-}
-
 const Turn = memo(function Turn({
   projectId,
-  sessionId,
   turn,
   editing,
   onPreviewFile,
   onOpenExternal,
   onResolvePermission,
-  onResume,
   onRetry,
   onRetryStart,
   onRetrySettled,
@@ -399,13 +314,11 @@ const Turn = memo(function Turn({
   onDeleteUserMessage
 }: {
   projectId: string;
-  sessionId?: string;
   turn: TimelineTurn;
   editing?: { value: string };
   onPreviewFile(path: string): void;
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
-  onResume(): Promise<void>;
   onRetry(targetMessageId: string, input: string, idempotencyKey: string): Promise<void>;
   onRetryStart(turn: TimelineTurn, mode: "retry" | "edit", user?: string): void;
   onRetrySettled(turnId: string, succeeded: boolean): void;
@@ -419,14 +332,7 @@ const Turn = memo(function Turn({
   onDeleteUserMessage(turnId: string): void;
 }): React.JSX.Element {
   const running = turn.status === "running" || turn.status === "waiting_permission";
-  // 「已看过」身份用跨投影稳定的 key（终态时间戳），实时/历史两种重建下都指同一轮。
-  const dismissedKey = useMemo(() => runErrorSeenKey(projectId, sessionId, turn), [projectId, sessionId, turn]);
-  const [errorDismissed, setErrorDismissed] = useState(() => isRunErrorSeen(dismissedKey));
   const retryPromiseRef = useRef<Promise<void> | undefined>(undefined);
-  const dismissError = useCallback((): void => {
-    markRunErrorsSeen([dismissedKey]);
-    setErrorDismissed(true);
-  }, [dismissedKey]);
   const retry = useCallback((): Promise<void> => {
     const targetMessageId = turn.assistantMessageId ?? turn.userMessageId;
     if (!turn.user || !targetMessageId) return Promise.resolve();
@@ -506,18 +412,6 @@ const Turn = memo(function Turn({
           />
         ) : null}
 
-        {/* 底部不再展示统计与模型行；运行信息只保留在 hover 揭示的时钟里。 */}
-        {/* 失败/阻塞/未完成/取消/中止统一收敛成一张错误卡片：图标 + 标题 + 人话错误 + 继续/重试。 */}
-        {turn.error && isRunErrorStatus(turn.status) && !errorDismissed ? (
-          <RunErrorCard
-            message={turn.error}
-            onDismiss={dismissError}
-            onResume={() => void onResume()}
-            onRetry={canRetry ? retry : undefined}
-            resumable={turn.resumable}
-            status={turn.status}
-          />
-        ) : null}
         </div>
       </ChatMessage>
     </section>

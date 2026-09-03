@@ -5,16 +5,19 @@
  * 权限和文件检查器回调。页面层只负责把这些能力放到正确的视觉区域。
  */
 import type { PermissionResult } from "../../../../permission/PermissionManager.js";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ThinkingOrb } from "thinking-orbs";
 import type { DesktopProject, DesktopRuntimeMutation, DesktopRuntimeProjection, DesktopSessionLimits, DesktopSessionWriterConflict } from "../../../protocol.js";
 import type { SkillDraftNotice } from "../app/useDesktopEventBridge.js";
 import type { TimelineTurn } from "../sessionTimeline.js";
+import { isRunErrorRetryable, isRunErrorStatus, runErrorSeenKey } from "../chatModel.js";
 import { pickThinkingMessage } from "../thinkingMessages.js";
 import { desktopWorktreeView } from "../worktreePresentation.js";
 import { Icon } from "./Icon.js";
 import { MessageTimeline } from "./MessageTimeline.js";
 import { RuntimePanel } from "./RuntimePanel.js";
+import { RunErrorCard } from "./chat/RunErrorCard.js";
+import { isRunErrorSeen, markRunErrorsSeen } from "./chat/runErrorDismissal.js";
 import { SkillDraftNoticeCard } from "./SkillDraftNoticeCard.js";
 import { WelcomeState } from "./WelcomeState.js";
 
@@ -51,7 +54,6 @@ interface WorkspaceProps {
   onOpenSkillSettings?(): void;
   onOpenExternal(url: string): void;
   onResolvePermission(requestId: string, result: PermissionResult): Promise<void>;
-  onResume(): Promise<void>;
   onRetry(targetMessageId: string, input: string, idempotencyKey: string): Promise<void>;
   onSwitchVersion(messageId: string, direction: "prev" | "next"): Promise<void>;
   onRetryWriterConflict(): Promise<void>;
@@ -103,7 +105,6 @@ export function Workspace({
   onOpenSkillSettings,
   onOpenExternal,
   onResolvePermission,
-  onResume,
   onRetry,
   onSwitchVersion,
   onRetryWriterConflict,
@@ -127,6 +128,9 @@ export function Workspace({
   const streaming = running || turns.some((turn) => turn.status === "running" || turn.status === "waiting_permission");
   const isHome = !loading && !runtimeError && !projectId;
   const showWelcome = !loading && !runtimeError && !sessionId && !streaming && turns.length === 0;
+  // 错误提示只跟随最后一轮：用户发出新消息后，旧错误仍留在时间线里，但不应继续占据输入框上方。
+  const lastTurn = turns[turns.length - 1];
+  const latestRunError = lastTurn && lastTurn.error && isRunErrorStatus(lastTurn.status) ? lastTurn : undefined;
   // 上限预警按会话 dismiss：换会话要重新提示，同会话点掉后不再打扰。
   const [limitBannerDismissedFor, setLimitBannerDismissedFor] = useState<string>();
   const showLimitBanner = Boolean(sessionLimits?.nearSizeLimit && sessionId && limitBannerDismissedFor !== sessionId);
@@ -338,7 +342,6 @@ export function Workspace({
                 onOpenExternal={onOpenExternal}
                 onPreviewFile={onPreviewFile}
                 onResolvePermission={onResolvePermission}
-                onResume={onResume}
                 onRollbackFiles={onRollbackFiles}
                 onRetry={onRetry}
                 onSwitchVersion={onSwitchVersion}
@@ -371,12 +374,60 @@ export function Workspace({
         </div>
         {renderWelcome ? null : (
           <div className="biny-chat-composer">
-            {writerConflict ? <SessionWriterConflictBanner onRetry={onRetryWriterConflict} /> : children}
+            {writerConflict ? <SessionWriterConflictBanner onRetry={onRetryWriterConflict} /> : (
+              <>
+                {!streaming && latestRunError && projectId ? (
+                  <ConversationRunError
+                    onRetry={onRetry}
+                    projectId={projectId}
+                    sessionId={sessionId}
+                    turn={latestRunError}
+                  />
+                ) : null}
+                {children}
+              </>
+            )}
           </div>
         )}
       </div>
       {streaming ? <span className="biny-streaming-state" aria-hidden="true" /> : null}
     </div>
+  );
+}
+
+function ConversationRunError({ projectId, sessionId, turn, onRetry }: {
+  projectId: string;
+  sessionId?: string;
+  turn: TimelineTurn;
+  onRetry(targetMessageId: string, input: string, idempotencyKey: string): Promise<void>;
+}): React.JSX.Element | null {
+  const message = turn.error ?? "";
+  const dismissedKey = runErrorSeenKey(projectId, sessionId, turn);
+  const [dismissed, setDismissed] = useState(() => isRunErrorSeen(dismissedKey));
+  const targetMessageId = turn.assistantMessageId ?? turn.userMessageId;
+  const canRetry = Boolean(turn.user && targetMessageId && !turn.resumable && isRunErrorRetryable(message));
+  useEffect(() => {
+    setDismissed(isRunErrorSeen(dismissedKey));
+  }, [dismissedKey]);
+  const dismiss = useCallback((): void => {
+    markRunErrorsSeen([dismissedKey]);
+    setDismissed(true);
+  }, [dismissedKey]);
+  const retry = useCallback(async (): Promise<void> => {
+    if (!canRetry || !targetMessageId || !turn.user) return;
+    markRunErrorsSeen([dismissedKey]);
+    setDismissed(true);
+    await onRetry(targetMessageId, turn.user, globalThis.crypto.randomUUID());
+  }, [canRetry, dismissedKey, onRetry, targetMessageId, turn.user]);
+
+  if (!message || isRunErrorSeen(dismissedKey) || dismissed) return null;
+  return (
+    <RunErrorCard
+      message={message}
+      onDismiss={dismiss}
+      onRetry={canRetry ? retry : undefined}
+      status={turn.status}
+    />
   );
 }
 

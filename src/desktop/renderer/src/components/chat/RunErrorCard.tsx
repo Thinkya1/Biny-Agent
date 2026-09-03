@@ -1,20 +1,17 @@
 /**
  * 轮次级失败/未完成卡片：blocked / incomplete / cancelled / aborted / failed 的统一出口。
  *
- * 卡片结构：图标 + 标题（区分「任务被阻塞 / 本轮运行失败 / 已取消」等语义）+ 人话错误信息
- * （UND_ERR_* 这类原始错误码经 `humanizeRunError` 映射成可操作提示，完整原文放 hover tooltip）
- * + 操作按钮（resumable 时「继续运行」，否则「重试」）。颜色全部走 biny 主题 token。
+ * 卡片结构：图标 + 语义标题 + 人话错误信息 + 下一步提示 + 可展开的技术详情 + 可重试操作。
+ * 原始错误码不再直接作为主文案，避免用户只能看到实现层错误而不知道如何处理。
  */
 import { memo, useCallback, useRef, useState } from "react";
-import { humanizeRunError, runErrorPresentation } from "../../chatModel.js";
+import { humanizeRunError, isRunErrorRetryable, runErrorPresentation, runErrorRecovery } from "../../chatModel.js";
 import type { TimelineRunStatus } from "../../sessionTimeline.js";
 import { Icon } from "../Icon.js";
 
 export const RunErrorCard = memo(function RunErrorCard({
   status,
   message,
-  resumable,
-  onResume,
   onRetry,
   onDismiss,
 }: {
@@ -22,16 +19,15 @@ export const RunErrorCard = memo(function RunErrorCard({
   status: TimelineRunStatus;
   /** 原始错误文本（可能是错误码）；卡片显示精简后的人话，完整原文放 tooltip。 */
   message: string;
-  /** 可从断点继续时展示「继续运行」。 */
-  resumable?: boolean;
-  onResume(): void;
-  /** 非 resumable 时展示「重试」；没有可重试的用户输入时缺省。 */
+  /** 可重试时展示「重试」；不可重试或任务需要外部处理时缺省。 */
   onRetry?(): Promise<void>;
   /** 关闭卡片（仅隐藏展示，不改变轮次状态）。 */
   onDismiss?(): void;
 }): React.JSX.Element {
-  const { title, variant } = runErrorPresentation(status);
+  const { title, variant } = runErrorPresentation(status, message);
   const summary = humanizeRunError(message);
+  const recovery = runErrorRecovery(status, message);
+  const retryAvailable = Boolean(onRetry) && isRunErrorRetryable(message);
   const [retrying, setRetrying] = useState(false);
   const retryingRef = useRef(false);
   const handleRetry = useCallback(async (): Promise<void> => {
@@ -46,21 +42,25 @@ export const RunErrorCard = memo(function RunErrorCard({
     }
   }, [onRetry]);
   return (
-    <div className="run-error-card" data-variant={variant} role="alert">
-      <span className="run-error-card-icon"><Icon name="warning" size={16} /></span>
+    <section aria-live="polite" className="run-error-card" data-variant={variant} role="alert">
+      <span aria-hidden="true" className="run-error-card-icon"><Icon name="warning" size={17} /></span>
       <div className="run-error-card-body">
-        <span className="run-error-card-title">{title}</span>
-        {summary ? <span className="run-error-card-message" title={message}>{summary}</span> : null}
-        {resumable || onRetry ? (
-          <div className="run-error-card-actions">
-            {resumable ? (
-              <button className="run-error-card-action is-primary" onClick={onResume} type="button">继续运行</button>
-            ) : onRetry ? (
-              <button className="run-error-card-action" disabled={retrying} onClick={() => { void handleRetry(); }} type="button">{retrying ? "重试中…" : "重试"}</button>
-          ) : null}
+        <div className="run-error-card-heading">
+          <strong className="run-error-card-title">{title}</strong>
+          <span className="run-error-card-kind">{retryAvailable ? "可重试" : "需要处理"}</span>
+        </div>
+        {summary ? <span className="run-error-card-message">{summary}</span> : null}
+        {recovery ? <span className="run-error-card-recovery">{recovery}</span> : null}
+        <details className="run-error-card-details">
+          <summary>查看技术详情</summary>
+          <pre>{message}</pre>
+        </details>
+      </div>
+      {retryAvailable ? (
+        <div className="run-error-card-actions">
+          <button className="run-error-card-action is-primary" disabled={retrying} onClick={() => { void handleRetry(); }} type="button">{retrying ? "重试中…" : "重试"}</button>
         </div>
       ) : null}
-      </div>
       {onDismiss ? (
         <button
           aria-label="关闭提示"
@@ -72,6 +72,6 @@ export const RunErrorCard = memo(function RunErrorCard({
           <Icon name="close" size={14} />
         </button>
       ) : null}
-    </div>
+    </section>
   );
 });

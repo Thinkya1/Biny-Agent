@@ -98,7 +98,9 @@ export function firstLine(text: string): string {
 }
 
 /** 轮次级失败/未完成的卡片呈现：标题（区分语义）+ 语义色（error 红 / warning 琥珀）。 */
-export function runErrorPresentation(status: TimelineRunStatus): { title: string; variant: "error" | "warning" } {
+export function runErrorPresentation(status: TimelineRunStatus, message?: string): { title: string; variant: "error" | "warning" } {
+  // 重试目标失效是操作上下文问题，不是模型本身失败；标题要直接告诉用户为什么不能继续点「重试」。
+  if (message && isRetryTargetError(message)) return { title: "这条回复已无法重试", variant: "error" };
   switch (status) {
     // blocked 是「运行被阻塞」（如 max-tokens）而非失败：琥珀警示。
     case "blocked": return { title: "任务被阻塞", variant: "warning" };
@@ -144,6 +146,8 @@ export function humanizeRunError(message: string): string {
   if (!text) return "";
   const lower = text.toLowerCase();
   const has = (...patterns: RegExp[]): boolean => patterns.some((pattern) => pattern.test(lower));
+  // 消息版本/分支已经变化时，继续重试只会再次失败；把实现层错误翻译成下一步操作。
+  if (isRetryTargetError(text)) return "这条消息已不在当前对话分支中，不能直接重新生成。";
   // 网络 / 连接（undici、Node、fetch）
   if (has(/und_err_connect_timeout/, /\betimedout\b/, /esockettimedout/, /connect(?:ion)? timeout/)) return "网络连接超时，请检查代理或网络后重试。";
   if (has(/und_err_headers_timeout/, /und_err_body_timeout/)) return "服务器响应超时，请稍后重试。";
@@ -162,6 +166,28 @@ export function humanizeRunError(message: string): string {
   if (has(/abort/, /cancel/)) return "操作已被取消。";
   // 兜底：保留可读首行。
   return firstLine(text);
+}
+
+/** 重试目标已脱离活动路径，通常发生在切换回答版本或会话刚被其他窗口更新之后。 */
+export function isRetryTargetError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return /retry target .*active conversation path/.test(lower)
+    || /retry source user message .*active conversation path/.test(lower)
+    || /retry target message does not exist/.test(lower)
+    || /retry target (?:has no user message ancestor|has a missing message parent|is not replayable)/.test(lower);
+}
+
+/** 当前错误是否仍有意义上的「重试」动作；不可重试时只保留关闭或发送新消息。 */
+export function isRunErrorRetryable(message: string): boolean {
+  return !isRetryTargetError(message);
+}
+
+/** 特殊错误的下一步提示；普通网络/鉴权错误的可操作建议已经包含在摘要中。 */
+export function runErrorRecovery(status: TimelineRunStatus, message: string): string | undefined {
+  if (isRetryTargetError(message)) return "请关闭提示后发送新消息；如果刚切换过回复版本，请先切回当前版本。";
+  if (status === "blocked") return "请完成必要操作后，在输入框发送新消息。";
+  if (status === "incomplete") return "本轮已停止，请检查上方输出后发送新消息。";
+  return undefined;
 }
 
 /** 折叠的 token 计数：517 / 12.2K / 517K / 1.2M（一位小数仅在三位数以下）。 */

@@ -1471,22 +1471,24 @@
   overflow-wrap: break-word;
 }
 
-/* 轮次级失败/未完成卡片（blocked / incomplete / cancelled / aborted / failed 统一出口） */
-.biny-chat-scroll .run-error-card {
+/* 轮次级失败/未完成卡片：固定在输入框上方，错误、详情和下一步操作保持同一视觉上下文。 */
+.biny-chat-composer .run-error-card {
   position: relative;
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  margin-block: 2px;
-  padding: 10px 12px;
+  margin: 0 0 10px;
+  padding: 12px 38px 12px 12px;
   border: 1px solid color-mix(in srgb, var(--biny-danger) 30%, transparent);
-  border-radius: var(--biny-radius-control, 8px);
-  background: color-mix(in srgb, var(--biny-danger) 5%, var(--biny-surface-soft));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--biny-danger) 4%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
 
 .run-error-card[data-variant="warning"] {
   border-color: color-mix(in srgb, var(--biny-warning) 35%, transparent);
-  background: color-mix(in srgb, var(--biny-warning) 6%, var(--biny-surface-soft));
+  background: color-mix(in srgb, var(--biny-warning) 4%, transparent);
 }
 
 .run-error-card-icon {
@@ -1504,7 +1506,7 @@
   color: var(--biny-warning);
 }
 
-.biny-chat-scroll .run-error-card-dismiss {
+.biny-chat-composer .run-error-card-dismiss {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -1523,7 +1525,7 @@
   transition: opacity var(--biny-motion-quick, 120ms) ease, background var(--biny-motion-quick, 120ms) ease;
 }
 
-.biny-chat-scroll .run-error-card-dismiss:hover {
+.biny-chat-composer .run-error-card-dismiss:hover {
   opacity: 1;
   background: color-mix(in srgb, var(--biny-text) 8%, transparent);
   color: var(--biny-text);
@@ -1537,10 +1539,27 @@
   min-width: 0;
 }
 
+.run-error-card-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .run-error-card-title {
   font-size: calc(13px * var(--font-scale, 1));
   font-weight: 600;
   color: var(--biny-text);
+}
+
+.run-error-card-kind {
+  flex: none;
+  color: var(--biny-danger);
+  font-size: calc(11px * var(--font-scale, 1));
+}
+
+.run-error-card[data-variant="warning"] .run-error-card-kind {
+  color: var(--biny-warning);
 }
 
 .run-error-card-message {
@@ -1550,31 +1569,89 @@
   overflow-wrap: break-word;
 }
 
-.run-error-card-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 4px;
+.run-error-card-recovery {
+  color: var(--biny-text-tertiary);
+  font-size: calc(12px * var(--font-scale, 1));
+  line-height: 1.5;
 }
 
-.biny-chat-scroll .run-error-card-action {
-  padding: 4px 12px;
+.run-error-card-details {
+  margin-top: 3px;
+  border-top: 1px solid color-mix(in srgb, var(--biny-danger) 18%, transparent);
+}
+
+.run-error-card-details summary {
+  width: fit-content;
+  padding-top: 7px;
+  color: var(--biny-text-tertiary);
+  cursor: pointer;
+  font-size: calc(11px * var(--font-scale, 1));
+  list-style-position: inside;
+}
+
+.run-error-card-details pre {
+  max-height: 96px;
+  overflow: auto;
+  margin: 7px 0 0;
+  padding: 8px 9px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--biny-text) 7%, transparent);
+  color: var(--biny-text-tertiary);
+  font: calc(10px * var(--font-scale, 1)) / 1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.run-error-card-actions {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  gap: 8px;
+  padding-top: 1px;
+}
+
+.biny-chat-composer .run-error-card-action {
+  min-height: 30px;
+  padding: 0 12px;
   border: 1px solid var(--biny-border);
   border-radius: var(--biny-radius-control, 8px);
-  background: var(--biny-surface);
+  background: var(--biny-surface-elevated);
   color: var(--biny-text);
   font-size: calc(12.5px * var(--font-scale, 1));
   cursor: pointer;
   transition: background var(--biny-motion-quick, 120ms) ease;
 }
 
-.biny-chat-scroll .run-error-card-action:hover {
+.biny-chat-composer .run-error-card-action:hover {
   background: var(--biny-surface-hover);
 }
 
-.biny-chat-scroll .run-error-card-action.is-primary {
-  border-color: var(--biny-focus);
-  background: var(--biny-focus);
-  color: #fff;
+.biny-chat-composer .run-error-card-action.is-primary {
+  border-color: var(--biny-danger);
+  background: var(--biny-danger);
+  color: var(--biny-selection-text);
+}
+
+.biny-chat-composer .run-error-card-action:focus-visible,
+.biny-chat-composer .run-error-card-dismiss:focus-visible,
+.run-error-card-details summary:focus-visible {
+  outline: 2px solid var(--biny-focus);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .biny-chat-composer .run-error-card {
+    flex-wrap: wrap;
+  }
+
+  .run-error-card-body {
+    flex-basis: calc(100% - 28px);
+  }
+
+  .run-error-card-actions {
+    width: 100%;
+    padding-left: 28px;
+  }
 }
 
 /* ============ 消息时钟 ============ */

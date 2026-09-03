@@ -118,6 +118,8 @@ function DesktopApp(): React.JSX.Element {
   const homeFlightNonceRef = useRef(0);
   /** 项目行「新建任务」直达的空白草稿：true 时 Workspace 渲染空白聊天而非首页欢迎态。 */
   const [blankDraft, setBlankDraft] = useState(false);
+  /** 未发送草稿的目标项目；只改变输入框归属，不提前切换工作区。 */
+  const [draftProjectId, setDraftProjectId] = useState<string>();
   const [_projectBranches, setProjectBranches] = useState<DesktopGitBranch[]>([]);
   const [_branchesLoading, setBranchesLoading] = useState(false);
   const [deletedUserMessages, setDeletedUserMessages] = useState<Set<string>>(() => new Set());
@@ -396,6 +398,8 @@ function DesktopApp(): React.JSX.Element {
       setRuntimePanelOpen(activeView === "runtime");
       selectedRef.current = sessionId;
       setSelectedSessionId(sessionId);
+      setBlankDraft(false);
+      setDraftProjectId(undefined);
       setDraftMemoryOverride(undefined);
       // 上下文用量属于某一个会话，换会话就作废，等新会话跑出 context.updated 再显示。
       setContextBudget(undefined);
@@ -447,6 +451,7 @@ function DesktopApp(): React.JSX.Element {
     mergeWorkspaceProject(snapshot);
     // 显式切换项目或新建任务时进入空白草稿，不沿用该项目之前保存的会话正文。
     setSelectedSessionId(undefined);
+    setDraftProjectId(undefined);
     setDraftMemoryOverride(undefined);
     setDocument(undefined);
     setWriterConflict(undefined);
@@ -461,10 +466,10 @@ function DesktopApp(): React.JSX.Element {
     // 从项目选择到会话读取共用同一个请求号，较早的跨项目请求不能在较新的点击后重新取得提交权。
     const request = loadRequestRef.current + 1;
     loadRequestRef.current = request;
-    // 草稿呈现变体随导航目标走：项目行入口直达空白聊天，其余入口（顶部/菜单/回退缺省）保持首页欢迎态。
-    // 同步设置在 await 之前，空白草稿不闪欢迎页；被 supersede 的请求会被更新的导航重新覆写。
-    setBlankDraft(target.sessionId === undefined && target.draftVariant === "blank");
     const startingCurrentDraft = target.sessionId === undefined && target.projectId === projectRef.current;
+    // 只有无会话草稿需要在 await 前切换呈现变体；打开已有会话时保留旧变体，
+    // 跨项目时则等目标快照就绪后再切，避免旧项目先闪成另一种草稿布局。
+    if (startingCurrentDraft) setBlankDraft(target.draftVariant === "blank");
     if (startingCurrentDraft) {
       // 当前项目的新建任务应立即呈现空白输入框。startDraft 只负责重置旧运行时，
       // 这里不能把它伪装成“恢复会话”，也不能继续显示上一段聊天正文。
@@ -482,7 +487,8 @@ function DesktopApp(): React.JSX.Element {
         ? { ...current, selectedSessionId: undefined }
         : current);
       setLoading(false);
-    } else {
+    } else if (!projectRef.current) {
+      // 已有工作区时保留旧项目/会话，等目标数据就绪后再一次性替换；否则 loading 会把聊天正文闪成空白。
       setLoading(true);
     }
     try {
@@ -490,7 +496,10 @@ function DesktopApp(): React.JSX.Element {
         const snapshot = await window.biny.startDraft(target.projectId);
         if (loadRequestRef.current !== request) return false;
         const adopted = await adoptWorkspace(snapshot, undefined, request);
-        if (adopted) setFocusToken((value) => value + 1);
+        if (adopted) {
+          setBlankDraft(target.draftVariant === "blank");
+          setFocusToken((value) => value + 1);
+        }
         return adopted;
       }
       if (target.projectId === projectRef.current) {
@@ -596,11 +605,17 @@ function DesktopApp(): React.JSX.Element {
   }, [adoptWorkspace]);
 
   const selectProject = useCallback(async (projectId: string): Promise<void> => {
-    if (projectId === projectRef.current) return;
+    if (projectId === projectRef.current) {
+      setDraftProjectId(undefined);
+      return;
+    }
     setComposerDraft(undefined);
+    setDraftProjectId(undefined);
     const request = loadRequestRef.current + 1;
     loadRequestRef.current = request;
-    setLoading(true);
+    // 切换目录是异步读取：已有工作区时保留当前聊天，避免 loading 短暂替换整块正文。
+    // 首次从首页选择项目仍需要 loading，避免在项目快照返回前渲染半成品状态。
+    if (!projectRef.current) setLoading(true);
     try {
       const snapshot = await window.biny.selectProject(projectId);
       if (loadRequestRef.current === request) await adoptWorkspace(snapshot, undefined, request);
@@ -610,6 +625,15 @@ function DesktopApp(): React.JSX.Element {
       if (loadRequestRef.current === request) setLoading(false);
     }
   }, [adoptWorkspace]);
+
+  const selectComposerProject = useCallback((projectId: string): void => {
+    // 新消息尚未生成 session 时，文件夹只是消息归属，不应触发工作区和左侧栏切换。
+    if (selectedRef.current === undefined) {
+      setDraftProjectId(projectId === projectRef.current ? undefined : projectId);
+      return;
+    }
+    void selectProject(projectId);
+  }, [selectProject]);
 
   const _switchProjectBranch = useCallback(async (branchName: string): Promise<void> => {
     const projectId = projectRef.current;
@@ -778,8 +802,13 @@ function DesktopApp(): React.JSX.Element {
   }, [newTask, openProject, openSearch, openSettings, toggleSidebar]);
 
   const sendPrompt = useCallback(async (input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string, capabilitySelection?: AgentCapabilitySelection): Promise<void> => {
-    const projectId = projectRef.current;
+    const activeProjectId = projectRef.current;
+    const projectId = selectedRef.current === undefined
+      ? draftProjectId ?? activeProjectId
+      : activeProjectId;
     if (!projectId) throw new Error("请先打开一个项目。");
+    const switchingDraftProject = projectId !== activeProjectId;
+    const navigationRequest = loadRequestRef.current;
     const previousSessionId = selectedRef.current;
     const previousNavigation = navigationRef.current;
     const draftPersonalization: DesktopChatPersonalizationOverride = {
@@ -789,7 +818,7 @@ function DesktopApp(): React.JSX.Element {
     setComposerDraft(undefined);
     const receipt = await window.biny.sendPrompt(
       projectId,
-      selectedRef.current,
+      switchingDraftProject ? undefined : selectedRef.current,
       input,
       mode,
       attachments,
@@ -799,7 +828,23 @@ function DesktopApp(): React.JSX.Element {
       undefined,
       capabilitySelection
     );
+    if (switchingDraftProject) {
+      // 消息已在目标项目创建后再切换界面；这样切换前不会重绘左侧栏，也不会丢掉目标运行产生的首批事件。
+      if (loadRequestRef.current !== navigationRequest) return;
+      try {
+        const snapshot = await window.biny.selectProject(projectId);
+        if (loadRequestRef.current !== navigationRequest) return;
+        const opened = await openSession(projectId, receipt.sessionId, false, navigationRequest, snapshot);
+        if (!opened || loadRequestRef.current !== navigationRequest) return;
+      } catch (error) {
+        setWarning(`消息已发送，但无法切换到目标文件夹：${errorMessage(error)}`);
+        return;
+      }
+      commitNavigation(pushNavigation(previousNavigation, { projectId, sessionId: receipt.sessionId }));
+      return;
+    }
     setSelectedSessionId(receipt.sessionId);
+    setDraftProjectId(undefined);
     setDraftMemoryOverride(undefined);
     if (receipt.sessionId !== previousSessionId) {
       const target: DesktopNavigationTarget = { projectId, sessionId: receipt.sessionId };
@@ -812,7 +857,7 @@ function DesktopApp(): React.JSX.Element {
       const summary = workspace?.sessions.find((session) => session.id === receipt.sessionId) ?? syntheticSession(projectId, receipt.sessionId, input);
       setDocument({ session: summary, events: [], liveEvents: [] });
     }
-  }, [commitNavigation, document, draftMemoryOverride, workspace?.sessions]);
+  }, [commitNavigation, document, draftMemoryOverride, draftProjectId, openSession, workspace?.sessions]);
 
   const retryWriterConflict = useCallback(async (): Promise<void> => {
     const projectId = projectRef.current;
@@ -828,7 +873,10 @@ function DesktopApp(): React.JSX.Element {
   // 首页（无会话）首条消息：先播过场动画再让聊天布局接管。失败回滚交给 Workspace。
   // 空白草稿的 Composer 本就在底部停靠，无需过场，直接发送。
   const sendPromptWithFlight = useCallback(async (input: string, mode: InteractiveAgentRunMode, attachments: DesktopAttachment[], delivery?: "steer" | "followUp", idempotencyKey?: string, capabilitySelection?: AgentCapabilitySelection): Promise<void> => {
-    const isHomeSubmit = Boolean(projectRef.current) && selectedRef.current === undefined && !blankDraft;
+    const isHomeSubmit = Boolean(projectRef.current)
+      && selectedRef.current === undefined
+      && !blankDraft
+      && (draftProjectId === undefined || draftProjectId === projectRef.current);
     if (isHomeSubmit) {
       homeFlightNonceRef.current += 1;
       setHomeFlight({ text: input, nonce: homeFlightNonceRef.current });
@@ -839,35 +887,23 @@ function DesktopApp(): React.JSX.Element {
       if (isHomeSubmit) setHomeFlight(null);
       throw error;
     }
-  }, [blankDraft, sendPrompt]);
+  }, [blankDraft, draftProjectId, sendPrompt]);
 
   const submitComposerPrompt = useCallback((prompt: string): void => {
     setComposerSubmitDraft({ text: prompt, nonce: Date.now() });
   }, []);
 
-  const resumeInterruptedTurn = useCallback(async (): Promise<void> => {
-    const projectId = projectRef.current;
-    const sessionId = selectedRef.current;
-    if (!projectId || !sessionId) return;
-    const receipt = await window.biny.resumeInterruptedTurn(projectId, sessionId);
-    if (!receipt) {
-      setWarning("当前会话没有可恢复的在途回合。");
-      return;
-    }
-    setSelectedSessionId(receipt.sessionId);
-  }, []);
-
   const runSlashCommand = useCallback(async (command: string): Promise<void> => {
-    const projectId = projectRef.current;
+    const projectId = selectedRef.current === undefined ? draftProjectId ?? projectRef.current : projectRef.current;
     if (!projectId) throw new Error("请先打开一个项目。");
     setSlashResult(await window.biny.runSlashCommand(projectId, selectedRef.current, command));
-  }, []);
+  }, [draftProjectId]);
 
   const expandSkillCommand = useCallback(async (input: string): Promise<string> => {
-    const projectId = projectRef.current;
+    const projectId = selectedRef.current === undefined ? draftProjectId ?? projectRef.current : projectRef.current;
     if (!projectId) throw new Error("请先打开一个项目。");
     return await window.biny.expandSkillCommand(projectId, input);
-  }, []);
+  }, [draftProjectId]);
 
   const runInspectorCommand = useCallback(async (command: string): Promise<DesktopSlashResult> => {
     const projectId = projectRef.current;
@@ -1029,6 +1065,7 @@ function DesktopApp(): React.JSX.Element {
       setWorkspace(bootstrap.workspace);
       setDocument(undefined);
       setSelectedSessionId(undefined);
+      setDraftProjectId(undefined);
       setPage(bootstrap.activeView === "extensions" ? "extensions" : "chat");
       setRuntimePanelOpen(bootstrap.activeView === "runtime" && Boolean(bootstrap.workspace));
       commitNavigation(createNavigationState());
@@ -1096,11 +1133,11 @@ function DesktopApp(): React.JSX.Element {
   }, [mergeWorkspaceProject]);
 
   const saveAttachment = useCallback(async (file: File): Promise<DesktopAttachment> => {
-    const projectId = projectRef.current;
+    const projectId = selectedRef.current === undefined ? draftProjectId ?? projectRef.current : projectRef.current;
     if (!projectId) throw new Error("请先打开一个项目。");
     if (file.size > 50 * 1024 * 1024) throw new Error(`${file.name} 超过 50 MB。`);
     return await window.biny.saveAttachment(projectId, file.name, file.type, new Uint8Array(await file.arrayBuffer()));
-  }, []);
+  }, [draftProjectId]);
 
   const resolvePermission = useCallback(async (requestId: string, result: PermissionResult): Promise<void> => {
     const projectId = projectRef.current;
@@ -1350,6 +1387,9 @@ function DesktopApp(): React.JSX.Element {
     setComposerDraft(input);
     setFocusToken((value) => value + 1);
   }, []);
+  const composerProject = selectedSessionId === undefined && draftProjectId
+    ? projects.find((project) => project.id === draftProjectId) ?? workspace?.project
+    : workspace?.project;
   const composer = (
     <Composer
       sessionWriterConflict={writerConflict !== undefined}
@@ -1386,11 +1426,11 @@ function DesktopApp(): React.JSX.Element {
       running={selectedRunning}
       runtimeBusy={runtimeBusy}
       runtimeInfo={workspace?.runtime?.info}
-      workspaceContext={workspace?.project ? (
+      workspaceContext={composerProject ? (
         <WorkspaceContextBar
           onCreateProject={() => void createEmptyProject()}
-          onSelectProject={(projectId) => { void selectProject(projectId); }}
-          project={workspace.project}
+          onSelectProject={selectComposerProject}
+          project={composerProject}
           projects={projects}
         />
       ) : undefined}
@@ -1536,7 +1576,6 @@ function DesktopApp(): React.JSX.Element {
         onPreviewFile={inspector.previewFile}
         inspectorOpen={inspector.open}
         onResolvePermission={resolvePermission}
-        onResume={resumeInterruptedTurn}
         onRollbackFiles={rollbackFiles}
         onRetry={retryTimelinePrompt}
         onSwitchVersion={switchTimelineVersion}
