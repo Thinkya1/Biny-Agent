@@ -1,9 +1,9 @@
 /**
  * 归档工具结果读取模块。
  *
- * 超出回合预算的工具输出会被移出对话，只在上下文里留下 `.biny/tool-results` 引用。该目录被
- * workspace ignore 规则挡在 `read_file` 之外，因此按需取回必须走这个受限入口：它只接受归档
- * 引用形态的路径，不接受任意工作区路径。
+ * 工具输出因回合预算或模型投影被移出对话时，只在上下文里留下 `.biny/tool-results` 引用。
+ * 该目录被 workspace ignore 规则挡在 `read_file` 之外，因此按需取回必须走这个受限入口：
+ * 它只接受归档引用形态的路径，不接受任意工作区路径。
  */
 import { z } from "zod";
 import { readToolResultArchive, resolveToolResultArchivePath } from "../../session/toolResultArchive.js";
@@ -40,7 +40,7 @@ export interface ReadToolResultResult {
 export function createReadToolResultTool(context: ToolContext): Tool<ReadToolResultArgs, ReadToolResultResult> {
   return {
     name: readToolResultToolName,
-    description: `Read a tool result that was archived out of the conversation because it exceeded the turn output budget. Pass the archivePath reported in the archived result. Returns at most ${String(maxLength)} characters; page through longer results with offset.`,
+    description: `Read a tool result archived out of the model context because it was large or superseded. Pass the archivePath reported in the result. Returns at most ${String(maxLength)} characters; page through longer results with offset.`,
     promptSnippet: "Read a paginated tool result archived outside the conversation",
     promptGuidelines: ["When a tool result reports an archivePath, use read_tool_result and continue paging until enough evidence is available"],
     parameters: {

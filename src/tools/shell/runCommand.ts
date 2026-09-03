@@ -6,6 +6,7 @@
  */
 import { homedir, tmpdir } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 import { ToolAccesses } from "../access.js";
 import { describeSandbox, sandboxCommand, type SandboxOptions } from "./sandbox.js";
@@ -14,6 +15,8 @@ import type { Tool, ToolContext, ToolUpdate } from "../types.js";
 import { resolveWorkspaceDirectory } from "../../workspace/resolvePath.js";
 
 const maxOutputBytes = 1024 * 1024;
+/** 普通调用仍只保留 1MiB；run_command 工具会在这个更大的边界内尽量保留全文，交给上层归档。 */
+const maxCapturedOutputBytes = 8 * 1024 * 1024;
 const defaultTimeoutMs = 120_000;
 const defaultTerminationGraceMs = 1_000;
 const defaultKillSettleMs = 1_000;
@@ -29,6 +32,16 @@ export interface RunCommandResult {
   sandbox?: string;
   stdout: string;
   stderr: string;
+  /** stdout 的原始 UTF-8 字节数；stdout 可能只保留了末尾。 */
+  stdoutBytes: number;
+  stdoutRetainedBytes: number;
+  stdoutTruncated: boolean;
+  stdoutTruncationDirection?: "tail";
+  /** stderr 的原始 UTF-8 字节数；stderr 可能只保留了末尾。 */
+  stderrBytes: number;
+  stderrRetainedBytes: number;
+  stderrTruncated: boolean;
+  stderrTruncationDirection?: "tail";
   exitCode: number;
   error?: string;
 }
@@ -41,6 +54,10 @@ export interface RunShellCommandOptions {
   timeoutMs?: number;
   terminationGraceMs?: number;
   killSettleMs?: number;
+  /** 工具调用尽量保留较大的完整输出，避免在回合归档之前丢掉前半段。 */
+  captureFullOutput?: boolean;
+  /** 完整输出捕获的硬上限，超过后仍保留尾部并明确标记。 */
+  maxCapturedOutputBytes?: number;
 }
 
 export interface RunCommandToolOptions {
@@ -92,7 +109,8 @@ export function createRunCommandTool(
           const result = await runShellCommand(cwd, sandboxed.command, {
             signal,
             onUpdate,
-            timeoutMs: options.timeoutMs
+            timeoutMs: options.timeoutMs,
+            captureFullOutput: true
           });
           // 如实回报这次到底有没有边界，避免"沙箱模式"这个名字暗示一个不存在的保护。
           return { ...result, sandbox: sandboxed.applied ? describeSandbox(sandboxOptions, process.platform) : `not applied (${sandboxed.reason ?? "unknown"})` };
@@ -112,14 +130,25 @@ export async function runShellCommand(cwd: string, command: string, options: Run
   const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
   const terminationGraceMs = options.terminationGraceMs ?? defaultTerminationGraceMs;
   const killSettleMs = options.killSettleMs ?? defaultKillSettleMs;
+  const outputLimitBytes = options.captureFullOutput
+    ? Math.min(options.maxCapturedOutputBytes ?? maxCapturedOutputBytes, maxCapturedOutputBytes)
+    : maxOutputBytes;
   if (![timeoutMs, terminationGraceMs, killSettleMs].every((value) => Number.isFinite(value) && value >= 0)) {
     throw new RangeError("Shell timeout and grace durations must be non-negative finite numbers.");
+  }
+  if (!Number.isSafeInteger(outputLimitBytes) || outputLimitBytes < 1) {
+    throw new RangeError("Shell output capture limit must be a positive safe integer.");
   }
 
   return await new Promise<RunCommandResult>((resolve, reject) => {
     options.signal?.throwIfAborted();
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    let outputFinalized = false;
     let settled = false;
     let stopReason: "abort" | "timeout" | undefined;
     let terminationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -139,18 +168,31 @@ export async function runShellCommand(cwd: string, command: string, options: Run
 
     const appendDiagnostic = (message: string) => {
       const text = `${stderr ? "\n" : ""}${message}`;
-      stderr = appendCapped(stderr, text);
+      stderrBytes += Buffer.byteLength(text, "utf8");
+      stderr = appendCappedToLimit(stderr, text, outputLimitBytes);
       options.onUpdate?.({ kind: "stderr", text });
     };
     const onStdout = (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      stdout = appendCapped(stdout, text);
-      options.onUpdate?.({ kind: "stdout", text });
+      stdoutBytes += chunk.byteLength;
+      const text = stdoutDecoder.write(chunk);
+      stdout = appendCappedToLimit(stdout, text, outputLimitBytes);
+      if (text) options.onUpdate?.({ kind: "stdout", text });
     };
     const onStderr = (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      stderr = appendCapped(stderr, text);
-      options.onUpdate?.({ kind: "stderr", text });
+      stderrBytes += chunk.byteLength;
+      const text = stderrDecoder.write(chunk);
+      stderr = appendCappedToLimit(stderr, text, outputLimitBytes);
+      if (text) options.onUpdate?.({ kind: "stderr", text });
+    };
+    const finalizeOutput = (): void => {
+      if (outputFinalized) return;
+      outputFinalized = true;
+      const stdoutRemainder = stdoutDecoder.end();
+      const stderrRemainder = stderrDecoder.end();
+      stdout = appendCappedToLimit(stdout, stdoutRemainder, outputLimitBytes);
+      stderr = appendCappedToLimit(stderr, stderrRemainder, outputLimitBytes);
+      if (stdoutRemainder) options.onUpdate?.({ kind: "stdout", text: stdoutRemainder });
+      if (stderrRemainder) options.onUpdate?.({ kind: "stderr", text: stderrRemainder });
     };
     const cleanup = () => {
       clearTimeout(commandTimer);
@@ -175,6 +217,7 @@ export async function runShellCommand(cwd: string, command: string, options: Run
       if (settled) return;
       settled = true;
       cleanup();
+      finalizeOutput();
       if (error !== undefined) {
         reject(error);
         return;
@@ -188,7 +231,25 @@ export async function runShellCommand(cwd: string, command: string, options: Run
         kind: "status",
         text: status === "timed_out" ? `Timed out with exit code ${String(resolvedExitCode)}` : `Exited with ${String(resolvedExitCode)}`
       });
-      resolve({ status, stdout, stderr, exitCode: resolvedExitCode, error: failureMessage });
+      const stdoutRetainedBytes = Buffer.byteLength(stdout, "utf8");
+      const stderrRetainedBytes = Buffer.byteLength(stderr, "utf8");
+      const stdoutTruncated = stdoutBytes > stdoutRetainedBytes;
+      const stderrTruncated = stderrBytes > stderrRetainedBytes;
+      resolve({
+        status,
+        stdout,
+        stderr,
+        stdoutBytes,
+        stdoutRetainedBytes,
+        stdoutTruncated,
+        stdoutTruncationDirection: stdoutTruncated ? "tail" : undefined,
+        stderrBytes,
+        stderrRetainedBytes,
+        stderrTruncated,
+        stderrTruncationDirection: stderrTruncated ? "tail" : undefined,
+        exitCode: resolvedExitCode,
+        error: failureMessage
+      });
     };
     const forceKill = async () => {
       if (settled) return;
@@ -439,13 +500,17 @@ function abortReason(signal: AbortSignal | undefined): unknown {
 }
 
 export function appendCapped(current: string, chunk: string): string {
+  return appendCappedToLimit(current, chunk, maxOutputBytes);
+}
+
+function appendCappedToLimit(current: string, chunk: string, limitBytes: number): string {
   const next = `${current}${chunk}`;
   const byteLength = Buffer.byteLength(next, "utf8");
-  if (byteLength <= maxOutputBytes) return next;
+  if (byteLength <= limitBytes) return next;
   // 上限按字节计，截断也必须按字节来：起点落在多字节字符中间时前进到下一个字符边界，
   // 避免在输出开头留下半个 UTF-8 序列。
   const buffer = Buffer.from(next, "utf8");
-  let start = byteLength - maxOutputBytes;
+  let start = byteLength - limitBytes;
   while (start < buffer.length && (buffer[start]! & 0xc0) === 0x80) start += 1;
   return buffer.subarray(start).toString("utf8");
 }

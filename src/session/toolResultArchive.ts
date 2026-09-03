@@ -94,8 +94,10 @@ export function toolResultPreview(value: string, maxCharacters = previewCharacte
   if (value.length <= maxCharacters) return value;
   const headLength = Math.floor(maxCharacters / 2);
   const tailLength = maxCharacters - headLength;
-  const omitted = Buffer.byteLength(value.slice(headLength, -tailLength), "utf8");
-  return `${value.slice(0, headLength)}\n… [${String(omitted)} bytes omitted; full result archived] …\n${value.slice(-tailLength)}`;
+  const head = safePrefix(value, headLength);
+  const tail = safeSuffix(value, tailLength);
+  const omitted = Buffer.byteLength(value.slice(head.length, value.length - tail.length), "utf8");
+  return `${head}\n… [${String(omitted)} bytes omitted; full result archived] …\n${tail}`;
 }
 
 /**
@@ -188,4 +190,24 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();
   if (value instanceof Error) return { name: value.name, message: value.message };
   return value;
+}
+
+function safePrefix(value: string, length: number): string {
+  let end = Math.min(value.length, Math.max(0, length));
+  if (end > 0 && isHighSurrogate(value.charCodeAt(end - 1))) end -= 1;
+  return value.slice(0, end);
+}
+
+function safeSuffix(value: string, length: number): string {
+  let start = Math.max(0, value.length - Math.max(0, length));
+  if (start < value.length && isLowSurrogate(value.charCodeAt(start))) start += 1;
+  return value.slice(start);
+}
+
+function isHighSurrogate(value: number): boolean {
+  return value >= 0xd800 && value <= 0xdbff;
+}
+
+function isLowSurrogate(value: number): boolean {
+  return value >= 0xdc00 && value <= 0xdfff;
 }

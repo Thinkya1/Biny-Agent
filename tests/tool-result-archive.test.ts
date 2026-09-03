@@ -10,6 +10,7 @@ import { SessionRecorder } from "../src/session/recorder.js";
 import { ensureAgentDirs } from "../src/session/store.js";
 import { createReadToolResultTool } from "../src/tools/file/readToolResult.js";
 import { ToolRegistry } from "../src/tools/registry.js";
+import type { AgentSessionEvent } from "../src/agent/types.js";
 import { resolveWorkspacePath } from "../src/workspace/resolvePath.js";
 import type { Tool } from "../src/tools/types.js";
 
@@ -164,6 +165,78 @@ async function testPersistLevelOutlining(): Promise<void> {
   }
 }
 
+/** 专用投影必须先于回合预算，且不能改变 session/UI 中看到的完整结果。 */
+async function testProjectionBeforeTurnBudget(): Promise<void> {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "biny-tool-result-projection-budget-"));
+  let recorder: SessionRecorder | undefined;
+  try {
+    await ensureAgentDirs(workspaceRoot);
+    const config = structuredClone(defaultConfig) as AgentConfig;
+    config.context.maxTurnToolResultBytes = 1_024;
+    config.permission.mode = "full-access";
+    const registry = new ToolRegistry();
+    registry.register(projectedWriteTool());
+    const events: AgentSessionEvent[] = [];
+    recorder = new SessionRecorder(workspaceRoot, "projection-budget-test");
+    const coordinator = new ToolExecutionCoordinator({
+      workspaceRoot,
+      config,
+      recorder,
+      toolRegistry: registry
+    }, new PermissionManager(config.permission), (event) => events.push(event));
+    const tool = nativeTool(coordinator, "write");
+
+    const modelFacing = await tool.execute("projection-write", { path: "src/example.ts", content: "new" }) as Record<string, unknown>;
+    assert.equal(modelFacing.archived, true);
+    assert.equal(typeof modelFacing.archivePath, "string");
+    assert.equal(typeof modelFacing.addedLines, "number");
+    assert.equal(modelFacing.diffPreview, undefined);
+
+    const completed = events.find((event) => event.type === "tool.completed");
+    assert.equal(completed?.type === "tool.completed" ? typeof completed.result.diffPreview : "undefined", "string");
+    const persisted = (await readFile(recorder.filePath, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { type: string; result?: Record<string, unknown> })
+      .find((event) => event.type === "tool_result");
+    assert.equal(typeof persisted?.result?.archivePath, "string");
+    const archive = JSON.parse(await readFile(path.join(workspaceRoot, String(persisted?.result?.archivePath)), "utf8")) as { output?: string };
+    assert.equal(JSON.parse(archive.output ?? "{}").diffPreview, `@@\n-${"old\n".repeat(12_000)}\n+new`);
+    await recorder.close();
+  } finally {
+    await recorder?.close().catch(() => undefined);
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+}
+
+function projectedWriteTool(): Tool<{ path: string; content: string }, Record<string, unknown>> {
+  return {
+    name: "write",
+    description: "Return a large write result for projection tests.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string" }, content: { type: "string" } },
+      required: ["path", "content"],
+      additionalProperties: false
+    },
+    schema: z.object({ path: z.string(), content: z.string() }),
+    risk: "read",
+    resolveExecution(args) {
+      return {
+        approvalRule: "projected_write",
+        async execute() {
+          return {
+            path: args.path,
+            bytes: Buffer.byteLength(args.content, "utf8"),
+            diffPreview: `@@\n-${"old\n".repeat(12_000)}\n+new`,
+            changeSummary: `Overwrite ${args.path}`
+          };
+        }
+      };
+    }
+  };
+}
+
 function hugeResultTool(): Tool<Record<string, never>, string> {
   return {
     name: "huge_result",
@@ -213,4 +286,5 @@ function nativeTool(coordinator: ToolExecutionCoordinator, name: string): Execut
 
 await testConcurrentToolResultBudget();
 await testPersistLevelOutlining();
+await testProjectionBeforeTurnBudget();
 await main();

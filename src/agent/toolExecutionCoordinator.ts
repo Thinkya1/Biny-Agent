@@ -39,6 +39,7 @@ import { createToolOperationId } from "../tools/types.js";
 import { resolveWorkspacePath, toWorkspaceRelative } from "../workspace/resolvePath.js";
 import type { ReasoningBlock } from "../session/recorder.js";
 import { archiveToolResult, serializeToolResult, toolResultPreview } from "../session/toolResultArchive.js";
+import { projectSingleToolResultForModel } from "./toolResultProjection.js";
 import type {
   AgentPermissionRequest,
   AgentPermissionResult,
@@ -592,7 +593,9 @@ export class ToolExecutionCoordinator {
     } = {}
   ): Promise<unknown> {
     const modelResult = await this.applyToolResultBudget(call, sequence, result);
-    const persistedResult = await this.outlineToolResultForPersistence(call, sequence, modelResult);
+    // 模型侧预算只改变返回值；session、实时界面和归档都以工具实际产出的结果为事实。
+    // 否则一次预算溢出会把“模型看见的引用”误当成工具真正返回的内容，后续恢复只能看到二次包装。
+    const persistedResult = await this.outlineToolResultForPersistence(call, sequence, result);
     await this.context.recorder.recordAndFlush({
       type: "tool_result",
       tool: call.name,
@@ -610,12 +613,12 @@ export class ToolExecutionCoordinator {
     } catch {
       // TurnStore 是崩溃安全断点，不能把已经持久化的 tool_result 变成工具失败。
     }
-    this.context.contextMemory?.observeToolResult(call.name, call.args, modelResult);
+    this.context.contextMemory?.observeToolResult(call.name, call.args, result);
     if (errorMessage) {
       this.context.recorder.record({ type: "error", message: errorMessage });
       this.emit({ type: "error", message: errorMessage, recorded: true, fatal: false });
     }
-    this.emitToolResult(call, modelResult, errorMessage, metadata);
+    this.emitToolResult(call, result, errorMessage, metadata);
     return modelResult;
   }
 
@@ -670,22 +673,37 @@ export class ToolExecutionCoordinator {
    * preview per step and overflow the window it was meant to protect.
    */
   private applyToolResultBudget(
-    call: { id: string; name: string },
+    call: { id: string; name: string; args: unknown },
     sequence: number,
     result: unknown
   ): Promise<unknown> {
     const current = this.toolResultBudgetTail.then(async () => {
       const budget = this.context.config.context.maxTurnToolResultBytes;
-      const output = serializeToolResult(result);
+      const rawOutput = serializeToolResult(result);
+      const rawResultBytes = Buffer.byteLength(rawOutput, "utf8");
+      const modelResult = await projectSingleToolResultForModel(call.name, call.args, result, {
+        toolCallId: call.id,
+        sequence,
+        archiveResult: async ({ result: archivedResult, output }) => await archiveToolResult({
+          workspaceRoot: this.context.workspaceRoot,
+          sessionId: this.context.recorder.sessionId,
+          toolCallId: call.id,
+          sequence,
+          tool: call.name,
+          result: archivedResult,
+          output
+        })
+      });
+      const output = serializeToolResult(modelResult);
       const resultBytes = Buffer.byteLength(output, "utf8");
-      this.producedToolResultBytes += resultBytes;
+      this.producedToolResultBytes += rawResultBytes;
       const remaining = Math.max(0, budget - this.inlineToolResultBytes);
       if (resultBytes <= remaining || call.name === readToolResultToolName) {
         this.inlineToolResultBytes += resultBytes;
-        return result;
+        return modelResult;
       }
 
-      const envelope = await this.archivedToolResultEnvelope(call, sequence, result, output, resultBytes, remaining);
+      const envelope = await this.archivedToolResultEnvelope(call, sequence, result, rawOutput, rawResultBytes, remaining);
       this.inlineToolResultBytes += Buffer.byteLength(serializeToolResult(envelope), "utf8");
       return envelope;
     });
@@ -706,6 +724,7 @@ export class ToolExecutionCoordinator {
     const shared = {
       archived: true,
       resultBytes,
+      resultFingerprint: createHash("sha256").update(output).digest("hex"),
       producedResultBytes: this.producedToolResultBytes,
       turnBudgetBytes: this.context.config.context.maxTurnToolResultBytes,
       ...(preview ? { preview } : {})
@@ -729,7 +748,8 @@ export class ToolExecutionCoordinator {
       return {
         ...shared,
         archiveError: formatToolError(call.name, error),
-        summary: "Tool result exceeded the turn output budget and could not be archived; it is not recoverable."
+        result,
+        summary: "Tool result exceeded the turn output budget, but archiving failed. The original result is included under result and remains in session history."
       };
     }
   }
@@ -745,7 +765,7 @@ export class ToolExecutionCoordinator {
     sequence: number,
     modelResult: unknown
   ): Promise<unknown> {
-    // 预算路径已归档的 envelope 只含预览，体积天然达标；二次归档只会撞同名文件。
+    // 工具本身若已经返回可取回的归档引用，不再重复包装它。
     if (typeof modelResult === "object" && modelResult !== null && (modelResult as { archived?: unknown }).archived === true) {
       return modelResult;
     }
@@ -777,7 +797,8 @@ export class ToolExecutionCoordinator {
         resultBytes,
         preview,
         archiveError: formatToolError(call.name, error),
-        summary: "Tool result exceeded the inline persistence limit and could not be archived; only the preview is available."
+        result: modelResult,
+        summary: "Tool result exceeded the inline persistence limit, but archiving failed. The original result is included under result and remains in session history."
       };
     }
   }
@@ -1292,9 +1313,12 @@ function resultNumber(value: unknown, key: string): number | undefined {
   return typeof field === "number" ? field : undefined;
 }
 
-function failedToolResultMessage(result: unknown): string | undefined {
+function failedToolResultMessage(result: unknown, seen = new Set<object>()): string | undefined {
   if (typeof result !== "object" || result === null) return undefined;
+  if (seen.has(result)) return undefined;
+  seen.add(result);
   const record = result as Record<string, unknown>;
+  const nestedFailure = record.result !== result ? failedToolResultMessage(record.result, seen) : undefined;
   const failed = typeof record.error === "string"
     || (typeof record.exitCode === "number" && record.exitCode !== 0)
     || record.approved === false
@@ -1303,11 +1327,12 @@ function failedToolResultMessage(result: unknown): string | undefined {
     || record.status === "timed_out"
     || record.status === "aborted"
     || record.status === "permission_required";
-  if (!failed) return undefined;
+  if (!failed && !nestedFailure) return undefined;
   return readStringField(result, "error")
     || readStringField(result, "reason")
     || readStringField(result, "message")
     || (typeof record.exitCode === "number" ? `Command exited with code ${String(record.exitCode)}.` : undefined)
+    || nestedFailure
     || `Tool did not complete (${typeof record.status === "string" ? record.status : "failed"}).`;
 }
 
@@ -1403,7 +1428,14 @@ function attachToolSummary(result: unknown, durationMs: number): unknown {
   const stdout = typeof record.stdout === "string" ? record.stdout : "";
   const stderr = typeof record.stderr === "string" ? record.stderr : "";
   const output = [stdout, stderr].filter(Boolean).join("\n");
-  return { ...record, durationMs, outputLines: output ? output.split(/\r?\n/).length : undefined, truncated: false };
+  return {
+    ...record,
+    durationMs,
+    outputLines: output ? output.split(/\r?\n/).length : undefined,
+    // run_command 已经分别记录两个输出流的截断状态。保留 UI 使用的历史聚合字段，但不能
+    // 覆盖更精确的逐流证据。
+    truncated: record.truncated === true || record.stdoutTruncated === true || record.stderrTruncated === true
+  };
 }
 
 /** 写入类工具统一用 `path`（move_file 用 `from`/`to`）表达目标；取不到就不跑诊断。 */

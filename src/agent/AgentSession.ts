@@ -101,6 +101,8 @@ import type { EmbeddingModelDescriptor, EmbeddingModelRuntime, LocalEmbeddingMod
 import { readAttachment, type AgentAttachment } from "../attachments/store.js";
 import type { AttachmentReference } from "../attachments/store.js";
 import { messageText } from "./modelMessages.js";
+import { projectToolResultsForModel } from "./toolResultProjection.js";
+import { archiveToolResult } from "../session/toolResultArchive.js";
 import { parseSkillDocument } from "../extensions/skillCatalog.js";
 import { createSkillDraft } from "../extensions/skillDrafts.js";
 import { TodoStore } from "../session/todoStore.js";
@@ -1645,7 +1647,18 @@ export class AgentSession {
           };
         },
         transformContext: async (contextMessages) => {
-          const prunedMessages = this.contextMemory.pruneToolResultsForStep(contextMessages);
+          const projectedMessages = await projectToolResultsForModel(contextMessages, {
+            archiveResult: async ({ message, result, output, sequence }) => await archiveToolResult({
+              workspaceRoot: this.options.workspaceRoot,
+              sessionId: this.recorder.sessionId,
+              toolCallId: message.toolCallId,
+              sequence,
+              tool: message.toolName,
+              result,
+              output
+            })
+          });
+          const prunedMessages = this.contextMemory.pruneToolResultsForStep(projectedMessages);
           const absoluteStep = completedStepsBeforeRun + observedSteps;
           if (!softLimitWarningInjected && absoluteStep >= runBudget.softStepLimit) {
             softLimitWarningInjected = true;
@@ -1697,10 +1710,21 @@ export class AgentSession {
             && mode !== "plan"
             && completionGuard.requiresSemanticReview()
           ) {
+            const reviewMessages = await projectToolResultsForModel(turn.context.messages, {
+              archiveResult: async ({ message, result, output, sequence }) => await archiveToolResult({
+                workspaceRoot: this.options.workspaceRoot,
+                sessionId: this.recorder.sessionId,
+                toolCallId: message.toolCallId,
+                sequence,
+                tool: message.toolName,
+                result,
+                output
+              })
+            });
             const review = await evaluateCompletion({
               model: activeModelSettings.model,
               task: input,
-              messages: turn.context.messages,
+              messages: reviewMessages,
               signal: abortSignal,
               providerOptions: activeModelSettings.providerOptions,
               timeoutMs: Math.min(activeModelSettings.timeoutMs ?? 30_000, 30_000),
