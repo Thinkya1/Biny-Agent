@@ -29,13 +29,16 @@ await testDailySummarySkipsPlaceholderAnalyses();
 await testActivitySummaryNarrativePersistence();
 
 function testDefaultActivitySidecarPath(): void {
+  const expectedPath = process.platform === "darwin"
+    ? "/tmp/biny-project/out/native/activity-recorder"
+    : undefined;
   assert.equal(
     defaultActivitySidecarPath({
       packaged: false,
       resourcesPath: "/tmp/biny-resources",
       appPath: "/tmp/biny-project/out/main"
     }),
-    "/tmp/biny-project/out/native/activity-recorder"
+    expectedPath
   );
   assert.equal(
     defaultActivitySidecarPath({
@@ -43,7 +46,7 @@ function testDefaultActivitySidecarPath(): void {
       resourcesPath: "/tmp/biny-resources",
       appPath: "/tmp/biny-project"
     }),
-    "/tmp/biny-project/out/native/activity-recorder"
+    expectedPath
   );
 }
 
