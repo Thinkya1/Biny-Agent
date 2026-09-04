@@ -3117,6 +3117,7 @@ select {
 /* memory：轻量条目列表，不把内部索引/来源治理暴露成控制台。 */
 .activity-memory-settings { gap: 18px; }
 .activity-memory-header,
+.activity-memory-diary,
 .activity-memory-add,
 .activity-memory-list,
 .activity-memory-sleep { padding: 16px 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
@@ -3126,9 +3127,17 @@ select {
 .activity-memory-list h3,
 .activity-memory-sleep h3 { margin: 0; font-size: calc(15px * var(--font-scale)); }
 .activity-memory-header p,
+.activity-memory-diary p,
 .activity-memory-add > p,
 .activity-memory-list p,
 .activity-memory-sleep p { margin: 5px 0 0; color: var(--text-secondary); font-size: calc(12px * var(--font-scale)); line-height: 1.5; }
+.activity-memory-diary-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.activity-memory-diary-heading h3 { margin: 0; font-size: calc(15px * var(--font-scale)); }
+.activity-memory-diary-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.activity-memory-diary-actions input { min-width: 190px; min-height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--surface-soft); font: inherit; font-size: 12px; }
+.activity-memory-diary-output { margin-top: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-soft); }
+.activity-memory-diary-output small { color: var(--text-tertiary); font-size: 10px; }
+.activity-memory-diary-output pre { max-height: 360px; margin: 8px 0 0; overflow: auto; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 12px; line-height: 1.6; }
 .activity-memory-config { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .activity-memory-add-box { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-soft); }
 .activity-memory-add-box textarea { box-sizing: border-box; width: 100%; resize: vertical; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; line-height: 1.55; }
@@ -3157,7 +3166,10 @@ select {
 @media (max-width: 720px) {
   .activity-memory-config { grid-template-columns: 1fr; }
   .activity-memory-header,
+  .activity-memory-diary-heading,
   .activity-memory-sleep { align-items: flex-start; flex-direction: column; }
+  .activity-memory-diary-actions { width: 100%; }
+  .activity-memory-diary-actions input { flex: 1; min-width: 0; }
 }
 
 .activity-memory-limit { display: flex; flex-direction: column; gap: 7px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-soft); }

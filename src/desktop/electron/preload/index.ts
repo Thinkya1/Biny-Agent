@@ -105,6 +105,7 @@ const api: DesktopApi = {
   activitySessionDetail: async (sessionId) => await ipcRenderer.invoke(desktopIpc.activitySessionDetail, sessionId),
   activitySnapshotPreview: async (snapshotId) => await ipcRenderer.invoke(desktopIpc.activitySnapshotPreview, snapshotId),
   activityReport: async (date) => await ipcRenderer.invoke(desktopIpc.activityReport, date),
+  dailyMemoryNote: async (date) => await ipcRenderer.invoke(desktopIpc.dailyMemoryNote, date),
   clearActivity: async () => await ipcRenderer.invoke(desktopIpc.activityClear),
   stageSettingsCredential: async (secret, scope) => await ipcRenderer.invoke(desktopIpc.stageSettingsCredential, secret, scope),
   completeModelLoginForSettings: async (projectId, provider, authRequestId, pastedAuthorization) => await ipcRenderer.invoke(

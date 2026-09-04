@@ -1477,6 +1477,7 @@ function DesktopApp(): React.JSX.Element {
             onLoadCookieJarStatus={loadCookieJarStatus}
             onLoadMemoryStats={loadMemoryStats}
             onLoadMemoryEntries={loadMemoryEntries}
+            onLoadDailyNote={async (date) => await window.biny.dailyMemoryNote(date)}
             onLoadMemoryEmbeddingStatus={loadMemoryEmbeddingStatus}
             onDownloadMemoryEmbeddingModel={downloadMemoryEmbeddingModel}
             onDeleteMemoryEmbeddingModel={deleteMemoryEmbeddingModel}

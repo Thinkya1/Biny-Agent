@@ -50,6 +50,8 @@ import type { QuickChatWindowController } from "./quickChatWindow.js";
 import { runtimeMutationStartsWork } from "./settingsRuntimeGate.js";
 import { exportSessionBundle, exportSessionClaudeCode } from "../../../session/transfer.js";
 import { activitySettingsPatchSchema } from "../../../activity/settings.js";
+import { resolveActivityReportRange } from "../../../activity/analyzer.js";
+import { readDailyMemoryNote } from "../../../activity/dailyNotes.js";
 
 interface IpcContext {
   state: DesktopStateStore;
@@ -781,6 +783,11 @@ export function registerDesktopIpc(context: IpcContext): void {
   handle(desktopIpc.activityReport, async (_event, date: unknown) => (
     await context.activity.buildReport(activityReportDateSchema.parse(date))
   ));
+
+  handle(desktopIpc.dailyMemoryNote, async (_event, date: unknown) => {
+    const dateLabel = resolveActivityReportRange(activityReportDateSchema.parse(date) ?? "today").label;
+    return { dateKey: dateLabel, content: await readDailyMemoryNote(dateLabel) };
+  });
 
   handleRecoveryGated(desktopIpc.activityClear, async () => {
     context.agents.assertNoRunningTasks("任务运行期间不能清除 Activity 数据。");

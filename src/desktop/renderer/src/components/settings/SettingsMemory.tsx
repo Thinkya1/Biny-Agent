@@ -8,7 +8,8 @@ import type {
   DesktopMemoryOriginFilter,
   DesktopMemorySearchMatch,
   DesktopMemoryStats,
-  DesktopMemorySleepPreview
+  DesktopMemorySleepPreview,
+  DesktopDailyMemoryNote
 } from "../../../../protocol.js";
 import type { MemorySleepRun } from "../../../../../agent/context/memoryTypes.js";
 import { Icon } from "../Icon.js";
@@ -33,6 +34,7 @@ interface SettingsMemoryProps {
   onSleepRuns(): Promise<MemorySleepRun[]>;
   onPreviewSleep(): Promise<DesktopMemorySleepPreview>;
   onCancelSleep(): Promise<{ cancelled: boolean }>;
+  onLoadDailyNote(date?: string): Promise<DesktopDailyMemoryNote>;
   onNotify(message: string): void;
 }
 
@@ -57,6 +59,7 @@ export function SettingsMemory({
   onSleepRuns,
   onPreviewSleep,
   onCancelSleep,
+  onLoadDailyNote,
   onNotify
 }: SettingsMemoryProps): React.JSX.Element {
   const { draft, setMemory } = useSettingsDraft();
@@ -73,6 +76,9 @@ export function SettingsMemory({
   const [sleepPreview, setSleepPreview] = useState<DesktopMemorySleepPreview>();
   const [sleepStatus, setSleepStatus] = useState<DesktopMemoryStats["maintenance"]>();
   const [archivedEntries, setArchivedEntries] = useState<DesktopMemoryEntry[]>([]);
+  const [dailyNoteDate, setDailyNoteDate] = useState("today");
+  const [dailyNote, setDailyNote] = useState<DesktopDailyMemoryNote>();
+  const [dailyNoteLoading, setDailyNoteLoading] = useState(false);
 
   const reload = useCallback(async (nextFilter: MemoryFilter = filter, nextIncludeArchived = includeArchived): Promise<void> => {
     if (!workspaceAvailable) return;
@@ -225,6 +231,18 @@ export function SettingsMemory({
     }
   };
 
+  const loadDailyNote = async (): Promise<void> => {
+    if (dailyNoteLoading) return;
+    setDailyNoteLoading(true);
+    try {
+      setDailyNote(await onLoadDailyNote(dailyNoteDate.trim() || "today"));
+    } catch (cause) {
+      onNotify(errorMessage(cause));
+    } finally {
+      setDailyNoteLoading(false);
+    }
+  };
+
   const remove = async (entry: DesktopMemoryEntry): Promise<void> => {
     if (!stats || saving) return;
     if (!window.confirm(`删除这条记忆？\n\n${entry.summary}`)) return;
@@ -303,6 +321,25 @@ export function SettingsMemory({
           <SettingsCheckbox checked={policy.sleepEnabled} detail="机器离线时，下一次启动后会安静地补做整理。" label="启用每日记忆整理" onChange={(sleepEnabled) => setMemory({ ...policy, sleepEnabled })} />
         </section>
       ) : null}
+
+      <section className="activity-memory-diary" id="memory-daily-diary" tabIndex={-1}>
+        <div className="activity-memory-diary-heading">
+          <div>
+            <h3>每日工作日志</h3>
+            <p>查看聊天摘要与活动记录；它与 durable memory 独立保存。</p>
+          </div>
+          <div className="activity-memory-diary-actions">
+            <input aria-label="每日工作日志日期" onChange={(event) => setDailyNoteDate(event.target.value)} placeholder="today、yesterday 或 2026-09-04" value={dailyNoteDate} />
+            <button className="ghost-button" disabled={dailyNoteLoading} onClick={() => { void loadDailyNote(); }} type="button">{dailyNoteLoading ? "读取中…" : "读取日志"}</button>
+          </div>
+        </div>
+        {dailyNote ? (
+          <div aria-live="polite" className="activity-memory-diary-output" role="region">
+            <small>{dailyNote.dateKey}</small>
+            <pre>{dailyNote.content ?? "这一天还没有工作日志。"}</pre>
+          </div>
+        ) : null}
+      </section>
 
       <section className="activity-memory-add" id="memory-add" tabIndex={-1}>
         <h3>添加记忆</h3>

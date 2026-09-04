@@ -10,7 +10,7 @@ import type { ModelProfile } from "../../../../../config/schema.js";
 import type { ModelChoice, ThinkingSelection } from "../../../../../llm/ModelManager.js";
 import type { LocalEmbeddingModelId } from "../../../../../llm/embedding/types.js";
 import type { MemorySleepRun } from "../../../../../agent/context/memoryTypes.js";
-import type { DesktopCookieJarStatus, DesktopFontPreference, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntriesPage, DesktopMemoryEntry, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryStats, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
+import type { DesktopCookieJarStatus, DesktopDailyMemoryNote, DesktopFontPreference, DesktopMemoryEmbeddingCancellationResult, DesktopMemoryEmbeddingDeleteResult, DesktopMemoryEmbeddingStatus, DesktopMemoryEntriesPage, DesktopMemoryEntry, DesktopMemoryEntryInput, DesktopMemoryEntryPatch, DesktopMemoryOriginFilter, DesktopMemoryStats, DesktopMemorySearchMatch, DesktopModelCatalogResult, DesktopModelConfigurationInput, DesktopModelConnection, DesktopModelConnectionTestResult, DesktopModelLoginProvider, DesktopModelLoginStartResult, DesktopSettingsCloseRequest, DesktopSettingsCloseResponse, DesktopSettingsSnapshot, DesktopThemePreference, DesktopWebSearchProvider, DesktopWorkspaceSnapshot } from "../../../../protocol.js";
 import {
   apiFormatForConnection,
   apiFormatOption,
@@ -69,6 +69,7 @@ interface SettingsOverlayProps {
   onFetchModelCatalogCandidate(configuration: DesktopModelConfigurationInput): Promise<DesktopModelCatalogResult>;
   sessionId?: string;
   sessionRunning: boolean;
+  onLoadDailyNote(date?: string): Promise<DesktopDailyMemoryNote>;
   onLoadMemoryStats(filter?: DesktopMemoryOriginFilter): Promise<DesktopMemoryStats>;
   onLoadMemoryEntries(filter: DesktopMemoryOriginFilter, offset: number, limit: number): Promise<DesktopMemoryEntriesPage>;
   onSearchMemory(filter: DesktopMemoryOriginFilter, query: string): Promise<DesktopMemorySearchMatch[]>;
@@ -206,6 +207,7 @@ function SettingsOverlayContent({
   onFetchModelCatalog,
   onFetchModelCatalogCandidate,
   sessionRunning,
+  onLoadDailyNote,
   onLoadMemoryStats,
   onLoadMemoryEntries,
   onSearchMemory,
@@ -499,6 +501,7 @@ function SettingsOverlayContent({
             models={settingsModels}
             hidden={activeTab !== "记忆"}
             workspaceAvailable={workspace !== undefined}
+            onLoadDailyNote={onLoadDailyNote}
             onLoadStats={onLoadMemoryStats}
             onLoadEntries={onLoadMemoryEntries}
             onSearch={onSearchMemory}

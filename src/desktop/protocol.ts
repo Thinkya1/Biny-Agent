@@ -47,6 +47,11 @@ export type DesktopIdentityOverview = IdentityOverview;
 
 /** 指定日期的 Activity 打工日记；markdown 可直接渲染，blocked/message 说明补分析为何被跳过。 */
 export type DesktopActivityReport = ActivityReportResult;
+/** 指定日期的文件型每日工作日志；正文不包含 durable memory 条目。 */
+export interface DesktopDailyMemoryNote {
+  dateKey: string;
+  content?: string;
+}
 export interface DesktopActivitySettingsUpdate {
   activity: DesktopActivitySettings;
   configRevision: string;
@@ -137,6 +142,7 @@ export const desktopIpc = {
   activitySessionDetail: "desktop:activity:session-detail",
   activitySnapshotPreview: "desktop:activity:snapshot-preview",
   activityReport: "desktop:activity:report",
+  dailyMemoryNote: "desktop:memory:daily-note",
   activityClear: "desktop:activity:clear",
   activityEvent: "desktop:activity:event",
   searchMemory: "desktop:memory:search",
@@ -1547,6 +1553,8 @@ export interface DesktopApi {
   activitySnapshotPreview(snapshotId: number): Promise<string | undefined>;
   /** 生成指定日期（today/yesterday/YYYY-MM-DD，默认 today）的 Activity 打工日记。 */
   activityReport(date?: string): Promise<DesktopActivityReport>;
+  /** 读取指定日期的 Markdown 工作日志；不读取 durable memory SQLite。 */
+  dailyMemoryNote(date?: string): Promise<DesktopDailyMemoryNote>;
   clearActivity(): Promise<ActivityRuntimeSnapshot>;
   stageSettingsCredential(secret: string, scope: DesktopSettingsCredentialScope): Promise<DesktopStagedSettingsCredential>;
   completeModelLoginForSettings(projectId: string, provider: DesktopModelLoginProvider, authRequestId: string, pastedAuthorization?: string): Promise<DesktopStagedModelLoginResult>;
