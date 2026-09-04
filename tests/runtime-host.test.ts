@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
-import { cp, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AgentRuntimeUpdate, InteractiveRuntimeSnapshot } from "../src/runtime/agentEvents.js";
@@ -522,7 +522,10 @@ async function main(): Promise<void> {
   const previousReplacementAgentRoot = process.env.BINY_AGENT_DIR;
   process.env.BINY_AGENT_DIR = replacementAgentRoot;
   try {
-    await cp(configDir, replacementConfigRoot, { recursive: true });
+    // configDir 里可能短暂存在由 Runtime Host 读写锁创建的 .config.write.lock；
+    // 它不是配置数据，复制整个目录会与锁的释放形成 TOCTOU，替换环境只复制稳定配置文件。
+    await fs.mkdir(replacementConfigRoot, { recursive: true });
+    await fs.copyFile(path.join(configDir, "config.json"), path.join(replacementConfigRoot, "config.json"));
     const replacementClient = await connectRuntimeHost(spawnedWorkspace, {
       clientId: "environment-replacement-client",
       surface: "desktop",

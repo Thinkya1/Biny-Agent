@@ -753,7 +753,9 @@ function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
   } catch (error) {
-    if (!isNoSuchProcessError(error)) throw error;
+    // macOS 对 detached 进程组可能返回 EPERM；逐 PID 信号和后续 SIGKILL
+    // 仍会继续执行，不能因为组信号这条 best-effort 路径失败而提前放弃收口。
+    if (!isNoSuchProcessError(error) && !isPermissionError(error)) throw error;
   }
 }
 
@@ -871,6 +873,10 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 
 function isNoSuchProcessError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ESRCH";
+}
+
+function isPermissionError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EPERM";
 }
 
 function abortReason(signal: AbortSignal | undefined): unknown {
