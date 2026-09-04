@@ -54,6 +54,7 @@ import { GoalGraphStore } from "./GoalGraphStore.js";
 import { CapabilityStore } from "./CapabilityStore.js";
 import { createProjectSkillKey } from "../extensions/skillRef.js";
 import { listEnabledProjectPluginPaths } from "../extensions/pluginRegistry.js";
+import { DailyDiaryScheduler } from "../agent/context/chatDiary.js";
 
 export interface CommandRuntime {
   workspaceRoot: string;
@@ -319,6 +320,16 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
   }
   if (!agent || !skills) throw new Error("Failed to initialize Biny agent runtime.");
 
+  const dailyDiaryAgent = agent;
+  const dailyDiaryScheduler = new DailyDiaryScheduler({
+    run: async (dateKeys, signal) => {
+      for (const dateKey of dateKeys) {
+        await dailyDiaryAgent.refreshDailyDiary(dateKey, { signal }).catch(() => undefined);
+      }
+    }
+  });
+  dailyDiaryScheduler.start();
+
   // MCP 连接状态与工具集合在运行期会变（断线、重连、list_changed），报告每次实时取。
   const extensionStatus = (): ExtensionStatus => ({
     mcp: mcpHost.listServers(),
@@ -417,6 +428,7 @@ export async function createCommandRuntime(workspaceRoot: string, options: Comma
     },
     close: async () => {
       try {
+        dailyDiaryScheduler.stop();
         await subagentTaskManager?.close();
         await agent.close();
       } finally {

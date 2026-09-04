@@ -130,6 +130,12 @@ export async function listSessionFiles(workspaceRoot: string): Promise<string[]>
   return (await listSessionFileEntries(location)).map((entry) => entry.fileName);
 }
 
+/** 枚举全局 session 分区，供每日工作日志补写漏掉的聊天回合。 */
+export async function listAllSessionFiles(agentDir?: string): Promise<string[]> {
+  const root = path.join(path.resolve(agentDir ?? globalAgentDir()), "sessions");
+  return await listJsonlFiles(root);
+}
+
 export async function resolveSessionFile(workspaceRoot: string, session: string | undefined): Promise<string> {
   const location = await resolveSessionStorage(workspaceRoot);
   return await resolveSessionFileAt(location, session);
@@ -680,6 +686,27 @@ async function listSessionFileEntries(location: SessionStorageLocation): Promise
     seen.set(file.fileName, file.filePath);
   }
   return safeFiles.sort((left, right) => left.fileName.localeCompare(right.fileName));
+}
+
+async function listJsonlFiles(directory: string): Promise<string[]> {
+  let entries;
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return [];
+    throw error;
+  }
+  const files: string[] = [];
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue;
+    const filePath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await listJsonlFiles(filePath));
+    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      files.push(filePath);
+    }
+  }
+  return files.sort((left, right) => left.localeCompare(right));
 }
 
 async function listSessionFileEntriesFromDirectory(

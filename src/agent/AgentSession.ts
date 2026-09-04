@@ -72,11 +72,17 @@ import {
 } from "./completionGuard.js";
 import { evaluateCompletion } from "./completionReview.js";
 import { ContextMemory } from "./context/ContextMemory.js";
+import {
+  appendCompletedChatDiaryEntry,
+  refreshChatDailyDiary,
+  type ChatDiaryRefreshResult
+} from "./context/chatDiary.js";
 import { LocalMemory, redactSecrets } from "./context/LocalMemory.js";
 import { IdentityStorage } from "./context/identityStorage.js";
 import { EmotionStorage } from "./context/emotionStorage.js";
 import { renderEmotionPrompt } from "./context/emotionPrompt.js";
 import { runMemoryCommand } from "./context/memoryCommands.js";
+import { readDailyMemoryNotes } from "../activity/dailyNotes.js";
 import { MemoryVectorIndex } from "./context/MemoryVectorIndex.js";
 import { HybridMemoryRetriever } from "./context/HybridMemoryRetriever.js";
 import {
@@ -501,6 +507,19 @@ export class AgentSession {
     return [...(paths ?? [])];
   }
 
+  private async dailyNotesPrompt(): Promise<string | undefined> {
+    try {
+      const notes = await readDailyMemoryNotes();
+      if (!notes.length) return undefined;
+      return notes.map((note) => [
+        `### ${note.dateKey}`,
+        note.content.length > 12_000 ? `…\n${note.content.slice(-12_000)}` : note.content
+      ].join("\n")).join("\n\n");
+    } catch {
+      return undefined;
+    }
+  }
+
   /** 只把当前模型步骤真正可见的工具元数据交给提示词构建器。 */
   private promptTools(toolNames?: readonly string[]) {
     if (!toolNames) return this.options.toolRegistry.list();
@@ -525,6 +544,7 @@ export class AgentSession {
       ? await this.identityStorage.promptText(this.activeConfig.context.identity.userEnabled)
       : undefined;
     const emotionPrompt = await this.currentEmotionPrompt();
+    const dailyNotesPrompt = await this.dailyNotesPrompt();
     let activityPrompt: string | undefined;
     if (this.options.activityContext !== undefined) {
       try {
@@ -546,6 +566,7 @@ export class AgentSession {
       identityPrompt,
       emotionPrompt,
       activityPrompt,
+      dailyNotesPrompt,
       cwd: this.options.workspaceRoot
     });
   }
@@ -736,6 +757,27 @@ export class AgentSession {
   /** 持久记忆存储句柄；读取/自动贡献开关不影响显式 /memory 管理操作。 */
   getLocalMemory(): LocalMemory {
     return this.localMemory;
+  }
+
+  /** 刷新文件型每日工作日志；只读聊天/Activity 日志，不读取或改写 durable memory。 */
+  async refreshDailyDiary(
+    dateKey: string,
+    options: { signal?: AbortSignal; force?: boolean } = {}
+  ): Promise<ChatDiaryRefreshResult> {
+    let model: AgentModel | undefined;
+    try {
+      model = this.memoryModelFor("memoryModel");
+    } catch {
+      // 没有可用模型时由 diary 模块写确定性 fallback，避免日报依赖聊天模型配置。
+    }
+    return await refreshChatDailyDiary(dateKey, {
+      model,
+      signal: options.signal,
+      force: options.force,
+      onUsage: (usage, operation, modelAlias) => { this.recordModelUsage(usage, operation, modelAlias); },
+      onModelRequest: async (metrics) => await this.recordModelRequest(metrics),
+      requestContext: { operation: "memory" }
+    });
   }
 
   /**
@@ -2055,6 +2097,14 @@ export class AgentSession {
       await this.recordTurnOutcome(outcome);
       if (outcome.status === "completed") {
         // 记忆整理是完成回合后的旁路；不等待模型请求，也不让它改变当前回合终态。
+        void appendCompletedChatDiaryEntry({
+          sessionId: this.recorder.sessionId,
+          turnId: runOptions.turnId!,
+          workspaceRoot: this.options.workspaceRoot,
+          userMessage: input,
+          assistantMessage: content,
+          occurredAt: new Date()
+        }).catch(() => undefined);
         if (this.activePersonalization.contributeMemories) {
           void this.localMemory.summarizeAndStoreMemories(finalMessages.slice(-4), {
             sessionId: this.recorder.sessionId,
