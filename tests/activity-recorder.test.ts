@@ -27,6 +27,7 @@ await testRecordEventRollsBackWhenFtsInsertFails();
 await testDailySummaryAggregation();
 await testDailySummarySkipsPlaceholderAnalyses();
 await testActivitySummaryNarrativePersistence();
+await testBuildReportPersistsDailyNote();
 
 function testDefaultActivitySidecarPath(): void {
   const expectedPath = process.platform === "darwin"
@@ -706,6 +707,44 @@ async function testActivitySummaryNarrativePersistence(): Promise<void> {
     assert.equal(summary.summary, "今天完成了编辑器和浏览器之间的工作切换。");
     assert.equal(summary.model, "summary-model");
     assert.equal(store.getSummary("daily", "2026-08-28")?.model, "summary-model");
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function testBuildReportPersistsDailyNote(): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "biny-activity-daily-note-report-"));
+  const store = new ActivityStore();
+  let writtenDate: string | undefined;
+  let writtenContent: string | undefined;
+  try {
+    await store.open(root);
+    const sessionId = store.startSession("2026-08-28T09:00:00.000Z");
+    store.endSession(sessionId, "2026-08-28T10:00:00.000Z");
+    store.recordAnalysis({ ...makeAnalysis(sessionId, "完成日报聚合"), project: "biny", topics: ["日报聚合"] });
+    await store.close();
+
+    const config = {
+      ...defaultConfig,
+      activity: { ...defaultActivitySettings, outputDirectory: root }
+    };
+    const configStore = { load: async () => config } as AgentConfigStore;
+    const service = new ActivityRecorderService({
+      configStore,
+      sidecarPath: undefined,
+      writeDailyNote: async (dateKey, content) => {
+        writtenDate = dateKey;
+        writtenContent = content;
+        return path.join(root, "memory", `${dateKey}.md`);
+      }
+    });
+    const report = await service.buildReport("2026-08-28");
+    assert.equal(report.sessionCount, 1);
+    assert.equal(writtenDate, "2026-08-28");
+    assert.match(writtenContent ?? "", /^# 2026-08-28 每日摘要/u);
+    assert.match(writtenContent ?? "", /### biny/u);
+    assert.match(writtenContent ?? "", /日报聚合/u);
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });

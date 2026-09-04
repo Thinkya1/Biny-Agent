@@ -1,9 +1,8 @@
 /**
  * Activity 分析的定时调度器。
  *
- * 只在启动后 120 秒做第一次 pending sweep，之后每 10 分钟检查一次；用户刚有输入时
- * 当前轮直接跳过，下一轮再试。调度器只负责这个时机，不读取 session、不碰隐私策略，也不做
- * 并发补跑，避免把分析模型调用偷偷变成另一条事件驱动链路。
+ * 启动后先做一次 pending sweep，之后每 10 分钟兜底检查；已结束 session 也可以由上层
+ * 显式触发一次立即 sweep。调度器只负责时机，不读取 session、不碰隐私策略，也不做并发补跑。
  */
 
 /** 首次分析检查延迟。 */
@@ -64,6 +63,12 @@ export class ActivityAnalysisScheduler {
     this.scheduleSweep();
   }
 
+  /** session 结束后立即尝试分析；显式触发不因最近输入而延迟。 */
+  runNow(): void {
+    if (this.stopped) return;
+    this.trigger(true);
+  }
+
   /** 停止并清理所有尚未触发的定时器；在途调用不强行取消，由上层 AbortSignal 负责中止。 */
   stop(): void {
     this.stopped = true;
@@ -81,8 +86,8 @@ export class ActivityAnalysisScheduler {
     }, this.sweepIntervalMs);
   }
 
-  private trigger(): void {
-    if (this.stopped || this.running || this.isUserActive?.()) return;
+  private trigger(force = false): void {
+    if (this.stopped || this.running || (!force && this.isUserActive?.())) return;
     this.running = true;
     let result: void | Promise<void>;
     try {

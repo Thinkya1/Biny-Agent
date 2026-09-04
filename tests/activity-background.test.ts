@@ -96,6 +96,7 @@ done
   const configStore = { load: async () => config } as AgentConfigStore;
   const timers = new FakeTimers();
   let notes = 0;
+  let lastNote: string | undefined;
   const service = new ActivityRecorderService({
     configStore,
     sidecarPath,
@@ -104,8 +105,9 @@ done
     dailySummaryIntervalMs: 20,
     embeddingInitialDelayMs: 60_000,
     embeddingSweepIntervalMs: 0,
-    writeDailyNote: async () => {
+    writeDailyNote: async (_dateKey, content) => {
       notes += 1;
+      lastNote = content;
       return path.join(root, "daily.md");
     }
   });
@@ -115,6 +117,7 @@ done
     timers.advance(10);
     await waitForSummary(root, yesterdayKey);
     assert.equal(notes, 1);
+    assert.match(lastNote ?? "", new RegExp(`^# ${yesterdayKey} 每日摘要`, "u"));
     timers.advance(20);
     await waitFor(() => notes === 2);
   } finally {

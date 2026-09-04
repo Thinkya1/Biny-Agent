@@ -8,8 +8,10 @@ import {
   analyzeActivitySession,
   analyzePendingActivitySessions,
   buildActivityReport,
+  formatActivityDailyNote,
   resolveActivityReportRange,
-  type ActivityAnalyzerDeps
+  type ActivityAnalyzerDeps,
+  type ActivityReportResult
 } from "../src/activity/analyzer.js";
 import { ActivityPrivacyPolicy } from "../src/activity/privacyPolicy.js";
 import { ActivityStore, type ActivitySessionAnalysis } from "../src/activity/store.js";
@@ -42,6 +44,8 @@ await testParseFailureFallsBackToPlaceholder();
 await testBuildReportGroupsAndFilters();
 await testBuildReportAnalyzesPendingInRange();
 await testBuildReportBlockedPolicy();
+await testBuildReportCanRenderStoredAnalysesOnly();
+testDailyNoteFormatter();
 testReportRangeParsing();
 
 /** 心跳/零星 session（事件数 < 阈值）不调用模型，直接落低置信度占位记录。 */
@@ -257,6 +261,41 @@ async function testBuildReportBlockedPolicy(): Promise<void> {
     assert.equal(calls(), 0);
     assert.ok(result.markdown.includes("没有已分析的活动记录"));
   });
+}
+
+async function testBuildReportCanRenderStoredAnalysesOnly(): Promise<void> {
+  await withStore(async (store) => {
+    seedEndedSession(store, todayAt(9), todayAt(10), 3);
+    const { model, calls } = scriptedModel([ANALYSIS_JSON]);
+    const result = await buildActivityReport({
+      ...deps(store, localPolicy(), model),
+      analyzePending: false
+    }, "today");
+    assert.equal(result.analyzedNow, 0);
+    assert.equal(result.pendingModel, 1);
+    assert.equal(result.blocked, true);
+    assert.equal(calls(), 0, "只渲染已落库分析时不应临时调用模型");
+    assert.match(result.message ?? "", /尚未完成分析/u);
+  });
+}
+
+function testDailyNoteFormatter(): void {
+  const result: ActivityReportResult = {
+    date: "2026-08-26",
+    startIso: "2026-08-25T16:00:00.000Z",
+    endIso: "2026-08-26T16:00:00.000Z",
+    markdown: "## 2026-08-26 工作日记\n\n### biny\n- 完成 Activity 日报",
+    sessionCount: 1,
+    analyzedNow: 1,
+    pendingModel: 1,
+    blocked: true,
+    message: "外部模型分析需要确认。"
+  };
+  const note = formatActivityDailyNote(result);
+  assert.match(note, /^# 2026-08-26 每日摘要/u);
+  assert.match(note, /### biny/u);
+  assert.match(note, /外部模型分析需要确认/u);
+  assert.match(note, /尚未分析/u);
 }
 
 function testReportRangeParsing(): void {

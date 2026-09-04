@@ -125,7 +125,8 @@ async function testActivitySuggestionsRespectAnalysisPolicy(): Promise<void> {
     const result = await generateActivitySuggestions({
       store,
       policy: new ActivityPrivacyPolicy({ ...defaultActivitySettings, analysisPolicy: "local_only" as const }),
-      model
+      model,
+      now: new Date("2026-09-01T12:00:00.000Z")
     });
     assert.deepEqual(result.suggestions, []);
     assert.equal(result.reason, "blocked");

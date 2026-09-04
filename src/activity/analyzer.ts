@@ -158,6 +158,8 @@ export interface ActivityAnalyzerDeps {
   signal?: AbortSignal;
   /** 可注入时钟，便于测试固定 analyzedAt 与「今天」。 */
   now?: () => Date;
+  /** false 时只消费已落库的分析行；用于每日摘要，避免在日结阶段临时调用模型。 */
+  analyzePending?: boolean;
   /** 分析完成后把模型挑出的稳定事实写入统一记忆库；失败不能影响 Activity 分析结果。 */
   writeMemories?: (
     candidates: readonly ActivityMemoryCandidate[],
@@ -376,21 +378,29 @@ export async function buildActivityReport(
   let pendingModel = 0;
   let blocked = false;
   let message: string | undefined;
-  for (const session of pending) {
-    if (deps.signal?.aborted) break;
-    const outcome = await analyzeActivitySession(deps, session.id);
-    if (outcome.status === "analyzed" || outcome.status === "trivial") analyzedNow += 1;
-    else if (outcome.status === "blocked") {
-      blocked = true;
-      pendingModel += 1;
-      message = outcome.decision.message;
-    } else if (outcome.status === "skipped" && outcome.reason === "no_model") {
-      blocked = true;
-      pendingModel += 1;
-      message ??= "未配置可用的分析模型。";
+  if (deps.analyzePending !== false) {
+    for (const session of pending) {
+      if (deps.signal?.aborted) break;
+      const outcome = await analyzeActivitySession(deps, session.id);
+      if (outcome.status === "analyzed" || outcome.status === "trivial") analyzedNow += 1;
+      else if (outcome.status === "blocked") {
+        blocked = true;
+        pendingModel += 1;
+        message = outcome.decision.message;
+      } else if (outcome.status === "skipped" && outcome.reason === "no_model") {
+        blocked = true;
+        pendingModel += 1;
+        message ??= "未配置可用的分析模型。";
+      }
     }
   }
 
+  const remaining = deps.store.listSessionsPendingAnalysisForDateRange(range.startIso, range.endIso, 200);
+  if (remaining.length > 0) {
+    blocked = true;
+    pendingModel = Math.max(pendingModel, remaining.length);
+    message ??= `还有 ${String(remaining.length)} 个已结束会话尚未完成分析。`;
+  }
   const rows = deps.store.listAnalysisForDateRange(range.startIso, range.endIso);
   return {
     date: range.label,
@@ -403,6 +413,30 @@ export async function buildActivityReport(
     blocked,
     message
   };
+}
+
+/**
+ * 把日报结果和未完成原因渲染成工具/CLI 都能直接输出的文本。
+ * 这里不重新调用模型，避免不同入口对同一天产生两套叙事。
+ */
+export function formatActivityReportResult(result: ActivityReportResult): string {
+  const notes: string[] = [];
+  if (result.blocked && result.message) notes.push(result.message);
+  if (result.pendingModel > 0) {
+    notes.push(`还有 ${String(result.pendingModel)} 个已结束会话尚未分析（策略未放行或没有可用模型），上面的日记只覆盖已分析的部分。`);
+  }
+  return [result.markdown, ...notes].join("\n\n");
+}
+
+/**
+ * 生成写入 `memory/YYYY-MM-DD.md` 的每日摘要。
+ * 文件是按日的可重建投影；session 仍保留在 ActivityStore 中作为可追溯来源。
+ */
+export function formatActivityDailyNote(result: ActivityReportResult): string {
+  const report = formatActivityReportResult(result)
+    .replace(/^## [^\n]+\n*/u, "")
+    .trim();
+  return [`# ${result.date} 每日摘要`, "", report].join("\n");
 }
 
 /**

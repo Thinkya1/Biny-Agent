@@ -54,6 +54,7 @@ await testActiveSweepIsSkipped();
 await testStopClearsBothTimers();
 await testStartIsIdempotent();
 await testRunningSweepIsNotReentered();
+await testRunNowBypassesActiveGuard();
 
 async function testInitialAndPeriodicSweep(): Promise<void> {
   const timers = new FakeTimers();
@@ -132,5 +133,22 @@ async function testRunningSweepIsNotReentered(): Promise<void> {
   assert.equal(runs, 1, "周期到点时在途分析不可并发重入");
   release?.();
   await new Promise((resolve) => setTimeout(resolve, 0));
+  scheduler.stop();
+}
+
+async function testRunNowBypassesActiveGuard(): Promise<void> {
+  const timers = new FakeTimers();
+  let active = true;
+  let runs = 0;
+  const scheduler = new ActivityAnalysisScheduler({
+    run: () => { runs += 1; },
+    isUserActive: () => active,
+    timers
+  });
+  scheduler.start();
+  scheduler.runNow();
+  await Promise.resolve();
+  assert.equal(runs, 1, "session 结束后的立即分析不能被最近输入挡住");
+  active = false;
   scheduler.stop();
 }

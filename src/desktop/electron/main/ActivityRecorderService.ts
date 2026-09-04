@@ -16,15 +16,16 @@ import { ActivityPrivacyPolicy } from "../../../activity/privacyPolicy.js";
 import {
   analyzePendingActivitySessions,
   buildActivityReport,
+  formatActivityDailyNote,
   type ActivityAnalyzerDeps,
   type ActivityReportResult
 } from "../../../activity/analyzer.js";
-import { refreshActivitySummaryWithNarrative } from "../../../activity/summary.js";
+import { refreshActivitySummary } from "../../../activity/summary.js";
 import { resolveActivityAnalysisModel } from "../../../activity/analysisModel.js";
 import { ActivityAnalysisScheduler } from "../../../activity/analysisScheduler.js";
 import { ActivityEmbeddingScheduler } from "../../../activity/embeddingScheduler.js";
 import { precomputeActivityEmbeddings } from "../../../activity/semanticSearch.js";
-import { writeDailyMemoryNote } from "../../../activity/dailyNotes.js";
+import { writeDailyActivityNote } from "../../../activity/dailyNotes.js";
 import type { ActivityRuntimeSnapshot, ActivityServiceState } from "../../../activity/types.js";
 import type { EmbeddingModelRuntime } from "../../../llm/embedding/types.js";
 import type {
@@ -178,11 +179,11 @@ export class ActivityRecorderService {
       clearTimeout: (handle) => clearTimeout(handle)
     };
     this.dailySummaryInitialDelayMs = options.dailySummaryInitialDelayMs ?? 120_000;
-    this.dailySummaryIntervalMs = options.dailySummaryIntervalMs ?? 15 * 60 * 1_000;
-    this.writeDailyNote = options.writeDailyNote ?? writeDailyMemoryNote;
+    this.dailySummaryIntervalMs = options.dailySummaryIntervalMs ?? 24 * 60 * 60 * 1_000;
+    this.writeDailyNote = options.writeDailyNote ?? writeDailyActivityNote;
     this.writeMemories = options.writeMemories;
-    // 分析只由启动后的首次检查和周期 sweep 触发；门禁与模型选择在
-    // runAnalysisSweep 里每次新鲜加载。
+    // 分析由 session 结束时的立即 sweep、启动后的首次检查和周期 sweep 触发；门禁与模型
+    // 选择在 runAnalysisSweep 里每次新鲜加载。
     this.analysisScheduler = new ActivityAnalysisScheduler({
       run: () => this.runAnalysisSweep(),
       isUserActive: () => this.isUserActive()
@@ -292,8 +293,8 @@ export class ActivityRecorderService {
   }
 
   /**
-   * 生成指定日期的打工日记。刻意不走 enqueue、也不用采集器自己的 store：补分析要做多次模型
-   * 调用，占用采集器那条写连接会把事件落盘队列堵住。这里开一条独立连接读分析表、补分析。
+   * 生成并持久化指定日期的打工日记。刻意不走 enqueue、也不用采集器自己的 store：补分析要
+   * 做多次模型调用，占用采集器那条写连接会把事件落盘队列堵住。这里开一条独立连接读分析表、补分析。
    */
   async buildReport(date?: string): Promise<ActivityReportResult> {
     const config = await this.configStore.load();
@@ -302,7 +303,9 @@ export class ActivityRecorderService {
     const store = new ActivityStore();
     await store.open(config.activity.outputDirectory);
     try {
-      return await buildActivityReport({ store, policy, model, writeMemories: this.writeMemories }, date ?? "today");
+      const result = await buildActivityReport({ store, policy, model, writeMemories: this.writeMemories }, date ?? "today");
+      await this.writeDailyNote(result.date, formatActivityDailyNote(result));
+      return result;
     } finally {
       await store.close();
     }
@@ -398,6 +401,8 @@ export class ActivityRecorderService {
     // 分析作用于已落库的数据，不依赖 sidecar 是否可用，因此 enabled 即启动触发调度。
     this.analysisScheduler.start();
     this.embeddingScheduler.start();
+    // 日报消费已经落库的 session 分析，不依赖本次是否成功启动采集 sidecar。
+    this.scheduleDailySummaryCheck();
     if (this.sidecarPath === undefined) {
       this.setState("unavailable", "当前平台没有可用的 macOS Activity sidecar。");
       return;
@@ -407,6 +412,7 @@ export class ActivityRecorderService {
       await this.startSidecar(nextSettings);
     } catch (error) {
       await this.stopInternal();
+      this.scheduleDailySummaryCheck();
       this.setState("unavailable", safeError(error));
     }
   }
@@ -441,7 +447,6 @@ export class ActivityRecorderService {
     this.send({ type: "start", settings });
     this.setState("running");
     this.scheduleSnapshotRotation(settings.maxStorageMb);
-    this.scheduleDailySummaryCheck();
   }
 
   private async stopInternal(): Promise<void> {
@@ -672,8 +677,12 @@ export class ActivityRecorderService {
 
   private endCurrentSession(endedAt: string): void {
     this.clearSessionIdleTimer();
-    if (this.sessionId) {
-      this.store.endSession(this.sessionId, endedAt);
+    const sessionId = this.sessionId;
+    if (sessionId) {
+      this.store.endSession(sessionId, endedAt);
+      // Session 已经有明确结束边界，立即把摘要落库；周期 sweep 仍负责进程退出、
+      // OCR 延迟或模型暂不可用时的补偿。
+      this.analysisScheduler.runNow();
     }
     this.sessionId = undefined;
   }
@@ -745,25 +754,21 @@ export class ActivityRecorderService {
         const dateKey = formatLocalDateKey(yesterday);
         const config = await this.configStore.load();
         const policy = new ActivityPrivacyPolicy(config.activity);
-        const model = resolveActivityAnalysisModel(config);
-        // narrative 可能触发模型调用，不能占用采集器自己的写队列；独立连接也能让事件
-        // 在生成日报期间继续落盘。自动日报使用 withNarrative=true，并持久化到
-        // activity_summaries；没有模型/策略阻止时由 summary 模块保留确定性本地 fallback。
+        // 日结只读取已落库的 session 分析并做确定性聚合，不能在这个时间点再调用模型。
+        // 独立连接让事件在生成日报期间继续落盘。
         const store = new ActivityStore();
         await store.open(config.activity.outputDirectory);
         try {
-          // 只有在没有完整日报时才触发自动生成；model 为空表示上次只是本地
-          // fallback（无模型、策略拒绝或调用失败），保留下一轮重试机会。
-          const existing = store.getSummary("daily", dateKey);
-          if (existing && !existing.isPartial && existing.model) return;
-          const summary = await refreshActivitySummaryWithNarrative(store, "daily", dateKey, {
-            model,
+          // 先重渲染日报，以便升级前的旧格式和本轮刚补分析的 session 都能进入 daily note。
+          const report = await buildActivityReport({
+            store,
             policy,
             signal: this.analysisAbort.signal,
-            now,
-            withNarrative: true
-          });
-          await this.writeDailyNote(dateKey, summary.summary);
+            analyzePending: false
+          }, dateKey);
+          // activity_summaries 保留确定性统计缓存；daily note 写入按项目归纳的完整日报。
+          refreshActivitySummary(store, "daily", dateKey, now);
+          await this.writeDailyNote(report.date, formatActivityDailyNote(report));
         } finally {
           await store.close();
         }

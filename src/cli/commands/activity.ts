@@ -10,7 +10,8 @@ import { updateConfig, createFileConfigStore } from "../../config/store.js";
 import { resolveActivityAnalysisModel } from "../../activity/analysisModel.js";
 import { ActivityPrivacyPolicy } from "../../activity/privacyPolicy.js";
 import { buildActivityDigest } from "../../activity/digest.js";
-import { buildActivityReport } from "../../activity/analyzer.js";
+import { buildActivityReport, formatActivityDailyNote, formatActivityReportResult } from "../../activity/analyzer.js";
+import { writeDailyActivityNote } from "../../activity/dailyNotes.js";
 import { refreshActivitySummaryWithNarrative } from "../../activity/summary.js";
 import { generateActivitySuggestions } from "../../activity/suggestions.js";
 import { ActivityStore, resolveActivityDirectory } from "../../activity/store.js";
@@ -143,8 +144,9 @@ export async function activityReportCommand(
   try {
     const policy = new ActivityPrivacyPolicy(config.activity);
     const result = await buildActivityReport({ store, policy, model: resolveActivityAnalysisModel(config) }, date);
+    await writeDailyActivityNote(result.date, formatActivityDailyNote(result));
     if (options.json) console.log(JSON.stringify(result));
-    else console.log(result.markdown);
+    else console.log(formatActivityReportResult(result));
   } finally {
     await store.close();
   }

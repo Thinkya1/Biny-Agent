@@ -11,7 +11,7 @@
  */
 import { z } from "zod";
 import type { AgentModel } from "../../agent/core/types.js";
-import { buildActivityReport, resolveActivityReportRange, type ActivityReportResult } from "../../activity/analyzer.js";
+import { buildActivityReport, formatActivityReportResult, resolveActivityReportRange, type ActivityReportResult } from "../../activity/analyzer.js";
 import { ActivityPrivacyPolicy } from "../../activity/privacyPolicy.js";
 import { ActivityStore } from "../../activity/store.js";
 import type { ActivitySettings } from "../../activity/settings.js";
@@ -123,7 +123,7 @@ export function createActivityReportTool(deps: ActivityReportToolDeps): Tool<Act
               now: deps.now
             }, dateLabel);
             if (!cached) cache.set(reportCacheKey(dateLabel, settings, model, store.activityRevision()), result);
-            return formatReportToolResult(result);
+            return formatActivityReportResult(result);
           } finally {
             await store.close();
           }
@@ -154,13 +154,3 @@ function reportCacheKey(
 
 /** 工具模块级共享的默认缓存：未注入 cache 时所有 activity_report 调用共用同一个 10 分钟 TTL。 */
 const defaultActivityReportCache = createInMemoryActivityReportCache();
-
-/** 工具结果用纯文本（markdown 日记 + 必要的策略说明），让模型直接读到可转述的内容。 */
-function formatReportToolResult(result: ActivityReportResult): string {
-  const notes: string[] = [];
-  if (result.blocked && result.message) notes.push(result.message);
-  if (result.pendingModel > 0) {
-    notes.push(`还有 ${String(result.pendingModel)} 个已结束会话尚未分析（策略未放行或没有可用模型），上面的日记只覆盖已分析的部分。`);
-  }
-  return [result.markdown, ...notes].join("\n\n");
-}
