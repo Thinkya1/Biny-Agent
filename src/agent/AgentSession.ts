@@ -1519,6 +1519,7 @@ export class AgentSession {
     let stepReasoningOutput = "";
     let stepReasoningBlocks: ReasoningBlock[] | undefined;
     const pendingEvents: AgentSessionEvent[] = [];
+    let wakePendingEvents: (() => void) | undefined;
     const completionGuard = new CompletionGuard(runOptions.initialCompletionEvidence);
     const emitUpdate = (event: AgentSessionEvent): void => {
       if (
@@ -1528,6 +1529,7 @@ export class AgentSession {
         || event.type === "tool.failed"
       ) completionGuard.observeToolEvent(event as AgentToolEvent);
       pendingEvents.push(event);
+      wakePendingEvents?.();
     };
     let observedSteps = 0;
     let toolResultCheckpointBarrier = Promise.resolve();
@@ -1796,153 +1798,168 @@ export class AgentSession {
         }
       }, abortSignal);
 
-      for await (const event of loop) {
-        while (pendingEvents.length) {
-          const next = pendingEvents.shift();
-          if (next) yield next;
-        }
-        if (event.type === "message_update") {
-          stepAssistantContent = agentMessageText(event.message);
-          if (event.event.type === "text-delta") {
-            yield { type: "assistant.delta", content: event.event.text };
-          } else if (event.event.type === "reasoning-start") {
-            if (!reasoningActive) {
-              reasoningActive = true;
-              yield { type: "reasoning.started", phase: observedSteps === 0 ? "initial" : "continuing" };
-            }
-          } else if (event.event.type === "reasoning-delta") {
-            stepReasoningOutput += event.event.text;
-            yield { type: "reasoning.delta", content: event.event.text };
-          } else if (event.event.type === "reasoning-end" && reasoningActive) {
-            reasoningActive = false;
-            yield { type: "reasoning.completed" };
-          } else if (event.event.type === "error") {
-            streamFailure = errorMessage(event.event.error);
-            streamFailureReported = true;
-            yield { type: "error", message: streamFailure, fatal: true };
+      // 每次只拉取一个核心事件，保留 message_end/turn_end 的宿主处理屏障；
+      // 等待工具期间，Coordinator 的进度可以独立唤醒消费者。
+      try {
+        let nextLoopEvent = loop.next();
+        while (true) {
+          const pending = new Promise<undefined>((resolve) => { wakePendingEvents = () => resolve(undefined); });
+          const next = pendingEvents.length ? undefined : await Promise.race([nextLoopEvent, pending]);
+          wakePendingEvents = undefined;
+          while (pendingEvents.length) {
+            const next = pendingEvents.shift();
+            if (next) yield next;
           }
-        } else if (event.type === "turn_start") {
-          // 每个 provider step 都重新开始计数，后续 tool_call 才能携带对应的 Thought。
-          stepAssistantContent = "";
-          stepReasoningOutput = "";
-          stepReasoningBlocks = undefined;
-        } else if (event.type === "message_end") {
-          if (event.message.role === "assistant") {
+          if (!next) continue;
+          if (next.done) break;
+          const event = next.value;
+          if (event.type === "message_update") {
             stepAssistantContent = agentMessageText(event.message);
-            stepReasoningBlocks = reasoningBlocks(event.message);
-            if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
-              const finalMessage = !event.message.content.some((part) => part.type === "toolCall");
-              const reference = this.recordCanonicalMessage({
-                type: "agent_message",
-                message: event.message,
-                messageId: finalMessage && runOptions.retryOfMessageId !== undefined ? runOptions.messageId : undefined,
-                parentMessageId: finalMessage
-                  ? runOptions.retryParentMessageId
-                  : undefined,
-                slotId: finalMessage
-                  ? runOptions.retrySlotId ?? lastUserMessageReference?.id
-                  : undefined,
-                replyToMessageId: finalMessage
-                  ? runOptions.replyToMessageId ?? lastUserMessageReference?.id
-                  : undefined,
-                retryOfMessageId: finalMessage ? runOptions.retryOfMessageId : undefined
-              });
-              referenceByMessage.set(event.message, reference);
-              if (finalMessage) {
-                finalAssistantReference = reference;
-                if (runOptions.retryOfMessageId !== undefined && reference.id && reference.slotId) {
-                  // 重试旧版本时覆盖此前的选择标记，让新回答立即成为活动版本。
-                  this.recorder.record({ type: "message_version_selected", messageId: reference.id, slotId: reference.slotId });
+            if (event.event.type === "text-delta") {
+              yield { type: "assistant.delta", content: event.event.text };
+            } else if (event.event.type === "reasoning-start") {
+              if (!reasoningActive) {
+                reasoningActive = true;
+                yield { type: "reasoning.started", phase: observedSteps === 0 ? "initial" : "continuing" };
+              }
+            } else if (event.event.type === "reasoning-delta") {
+              stepReasoningOutput += event.event.text;
+              yield { type: "reasoning.delta", content: event.event.text };
+            } else if (event.event.type === "reasoning-end" && reasoningActive) {
+              reasoningActive = false;
+              yield { type: "reasoning.completed" };
+            } else if (event.event.type === "error") {
+              streamFailure = errorMessage(event.event.error);
+              streamFailureReported = true;
+              yield { type: "error", message: streamFailure, fatal: true };
+            }
+          } else if (event.type === "turn_start") {
+            // 每个 provider step 都重新开始计数，后续 tool_call 才能携带对应的 Thought。
+            stepAssistantContent = "";
+            stepReasoningOutput = "";
+            stepReasoningBlocks = undefined;
+          } else if (event.type === "message_end") {
+            if (event.message.role === "assistant") {
+              stepAssistantContent = agentMessageText(event.message);
+              stepReasoningBlocks = reasoningBlocks(event.message);
+              if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
+                const finalMessage = !event.message.content.some((part) => part.type === "toolCall");
+                const reference = this.recordCanonicalMessage({
+                  type: "agent_message",
+                  message: event.message,
+                  messageId: finalMessage && runOptions.retryOfMessageId !== undefined ? runOptions.messageId : undefined,
+                  parentMessageId: finalMessage
+                    ? runOptions.retryParentMessageId
+                    : undefined,
+                  slotId: finalMessage
+                    ? runOptions.retrySlotId ?? lastUserMessageReference?.id
+                    : undefined,
+                  replyToMessageId: finalMessage
+                    ? runOptions.replyToMessageId ?? lastUserMessageReference?.id
+                    : undefined,
+                  retryOfMessageId: finalMessage ? runOptions.retryOfMessageId : undefined
+                });
+                referenceByMessage.set(event.message, reference);
+                if (finalMessage) {
+                  finalAssistantReference = reference;
+                  if (runOptions.retryOfMessageId !== undefined && reference.id && reference.slotId) {
+                    // 重试旧版本时覆盖此前的选择标记，让新回答立即成为活动版本。
+                    this.recorder.record({ type: "message_version_selected", messageId: reference.id, slotId: reference.slotId });
+                  }
                 }
               }
+            } else if (event.message.role === "user") {
+              const queued = messageQueues.delivered.get(event.message);
+              if (queued) {
+                yield {
+                  type: "message.user",
+                  messageId: queued.messageId,
+                  content: queued.input,
+                  delivery: queued.delivery
+                };
+              }
             }
-          } else if (event.message.role === "user") {
-            const queued = messageQueues.delivered.get(event.message);
-            if (queued) {
-              yield {
-                type: "message.user",
-                messageId: queued.messageId,
-                content: queued.input,
-                delivery: queued.delivery
-              };
-            }
-          }
-        } else if (event.type === "turn_end") {
-          relatedToolCallIds = event.toolResults.map((toolResult) => toolResult.toolCallId);
-          for (const toolResult of event.toolResults) {
-            referenceByMessage.set(
-              toolResult,
-              this.recordCanonicalMessage({ type: "agent_message", message: toolResult })
-            );
-          }
-          observedSteps += 1;
-          if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
-            this.recordCompletedModelStep();
-          }
-          lastStepReasoningOutput = stepReasoningOutput;
-          lastAssistant = event.message;
-          const usage = event.message.usage;
-          if (usage) {
-            stepUsageRecords.push(this.recordModelUsage(usage, mode === "plan" ? "plan" : "agent"));
-            this.contextMemory.recordProviderUsage(usage);
-          }
-          await recordNativeTelemetry(this.options.config, this.options.workspaceRoot, {
-            type: "step",
-            provider: activeModelSettings.model.provider,
-            modelId: activeModelSettings.model.modelId,
-            step: completedStepsBeforeRun + observedSteps,
-            finishReason: event.message.stopReason,
-            usage,
-            output: agentMessageText(event.message)
-          });
-          // 保存每个已完成的工具步。进程可能在下一次 provider 请求前退出，
-          // 续跑必须从最后一个完整的 assistant + tool result context 开始。
-          if (
-            event.toolResults.length > 0
-            && completedStepsBeforeRun + observedSteps < runBudget.hardStepLimit
-          ) {
-            try {
-              await this.recorder.flush();
-              await this.turnStore.save(
-                input,
-                systemPrompt,
-                event.messages,
-                completedStepsBeforeRun + observedSteps,
-                {
-                  ...coordinator.getExecutionBudgetSnapshot(),
-                  completionEvidence: completionGuard.snapshot()
-                },
-                undefined,
-                runOptions.previousTerminals,
-                coordinator.getExecutionCheckpoints(),
-                this.recorder.runtimeHighWater()
+          } else if (event.type === "turn_end") {
+            relatedToolCallIds = event.toolResults.map((toolResult) => toolResult.toolCallId);
+            for (const toolResult of event.toolResults) {
+              referenceByMessage.set(
+                toolResult,
+                this.recordCanonicalMessage({ type: "agent_message", message: toolResult })
               );
-            } catch {
-              // 步间 checkpoint 失败时不伪装为可恢复；工具结果和最终终态仍照常提交。
+            }
+            observedSteps += 1;
+            if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
+              this.recordCompletedModelStep();
+            }
+            lastStepReasoningOutput = stepReasoningOutput;
+            lastAssistant = event.message;
+            const usage = event.message.usage;
+            if (usage) {
+              stepUsageRecords.push(this.recordModelUsage(usage, mode === "plan" ? "plan" : "agent"));
+              this.contextMemory.recordProviderUsage(usage);
+            }
+            await recordNativeTelemetry(this.options.config, this.options.workspaceRoot, {
+              type: "step",
+              provider: activeModelSettings.model.provider,
+              modelId: activeModelSettings.model.modelId,
+              step: completedStepsBeforeRun + observedSteps,
+              finishReason: event.message.stopReason,
+              usage,
+              output: agentMessageText(event.message)
+            });
+            // 保存每个已完成的工具步。进程可能在下一次 provider 请求前退出，
+            // 续跑必须从最后一个完整的 assistant + tool result context 开始。
+            if (
+              event.toolResults.length > 0
+              && completedStepsBeforeRun + observedSteps < runBudget.hardStepLimit
+            ) {
+              try {
+                await this.recorder.flush();
+                await this.turnStore.save(
+                  input,
+                  systemPrompt,
+                  event.messages,
+                  completedStepsBeforeRun + observedSteps,
+                  {
+                    ...coordinator.getExecutionBudgetSnapshot(),
+                    completionEvidence: completionGuard.snapshot()
+                  },
+                  undefined,
+                  runOptions.previousTerminals,
+                  coordinator.getExecutionCheckpoints(),
+                  this.recorder.runtimeHighWater()
+                );
+              } catch {
+                // 步间 checkpoint 失败时不伪装为可恢复；工具结果和最终终态仍照常提交。
+              }
+            }
+          } else if (event.type === "agent_end") {
+            newMessages = event.messages;
+            finalContextMessages = event.contextMessages;
+          } else if (event.type === "model_retry") {
+            yield {
+              type: "context.retrying",
+              reason: "context_overflow",
+              attempt: event.attempt,
+              compactedMessages: event.compactedMessages
+            };
+          } else if (event.type === "error") {
+            if (event.fatal) {
+              streamFailure ??= event.error;
+              streamFailureReported = true;
+              yield { type: "error", message: event.error, fatal: true };
+            } else if (event.reason === "step_limit") {
+              hardStepLimitReached = true;
+              yield { type: "error", message: event.error };
+            } else {
+              yield { type: "error", message: event.error };
             }
           }
-        } else if (event.type === "agent_end") {
-          newMessages = event.messages;
-          finalContextMessages = event.contextMessages;
-        } else if (event.type === "model_retry") {
-          yield {
-            type: "context.retrying",
-            reason: "context_overflow",
-            attempt: event.attempt,
-            compactedMessages: event.compactedMessages
-          };
-        } else if (event.type === "error") {
-          if (event.fatal) {
-            streamFailure ??= event.error;
-            streamFailureReported = true;
-            yield { type: "error", message: event.error, fatal: true };
-          } else if (event.reason === "step_limit") {
-            hardStepLimitReached = true;
-            yield { type: "error", message: event.error };
-          } else {
-            yield { type: "error", message: event.error };
-          }
+          nextLoopEvent = loop.next();
         }
+      } finally {
+        wakePendingEvents = undefined;
+        await loop.return([]);
       }
       while (pendingEvents.length) {
         const next = pendingEvents.shift();

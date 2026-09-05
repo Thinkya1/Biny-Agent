@@ -90,6 +90,9 @@ async function main(): Promise<void> {
   });
   const recorder = new SessionRecorder(workspaceRoot);
   const registry = new ToolRegistry();
+  let releaseTool!: () => void;
+  const toolProgressSeen = new Promise<void>((resolve) => { releaseTool = resolve; });
+  let echoCompleted = false;
   const echoTool: Tool<{ value: string }, { value: string }> = {
     name: "echo",
     description: "Echo one value.",
@@ -103,7 +106,18 @@ async function main(): Promise<void> {
     risk: "read",
     resolveExecution: (args) => ({
       approvalRule: "echo",
-      execute: async () => ({ value: args.value })
+      execute: async (context) => {
+        context.onUpdate?.({ kind: "progress", text: "waiting for consumer" });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            toolProgressSeen,
+            new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("tool progress was buffered")), 2000); })
+          ]);
+        } finally { clearTimeout(timer); }
+        echoCompleted = true;
+        return { value: args.value };
+      }
     })
   };
   registry.registerBuiltinTool(echoTool);
@@ -121,7 +135,13 @@ async function main(): Promise<void> {
     const events: AgentSessionEvent[] = [];
     for await (const event of agent.prompt("answer briefly", {
       confirmPermission: async () => ({ approved: true, scope: "once" })
-    })) events.push(event);
+    })) {
+      if (event.type === "tool.progress") {
+        assert.equal(echoCompleted, false, "session progress must arrive while the tool is running");
+        releaseTool();
+      }
+      events.push(event);
+    }
     const done = events.find((event): event is Extract<AgentSessionEvent, { type: "done" }> => event.type === "done");
     assert.equal(requestCount, 2);
     assert.equal(done?.outcome.status, "completed");

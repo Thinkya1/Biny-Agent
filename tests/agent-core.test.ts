@@ -3,6 +3,8 @@ import type { AgentAssistantMessage, AgentEvent, AgentModel, AgentTool, ModelStr
 import { agentLoop } from "../src/agent/core/agentLoop.js";
 
 async function main(): Promise<void> {
+  await testToolProgressBeforeCompletion();
+  await testReasoningSignatureAndReplacedContext();
   await testAssistantDeltasAreForwardedBeforeProviderCompletes();
   await testModelErrorRecoveryRetriesBeforeAnyDelta();
   await testModelStreamWithoutFinishFails();
@@ -59,6 +61,67 @@ async function main(): Promise<void> {
   assert.equal(received.includes("tool_execution_end"), true);
   assert.equal(received.filter((type) => type === "turn_end").length, 2);
   console.log("agent core tests passed");
+}
+
+async function testToolProgressBeforeCompletion(): Promise<void> {
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  let completed = false;
+  const tool: AgentTool = {
+    name: "slow", description: "test", parameters: { type: "object" },
+    async execute(_id, _args, _signal, onUpdate) {
+      onUpdate?.({ content: [{ type: "text", text: "progress" }] });
+      await barrier;
+      completed = true;
+      return { content: [] };
+    }
+  };
+  const model: AgentModel = {
+    provider: "test", modelId: "test",
+    stream: async () => events([
+      { type: "tool-call", id: "slow", name: "slow", arguments: {} },
+      { type: "finish", reason: "tool-calls" }
+    ])
+  };
+  const running = (async () => {
+    for await (const event of agentLoop([{ role: "user", content: "test" }], { messages: [], tools: [] }, { model, tools: [tool], maxSteps: 1 })) {
+      if (event.type === "tool_execution_start") assert.equal(completed, false);
+      if (event.type === "tool_execution_update") {
+        assert.equal(completed, false);
+        release();
+      }
+    }
+  })();
+  try { await settlesWithin(running, 1000); } finally { release(); }
+}
+
+async function testReasoningSignatureAndReplacedContext(): Promise<void> {
+  let requests = 0;
+  const model: AgentModel = {
+    provider: "test", modelId: "test",
+    stream: async () => {
+      requests += 1;
+      return events(requests === 1 ? [
+        { type: "reasoning-start", id: "r" },
+        { type: "reasoning-delta", id: "r", text: "thinking" },
+        { type: "reasoning-end", id: "r", providerMetadata: { anthropic: { signature: "sig" } } },
+        { type: "tool-call", id: "call", name: "read", arguments: {} },
+        { type: "finish", reason: "tool-calls" }
+      ] : [{ type: "text-delta", text: "done" }, { type: "finish", reason: "stop" }]);
+    }
+  };
+  const tool: AgentTool = { name: "read", description: "test", parameters: { type: "object" }, execute: async () => ({ content: [] }) };
+  for await (const event of agentLoop([{ role: "user", content: "test" }], { messages: [], tools: [] }, {
+    model, tools: [tool], maxSteps: 2,
+    prepareNextTurn: async ({ context }) => ({ context: { ...context, messages: [...context.messages] } })
+  })) {
+    if (event.type === "agent_end") {
+      assert.deepEqual(event.contextMessages, event.messages);
+      const assistant = event.contextMessages[1] as AgentAssistantMessage;
+      const reasoning = assistant.content.find((part) => part.type === "reasoning");
+      assert.deepEqual(reasoning?.providerMetadata, { anthropic: { signature: "sig" } });
+    }
+  }
 }
 
 async function testUnknownToolCallStopsWithoutRetry(): Promise<void> {

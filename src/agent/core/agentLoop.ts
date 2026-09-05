@@ -114,10 +114,15 @@ async function* runLoop(
       hasMoreToolCalls = calls.length > 0;
       if (calls.length > 0) {
         const truncated = assistant.stopReason === "length";
-        const toolBatch = await executeToolCalls(context, assistant, calls, config, signal, truncated);
+        const events = new AsyncEventQueue<AgentEvent>();
+        const execution = executeToolCalls(context, assistant, calls, config, signal, truncated, (event) => events.push(event));
+        void execution.then(() => events.close(), (error: unknown) => events.error(error));
+        for await (const event of events) {
+          if (event.type === "error" && event.fatal) fatalToolError = true;
+          yield event;
+        }
+        const toolBatch = await execution;
         toolResults = toolBatch.messages;
-        yield* toolBatch.events;
-        fatalToolError = toolBatch.events.some((event) => event.type === "error" && event.fatal);
         for (const result of toolResults) {
           context.messages.push(result);
           newMessages.push(result);
@@ -130,7 +135,12 @@ async function* runLoop(
       const turnContext: AgentLoopTurnContext = { message: assistant, toolResults, context, newMessages };
       const nextTurn = await config.prepareNextTurn?.(turnContext);
       if (nextTurn) {
-        context = nextTurn.context ?? context;
+        if (nextTurn.context) {
+          // 外层 agent_end 与后续步骤共享这个对象，替换快照时不能切断引用。
+          context.messages = nextTurn.context.messages;
+          context.tools = nextTurn.context.tools;
+          context.systemPrompt = nextTurn.context.systemPrompt;
+        }
         if (nextTurn.tools) context.tools = [...nextTurn.tools];
         config = {
           ...config,
@@ -191,6 +201,9 @@ async function* streamAssistant(
           block.text += event.text;
           block.providerMetadata = event.providerMetadata ?? block.providerMetadata;
           reasoning.set(event.id, block);
+        } else if (event.type === "reasoning-end") {
+          const block = reasoning.get(event.id);
+          if (block) block.providerMetadata = event.providerMetadata ?? block.providerMetadata;
         } else if (event.type === "tool-call") {
           toolCalls.push({ type: "toolCall", id: event.id, name: event.name, arguments: event.arguments, invalid: event.invalid });
         } else if (event.type === "finish") {
@@ -268,23 +281,22 @@ async function executeToolCalls(
   calls: AgentToolCallContent[],
   config: AgentLoopConfig,
   signal: AbortSignal | undefined,
-  truncated: boolean
-): Promise<{ messages: AgentToolResultMessage[]; events: AgentEvent[]; terminate: boolean }> {
+  truncated: boolean,
+  emit: (event: AgentEvent) => void
+): Promise<{ messages: AgentToolResultMessage[]; terminate: boolean }> {
   const sequential = config.toolExecution === "sequential"
     || calls.some((call) => context.tools.find((tool) => tool.name === call.name)?.executionMode === "sequential");
   if (sequential) {
-    const results: Array<{ message: AgentToolResultMessage; events: AgentEvent[]; terminate: boolean }> = [];
-    for (const call of calls) results.push(await executeOneTool(context, assistant, call, config, signal, truncated));
+    const results: Array<{ message: AgentToolResultMessage; terminate: boolean }> = [];
+    for (const call of calls) results.push(await executeOneTool(context, assistant, call, config, signal, truncated, emit));
     return {
       messages: results.map((result) => result.message),
-      events: results.flatMap((result) => result.events),
       terminate: results.length > 0 && results.every((result) => result.terminate)
     };
   }
-  const results = await Promise.all(calls.map(async (call) => await executeOneTool(context, assistant, call, config, signal, truncated)));
+  const results = await Promise.all(calls.map(async (call) => await executeOneTool(context, assistant, call, config, signal, truncated, emit)));
   return {
     messages: results.map((result) => result.message),
-    events: results.flatMap((result) => result.events),
     terminate: results.length > 0 && results.every((result) => result.terminate)
   };
 }
@@ -295,9 +307,10 @@ async function executeOneTool(
   call: AgentToolCallContent,
   config: AgentLoopConfig,
   signal: AbortSignal | undefined,
-  truncated: boolean
-): Promise<{ message: AgentToolResultMessage; events: AgentEvent[]; terminate: boolean }> {
-  const events: AgentEvent[] = [{ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.arguments }];
+  truncated: boolean,
+  emit: (event: AgentEvent) => void
+): Promise<{ message: AgentToolResultMessage; terminate: boolean }> {
+  emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.arguments });
   const tool = context.tools.find((candidate) => candidate.name === call.name);
   const unknownTool = tool === undefined;
   let result: AgentToolResult;
@@ -326,7 +339,7 @@ async function executeOneTool(
       } else {
         try {
           result = await tool.execute(call.id, call.arguments, signal, (update) => {
-            events.push({ type: "tool_execution_update", toolCallId: call.id, toolName: call.name, update });
+            emit({ type: "tool_execution_update", toolCallId: call.id, toolName: call.name, update });
           });
         } catch (error) {
           result = errorResult(errorMessage(error));
@@ -336,10 +349,10 @@ async function executeOneTool(
       }
     }
   }
-  events.push({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result });
+  emit({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, result });
   if (syntheticFailure) {
     const message = result.content.find((part) => part.type === "text")?.text ?? `Tool ${call.name} failed.`;
-    events.push({ type: "error", error: message, fatal: unknownTool });
+    emit({ type: "error", error: message, fatal: unknownTool });
   }
   return {
     message: {
@@ -351,7 +364,6 @@ async function executeOneTool(
     isError: result.isError === true,
     timestamp: Date.now()
     },
-    events,
     terminate: result.terminate === true || unknownTool
   };
 }
@@ -362,11 +374,6 @@ function errorResult(message: string): AgentToolResult {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/** 保留给后续 Provider/宿主直接使用的异步事件队列工厂。 */
-export function createAgentEventQueue<T>(): AsyncEventQueue<T> {
-  return new AsyncEventQueue<T>();
 }
 
 async function* streamWithAbort<T>(
