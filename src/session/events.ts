@@ -46,7 +46,7 @@ const modelRequestContextSchema = z.object({
   runId: z.string().optional(),
   turnId: z.string().optional(),
   step: z.number().int().nonnegative().optional(),
-  operation: z.enum(["agent", "plan", "completion_review", "compaction", "memory", "subagent"]).optional(),
+  operation: z.enum(["agent", "plan", "compaction", "memory", "subagent"]).optional(),
   promptEpoch: z.number().int().nonnegative().optional(),
   promptEpochReason: z.enum(["initial", "compaction", "rewind", "fork", "provider_changed", "model_changed", "tool_schema_changed"]).optional(),
   promptEpochCreatedAt: z.string().optional(),

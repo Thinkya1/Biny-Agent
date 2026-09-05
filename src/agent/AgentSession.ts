@@ -60,17 +60,9 @@ import type {
   AgentPermissionRequest,
   AgentPermissionResult,
   AgentRuntimeContext,
-  AgentToolEvent,
   AgentSessionEvent,
   AgentTurnOutcome
 } from "./types.js";
-import {
-  CompletionGuard,
-  parseCompletionGuardSnapshot,
-  type CompletionGuardDecision,
-  type CompletionGuardSnapshot
-} from "./completionGuard.js";
-import { evaluateCompletion } from "./completionReview.js";
 import { ContextMemory } from "./context/ContextMemory.js";
 import {
   appendCompletedChatDiaryEntry,
@@ -262,7 +254,6 @@ interface NativeTurnArgs {
   messageReferences: Array<SessionMessageReference | undefined>;
   runOptions: AgentRunOptions & {
     initialToolBudget?: ToolExecutionBudgetSnapshot;
-    initialCompletionEvidence?: CompletionGuardSnapshot;
     previousTerminals?: InterruptedTurnTerminal[];
   };
   abortSignal: AbortSignal;
@@ -744,9 +735,6 @@ export class AgentSession {
         recordSessionUserMessage: false,
         completedStepsBeforeRun: turn.completedSteps,
         initialToolBudget: restartToolBudget(readToolBudget(turn.facts), turn.completedSteps === 0),
-        initialCompletionEvidence: restartCompletionEvidence(
-          readCompletionEvidence(turn.facts)
-        ),
         previousTerminals
       });
     } finally {
@@ -1208,7 +1196,6 @@ export class AgentSession {
     runOptions: AgentRunOptions & {
       completedStepsBeforeRun?: number;
       initialToolBudget?: ToolExecutionBudgetSnapshot;
-      initialCompletionEvidence?: CompletionGuardSnapshot;
       previousTerminals?: InterruptedTurnTerminal[];
       continueMessageReferences?: Array<SessionMessageReference | undefined>;
     } = {}
@@ -1520,14 +1507,7 @@ export class AgentSession {
     let stepReasoningBlocks: ReasoningBlock[] | undefined;
     const pendingEvents: AgentSessionEvent[] = [];
     let wakePendingEvents: (() => void) | undefined;
-    const completionGuard = new CompletionGuard(runOptions.initialCompletionEvidence);
     const emitUpdate = (event: AgentSessionEvent): void => {
-      if (
-        event.type === "tool.started"
-        || event.type === "tool.progress"
-        || event.type === "tool.completed"
-        || event.type === "tool.failed"
-      ) completionGuard.observeToolEvent(event as AgentToolEvent);
       pendingEvents.push(event);
       wakePendingEvents?.();
     };
@@ -1549,10 +1529,7 @@ export class AgentSession {
           systemPrompt,
           replay.messages,
           completedStepsBeforeRun + observedSteps + 1,
-          {
-            ...coordinator.getExecutionBudgetSnapshot(),
-            completionEvidence: completionGuard.snapshot()
-          },
+          coordinator.getExecutionBudgetSnapshot(),
           undefined,
           runOptions.previousTerminals,
           coordinator.getExecutionCheckpoints(),
@@ -1613,8 +1590,6 @@ export class AgentSession {
     let hardStepLimitReached = false;
     let softLimitWarningInjected = completedStepsBeforeRun >= runBudget.softStepLimit;
     let contextRecoveryAttempts = 0;
-    let completionDecision: Exclude<CompletionGuardDecision, { kind: "continue" }> | undefined;
-    let pendingCompletionMessages: AgentMessage[] = [];
 
     recordPerfPhase("turn.nativeLoopPre", nativeLoopPerfStartedAt, { runId: runOptions.runId });
     yield { type: "status", status: "thinking" };
@@ -1716,85 +1691,11 @@ export class AgentSession {
           }
           return prunedMessages;
         },
-        getSteeringMessages: async () => {
-          const completionMessages = pendingCompletionMessages;
-          pendingCompletionMessages = [];
-          return [
-            ...completionMessages,
-            ...this.takeQueuedRunMessages(messageQueues, "steer", lastAssistant, referenceByMessage)
-          ];
-        },
+        getSteeringMessages: async () => this.takeQueuedRunMessages(messageQueues, "steer", lastAssistant, referenceByMessage),
         getFollowUpMessages: async () => {
           const next = this.takeQueuedRunMessages(messageQueues, "followUp", lastAssistant, referenceByMessage);
           if (!next.length) messageQueues.accepting = false;
           return next;
-        },
-        shouldStopAfterTurn: async (turn) => {
-          // 工具调用后的 assistant 只代表“工具已经被请求”，必须先让 Loop 消费结构化结果。
-          if (turn.message.content.some((part) => part.type === "toolCall")) return false;
-          completionGuard.noteTextCompletionClaim(agentMessageText(turn.message));
-          const budget = coordinator.getExecutionBudgetSnapshot();
-          let decision = completionGuard.decide({
-            steps: completedStepsBeforeRun + observedSteps,
-            hardStepLimit: runBudget.hardStepLimit,
-            accountedToolCalls: budget.accountedToolCalls,
-            maxToolCalls: runBudget.maxToolCalls,
-            maxRepeatedActionCount: budget.maxRepeatedActionCount,
-            maxRepeatedActions: runBudget.maxRepeatedActions,
-            finishReason: turn.message.stopReason,
-            explicitCompletionExpected: mode !== "plan"
-          });
-          if (decision.kind === "continue") {
-            pendingCompletionMessages.push(decision.feedback);
-            return false;
-          }
-          if (
-            decision.kind === "complete"
-            && turn.message.stopReason === "stop"
-            && mode !== "plan"
-            && completionGuard.requiresSemanticReview()
-          ) {
-            const reviewMessages = await projectToolResultsForModel(turn.context.messages, {
-              archiveResult: async ({ message, result, output, sequence }) => await archiveToolResult({
-                workspaceRoot: this.options.workspaceRoot,
-                sessionId: this.recorder.sessionId,
-                toolCallId: message.toolCallId,
-                sequence,
-                tool: message.toolName,
-                result,
-                output
-              })
-            });
-            const review = await evaluateCompletion({
-              model: activeModelSettings.model,
-              task: input,
-              messages: reviewMessages,
-              signal: abortSignal,
-              providerOptions: activeModelSettings.providerOptions,
-              timeoutMs: Math.min(activeModelSettings.timeoutMs ?? 30_000, 30_000),
-              onRequestMetrics: (metrics) => this.recordModelRequest(metrics),
-              requestContext: {
-                ...modelRequestContext(completedStepsBeforeRun + observedSteps),
-                operation: "completion_review"
-              }
-            });
-            // 评审器自身故障（模型配置/网络/解析错误）不代表工作未完成：结构性检查已通过，
-            // 采信完成声明正常收口。否则同一基础设施错误会以相同指纹反复打回，
-            // 停滞计数耗尽后把正常回合误判成 incomplete。故障痕迹留在 operation=completion_review 的请求指标里。
-            if (!review.met && !review.evaluatorFailed) {
-              decision = completionGuard.requestContinuation(
-                `Independent completion review did not confirm completion: ${review.reason}`,
-                "completion-review:not-met"
-              );
-              if (decision.kind === "continue") {
-                pendingCompletionMessages.push(decision.feedback);
-                return false;
-              }
-            }
-          }
-          completionDecision = decision;
-          // 用户在收口前排入的 steering/follow-up 仍然要先交给模型，不能被内部复核吞掉。
-          return messageQueues.steering.length === 0 && messageQueues.followUps.length === 0;
         }
       }, abortSignal);
 
@@ -1920,10 +1821,7 @@ export class AgentSession {
                   systemPrompt,
                   event.messages,
                   completedStepsBeforeRun + observedSteps,
-                  {
-                    ...coordinator.getExecutionBudgetSnapshot(),
-                    completionEvidence: completionGuard.snapshot()
-                  },
+                  coordinator.getExecutionBudgetSnapshot(),
                   undefined,
                   runOptions.previousTerminals,
                   coordinator.getExecutionCheckpoints(),
@@ -2010,21 +1908,6 @@ export class AgentSession {
         replyToMessageId: runOptions.replyToMessageId ?? lastUserMessageReference?.id,
         retryOfMessageId: runOptions.retryOfMessageId
       });
-      if (!completionDecision) {
-        completionDecision = hardStepLimitReached
-          ? {
-            kind: "incomplete",
-            stopReason: "hard_step_limit",
-            summary: `The run reached its hard limit of ${String(runBudget.hardStepLimit)} provider steps.`
-          }
-          : lastAssistant?.stopReason !== undefined
-            ? { kind: "complete" }
-            : {
-              kind: "failed",
-              stopReason: "missing_terminal_event",
-              summary: "The Agent Loop ended without a canonical terminal completion decision."
-            };
-      }
       let outcome = nativeTurnOutcome(
         hardStepLimitReached,
         content,
@@ -2032,37 +1915,6 @@ export class AgentSession {
         completedStepsBeforeRun + observedSteps,
         usageRecord
       );
-      if (completionDecision.kind === "incomplete") {
-        outcome = {
-          ...outcome,
-          status: "incomplete",
-          stopReason: completionDecision.stopReason,
-          error: completionDecision.summary,
-          resumable: true,
-          blockedReason: undefined,
-          requiredAction: undefined
-        };
-      } else if (completionDecision.kind === "blocked") {
-        outcome = {
-          ...outcome,
-          status: "blocked",
-          stopReason: "blocked",
-          error: completionDecision.summary,
-          resumable: false,
-          blockedReason: completionDecision.blockedReason,
-          requiredAction: completionDecision.requiredAction
-        };
-      } else if (completionDecision.kind === "failed") {
-        outcome = {
-          ...outcome,
-          status: "failed",
-          stopReason: completionDecision.stopReason,
-          error: completionDecision.summary,
-          resumable: false,
-          blockedReason: undefined,
-          requiredAction: undefined
-        };
-      }
       if (content && (outcome.status === "completed" || outcome.status === "incomplete" || outcome.status === "blocked")) {
         yield { type: "assistant.completed", content };
       }
@@ -2074,10 +1926,7 @@ export class AgentSession {
             systemPrompt,
             finalMessages,
             0,
-            {
-              ...coordinator.getExecutionBudgetSnapshot(),
-              completionEvidence: completionGuard.snapshot()
-            },
+            coordinator.getExecutionBudgetSnapshot(),
             {
               status: outcome.status,
               stopReason: outcome.stopReason,
@@ -3201,7 +3050,10 @@ function nativeTurnOutcome(
       error: "模型响应在确认任务完成前被中止。"
     };
   }
-  if (finishReason !== undefined && finishReason !== "stop") {
+  if (finishReason === undefined) {
+    return { status: "failed", stopReason: "missing_terminal_event", steps, output, usage, error: "Agent Loop ended without a model terminal event." };
+  }
+  if (finishReason !== "stop") {
     return {
       status: "incomplete",
       stopReason: "budget_exhausted",
@@ -3274,24 +3126,6 @@ function readToolBudget(value: unknown): ToolExecutionBudgetSnapshot | undefined
   return {
     accountedToolCalls: value.accountedToolCalls,
     maxRepeatedActionCount: value.maxRepeatedActionCount
-  };
-}
-
-function readCompletionEvidence(value: unknown): CompletionGuardSnapshot | undefined {
-  if (!isRecord(value)) return undefined;
-  return parseCompletionGuardSnapshot(value.completionEvidence);
-}
-
-function restartCompletionEvidence(
-  evidence: CompletionGuardSnapshot | undefined
-): CompletionGuardSnapshot | undefined {
-  if (!evidence) return undefined;
-  // 用户显式继续代表一次新的有界尝试；continuation 计数重置，但失败和未知副作用事实必须保留。
-  return {
-    ...evidence,
-    continuationAttempts: 0,
-    stagnantAttempts: 0,
-    lastBlockFingerprint: ""
   };
 }
 
